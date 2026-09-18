@@ -4,12 +4,25 @@ import java.security.MessageDigest
 import scala.sys.process.Process
 import scala.sys.process.ProcessLogger
 
-ThisBuild / scalaVersion    := "3.3.8"
-ThisBuild / version         := "0.1.0-SNAPSHOT"
+ThisBuild / scalaVersion     := "3.3.8"
+ThisBuild / tlBaseVersion    := "0.1"
+ThisBuild / organization     := "io.github.pmbmegalom"
+ThisBuild / organizationName := "Piermatteo Barambani Megalom"
+ThisBuild / homepage         := Some(url("https://github.com/PMBMegalom/xkafka"))
+ThisBuild / scmInfo          := Some(
+  ScmInfo(
+    url("https://github.com/PMBMegalom/xkafka"),
+    "scm:git:https://github.com/PMBMegalom/xkafka.git",
+    "scm:git:git@github.com:PMBMegalom/xkafka.git"
+  )
+)
+ThisBuild / developers := List(
+  tlGitHubDev("PMBMegalom", "Piermatteo Barambani Megalom")
+)
+ThisBuild / startYear       := Some(2026)
 ThisBuild / licenses        := Seq("MIT" -> url("https://opensource.org/license/mit"))
 ThisBuild / tlJdkRelease    := Some(17)
 ThisBuild / tlFatalWarnings := true
-ThisBuild / tlCiHeaderCheck := false
 
 val setupNode = WorkflowStep.Use(
   UseRef.Public("actions", "setup-node", "v7"),
@@ -21,8 +34,6 @@ val setupNode = WorkflowStep.Use(
   )
 )
 
-ThisBuild / githubWorkflowIncludeClean          := false
-ThisBuild / githubWorkflowPublishTargetBranches := Seq.empty
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
 )
@@ -57,6 +68,7 @@ val librdkafkaPrefix  = settingKey[File]("Directory containing the librdkafka in
 val prepareLibrdkafka = taskKey[File]("Downloads, verifies, and builds the pinned librdkafka release")
 
 val commonSettings = Seq(
+  headerLicense := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
   scalacOptions += "-Wnonunit-statement",
   Compile / packageBin / mappings += (repositoryRoot / "LICENSE" -> "META-INF/LICENSE"),
   libraryDependencies ++= Seq(
@@ -72,7 +84,8 @@ lazy val kernel = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/kernel"))
   .settings(commonSettings)
   .settings(
-    name := "xkafka-kernel"
+    name        := "xkafka-kernel",
+    description := "Portable data types and algebras for xkafka"
   )
 
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
@@ -81,6 +94,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .settings(commonSettings)
   .settings(
     name                                    := "xkafka-client",
+    description                             := "Cross-platform functional Kafka client for Scala",
     Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
     libraryDependencies += "org.typelevel" %%% "munit-cats-effect" % munitCatsEffectVersion % Test
   )
