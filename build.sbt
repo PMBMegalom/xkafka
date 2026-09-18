@@ -141,6 +141,10 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
         IO.touch(buildMarker)
       }
 
+      val staticLinkDirectory = target.value / "librdkafka-static-link"
+      IO.createDirectory(staticLinkDirectory)
+      IO.copyFile(library, staticLinkDirectory / "librdkafka.a")
+
       prefix
     },
     Compile / nativeLink := (Compile / nativeLink).dependsOn(prepareLibrdkafka).value,
@@ -150,7 +154,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       val prefix = librdkafkaPrefix.value
       config
         .withCompileOptions(_ :+ s"-I${prefix.getAbsolutePath}/include")
-        .withLinkingOptions(_ :+ (prefix / "lib" / "librdkafka.a").getAbsolutePath)
+        .withLinkingOptions(_ :+ s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}")
     }
   )
   .jvmSettings(

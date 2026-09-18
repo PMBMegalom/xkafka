@@ -106,6 +106,18 @@ XKAFKA_LIBRDKAFKA_PREFIX=/path/to/librdkafka-prefix sbt test
 The prefix must contain `include/librdkafka/rdkafka.h` and
 `lib/librdkafka.a`.
 
+Published Native client artifacts contain the C glue code and request
+`-lrdkafka` when the Native backend is reachable. Applications with librdkafka
+installed in standard compiler and linker locations need no additional xkafka
+settings. For a nonstandard installation, add its include and library
+directories to the application's Scala Native configuration:
+
+```scala
+nativeConfig := nativeConfig.value
+  .withCompileOptions(_ :+ "-I/path/to/librdkafka/include")
+  .withLinkingOptions(_ :+ "-L/path/to/librdkafka/lib")
+```
+
 ## Integration tests
 
 Docker is required for the broker-backed suite:

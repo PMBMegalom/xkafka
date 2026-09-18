@@ -2,6 +2,7 @@ package xkafka.internal.librdkafka
 
 import scala.scalanative.unsafe.*
 
+@link("rdkafka")
 @extern
 private[xkafka] object Bindings:
   def xkafka_version_str(): CString = extern

@@ -1,3 +1,5 @@
+#ifdef SCALANATIVE_LINK_RDKAFKA
+
 #include <librdkafka/rdkafka.h>
 
 #include <stdint.h>
@@ -359,3 +361,5 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
         }
         return 0;
 }
+
+#endif
