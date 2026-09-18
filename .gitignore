@@ -1,0 +1,10 @@
+.bsp/
+.metals/
+.scala-build/
+.vscode/
+*.swp
+node_modules/
+target/
+project/project/
+project/target/
+**/target/
