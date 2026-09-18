@@ -9,6 +9,37 @@ ThisBuild / version         := "0.1.0-SNAPSHOT"
 ThisBuild / licenses        := Seq("MIT" -> url("https://opensource.org/license/mit"))
 ThisBuild / tlJdkRelease    := Some(17)
 ThisBuild / tlFatalWarnings := true
+ThisBuild / tlCiHeaderCheck := false
+
+val setupNode = WorkflowStep.Use(
+  UseRef.Public("actions", "setup-node", "v7"),
+  name = Some("Setup Node.js"),
+  params = Map(
+    "node-version-file"     -> ".nvmrc",
+    "cache"                 -> "npm",
+    "cache-dependency-path" -> "modules/client/js/package-lock.json"
+  )
+)
+
+ThisBuild / githubWorkflowIncludeClean          := false
+ThisBuild / githubWorkflowPublishTargetBranches := Seq.empty
+ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
+  Some("matrix.project == 'rootJS'")
+)
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "integration",
+  name = "Broker-backed integration tests",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    setupNode,
+    WorkflowStep.Run(
+      List("scripts/integration-test.sh"),
+      name = Some("Test all three backends against Kafka")
+    )
+  ),
+  scalas = List("3"),
+  javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(45)
+)
 
 val catsEffectVersion       = "3.7.0"
 val catsTaglessVersion      = "0.16.5"
