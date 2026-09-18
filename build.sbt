@@ -33,6 +33,7 @@ val setupNode = WorkflowStep.Use(
     "cache-dependency-path" -> "modules/client/js/package-lock.json"
   )
 )
+val publishedArtifactCondition = "github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')"
 
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
@@ -49,6 +50,26 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   ),
   scalas = List("3"),
   javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(45)
+)
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "downstream",
+  name = "Published artifact smoke tests",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    setupNode,
+    WorkflowStep.Run(
+      List("""echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV"""),
+      name = Some("Select published version")
+    ),
+    WorkflowStep.Run(
+      List("scripts/downstream-test.sh"),
+      name = Some("Test published JVM, JavaScript, and Native artifacts")
+    )
+  ),
+  cond = Some(publishedArtifactCondition),
+  scalas = List("3"),
+  javas = List(JavaSpec.temurin("17")),
+  needs = List("publish"),
   timeoutMinutes = Some(45)
 )
 
