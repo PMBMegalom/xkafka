@@ -89,9 +89,10 @@ private[xkafka] trait ConsumerRunConfig extends js.Object
 
 @js.native
 private[xkafka] trait EachBatchPayload extends js.Object:
-  val batch: ConsumerBatch = js.native
-  def isRunning(): Boolean = js.native
-  def isStale(): Boolean   = js.native
+  val batch: ConsumerBatch                = js.native
+  def isRunning(): Boolean                = js.native
+  def isStale(): Boolean                  = js.native
+  def resolveOffset(offset: String): Unit = js.native
 
 @js.native
 private[xkafka] trait ConsumerBatch extends js.Object:

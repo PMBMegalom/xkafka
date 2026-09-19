@@ -31,7 +31,6 @@ import cats.effect.Deferred
 import cats.effect.Resource
 import cats.effect.std.Dispatcher
 import cats.effect.std.Queue
-import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.Chunk
 import fs2.Stream
@@ -105,8 +104,9 @@ private final class ConfluentKafkaClient[F[_]](
           )
         )
       )
-      _ <- Resource.make(await(underlying.connect()))(_ => await(underlying.disconnect()))
-      _ <- Resource.eval(
+      dispatcher <- Dispatcher.parallel[F]
+      _          <- Resource.make(await(underlying.connect()))(_ => await(underlying.disconnect()))
+      _          <- Resource.eval(
         subscription match
           case Subscription.Topics(topics) =>
             await(
@@ -117,19 +117,21 @@ private final class ConfluentKafkaClient[F[_]](
               )
             )
       )
-      dispatcher <- Dispatcher.parallel[F]
-      queue      <- Resource.eval(
+      queue <- Resource.eval(
         Queue.bounded[F, CommittableConsumerRecord[F, K, V]](256)
       )
-      failure <- Resource.eval(Deferred[F, Throwable])
+      failure  <- Resource.eval(Deferred[F, Throwable])
+      shutdown <- Resource.eval(Deferred[F, Unit])
       adapter = new ConfluentKafkaConsumer(
         underlying,
         settings,
         dispatcher,
         queue,
-        failure
+        failure,
+        shutdown
       )
-      _ <- Resource.make(adapter.run.start)(_.cancel)
+      _ <- Resource.eval(adapter.run)
+      _ <- Resource.make(F.unit)(_ => shutdown.complete(()).void)
     yield adapter
 
   private def await[A](promise: => js.Promise[A]): F[A] =
@@ -296,7 +298,8 @@ private final class ConfluentKafkaClient[F[_]](
       settings: ConsumerSettings[F, K, V],
       dispatcher: Dispatcher[F],
       queue: Queue[F, CommittableConsumerRecord[F, K, V]],
-      failure: Deferred[F, Throwable]
+      failure: Deferred[F, Throwable],
+      shutdown: Deferred[F, Unit]
   ) extends KafkaConsumer[F, K, V]:
 
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
@@ -320,18 +323,17 @@ private final class ConfluentKafkaClient[F[_]](
       ).handleErrorWith(error => failure.complete(error).void >> F.raiseError(error))
 
     private def processBatch(payload: confluent.EachBatchPayload): F[Unit] =
-      val batch = payload.batch
+      val batch    = payload.batch
+      val messages = batch.messages.toList
       if !payload.isRunning() || payload.isStale() then F.unit
       else
         (topic(batch.topic), partition(batch.partition)).tupled.flatMap { case (portableTopic, portablePartition) =>
-          batch.messages.toList.traverse_ { message =>
+          messages.traverse(consumerRecord(portableTopic, portablePartition, _)).flatMap { records =>
             if !payload.isRunning() || payload.isStale() then F.unit
             else
-              consumerRecord(
-                portableTopic,
-                portablePartition,
-                message
-              ).flatMap(queue.offer)
+              // Resolution advances Confluent's local cursor; enable.auto.commit remains disabled.
+              messages.lastOption.traverse_(message => F.delay(payload.resolveOffset(message.offset))) >>
+                records.traverse_(record => F.race(queue.offer(record), shutdown.get).void)
           }
         }
 

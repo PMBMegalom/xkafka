@@ -166,6 +166,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     var disconnected                                   = 0
     var runConfig: Option[confluent.ConsumerRunConfig] = None
     var committed: Vector[(String, Int, String)]       = Vector.empty
+    var resolved: Vector[String]                       = Vector.empty
 
     val consumer = js.Dynamic
       .literal(
@@ -221,7 +222,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             offset = "9007199254740993",
             timestamp = "5678",
             key = "key",
-            value = "value"
+            value = "value",
+            resolveOffset = offset => resolved = resolved :+ offset
           )
 
           IO.fromFuture(IO(callback(payload).toFuture)) >>
@@ -233,6 +235,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 assertEquals(record.record.key, "key")
                 assertEquals(record.record.value, "value")
                 assertEquals(record.offset.nextOffset.value, 9007199254740994L)
+                assertEquals(resolved, Vector("9007199254740993"))
               } >> record.offset.commit
             }
         }
@@ -279,7 +282,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       offset: String,
       timestamp: String,
       key: String,
-      value: String
+      value: String,
+      resolveOffset: String => Unit
   ): confluent.EachBatchPayload =
     val message = js.Dynamic.literal(
       key = uint8(key),
@@ -299,7 +303,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       .literal(
         batch = batch,
         isRunning = (() => true): js.Function0[Boolean],
-        isStale = (() => false): js.Function0[Boolean]
+        isStale = (() => false): js.Function0[Boolean],
+        resolveOffset = ((offset: String) => resolveOffset(offset)): js.Function1[String, Unit]
       )
       .asInstanceOf[confluent.EachBatchPayload]
 

@@ -29,16 +29,16 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 
 final class KafkaIntegrationSuite extends CatsEffectSuite:
-  override val munitIOTimeout: Duration = 2.minutes
+  override val munitIOTimeout: Duration = 3.minutes
 
   private val bootstrapServers =
     PlatformKafkaClient.integrationBootstrapServers
 
   bootstrapServers match
     case None =>
-      test("produce, consume, and commit against Kafka".ignore)(IO.unit)
+      test("resume from a committed offset against Kafka".ignore)(IO.unit)
     case Some(bootstrapServer) =>
-      test("produce, consume, and commit against Kafka") {
+      test("resume from a committed offset against Kafka") {
         roundTrip(bootstrapServer)
       }
 
@@ -50,10 +50,19 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val headers        = Headers(
       Header("x-xkafka-integration", Some(Chunk.array(Array[Byte](1, 2, 3))))
     )
-    val record = ProducerRecord(
+    val partition = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
+    val first     = ProducerRecord(
       topic = topic,
-      key = "round-trip-key",
-      value = s"round-trip-value-${PlatformKafkaClient.name}",
+      key = "first-key",
+      value = s"first-value-${PlatformKafkaClient.name}",
+      partition = Some(partition),
+      headers = headers
+    )
+    val second = ProducerRecord(
+      topic = topic,
+      key = "second-key",
+      value = s"second-value-${PlatformKafkaClient.name}",
+      partition = Some(partition),
       headers = headers
     )
     val producerSettings = ProducerSettings(
@@ -72,33 +81,21 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     for
       produced <- PlatformKafkaClient()
         .producer(producerSettings)
-        .use(_.produce(NonEmptyList.one(record)))
+        .use(_.produce(NonEmptyList.of(first, second)))
         .timeoutTo(
           45.seconds,
           IO.raiseError(new RuntimeException("Kafka producer timed out"))
         )
-      consumed <- PlatformKafkaClient()
-        .consumer(
-          consumerSettings,
-          Subscription.Topics(NonEmptyList.one(topic))
-        )
-        .use { consumer =>
-          for
-            record <- consumer.records.take(1).compile.lastOrError
-            _      <- record.offset.commit
-          yield record
-        }
-        .timeoutTo(
-          60.seconds,
-          IO.raiseError(new RuntimeException("Kafka consumer timed out"))
-        )
+      consumed <- consumeTwoAndCommitFirst(consumerSettings, topic)
+      (consumedFirst, observedSecond) = consumed
+      consumedSecond <- consumeOne(consumerSettings, topic)
     yield
       assert(produced.metadata.nonEmpty)
-      assertEquals(consumed.record.topicPartition.topic, topic)
-      assertEquals(consumed.record.key, record.key)
-      assertEquals(consumed.record.value, record.value)
+      assertEquals(consumedFirst.record.topicPartition, TopicPartition(topic, partition))
+      assertEquals(consumedFirst.record.key, first.key)
+      assertEquals(consumedFirst.record.value, first.value)
       assertEquals(
-        consumed.record.headers
+        consumedFirst.record.headers
           .getAll("x-xkafka-integration")
           .map(
             _.map(_.toVector)
@@ -106,8 +103,42 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         Vector(Some(Vector[Byte](1, 2, 3)))
       )
       assertEquals(
-        consumed.offset.nextOffset.value,
-        consumed.record.offset.value + 1L
+        consumedFirst.offset.nextOffset.value,
+        consumedFirst.record.offset.value + 1L
+      )
+      assertEquals(consumedSecond.record.topicPartition, TopicPartition(topic, partition))
+      assertEquals(consumedSecond.record.key, second.key)
+      assertEquals(consumedSecond.record.value, second.value)
+      assertEquals(consumedSecond.record.offset, consumedFirst.offset.nextOffset)
+      assertEquals(consumedSecond.record, observedSecond.record)
+
+  private def consumeTwoAndCommitFirst(
+      settings: ConsumerSettings[IO, String, String],
+      topic: Topic
+  ): IO[(CommittableConsumerRecord[IO, String, String], CommittableConsumerRecord[IO, String, String])] =
+    PlatformKafkaClient()
+      .consumer(settings, Subscription.Topics(NonEmptyList.one(topic)))
+      .use { consumer =>
+        consumer.records.take(2).compile.toList.flatMap {
+          case first :: second :: Nil => first.offset.commit.as((first, second))
+          case records                => IO.raiseError(new AssertionError(s"expected two records, got ${records.size}"))
+        }
+      }
+      .timeoutTo(
+        60.seconds,
+        IO.raiseError(new RuntimeException("Kafka consumer timed out"))
+      )
+
+  private def consumeOne(
+      settings: ConsumerSettings[IO, String, String],
+      topic: Topic
+  ): IO[CommittableConsumerRecord[IO, String, String]] =
+    PlatformKafkaClient()
+      .consumer(settings, Subscription.Topics(NonEmptyList.one(topic)))
+      .use(_.records.take(1).compile.lastOrError)
+      .timeoutTo(
+        60.seconds,
+        IO.raiseError(new RuntimeException("Kafka consumer timed out"))
       )
 
   private val utf8Serializer: Serializer[IO, String] =
