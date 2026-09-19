@@ -245,6 +245,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "end offset", (_, high) => high)
 
+    override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
+      if timestampsToSearch.isEmpty then F.pure(Map.empty) else semaphore.permit.use(_ => F.blocking(readOffsetsForTimes(timestampsToSearch)))
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = semaphore.permit.use(_ => F.blocking(seekTo(topicPartition, offset)))
 
     private def poll(): Option[NativeRecord] =
@@ -389,6 +392,40 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           val value  = select(!low, !high)
           val offset = Offset.from(value).fold(error => throw invalidBackendValue(field, value, error), identity)
           topicPartition -> offset
+        .toMap
+
+    private def readOffsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Map[TopicPartition, Option[Offset]] =
+      Zone.acquire: zone =>
+        given Zone           = zone
+        val entries          = timestampsToSearch.toVector
+        val topics           = alloc[CString](entries.size)
+        val partitions       = alloc[CInt](entries.size)
+        val timestamps       = alloc[CLongLong](entries.size)
+        val timestampOffsets = alloc[CLongLong](entries.size)
+        entries.iterator.zipWithIndex.foreach:
+          case ((topicPartition, timestamp), index) =>
+            topics(index) = toCString(topicPartition.topic.value)
+            partitions(index) = topicPartition.partition.value
+            timestamps(index) = timestamp.epochMillis
+        val error  = stackalloc[CChar](ErrorBufferSize)
+        val result =
+          Bindings.xkafka_consumer_offsets_for_times(
+            handle,
+            topics,
+            partitions,
+            timestamps,
+            entries.size.toUSize,
+            timestampOffsets,
+            error,
+            ErrorBufferSize.toUSize
+          )
+        if result != 0 then throw nativeError(error)
+        entries.iterator.zipWithIndex.map:
+          case ((topicPartition, _), index) =>
+            val value  = timestampOffsets(index)
+            val offset =
+              Option.when(value >= 0L)(Offset.from(value).fold(error => throw invalidBackendValue("timestamp offset", value, error), identity))
+            topicPartition -> offset
         .toMap
 
     private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =

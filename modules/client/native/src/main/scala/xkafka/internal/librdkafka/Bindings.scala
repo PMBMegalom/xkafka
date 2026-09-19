@@ -145,6 +145,17 @@ private[xkafka] object Bindings:
       errorSize: CSize
   ): CInt = extern
 
+  def xkafka_consumer_offsets_for_times(
+      consumer: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      timestamps: Ptr[CLongLong],
+      count: CSize,
+      offsets: Ptr[CLongLong],
+      error: CString,
+      errorSize: CSize
+  ): CInt = extern
+
   def xkafka_consumer_seek(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern
 
   def xkafka_consumer_commit(

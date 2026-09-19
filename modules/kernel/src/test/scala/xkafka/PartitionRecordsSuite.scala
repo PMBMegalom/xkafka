@@ -80,7 +80,8 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] = IO.pure(Map.empty)
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]  = IO.pure(Map.empty)
       override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]        = IO.pure(Map.empty)
-      override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]                           = IO.unit
+      override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] = IO.pure(Map.empty)
+      override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]                                               = IO.unit
 
   private def record(topicPartition: TopicPartition, offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
     val partition       = topicPartition

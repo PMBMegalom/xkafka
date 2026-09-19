@@ -36,6 +36,7 @@ final class ClientSuite extends FunSuite:
   private val partition      = Partition.from(0).toOption.get
   private val offset         = Offset.from(0L).toOption.get
   private val nextOffset     = Offset.from(1L).toOption.get
+  private val timestamp      = Timestamp.fromEpochMillis(1234L)
   private val group          = ConsumerGroup.from("workers").toOption.get
   private val clientSettings = ClientSettings(NonEmptyList.one("localhost:9092"))
   private val producerRecord = ProducerRecord(topic, "key", "value")
@@ -131,6 +132,8 @@ final class ClientSuite extends FunSuite:
           Some(topicPartitions.map(_ -> offset).toMap)
         override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =
           Some(topicPartitions.map(_ -> nextOffset).toMap)
+        override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
+          Some(timestampsToSearch.keys.map(_ -> Some(offset)).toMap)
         override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit] = Some(())
     val mapped = FunctorK[[F[_]] =>> KafkaConsumer[F, String, String]].mapK(source)(optionToSyncIO)
 
@@ -141,9 +144,10 @@ final class ClientSuite extends FunSuite:
         mapped.committed(Set(consumerRecord.topicPartition)),
         mapped.beginningOffsets(Set(consumerRecord.topicPartition)),
         mapped.endOffsets(Set(consumerRecord.topicPartition)),
+        mapped.offsetsForTimes(Map(consumerRecord.topicPartition -> timestamp)),
         mapped.seek(consumerRecord.topicPartition, offset)
-      ).flatMapN((record, assignment, committed, beginning, end, _) =>
-        record.offset.commit.as((record.record, assignment, committed, beginning, end))
+      ).flatMapN((record, assignment, committed, beginning, end, timed, _) =>
+        record.offset.commit.as((record.record, assignment, committed, beginning, end, timed))
       ).unsafeRunSync()
 
     assertEquals(
@@ -153,7 +157,8 @@ final class ClientSuite extends FunSuite:
         Set(consumerRecord.topicPartition),
         Map(consumerRecord.topicPartition -> Some(nextOffset)),
         Map(consumerRecord.topicPartition -> offset),
-        Map(consumerRecord.topicPartition -> nextOffset)
+        Map(consumerRecord.topicPartition -> nextOffset),
+        Map(consumerRecord.topicPartition -> Some(offset))
       )
     )
 

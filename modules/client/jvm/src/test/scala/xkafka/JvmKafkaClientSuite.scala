@@ -33,7 +33,7 @@ import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, Ka
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
-import org.apache.kafka.clients.consumer.{ConsumerRecord as JavaConsumerRecord, MockConsumer}
+import org.apache.kafka.clients.consumer.{ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp}
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
 import org.apache.kafka.common.TopicPartition as JavaTopicPartition
 import org.apache.kafka.common.serialization.ByteArraySerializer
@@ -88,7 +88,11 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val topic              = Topic.from("events").toOption.get
     val group              = ConsumerGroup.from("workers").toOption.get
     val javaTopicPartition = new JavaTopicPartition(topic.value, 0)
-    val mock               = new MockConsumer[Array[Byte], Array[Byte]]("earliest")
+    val mock               =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        override def offsetsForTimes(
+            timestampsToSearch: java.util.Map[JavaTopicPartition, java.lang.Long]
+        ): java.util.Map[JavaTopicPartition, OffsetAndTimestamp] = JavaMap.of(javaTopicPartition, new OffsetAndTimestamp(0L, 1234L))
     mock.schedulePollTask(() =>
       mock.rebalance(JavaList.of(javaTopicPartition))
       mock.updateBeginningOffsets(JavaMap.of(javaTopicPartition, Long.box(0L)))
@@ -129,6 +133,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         committed  <- consumer.committed(Set(consumed.record.topicPartition))
         beginning  <- consumer.beginningOffsets(Set(consumed.record.topicPartition))
         end        <- consumer.endOffsets(Set(consumed.record.topicPartition))
+        timed      <- consumer.offsetsForTimes(Map(consumed.record.topicPartition -> Timestamp.fromEpochMillis(1234L)))
         _          <- consumer.seek(consumed.record.topicPartition, consumed.record.offset)
         position = mock.position(javaTopicPartition)
       yield
@@ -140,5 +145,6 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(committed, Map(consumed.record.topicPartition -> Some(consumed.offset.nextOffset)))
         assertEquals(beginning, Map(consumed.record.topicPartition -> consumed.record.offset))
         assertEquals(end, Map(consumed.record.topicPartition -> consumed.offset.nextOffset))
+        assertEquals(timed, Map(consumed.record.topicPartition -> Some(consumed.record.offset)))
         assertEquals(position, 0L)
     .timeout(5.seconds)

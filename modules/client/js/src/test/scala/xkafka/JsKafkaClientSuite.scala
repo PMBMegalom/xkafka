@@ -129,14 +129,15 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   test("consumer decodes a batch and commits the exact next offset"):
     Dispatcher.sequential[IO].use: dispatcher =>
       for
-        connected         <- Ref.of[IO, Int](0)
-        disconnected      <- Ref.of[IO, Int](0)
-        runConfig         <- Deferred[IO, confluent.ConsumerRunConfig]
-        committed         <- Ref.of[IO, Vector[(String, Int, String)]](Vector.empty)
-        resolved          <- Deferred[IO, String]
-        seeked            <- Deferred[IO, (String, Int, String)]
-        adminConnected    <- Ref.of[IO, Int](0)
-        adminDisconnected <- Ref.of[IO, Int](0)
+        connected          <- Ref.of[IO, Int](0)
+        disconnected       <- Ref.of[IO, Int](0)
+        runConfig          <- Deferred[IO, confluent.ConsumerRunConfig]
+        committed          <- Ref.of[IO, Vector[(String, Int, String)]](Vector.empty)
+        resolved           <- Deferred[IO, String]
+        seeked             <- Deferred[IO, (String, Int, String)]
+        requestedTimestamp <- Deferred[IO, Double]
+        adminConnected     <- Ref.of[IO, Int](0)
+        adminDisconnected  <- Ref.of[IO, Int](0)
         admin =
           js.Dynamic.literal(
             connect = (() => promise(dispatcher)(adminConnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
@@ -146,9 +147,18 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                   (_: String) =>
                     js.Promise.resolve(js.Array(
                       js.Dynamic.literal(partition = 4, offset = "9007199254740995", high = "9007199254740995", low = "9007199254740992")
-                        .asInstanceOf[confluent.TopicOffsets]
+                        .asInstanceOf[confluent.TopicOffsets],
+                      js.Dynamic.literal(partition = 5, offset = "10", high = "10", low = "0").asInstanceOf[confluent.TopicOffsets]
                     ))
-              ): js.Function1[String, js.Promise[js.Array[confluent.TopicOffsets]]]
+              ): js.Function1[String, js.Promise[js.Array[confluent.TopicOffsets]]],
+            fetchTopicOffsetsByTimestamp =
+              (
+                  (_: String, timestamp: Double) =>
+                    promise(dispatcher)(requestedTimestamp.complete(timestamp).void.as(js.Array(
+                      confluent.Values.topicPartitionOffset("events", 4, "9007199254740994"),
+                      confluent.Values.topicPartitionOffset("events", 5, "10")
+                    )))
+              ): js.Function2[String, Double, js.Promise[js.Array[confluent.TopicPartitionOffset]]]
           ).asInstanceOf[confluent.Admin]
         consumer =
           js.Dynamic.literal(
@@ -195,29 +205,35 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                     value = "value",
                     resolveOffset = offset => dispatcher.unsafeRunAndForget(resolved.complete(offset).void)
                   )
-                _              <- IO.fromFuture(IO(callback(payload).toFuture))
-                record         <- portable.records.take(1).compile.lastOrError
-                _              <- record.offset.commit
-                assignment     <- portable.assignment
-                stored         <- portable.committed(Set(record.record.topicPartition))
-                beginning      <- portable.beginningOffsets(Set(record.record.topicPartition))
-                end            <- portable.endOffsets(Set(record.record.topicPartition))
+                _          <- IO.fromFuture(IO(callback(payload).toFuture))
+                record     <- portable.records.take(1).compile.lastOrError
+                _          <- record.offset.commit
+                assignment <- portable.assignment
+                stored     <- portable.committed(Set(record.record.topicPartition))
+                beginning  <- portable.beginningOffsets(Set(record.record.topicPartition))
+                end        <- portable.endOffsets(Set(record.record.topicPartition))
+                otherTopicPartition = TopicPartition(record.record.topicPartition.topic, partition(5))
+                timed <-
+                  portable.offsetsForTimes(
+                    Map(record.record.topicPartition -> Timestamp.fromEpochMillis(5678L), otherTopicPartition -> Timestamp.fromEpochMillis(5678L))
+                  )
                 _              <- portable.seek(record.record.topicPartition, record.record.offset)
                 seekedOffset   <- seeked.get
                 resolvedOffset <- resolved.get
-              yield (record, assignment, stored, beginning, end, seekedOffset, resolvedOffset)
+                timestampValue <- requestedTimestamp.get
+              yield (record, assignment, stored, beginning, end, timed, seekedOffset, resolvedOffset, timestampValue)
         connectedCount         <- connected.get
         disconnectedCount      <- disconnected.get
         adminConnectedCount    <- adminConnected.get
         adminDisconnectedCount <- adminDisconnected.get
         committedOffsets       <- committed.get
-        (record, assignment, stored, beginning, end, seekedOffset, resolvedOffset) = result
+        (record, assignment, stored, beginning, end, timed, seekedOffset, resolvedOffset, timestampValue) = result
         _ <-
           IO:
             assertEquals(connectedCount, 1)
             assertEquals(disconnectedCount, 1)
-            assertEquals(adminConnectedCount, 2)
-            assertEquals(adminDisconnectedCount, 2)
+            assertEquals(adminConnectedCount, 3)
+            assertEquals(adminDisconnectedCount, 3)
             assertEquals(record.record.topicPartition.topic, topic("events"))
             assertEquals(record.record.topicPartition.partition, partition(4))
             assertEquals(record.record.offset.value, 9007199254740993L)
@@ -228,8 +244,16 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             assertEquals(stored, Map(record.record.topicPartition -> Some(record.offset.nextOffset)))
             assertEquals(beginning, Map(record.record.topicPartition -> Offset.from(9007199254740992L).toOption.get))
             assertEquals(end, Map(record.record.topicPartition -> Offset.from(9007199254740995L).toOption.get))
+            assertEquals(
+              timed,
+              Map(
+                record.record.topicPartition                                     -> Some(record.offset.nextOffset),
+                TopicPartition(record.record.topicPartition.topic, partition(5)) -> None
+              )
+            )
             assertEquals(seekedOffset, ("events", 4, "9007199254740993"))
             assertEquals(resolvedOffset, "9007199254740993")
+            assertEquals(timestampValue, 5678d)
             assertEquals(committedOffsets, Vector(("events", 4, "9007199254740994")))
       yield ()
 

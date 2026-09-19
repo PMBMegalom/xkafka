@@ -216,6 +216,26 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "end offset", _.high)
 
+    override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
+      if timestampsToSearch.isEmpty then F.pure(Map.empty)
+      else
+        admin.use: value =>
+          timestampsToSearch.toList.groupBy(_._1.topic).toList.traverse: (topic, requested) =>
+            await(value.fetchTopicOffsets(topic.value)).flatMap: boundaries =>
+              val ends = boundaries.iterator.map(offsets => offsets.partition -> offsets.high).toMap
+              requested.groupBy(_._2).toList.traverse: (timestamp, searches) =>
+                jsTimestamp(timestamp).flatMap: instant =>
+                  await(value.fetchTopicOffsetsByTimestamp(topic.value, instant)).flatMap: returned =>
+                    val found = returned.iterator.map(offsets => offsets.partition -> offsets.offset).toMap
+                    searches.traverse: (topicPartition, _) =>
+                      (found.get(topicPartition.partition.value), ends.get(topicPartition.partition.value)) match
+                        case (Some(raw), Some(rawEnd)) => (optionalOffset("timestamp offset", raw), offset("end offset", rawEnd)).mapN:
+                            (candidate, end) => topicPartition -> candidate.filterNot(_ == end)
+                        case (None, _) => F.raiseError(missingOffset("timestamp offset", topicPartition))
+                        case (_, None) => F.raiseError(missingOffset("end offset", topicPartition))
+              .map(_.flatten)
+          .map(_.flatten.toMap)
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
       F.delay(
         underlying.seek(confluent.Values.topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString))
@@ -276,6 +296,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           if parsed < 0L then F.pure(None)
           else F.fromEither(Offset.from(parsed).leftMap(error => invalidBackendValue(field, raw, error)).map(Some(_)))
 
+    private def jsTimestamp(timestamp: Timestamp): F[Double] =
+      val value = timestamp.epochMillis
+      if value >= -9007199254740991L && value <= 9007199254740991L then F.pure(value.toDouble)
+      else F.raiseError(new IllegalArgumentException(s"timestamp $value cannot be represented exactly by Confluent Kafka JavaScript"))
+
     private def boundaryOffsets(
         topicPartitions: Set[TopicPartition],
         field: String,
@@ -290,8 +315,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
               requested.toList.traverse: topicPartition =>
                 indexed.get(topicPartition.partition.value) match
                   case Some(offsets) => offset(field, select(offsets)).map(topicPartition -> _)
-                  case None => F.raiseError(new IllegalStateException(s"Confluent Kafka JavaScript did not return a $field for $topicPartition"))
+                  case None          => F.raiseError(missingOffset(field, topicPartition))
           .map(_.flatten.toMap)
+
+    private def missingOffset(field: String, topicPartition: TopicPartition): IllegalStateException =
+      new IllegalStateException(s"Confluent Kafka JavaScript did not return a $field for $topicPartition")
 
     private def admin: Resource[F, confluent.Admin] =
       Resource.eval(F.delay(underlying.dependentAdmin())).flatMap: value =>

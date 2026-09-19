@@ -172,6 +172,19 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else underlying.endOffsets(topicPartitions.map(javaTopicPartition)).flatMap(portableOffsets("end offset", topicPartitions, _))
 
+    override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
+      if timestampsToSearch.isEmpty then F.pure(Map.empty)
+      else
+        val requested =
+          timestampsToSearch.map: (topicPartition, timestamp) =>
+            javaTopicPartition(topicPartition) -> timestamp.epochMillis
+        underlying.offsetsForTimes(requested).flatMap: values =>
+          timestampsToSearch.keys.toList.traverse: topicPartition =>
+            values.get(javaTopicPartition(topicPartition)).flatten.traverse: value =>
+              F.fromEither(Offset.from(value.offset).leftMap(error => invalidBackendValue("timestamp offset", error)))
+            .map(topicPartition -> _)
+          .map(_.toMap)
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = underlying.seek(javaTopicPartition(topicPartition), offset.value)
 
     private def portableOffsets(

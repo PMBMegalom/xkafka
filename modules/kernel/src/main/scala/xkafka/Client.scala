@@ -206,6 +206,9 @@ trait KafkaConsumer[F[_], K, V]:
   /** Returns the offset immediately after the latest available record for each requested topic-partition. */
   def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]]
 
+  /** Returns the earliest offset whose record timestamp is greater than or equal to each requested timestamp, or `None` when none exists. */
+  def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]]
+
   def seek(topicPartition: TopicPartition, offset: Offset): F[Unit]
 
   final def mapK[G[_]](fk: FunctionK[F, G]): KafkaConsumer[G, K, V] =
@@ -219,6 +222,9 @@ trait KafkaConsumer[F[_], K, V]:
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Offset]] = fk(self.beginningOffsets(topicPartitions))
 
       override def endOffsets(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Offset]] = fk(self.endOffsets(topicPartitions))
+
+      override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): G[Map[TopicPartition, Option[Offset]]] =
+        fk(self.offsetsForTimes(timestampsToSearch))
 
       override def seek(topicPartition: TopicPartition, offset: Offset): G[Unit] = fk(self.seek(topicPartition, offset))
 

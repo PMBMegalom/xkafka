@@ -37,14 +37,14 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     case None =>
       test("resume from a committed offset against Kafka".ignore)(IO.unit)
       test("resume from batched offsets across topic-partitions".ignore)(IO.unit)
-      test("inspect assignment and committed offsets and seek".ignore)(IO.unit)
+      test("inspect consumer offsets and seek".ignore)(IO.unit)
       test("consume partition-scoped streams".ignore)(IO.unit)
     case Some(bootstrapServer) =>
       test("resume from a committed offset against Kafka"):
         roundTrip(bootstrapServer)
       test("resume from batched offsets across topic-partitions"):
         batchRoundTrip(bootstrapServer)
-      test("inspect assignment and committed offsets and seek"):
+      test("inspect consumer offsets and seek"):
         controlRoundTrip(bootstrapServer)
       test("consume partition-scoped streams"):
         partitionedRoundTrip(bootstrapServer)
@@ -130,7 +130,8 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
     val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
     val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
-    val record           = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition))
+    val timestamp        = Timestamp.fromEpochMillis(1700000000000L)
+    val record           = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition), timestamp = Some(timestamp))
 
     for
       _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(NonEmptyList.one(record))).timeout(45.seconds)
@@ -143,21 +144,25 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
                 before     <- consumer.committed(Set(topicPartition))
                 beginning  <- consumer.beginningOffsets(Set(topicPartition))
                 end        <- consumer.endOffsets(Set(topicPartition))
+                timed      <- consumer.offsetsForTimes(Map(topicPartition -> timestamp))
+                missing    <- consumer.offsetsForTimes(Map(topicPartition -> Timestamp.fromEpochMillis(timestamp.epochMillis + 1L)))
                 _          <- value.offset.commit
                 stored     <- consumer.committed(Set(topicPartition))
                 _          <- consumer.seek(topicPartition, value.record.offset)
-              yield (value, Some((assignment, before, stored, beginning, end)))
+              yield (value, Some((assignment, before, stored, beginning, end, timed, missing)))
             case (value, _) => IO.pure((value, None))
           .take(2).compile.toList.timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer control test timed out")))
     yield
-      val first                                        = consumed.head
-      val replayed                                     = consumed.last
-      val (assignment, before, stored, beginning, end) = first._2.getOrElse(fail("missing consumer control results"))
+      val first                                                        = consumed.head
+      val replayed                                                     = consumed.last
+      val (assignment, before, stored, beginning, end, timed, missing) = first._2.getOrElse(fail("missing consumer control results"))
       assertEquals(assignment, Set(topicPartition))
       assertEquals(before, Map(topicPartition -> None))
       assertEquals(stored, Map(topicPartition -> Some(first._1.offset.nextOffset)))
       assertEquals(beginning, Map(topicPartition -> first._1.record.offset))
       assertEquals(end, Map(topicPartition -> first._1.offset.nextOffset))
+      assertEquals(timed, Map(topicPartition -> Some(first._1.record.offset)))
+      assertEquals(missing, Map(topicPartition -> None))
       assertEquals(replayed._1.record.offset, first._1.record.offset)
       assertEquals(replayed._1.record.value, "control-value")
 
