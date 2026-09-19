@@ -77,7 +77,9 @@ collects 100 offsets or five seconds elapse, whichever happens first.
 Within the consumer resource, `assignment` reports the currently assigned
 topic-partitions, `committed` returns their broker-stored next offsets without
 sentinel values, and `seek` changes the next offset fetched for an assigned
-topic-partition.
+topic-partition. `assignmentChanges(pollInterval)` is an FS2 stream which emits
+the current assignment immediately and subsequently only when a poll observes
+a different assignment.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
