@@ -31,6 +31,9 @@ trait Serializer[F[_], -A]:
 
   def serialize(topic: Topic, headers: Headers, value: A): F[Option[Chunk[Byte]]]
 
+  final def mapK[G[_]](fk: FunctionK[F, G]): Serializer[G, A] =
+    Serializer.instance((topic, headers, value) => fk(self.serialize(topic, headers, value)))
+
   final def contramap[B](f: B => A): Serializer[F, B] =
     new Serializer[F, B]:
       override def serialize(topic: Topic, headers: Headers, value: B): F[Option[Chunk[Byte]]] = self.serialize(topic, headers, f(value))
@@ -40,8 +43,7 @@ object Serializer:
     override def contramap[A, B](serializer: Serializer[F, A])(f: B => A): Serializer[F, B] = serializer.contramap(f)
 
   given [A]: FunctorK[[F[_]] =>> Serializer[F, A]] with
-    override def mapK[F[_], G[_]](serializer: Serializer[F, A])(fk: FunctionK[F, G]): Serializer[G, A] =
-      instance((topic, headers, value) => fk(serializer.serialize(topic, headers, value)))
+    override def mapK[F[_], G[_]](serializer: Serializer[F, A])(fk: FunctionK[F, G]): Serializer[G, A] = serializer.mapK(fk)
 
   def apply[F[_], A](using serializer: Serializer[F, A]): Serializer[F, A] = serializer
 
@@ -56,6 +58,9 @@ trait Deserializer[F[_], A]:
 
   def deserialize(topic: Topic, headers: Headers, bytes: Option[Chunk[Byte]]): F[A]
 
+  final def mapK[G[_]](fk: FunctionK[F, G]): Deserializer[G, A] =
+    Deserializer.instance((topic, headers, bytes) => fk(self.deserialize(topic, headers, bytes)))
+
   final def map[B](f: A => B)(using F: Functor[F]): Deserializer[F, B] =
     new Deserializer[F, B]:
       override def deserialize(topic: Topic, headers: Headers, bytes: Option[Chunk[Byte]]): F[B] = F.map(self.deserialize(topic, headers, bytes))(f)
@@ -65,8 +70,7 @@ object Deserializer:
     override def map[A, B](deserializer: Deserializer[F, A])(f: A => B): Deserializer[F, B] = deserializer.map(f)
 
   given [A]: FunctorK[[F[_]] =>> Deserializer[F, A]] with
-    override def mapK[F[_], G[_]](deserializer: Deserializer[F, A])(fk: FunctionK[F, G]): Deserializer[G, A] =
-      instance((topic, headers, bytes) => fk(deserializer.deserialize(topic, headers, bytes)))
+    override def mapK[F[_], G[_]](deserializer: Deserializer[F, A])(fk: FunctionK[F, G]): Deserializer[G, A] = deserializer.mapK(fk)
 
   def apply[F[_], A](using deserializer: Deserializer[F, A]): Deserializer[F, A] = deserializer
 

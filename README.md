@@ -75,9 +75,12 @@ match complete topic names; portable patterns should use regular-expression
 syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
-`Deserializer[F, A]` has a Cats `Functor` instance. Both also have cats-tagless
-`FunctorK` instances for transforming their effect with a natural
-transformation.
+`Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
+deserializers, producer and consumer settings, committable offsets and records,
+producers, and consumers have cats-tagless `FunctorK` instances for transforming
+their effect with a natural transformation. `KafkaClient.imapK` transforms a
+complete client between effects in both directions while preserving `Resource`
+cancellation semantics.
 
 Client, producer, and consumer settings each accept an immutable `properties`
 map for backend configuration not modeled directly by xkafka:
