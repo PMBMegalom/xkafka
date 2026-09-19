@@ -135,6 +135,16 @@ private[xkafka] object Bindings:
       errorSize: CSize
   ): CInt = extern
 
+  def xkafka_consumer_watermark_offsets(
+      consumer: CVoidPtr,
+      topic: CString,
+      partition: CInt,
+      low: Ptr[CLongLong],
+      high: Ptr[CLongLong],
+      error: CString,
+      errorSize: CSize
+  ): CInt = extern
+
   def xkafka_consumer_seek(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern
 
   def xkafka_consumer_commit(

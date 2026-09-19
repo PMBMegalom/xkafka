@@ -64,6 +64,13 @@ private[xkafka] trait Consumer extends js.Object:
   def committed(topicPartitions: js.Array[TopicPartition]): js.Promise[js.Array[TopicPartitionOffset]] = js.native
   def seek(topicPartitionOffset: TopicPartitionOffset): Unit                                           = js.native
   def assignment(): js.Array[TopicPartition]                                                           = js.native
+  def dependentAdmin(): Admin                                                                          = js.native
+
+@js.native
+private[xkafka] trait Admin extends js.Object:
+  def connect(): js.Promise[Unit]                                          = js.native
+  def disconnect(): js.Promise[Unit]                                       = js.native
+  def fetchTopicOffsets(topic: String): js.Promise[js.Array[TopicOffsets]] = js.native
 
 @js.native
 private[xkafka] trait ProducerBatch extends js.Object
@@ -121,6 +128,13 @@ private[xkafka] trait TopicPartition extends js.Object:
 @js.native
 private[xkafka] trait TopicPartitionOffset extends TopicPartition:
   val offset: String | Null = js.native
+
+@js.native
+private[xkafka] trait TopicOffsets extends js.Object:
+  val partition: Int = js.native
+  val offset: String = js.native
+  val high: String   = js.native
+  val low: String    = js.native
 
 @js.native
 @JSImport("buffer", "Buffer")

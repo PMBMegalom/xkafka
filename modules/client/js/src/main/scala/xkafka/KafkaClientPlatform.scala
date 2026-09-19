@@ -210,6 +210,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
             (portableTopicPartition(value), optionalOffset("committed offset", value.offset)).mapN(_ -> _)
         ).map(_.toMap)
 
+    override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
+      boundaryOffsets(topicPartitions, "beginning offset", _.low)
+
+    override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
+      boundaryOffsets(topicPartitions, "end offset", _.high)
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
       F.delay(
         underlying.seek(confluent.Values.topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString))
@@ -269,3 +275,24 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         parseLong(field, raw).flatMap: parsed =>
           if parsed < 0L then F.pure(None)
           else F.fromEither(Offset.from(parsed).leftMap(error => invalidBackendValue(field, raw, error)).map(Some(_)))
+
+    private def boundaryOffsets(
+        topicPartitions: Set[TopicPartition],
+        field: String,
+        select: confluent.TopicOffsets => String
+    ): F[Map[TopicPartition, Offset]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty)
+      else
+        admin.use: value =>
+          topicPartitions.groupBy(_.topic).toList.traverse: (topic, requested) =>
+            await(value.fetchTopicOffsets(topic.value)).flatMap: returned =>
+              val indexed = returned.iterator.map(offsets => offsets.partition -> offsets).toMap
+              requested.toList.traverse: topicPartition =>
+                indexed.get(topicPartition.partition.value) match
+                  case Some(offsets) => offset(field, select(offsets)).map(topicPartition -> _)
+                  case None => F.raiseError(new IllegalStateException(s"Confluent Kafka JavaScript did not return a $field for $topicPartition"))
+          .map(_.flatten.toMap)
+
+    private def admin: Resource[F, confluent.Admin] =
+      Resource.eval(F.delay(underlying.dependentAdmin())).flatMap: value =>
+        Resource.make(await(value.connect()))(_ => await(value.disconnect())).as(value)

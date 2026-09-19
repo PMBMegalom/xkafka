@@ -164,7 +164,26 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
             .map(topicPartition -> _)
           .map(_.toMap)
 
+    override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty)
+      else underlying.beginningOffsets(topicPartitions.map(javaTopicPartition)).flatMap(portableOffsets("beginning offset", topicPartitions, _))
+
+    override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty)
+      else underlying.endOffsets(topicPartitions.map(javaTopicPartition)).flatMap(portableOffsets("end offset", topicPartitions, _))
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = underlying.seek(javaTopicPartition(topicPartition), offset.value)
+
+    private def portableOffsets(
+        field: String,
+        requested: Set[TopicPartition],
+        values: Map[JavaTopicPartition, Long]
+    ): F[Map[TopicPartition, Offset]] =
+      requested.toList.traverse: topicPartition =>
+        values.get(javaTopicPartition(topicPartition)) match
+          case Some(value) => F.fromEither(Offset.from(value).leftMap(error => invalidBackendValue(field, error))).map(topicPartition -> _)
+          case None        => F.raiseError(new IllegalStateException(s"fs2-kafka did not return a $field for $topicPartition"))
+      .map(_.toMap)
 
     private def consumerRecord(committable: Fs2CommittableConsumerRecord[F, K, V]): F[CommittableConsumerRecord[F, K, V]] =
       val source    = committable.record

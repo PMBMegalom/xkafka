@@ -447,6 +447,23 @@ int xkafka_consumer_committed(rd_kafka_t *consumer,
         return 0;
 }
 
+int xkafka_consumer_watermark_offsets(rd_kafka_t *consumer,
+                                      const char *topic,
+                                      int32_t partition,
+                                      int64_t *low,
+                                      int64_t *high,
+                                      char *error,
+                                      size_t error_size) {
+        rd_kafka_resp_err_t result = rd_kafka_query_watermark_offsets(
+            consumer, topic, partition, low, high, -1);
+
+        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                return -1;
+        }
+        return 0;
+}
+
 int xkafka_consumer_seek(rd_kafka_t *consumer,
                          const char *topic,
                          int32_t partition,

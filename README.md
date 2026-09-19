@@ -76,7 +76,8 @@ collects 100 offsets or five seconds elapse, whichever happens first.
 
 Within the consumer resource, `assignment` reports the currently assigned
 topic-partitions, `committed` returns their broker-stored next offsets without
-sentinel values, and `seek` changes the next offset fetched for an assigned
+sentinel values, `beginningOffsets` and `endOffsets` query the available offset
+range, and `seek` changes the next offset fetched for an assigned
 topic-partition. `assignmentChanges(pollInterval)` is an FS2 stream which emits
 the current assignment immediately and subsequently only when a poll observes
 a different assignment. `partitionedRecords(pollInterval)` exposes a bounded

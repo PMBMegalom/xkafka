@@ -239,6 +239,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty) else semaphore.permit.use(_ => F.blocking(readCommitted(topicPartitions)))
 
+    override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
+      boundaryOffsets(topicPartitions, "beginning offset", (low, _) => low)
+
+    override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
+      boundaryOffsets(topicPartitions, "end offset", (_, high) => high)
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = semaphore.permit.use(_ => F.blocking(seekTo(topicPartition, offset)))
 
     private def poll(): Option[NativeRecord] =
@@ -356,6 +362,33 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               Option.when(offsetValue >= 0L):
                 Offset.from(offsetValue).fold(error => throw invalidBackendValue("committed offset", offsetValue, error), identity)
             topicPartition -> offset
+        .toMap
+
+    private def boundaryOffsets(topicPartitions: Set[TopicPartition], field: String, select: (Long, Long) => Long): F[Map[TopicPartition, Offset]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty)
+      else semaphore.permit.use(_ => F.blocking(readBoundaryOffsets(topicPartitions, field, select)))
+
+    private def readBoundaryOffsets(topicPartitions: Set[TopicPartition], field: String, select: (Long, Long) => Long): Map[TopicPartition, Offset] =
+      Zone.acquire: zone =>
+        given Zone = zone
+        topicPartitions.iterator.map: topicPartition =>
+          val low    = stackalloc[CLongLong]()
+          val high   = stackalloc[CLongLong]()
+          val error  = stackalloc[CChar](ErrorBufferSize)
+          val result =
+            Bindings.xkafka_consumer_watermark_offsets(
+              handle,
+              toCString(topicPartition.topic.value),
+              topicPartition.partition.value,
+              low,
+              high,
+              error,
+              ErrorBufferSize.toUSize
+            )
+          if result != 0 then throw nativeError(error)
+          val value  = select(!low, !high)
+          val offset = Offset.from(value).fold(error => throw invalidBackendValue(field, value, error), identity)
+          topicPartition -> offset
         .toMap
 
     private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =

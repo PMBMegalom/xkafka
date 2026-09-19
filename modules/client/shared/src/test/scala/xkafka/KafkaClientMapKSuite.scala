@@ -75,4 +75,6 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def assignment: IO[Set[TopicPartition]]                                                      = IO.pure(Set.empty)
             override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] =
               IO.pure(topicPartitions.map(_ -> None).toMap)
-            override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit] = IO.unit
+            override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]] = IO.pure(Map.empty)
+            override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]       = IO.pure(Map.empty)
+            override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]                          = IO.unit

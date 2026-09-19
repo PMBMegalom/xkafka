@@ -92,6 +92,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     mock.schedulePollTask(() =>
       mock.rebalance(JavaList.of(javaTopicPartition))
       mock.updateBeginningOffsets(JavaMap.of(javaTopicPartition, Long.box(0L)))
+      mock.updateEndOffsets(JavaMap.of(javaTopicPartition, Long.box(1L)))
       mock.addRecord(new JavaConsumerRecord(topic.value, 0, 0L, "key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8)))
     )
     given MkConsumer[IO] with
@@ -126,6 +127,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assignment <- consumer.assignment
         _          <- consumed.offset.commit
         committed  <- consumer.committed(Set(consumed.record.topicPartition))
+        beginning  <- consumer.beginningOffsets(Set(consumed.record.topicPartition))
+        end        <- consumer.endOffsets(Set(consumed.record.topicPartition))
         _          <- consumer.seek(consumed.record.topicPartition, consumed.record.offset)
         position = mock.position(javaTopicPartition)
       yield
@@ -135,5 +138,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(consumed.offset.nextOffset.value, 1L)
         assertEquals(assignment, Set(consumed.record.topicPartition))
         assertEquals(committed, Map(consumed.record.topicPartition -> Some(consumed.offset.nextOffset)))
+        assertEquals(beginning, Map(consumed.record.topicPartition -> consumed.record.offset))
+        assertEquals(end, Map(consumed.record.topicPartition -> consumed.offset.nextOffset))
         assertEquals(position, 0L)
     .timeout(5.seconds)

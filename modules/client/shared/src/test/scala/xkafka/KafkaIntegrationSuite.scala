@@ -141,19 +141,23 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
               for
                 assignment <- consumer.assignment
                 before     <- consumer.committed(Set(topicPartition))
+                beginning  <- consumer.beginningOffsets(Set(topicPartition))
+                end        <- consumer.endOffsets(Set(topicPartition))
                 _          <- value.offset.commit
                 stored     <- consumer.committed(Set(topicPartition))
                 _          <- consumer.seek(topicPartition, value.record.offset)
-              yield (value, Some((assignment, before, stored)))
+              yield (value, Some((assignment, before, stored, beginning, end)))
             case (value, _) => IO.pure((value, None))
           .take(2).compile.toList.timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer control test timed out")))
     yield
-      val first                        = consumed.head
-      val replayed                     = consumed.last
-      val (assignment, before, stored) = first._2.getOrElse(fail("missing consumer control results"))
+      val first                                        = consumed.head
+      val replayed                                     = consumed.last
+      val (assignment, before, stored, beginning, end) = first._2.getOrElse(fail("missing consumer control results"))
       assertEquals(assignment, Set(topicPartition))
       assertEquals(before, Map(topicPartition -> None))
       assertEquals(stored, Map(topicPartition -> Some(first._1.offset.nextOffset)))
+      assertEquals(beginning, Map(topicPartition -> first._1.record.offset))
+      assertEquals(end, Map(topicPartition -> first._1.offset.nextOffset))
       assertEquals(replayed._1.record.offset, first._1.record.offset)
       assertEquals(replayed._1.record.value, "control-value")
 
