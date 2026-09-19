@@ -22,7 +22,7 @@
 package xkafka
 
 import java.nio.charset.StandardCharsets
-import java.util.{List as JavaList, Map as JavaMap, Set as JavaSet}
+import java.util.{List as JavaList, Map as JavaMap}
 
 import scala.concurrent.duration.*
 
@@ -122,13 +122,18 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
     KafkaClientPlatform.fromFs2[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
       for
-        consumed <- consumer.records.take(1).compile.lastOrError
-        _        <- consumed.offset.commit
-        committed = mock.committed(JavaSet.of(javaTopicPartition))
+        consumed   <- consumer.records.take(1).compile.lastOrError
+        assignment <- consumer.assignment
+        _          <- consumed.offset.commit
+        committed  <- consumer.committed(Set(consumed.record.topicPartition))
+        _          <- consumer.seek(consumed.record.topicPartition, consumed.record.offset)
+        position = mock.position(javaTopicPartition)
       yield
         assertEquals(consumed.record.key, "key")
         assertEquals(consumed.record.value, "value")
         assertEquals(consumed.record.offset.value, 0L)
         assertEquals(consumed.offset.nextOffset.value, 1L)
-        assertEquals(committed.get(javaTopicPartition).offset(), 1L)
+        assertEquals(assignment, Set(consumed.record.topicPartition))
+        assertEquals(committed, Map(consumed.record.topicPartition -> Some(consumed.offset.nextOffset)))
+        assertEquals(position, 0L)
     .timeout(5.seconds)

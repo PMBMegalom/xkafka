@@ -74,6 +74,11 @@ commit per originating consumer. For streaming workloads,
 `commitBatchWithin[IO](100, 5.seconds)` is an FS2 pipe which commits whenever it
 collects 100 offsets or five seconds elapse, whichever happens first.
 
+Within the consumer resource, `assignment` reports the currently assigned
+topic-partitions, `committed` returns their broker-stored next offsets without
+sentinel values, and `seek` changes the next offset fetched for an assigned
+topic-partition.
+
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
 deserializers, producer and consumer settings, committable offsets and records,

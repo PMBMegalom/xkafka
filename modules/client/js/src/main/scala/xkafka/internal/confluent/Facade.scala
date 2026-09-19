@@ -56,11 +56,14 @@ private[xkafka] trait Producer extends js.Object:
 
 @js.native
 private[xkafka] trait Consumer extends js.Object:
-  def connect(): js.Promise[Unit]                                              = js.native
-  def disconnect(): js.Promise[Unit]                                           = js.native
-  def subscribe(subscription: ConsumerSubscribe): js.Promise[Unit]             = js.native
-  def run(config: ConsumerRunConfig): js.Promise[Unit]                         = js.native
-  def commitOffsets(offsets: js.Array[TopicPartitionOffset]): js.Promise[Unit] = js.native
+  def connect(): js.Promise[Unit]                                                                      = js.native
+  def disconnect(): js.Promise[Unit]                                                                   = js.native
+  def subscribe(subscription: ConsumerSubscribe): js.Promise[Unit]                                     = js.native
+  def run(config: ConsumerRunConfig): js.Promise[Unit]                                                 = js.native
+  def commitOffsets(offsets: js.Array[TopicPartitionOffset]): js.Promise[Unit]                         = js.native
+  def committed(topicPartitions: js.Array[TopicPartition]): js.Promise[js.Array[TopicPartitionOffset]] = js.native
+  def seek(topicPartitionOffset: TopicPartitionOffset): Unit                                           = js.native
+  def assignment(): js.Array[TopicPartition]                                                           = js.native
 
 @js.native
 private[xkafka] trait ProducerBatch extends js.Object
@@ -111,7 +114,13 @@ private[xkafka] trait KafkaMessage extends js.Object:
   val headers: js.UndefOr[JsHeaders] = js.native
 
 @js.native
-private[xkafka] trait TopicPartitionOffset extends js.Object
+private[xkafka] trait TopicPartition extends js.Object:
+  val topic: String  = js.native
+  val partition: Int = js.native
+
+@js.native
+private[xkafka] trait TopicPartitionOffset extends TopicPartition:
+  val offset: String | Null = js.native
 
 @js.native
 @JSImport("buffer", "Buffer")
@@ -171,3 +180,6 @@ private[xkafka] object Values:
 
   def topicPartitionOffset(topic: String, partition: Int, offset: String): TopicPartitionOffset =
     js.Dynamic.literal(topic = topic, partition = partition, offset = offset).asInstanceOf[TopicPartitionOffset]
+
+  def topicPartition(topic: String, partition: Int): TopicPartition =
+    js.Dynamic.literal(topic = topic, partition = partition).asInstanceOf[TopicPartition]

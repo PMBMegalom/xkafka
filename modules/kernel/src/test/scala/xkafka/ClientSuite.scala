@@ -24,6 +24,7 @@ package xkafka
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
 import cats.effect.SyncIO
+import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.{Chunk, Stream}
 import munit.FunSuite
@@ -115,11 +116,21 @@ final class ClientSuite extends FunSuite:
     val source       =
       new KafkaConsumer[Option, String, String]:
         override val records: Stream[Option, CommittableConsumerRecord[Option, String, String]] = Stream.emit(sourceRecord).covary[Option]
+        override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
+        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] =
+          Some(topicPartitions.map(_ -> Some(nextOffset)).toMap)
+        override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit] = Some(())
     val mapped = FunctorK[[F[_]] =>> KafkaConsumer[F, String, String]].mapK(source)(optionToSyncIO)
 
-    val result = mapped.records.compile.lastOrError.flatMap(record => record.offset.commit.as(record.record)).unsafeRunSync()
+    val result =
+      (
+        mapped.records.compile.lastOrError,
+        mapped.assignment,
+        mapped.committed(Set(consumerRecord.topicPartition)),
+        mapped.seek(consumerRecord.topicPartition, offset)
+      ).flatMapN((record, assignment, committed, _) => record.offset.commit.as((record.record, assignment, committed))).unsafeRunSync()
 
-    assertEquals(result, consumerRecord)
+    assertEquals(result, (consumerRecord, Set(consumerRecord.topicPartition), Map(consumerRecord.topicPartition -> Some(nextOffset))))
 
   private def committableOffset: CommittableOffset[Option] = offsetAt(partition, nextOffset)
 

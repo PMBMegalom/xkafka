@@ -37,11 +37,14 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     case None =>
       test("resume from a committed offset against Kafka".ignore)(IO.unit)
       test("resume from batched offsets across topic-partitions".ignore)(IO.unit)
+      test("inspect assignment and committed offsets and seek".ignore)(IO.unit)
     case Some(bootstrapServer) =>
       test("resume from a committed offset against Kafka"):
         roundTrip(bootstrapServer)
       test("resume from batched offsets across topic-partitions"):
         batchRoundTrip(bootstrapServer)
+      test("inspect assignment and committed offsets and seek"):
+        controlRoundTrip(bootstrapServer)
 
   private def roundTrip(bootstrapServer: String): IO[Unit] =
     val suffix         = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
@@ -114,6 +117,42 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(consumed.map(record => record.record.topicPartition.topic).toSet, Set(firstTopic, secondTopic))
       assertEquals(resumed.map(record => record.record.value).toSet, Set("first-2", "second-2"))
       assert(resumed.forall(record => record.record.offset.value == 1L))
+
+  private def controlRoundTrip(bootstrapServer: String): IO[Unit] =
+    val suffix           = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
+    val topic            = validTopic(s"xkafka-control-integration-$suffix")
+    val partition        = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
+    val topicPartition   = TopicPartition(topic, partition)
+    val group            = validConsumerGroup(s"xkafka-control-integration-$suffix")
+    val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
+    val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
+    val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
+    val record           = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition))
+
+    for
+      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(NonEmptyList.one(record))).timeout(45.seconds)
+      consumed <-
+        PlatformKafkaClient().consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+          consumer.records.zipWithIndex.evalMap:
+            case (value, 0L) =>
+              for
+                assignment <- consumer.assignment
+                before     <- consumer.committed(Set(topicPartition))
+                _          <- value.offset.commit
+                stored     <- consumer.committed(Set(topicPartition))
+                _          <- consumer.seek(topicPartition, value.record.offset)
+              yield (value, Some((assignment, before, stored)))
+            case (value, _) => IO.pure((value, None))
+          .take(2).compile.toList.timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer control test timed out")))
+    yield
+      val first                        = consumed.head
+      val replayed                     = consumed.last
+      val (assignment, before, stored) = first._2.getOrElse(fail("missing consumer control results"))
+      assertEquals(assignment, Set(topicPartition))
+      assertEquals(before, Map(topicPartition -> None))
+      assertEquals(stored, Map(topicPartition -> Some(first._1.offset.nextOffset)))
+      assertEquals(replayed._1.record.offset, first._1.record.offset)
+      assertEquals(replayed._1.record.value, "control-value")
 
   private def consumeTwoAndCommitFirst(
       settings: ConsumerSettings[IO, String, String],

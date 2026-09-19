@@ -365,6 +365,119 @@ int xkafka_message_header_at(const rd_kafka_message_t *message,
         return 0;
 }
 
+static rd_kafka_topic_partition_list_t *
+xkafka_topic_partition_list(const char *const *topics,
+                            const int32_t *partitions,
+                            const int64_t *offset_values,
+                            size_t count) {
+        rd_kafka_topic_partition_list_t *native_offsets =
+            rd_kafka_topic_partition_list_new((int)count);
+        size_t index;
+
+        for (index = 0; index < count; index++) {
+                rd_kafka_topic_partition_t *entry =
+                    rd_kafka_topic_partition_list_add(native_offsets,
+                                                      topics[index],
+                                                      partitions[index]);
+                if (offset_values != NULL)
+                        entry->offset = offset_values[index];
+        }
+
+        return native_offsets;
+}
+
+void *xkafka_consumer_assignment(rd_kafka_t *consumer,
+                                 char *error,
+                                 size_t error_size) {
+        rd_kafka_topic_partition_list_t *assignment = NULL;
+        rd_kafka_resp_err_t result = rd_kafka_assignment(consumer, &assignment);
+
+        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                return NULL;
+        }
+        return assignment;
+}
+
+void xkafka_assignment_destroy(void *assignment) {
+        rd_kafka_topic_partition_list_destroy(assignment);
+}
+
+size_t xkafka_assignment_count(const void *assignment) {
+        return (size_t)((const rd_kafka_topic_partition_list_t *)assignment)->cnt;
+}
+
+const char *xkafka_assignment_topic_at(const void *assignment, size_t index) {
+        return ((const rd_kafka_topic_partition_list_t *)assignment)->elems[index].topic;
+}
+
+int32_t xkafka_assignment_partition_at(const void *assignment, size_t index) {
+        return ((const rd_kafka_topic_partition_list_t *)assignment)->elems[index].partition;
+}
+
+int xkafka_consumer_committed(rd_kafka_t *consumer,
+                              const char *const *topics,
+                              const int32_t *partitions,
+                              size_t count,
+                              int64_t *offset_values,
+                              char *error,
+                              size_t error_size) {
+        rd_kafka_topic_partition_list_t *native_offsets =
+            xkafka_topic_partition_list(topics, partitions, NULL, count);
+        rd_kafka_resp_err_t result =
+            rd_kafka_committed(consumer, native_offsets, -1);
+        size_t index;
+
+        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                rd_kafka_topic_partition_list_destroy(native_offsets);
+                return -1;
+        }
+        for (index = 0; index < count; index++) {
+                rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
+                if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error(error, error_size,
+                                         rd_kafka_err2str(entry->err));
+                        rd_kafka_topic_partition_list_destroy(native_offsets);
+                        return -1;
+                }
+                offset_values[index] = entry->offset >= 0 ? entry->offset : -1;
+        }
+        rd_kafka_topic_partition_list_destroy(native_offsets);
+        return 0;
+}
+
+int xkafka_consumer_seek(rd_kafka_t *consumer,
+                         const char *topic,
+                         int32_t partition,
+                         int64_t offset,
+                         char *error,
+                         size_t error_size) {
+        const char *topics[] = {topic};
+        const int32_t partitions[] = {partition};
+        const int64_t offsets[] = {offset};
+        rd_kafka_topic_partition_list_t *native_offsets =
+            xkafka_topic_partition_list(topics, partitions, offsets, 1);
+        rd_kafka_error_t *result =
+            rd_kafka_seek_partitions(consumer, native_offsets, -1);
+
+        if (result != NULL) {
+                xkafka_set_error(error, error_size,
+                                 rd_kafka_error_string(result));
+                rd_kafka_error_destroy(result);
+                rd_kafka_topic_partition_list_destroy(native_offsets);
+                return -1;
+        }
+        if (native_offsets->elems[0].err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error(error, error_size,
+                                 rd_kafka_err2str(native_offsets->elems[0].err));
+                rd_kafka_topic_partition_list_destroy(native_offsets);
+                return -1;
+        }
+        rd_kafka_topic_partition_list_destroy(native_offsets);
+        return 0;
+}
+
 int xkafka_consumer_commit(rd_kafka_t *consumer,
                            const char *const *topics,
                            const int32_t *partitions,
@@ -373,17 +486,10 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
                            char *error,
                            size_t error_size) {
         rd_kafka_topic_partition_list_t *native_offsets =
-            rd_kafka_topic_partition_list_new((int)count);
+            xkafka_topic_partition_list(topics, partitions, offset_values,
+                                        count);
         rd_kafka_resp_err_t result;
-        size_t index;
 
-        for (index = 0; index < count; index++) {
-                rd_kafka_topic_partition_t *entry =
-                    rd_kafka_topic_partition_list_add(native_offsets,
-                                                      topics[index],
-                                                      partitions[index]);
-                entry->offset = offset_values[index];
-        }
         result = rd_kafka_commit(consumer, native_offsets, 0);
         rd_kafka_topic_partition_list_destroy(native_offsets);
 

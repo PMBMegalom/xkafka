@@ -152,6 +152,20 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] = underlying.records.evalMap(consumerRecord)
 
+    override def assignment: F[Set[TopicPartition]] = underlying.assignment.flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
+
+    override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty)
+      else
+        underlying.committed(topicPartitions.map(javaTopicPartition)).flatMap: values =>
+          topicPartitions.toList.traverse: topicPartition =>
+            Option(values.getOrElse(javaTopicPartition(topicPartition), null)).traverse: metadata =>
+              F.fromEither(Offset.from(metadata.offset).leftMap(error => invalidBackendValue("committed offset", error)))
+            .map(topicPartition -> _)
+          .map(_.toMap)
+
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = underlying.seek(javaTopicPartition(topicPartition), offset.value)
+
     private def consumerRecord(committable: Fs2CommittableConsumerRecord[F, K, V]): F[CommittableConsumerRecord[F, K, V]] =
       val source    = committable.record
       val validated =
@@ -182,3 +196,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           CommittableConsumerRecord(portableRecord, portableOffset)
 
       F.fromEither(validated)
+
+    private def javaTopicPartition(topicPartition: TopicPartition): JavaTopicPartition =
+      new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value)
+
+    private def portableTopicPartition(source: JavaTopicPartition): F[TopicPartition] =
+      F.fromEither:
+        for
+          topic     <- Topic.from(source.topic).leftMap(error => invalidBackendValue("assigned topic", error))
+          partition <- Partition.from(source.partition).leftMap(error => invalidBackendValue("assigned partition", error))
+        yield TopicPartition(topic, partition)

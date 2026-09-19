@@ -115,6 +115,28 @@ private[xkafka] object Bindings:
       hasValue: Ptr[CInt]
   ): CInt = extern
 
+  def xkafka_consumer_assignment(consumer: CVoidPtr, error: CString, errorSize: CSize): CVoidPtr = extern
+
+  def xkafka_assignment_destroy(assignment: CVoidPtr): Unit = extern
+
+  def xkafka_assignment_count(assignment: CVoidPtr): CSize = extern
+
+  def xkafka_assignment_topic_at(assignment: CVoidPtr, index: CSize): CString = extern
+
+  def xkafka_assignment_partition_at(assignment: CVoidPtr, index: CSize): CInt = extern
+
+  def xkafka_consumer_committed(
+      consumer: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      offsets: Ptr[CLongLong],
+      error: CString,
+      errorSize: CSize
+  ): CInt = extern
+
+  def xkafka_consumer_seek(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern
+
   def xkafka_consumer_commit(
       consumer: CVoidPtr,
       topics: Ptr[CString],

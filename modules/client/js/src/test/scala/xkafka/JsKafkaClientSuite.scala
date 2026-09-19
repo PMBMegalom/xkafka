@@ -134,6 +134,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         runConfig    <- Deferred[IO, confluent.ConsumerRunConfig]
         committed    <- Ref.of[IO, Vector[(String, Int, String)]](Vector.empty)
         resolved     <- Deferred[IO, String]
+        seeked       <- Deferred[IO, (String, Int, String)]
         consumer =
           js.Dynamic.literal(
             connect = (() => promise(dispatcher)(connected.update(_ + 1))): js.Function0[js.Promise[Unit]],
@@ -148,7 +149,17 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               (
                   (offsets: js.Array[confluent.TopicPartitionOffset]) =>
                     promise(dispatcher)(committed.set(offsets.toVector.map(topicPartitionOffset)))
-              ): js.Function1[js.Array[confluent.TopicPartitionOffset], js.Promise[Unit]]
+              ): js.Function1[js.Array[confluent.TopicPartitionOffset], js.Promise[Unit]],
+            assignment = (() => js.Array(confluent.Values.topicPartition("events", 4))): js.Function0[js.Array[confluent.TopicPartition]],
+            committed =
+              (
+                  (_: js.Array[confluent.TopicPartition]) =>
+                    js.Promise.resolve(js.Array(confluent.Values.topicPartitionOffset("events", 4, "9007199254740994")))
+              ): js.Function1[js.Array[confluent.TopicPartition], js.Promise[js.Array[confluent.TopicPartitionOffset]]],
+            seek =
+              (
+                  (offset: confluent.TopicPartitionOffset) => dispatcher.unsafeRunAndForget(seeked.complete(topicPartitionOffset(offset)).void)
+              ): js.Function1[confluent.TopicPartitionOffset, Unit]
           ).asInstanceOf[confluent.Consumer]
         settings =
           ConsumerSettings(clientSettings, consumerGroup("tests"), utf8Deserializer, utf8Deserializer, properties = Map("fetch.min.bytes" -> "2"))
@@ -171,12 +182,16 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 _              <- IO.fromFuture(IO(callback(payload).toFuture))
                 record         <- portable.records.take(1).compile.lastOrError
                 _              <- record.offset.commit
+                assignment     <- portable.assignment
+                stored         <- portable.committed(Set(record.record.topicPartition))
+                _              <- portable.seek(record.record.topicPartition, record.record.offset)
+                seekedOffset   <- seeked.get
                 resolvedOffset <- resolved.get
-              yield (record, resolvedOffset)
+              yield (record, assignment, stored, seekedOffset, resolvedOffset)
         connectedCount    <- connected.get
         disconnectedCount <- disconnected.get
         committedOffsets  <- committed.get
-        (record, resolvedOffset) = result
+        (record, assignment, stored, seekedOffset, resolvedOffset) = result
         _ <-
           IO:
             assertEquals(connectedCount, 1)
@@ -187,6 +202,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             assertEquals(record.record.key, "key")
             assertEquals(record.record.value, "value")
             assertEquals(record.offset.nextOffset.value, 9007199254740994L)
+            assertEquals(assignment, Set(record.record.topicPartition))
+            assertEquals(stored, Map(record.record.topicPartition -> Some(record.offset.nextOffset)))
+            assertEquals(seekedOffset, ("events", 4, "9007199254740993"))
             assertEquals(resolvedOffset, "9007199254740993")
             assertEquals(committedOffsets, Vector(("events", 4, "9007199254740994")))
       yield ()

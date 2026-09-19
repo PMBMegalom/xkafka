@@ -71,4 +71,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], subscription: Subscription): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:
           new KafkaConsumer[IO, K, V]:
-            override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]] = Stream.empty
+            override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                 = Stream.empty
+            override def assignment: IO[Set[TopicPartition]]                                                      = IO.pure(Set.empty)
+            override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] =
+              IO.pure(topicPartitions.map(_ -> None).toMap)
+            override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit] = IO.unit

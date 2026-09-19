@@ -199,6 +199,22 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
       Stream.fromQueueUnterminated(queue).mergeHaltBoth(Stream.eval(failure.get).flatMap(Stream.raiseError[F]))
 
+    override def assignment: F[Set[TopicPartition]] = F.delay(underlying.assignment()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
+
+    override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty)
+      else
+        val requested = topicPartitions.iterator.map(value => confluent.Values.topicPartition(value.topic.value, value.partition.value)).toJSArray
+        await(underlying.committed(requested)).flatMap(
+          _.toList.traverse: value =>
+            (portableTopicPartition(value), optionalOffset("committed offset", value.offset)).mapN(_ -> _)
+        ).map(_.toMap)
+
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
+      F.delay(
+        underlying.seek(confluent.Values.topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString))
+      )
+
     val run: F[Unit] =
       await(underlying.run(confluent.Values.consumerRun(payload =>
         dispatcher.unsafeToPromise(
@@ -244,3 +260,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
             override val committer: OffsetCommitter[F] = offsetCommitter
 
         CommittableConsumerRecord(record, committableOffset)
+
+    private def portableTopicPartition(value: confluent.TopicPartition): F[TopicPartition] =
+      (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
+
+    private def optionalOffset(field: String, value: String | Null): F[Option[Offset]] =
+      Option(value).fold(F.pure(Option.empty[Offset])): raw =>
+        parseLong(field, raw).flatMap: parsed =>
+          if parsed < 0L then F.pure(None)
+          else F.fromEither(Offset.from(parsed).leftMap(error => invalidBackendValue(field, raw, error)).map(Some(_)))

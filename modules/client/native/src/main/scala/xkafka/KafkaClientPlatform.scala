@@ -234,6 +234,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
       Stream.repeatEval(semaphore.permit.use(_ => F.blocking(poll()))).unNone.evalMap(decode)
 
+    override def assignment: F[Set[TopicPartition]] = semaphore.permit.use(_ => F.blocking(readAssignment()))
+
+    override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
+      if topicPartitions.isEmpty then F.pure(Map.empty) else semaphore.permit.use(_ => F.blocking(readCommitted(topicPartitions)))
+
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = semaphore.permit.use(_ => F.blocking(seekTo(topicPartition, offset)))
+
     private def poll(): Option[NativeRecord] =
       Zone.acquire: _ =>
         val status  = stackalloc[CInt]()
@@ -311,5 +318,59 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           val result =
             Bindings.xkafka_consumer_commit(handle, topics, partitions, nativeOffsets, entries.size.toUSize, error, ErrorBufferSize.toUSize)
           if result != 0 then throw nativeError(error)
+
+    private def readAssignment(): Set[TopicPartition] =
+      val error      = stackalloc[CChar](ErrorBufferSize)
+      val assignment = Bindings.xkafka_consumer_assignment(handle, error, ErrorBufferSize.toUSize)
+      if assignment == null then throw nativeError(error)
+
+      try Vector.tabulate(Bindings.xkafka_assignment_count(assignment).toInt): index =>
+          val topicValue     = fromCString(Bindings.xkafka_assignment_topic_at(assignment, index.toUSize))
+          val partitionValue = Bindings.xkafka_assignment_partition_at(assignment, index.toUSize)
+          val topic          = Topic.from(topicValue).fold(error => throw invalidBackendValue("assigned topic", topicValue, error), identity)
+          val partition      =
+            Partition.from(partitionValue).fold(error => throw invalidBackendValue("assigned partition", partitionValue, error), identity)
+          TopicPartition(topic, partition)
+        .toSet
+      finally Bindings.xkafka_assignment_destroy(assignment)
+
+    private def readCommitted(topicPartitions: Set[TopicPartition]): Map[TopicPartition, Option[Offset]] =
+      Zone.acquire: zone =>
+        given Zone           = zone
+        val entries          = topicPartitions.toVector
+        val topics           = alloc[CString](entries.size)
+        val partitions       = alloc[CInt](entries.size)
+        val committedOffsets = alloc[CLongLong](entries.size)
+        entries.iterator.zipWithIndex.foreach:
+          case (topicPartition, index) =>
+            topics(index) = toCString(topicPartition.topic.value)
+            partitions(index) = topicPartition.partition.value
+        val error  = stackalloc[CChar](ErrorBufferSize)
+        val result =
+          Bindings.xkafka_consumer_committed(handle, topics, partitions, entries.size.toUSize, committedOffsets, error, ErrorBufferSize.toUSize)
+        if result != 0 then throw nativeError(error)
+        entries.iterator.zipWithIndex.map:
+          case (topicPartition, index) =>
+            val offsetValue = committedOffsets(index)
+            val offset      =
+              Option.when(offsetValue >= 0L):
+                Offset.from(offsetValue).fold(error => throw invalidBackendValue("committed offset", offsetValue, error), identity)
+            topicPartition -> offset
+        .toMap
+
+    private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =
+      Zone.acquire: zone =>
+        given Zone = zone
+        val error  = stackalloc[CChar](ErrorBufferSize)
+        val result =
+          Bindings.xkafka_consumer_seek(
+            handle,
+            toCString(topicPartition.topic.value),
+            topicPartition.partition.value,
+            offset.value,
+            error,
+            ErrorBufferSize.toUSize
+          )
+        if result != 0 then throw nativeError(error)
 
 private final class LibrdkafkaException(message: String) extends RuntimeException(message)

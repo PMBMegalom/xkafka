@@ -176,9 +176,22 @@ trait KafkaConsumer[F[_], K, V]:
 
   def records: Stream[F, CommittableConsumerRecord[F, K, V]]
 
+  def assignment: F[Set[TopicPartition]]
+
+  /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
+  def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]
+
+  def seek(topicPartition: TopicPartition, offset: Offset): F[Unit]
+
   final def mapK[G[_]](fk: FunctionK[F, G]): KafkaConsumer[G, K, V] =
     new KafkaConsumer[G, K, V]:
       override val records: Stream[G, CommittableConsumerRecord[G, K, V]] = self.records.map(_.mapK(fk)).translate(fk)
+
+      override def assignment: G[Set[TopicPartition]] = fk(self.assignment)
+
+      override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[Offset]]] = fk(self.committed(topicPartitions))
+
+      override def seek(topicPartition: TopicPartition, offset: Offset): G[Unit] = fk(self.seek(topicPartition, offset))
 
 object KafkaConsumer:
   given [K, V]: FunctorK[[F[_]] =>> KafkaConsumer[F, K, V]] with
