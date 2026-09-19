@@ -34,40 +34,31 @@ enum ValidationError derives CanEqual:
 opaque type Topic = String
 
 object Topic:
-  def from(value: String): Either[ValidationError, Topic] =
-    Either.cond(value.nonEmpty, value, ValidationError.EmptyTopic)
+  def from(value: String): Either[ValidationError, Topic] = Either.cond(value.nonEmpty, value, ValidationError.EmptyTopic)
 
   extension (topic: Topic) def value: String = topic
 
 opaque type Partition = Int
 
 object Partition:
-  def from(value: Int): Either[ValidationError, Partition] =
-    Either.cond(value >= 0, value, ValidationError.NegativePartition(value))
+  def from(value: Int): Either[ValidationError, Partition] = Either.cond(value >= 0, value, ValidationError.NegativePartition(value))
 
   extension (partition: Partition) def value: Int = partition
 
 opaque type Offset = Long
 
 object Offset:
-  def from(value: Long): Either[ValidationError, Offset] =
-    Either.cond(value >= 0L, value, ValidationError.NegativeOffset(value))
+  def from(value: Long): Either[ValidationError, Offset] = Either.cond(value >= 0L, value, ValidationError.NegativeOffset(value))
 
   extension (offset: Offset)
     def value: Long = offset
 
-    def next: Either[ValidationError, Offset] =
-      Either.cond(
-        offset < Long.MaxValue,
-        offset + 1L,
-        ValidationError.OffsetOverflow
-      )
+    def next: Either[ValidationError, Offset] = Either.cond(offset < Long.MaxValue, offset + 1L, ValidationError.OffsetOverflow)
 
 opaque type ConsumerGroup = String
 
 object ConsumerGroup:
-  def from(value: String): Either[ValidationError, ConsumerGroup] =
-    Either.cond(value.nonEmpty, value, ValidationError.EmptyConsumerGroup)
+  def from(value: String): Either[ValidationError, ConsumerGroup] = Either.cond(value.nonEmpty, value, ValidationError.EmptyConsumerGroup)
 
   extension (group: ConsumerGroup) def value: String = group
 
@@ -97,7 +88,8 @@ object Headers:
     def append(header: Header): Headers = headers :+ header
 
     def getAll(key: String): Vector[Option[Chunk[Byte]]] =
-      headers.collect { case Header(`key`, value) => value }
+      headers.collect:
+        case Header(`key`, value) => value
 
 final case class ProducerRecord[K, V](
     topic: Topic,
@@ -108,21 +100,14 @@ final case class ProducerRecord[K, V](
     headers: Headers = Headers.empty
 )
 
-final case class RecordMetadata(
-    topicPartition: TopicPartition,
-    offset: Option[Offset],
-    timestamp: Option[Timestamp]
-)
+final case class RecordMetadata(topicPartition: TopicPartition, offset: Option[Offset], timestamp: Option[Timestamp])
 
 /** The acknowledged result of producing a non-empty collection of records.
   *
   * Metadata cardinality is backend-defined. The JVM and Native drivers can report metadata per record, while the Confluent JavaScript driver reports
   * it per topic-partition batch.
   */
-final case class ProducerResult[K, V](
-    records: NonEmptyList[ProducerRecord[K, V]],
-    metadata: List[RecordMetadata]
-)
+final case class ProducerResult[K, V](records: NonEmptyList[ProducerRecord[K, V]], metadata: List[RecordMetadata])
 
 final case class ConsumerRecord[K, V](
     topicPartition: TopicPartition,

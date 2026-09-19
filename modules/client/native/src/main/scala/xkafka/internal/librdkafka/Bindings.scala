@@ -23,8 +23,7 @@ package xkafka.internal.librdkafka
 
 import scala.scalanative.unsafe.*
 
-@link("rdkafka")
-@extern
+@link("rdkafka") @extern
 private[xkafka] object Bindings:
   def xkafka_version_str(): CString = extern
 
@@ -44,14 +43,7 @@ private[xkafka] object Bindings:
 
   def xkafka_headers_destroy(headers: CVoidPtr): Unit = extern
 
-  def xkafka_headers_add(
-      headers: CVoidPtr,
-      name: CString,
-      value: CVoidPtr,
-      valueSize: CSize,
-      error: CString,
-      errorSize: CSize
-  ): CInt = extern
+  def xkafka_headers_add(headers: CVoidPtr, name: CString, value: CVoidPtr, valueSize: CSize, error: CString, errorSize: CSize): CInt = extern
 
   def xkafka_producer_send(
       producer: CVoidPtr,
@@ -88,23 +80,11 @@ private[xkafka] object Bindings:
 
   def xkafka_subscription_destroy(subscription: CVoidPtr): Unit = extern
 
-  def xkafka_subscription_add(subscription: CVoidPtr, topic: CString): Unit =
-    extern
+  def xkafka_subscription_add(subscription: CVoidPtr, topic: CString): Unit = extern
 
-  def xkafka_consumer_subscribe(
-      consumer: CVoidPtr,
-      subscription: CVoidPtr,
-      error: CString,
-      errorSize: CSize
-  ): CInt = extern
+  def xkafka_consumer_subscribe(consumer: CVoidPtr, subscription: CVoidPtr, error: CString, errorSize: CSize): CInt = extern
 
-  def xkafka_consumer_poll(
-      consumer: CVoidPtr,
-      timeoutMs: CInt,
-      status: Ptr[CInt],
-      error: CString,
-      errorSize: CSize
-  ): CVoidPtr = extern
+  def xkafka_consumer_poll(consumer: CVoidPtr, timeoutMs: CInt, status: Ptr[CInt], error: CString, errorSize: CSize): CVoidPtr = extern
 
   def xkafka_message_destroy(message: CVoidPtr): Unit = extern
 
@@ -135,11 +115,4 @@ private[xkafka] object Bindings:
       hasValue: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_consumer_commit(
-      consumer: CVoidPtr,
-      topic: CString,
-      partition: CInt,
-      offset: CLongLong,
-      error: CString,
-      errorSize: CSize
-  ): CInt = extern
+  def xkafka_consumer_commit(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern

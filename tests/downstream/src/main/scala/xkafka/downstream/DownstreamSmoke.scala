@@ -19,7 +19,8 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package xkafka.downstream
+package xkafka
+package downstream
 
 import scala.concurrent.duration.*
 
@@ -28,7 +29,6 @@ import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.*
 
 object DownstreamSmoke extends IOApp.Simple:
   private val bootstrapServer = sys.env.getOrElse(

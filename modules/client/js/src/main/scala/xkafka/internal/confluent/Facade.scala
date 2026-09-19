@@ -19,14 +19,12 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package xkafka.internal.confluent
+package xkafka
+package internal.confluent
 
 import scala.scalajs.js
 import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
-
-import xkafka.AutoOffsetReset
-import xkafka.ManagedProperties
 
 private[xkafka] type JsHeaders = js.Dictionary[js.Any]
 
@@ -53,18 +51,15 @@ private[xkafka] trait ConsumerConfig extends js.Object
 private[xkafka] trait Producer extends js.Object:
   def connect(): js.Promise[Unit]                                           = js.native
   def disconnect(): js.Promise[Unit]                                        = js.native
-  def sendBatch(batch: ProducerBatch): js.Promise[js.Array[RecordMetadata]] =
-    js.native
+  def sendBatch(batch: ProducerBatch): js.Promise[js.Array[RecordMetadata]] = js.native
 
 @js.native
 private[xkafka] trait Consumer extends js.Object:
-  def connect(): js.Promise[Unit]                                  = js.native
-  def disconnect(): js.Promise[Unit]                               = js.native
-  def subscribe(subscription: ConsumerSubscribe): js.Promise[Unit] = js.native
-  def run(config: ConsumerRunConfig): js.Promise[Unit]             = js.native
-  def commitOffsets(
-      offsets: js.Array[TopicPartitionOffset]
-  ): js.Promise[Unit] = js.native
+  def connect(): js.Promise[Unit]                                              = js.native
+  def disconnect(): js.Promise[Unit]                                           = js.native
+  def subscribe(subscription: ConsumerSubscribe): js.Promise[Unit]             = js.native
+  def run(config: ConsumerRunConfig): js.Promise[Unit]                         = js.native
+  def commitOffsets(offsets: js.Array[TopicPartitionOffset]): js.Promise[Unit] = js.native
 
 @js.native
 private[xkafka] trait ProducerBatch extends js.Object
@@ -146,9 +141,8 @@ private[xkafka] object Values:
 
   private def configuration(properties: Map[String, String]): js.Dynamic =
     val result = js.Dynamic.literal()
-    properties.removedAll(ManagedProperties).foreach { case (key, value) =>
-      result.updateDynamic(key)(value)
-    }
+    properties.removedAll(ManagedProperties).foreach:
+      case (key, value) => result.updateDynamic(key)(value)
     result
 
   def message(
@@ -158,47 +152,21 @@ private[xkafka] object Values:
       timestamp: js.UndefOr[String],
       headers: JsHeaders
   ): Message =
-    val result = js.Dynamic.literal(
-      key = key,
-      value = value,
-      headers = headers
-    )
+    val result = js.Dynamic.literal(key = key, value = value, headers = headers)
     partition.foreach(value => result.updateDynamic("partition")(value))
     timestamp.foreach(value => result.updateDynamic("timestamp")(value))
     result.asInstanceOf[Message]
 
   def topicMessages(topic: String, messages: js.Array[Message]): TopicMessages =
-    js.Dynamic
-      .literal(topic = topic, messages = messages)
-      .asInstanceOf[TopicMessages]
+    js.Dynamic.literal(topic = topic, messages = messages).asInstanceOf[TopicMessages]
 
-  def producerBatch(
-      topicMessages: js.Array[TopicMessages]
-  ): ProducerBatch =
-    js.Dynamic
-      .literal(topicMessages = topicMessages)
-      .asInstanceOf[ProducerBatch]
+  def producerBatch(topicMessages: js.Array[TopicMessages]): ProducerBatch =
+    js.Dynamic.literal(topicMessages = topicMessages).asInstanceOf[ProducerBatch]
 
-  def subscription(topics: js.Array[String]): ConsumerSubscribe =
-    js.Dynamic
-      .literal(topics = topics)
-      .asInstanceOf[ConsumerSubscribe]
+  def subscription(topics: js.Array[String]): ConsumerSubscribe = js.Dynamic.literal(topics = topics).asInstanceOf[ConsumerSubscribe]
 
-  def consumerRun(
-      eachBatch: js.Function1[EachBatchPayload, js.Promise[Unit]]
-  ): ConsumerRunConfig =
-    js.Dynamic
-      .literal(
-        eachBatchAutoResolve = false,
-        eachBatch = eachBatch
-      )
-      .asInstanceOf[ConsumerRunConfig]
+  def consumerRun(eachBatch: js.Function1[EachBatchPayload, js.Promise[Unit]]): ConsumerRunConfig =
+    js.Dynamic.literal(eachBatchAutoResolve = false, eachBatch = eachBatch).asInstanceOf[ConsumerRunConfig]
 
-  def topicPartitionOffset(
-      topic: String,
-      partition: Int,
-      offset: String
-  ): TopicPartitionOffset =
-    js.Dynamic
-      .literal(topic = topic, partition = partition, offset = offset)
-      .asInstanceOf[TopicPartitionOffset]
+  def topicPartitionOffset(topic: String, partition: Int, offset: String): TopicPartitionOffset =
+    js.Dynamic.literal(topic = topic, partition = partition, offset = offset).asInstanceOf[TopicPartitionOffset]

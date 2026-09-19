@@ -21,17 +21,10 @@
 
 package xkafka
 
-import cats.effect.Async
-import cats.effect.Resource
+import cats.effect.{Async, Resource}
 
-private[xkafka] val ManagedProperties = Set(
-  "bootstrap.servers",
-  "client.id",
-  "group.id",
-  "auto.offset.reset",
-  "enable.auto.commit",
-  "enable.auto.offset.store"
-)
+private[xkafka] val ManagedProperties =
+  Set("bootstrap.servers", "client.id", "group.id", "auto.offset.reset", "enable.auto.commit", "enable.auto.offset.store")
 
 trait KafkaClient[F[_]]:
   def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]]

@@ -56,15 +56,10 @@ trait CommittableOffset[F[_]]:
 
   def commit: F[Unit]
 
-final case class CommittableConsumerRecord[F[_], K, V](
-    record: ConsumerRecord[K, V],
-    offset: CommittableOffset[F]
-)
+final case class CommittableConsumerRecord[F[_], K, V](record: ConsumerRecord[K, V], offset: CommittableOffset[F])
 
 trait KafkaProducer[F[_], K, V]:
-  def produce(
-      records: NonEmptyList[ProducerRecord[K, V]]
-  ): F[ProducerResult[K, V]]
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]]
 
 trait KafkaConsumer[F[_], K, V]:
   def records: Stream[F, CommittableConsumerRecord[F, K, V]]

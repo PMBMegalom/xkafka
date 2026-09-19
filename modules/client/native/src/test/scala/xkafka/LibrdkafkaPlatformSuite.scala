@@ -27,31 +27,18 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 
 final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
-  test("loads librdkafka through the native shim") {
+  test("loads librdkafka through the native shim"):
     assert(LibrdkafkaPlatform.version.nonEmpty)
-  }
 
-  test("allocates and releases a native producer") {
-    val serializer = Serializer.const[IO, String](
-      Some(Chunk.array(Array.emptyByteArray))
-    )
-    val settings = ProducerSettings(
-      ClientSettings(NonEmptyList.one("localhost:9092"), Some("native-test")),
-      serializer,
-      serializer
-    )
+  test("allocates and releases a native producer"):
+    val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
+    val settings   = ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092"), Some("native-test")), serializer, serializer)
 
     KafkaClient[IO].producer(settings).use(_ => IO.unit)
-  }
 
-  test("passes custom producer properties to librdkafka") {
+  test("passes custom producer properties to librdkafka"):
     val serializer = Serializer.const[IO, String](None)
-    val settings   = ProducerSettings(
-      ClientSettings(NonEmptyList.one("localhost:9092")),
-      serializer,
-      serializer,
-      Map("message.timeout.ms" -> "not-a-duration")
-    )
+    val settings   =
+      ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092")), serializer, serializer, Map("message.timeout.ms" -> "not-a-duration"))
 
     interceptIO[RuntimeException](KafkaClient[IO].producer(settings).use(_ => IO.unit))
-  }
