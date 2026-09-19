@@ -25,7 +25,7 @@ import scala.concurrent.duration.*
 
 import cats.data.NonEmptyList
 import cats.effect.IO
-import fs2.Chunk
+import fs2.{Chunk, Stream}
 import munit.CatsEffectSuite
 
 final class KafkaIntegrationSuite extends CatsEffectSuite:
@@ -143,10 +143,11 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
   private def consumeAndCommitBatch(
       settings: ConsumerSettings[IO, String, String],
       subscription: Subscription,
-      count: Long
+      count: Int
   ): IO[List[CommittableConsumerRecord[IO, String, String]]] =
     PlatformKafkaClient().consumer(settings, subscription).use: consumer =>
-      consumer.records.take(count).compile.toList.flatMap(records => CommittableOffsetBatch.fromFoldable(records.map(_.offset)).commit.as(records))
+      consumer.records.take(count.toLong).compile.toList.flatMap: records =>
+        Stream.emits(records.map(_.offset)).covary[IO].through(commitBatchWithin(count, 1.minute)).compile.drain.as(records)
     .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
   private val utf8Serializer   = Serializer.utf8[IO]

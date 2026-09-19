@@ -70,7 +70,9 @@ syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
 Offsets can be accumulated with `CommittableOffsetBatch.fromFoldable` and
 committed together while the consumer resource remains active. A batch retains
 only the greatest next offset for each topic-partition and performs one backend
-commit per originating consumer.
+commit per originating consumer. For streaming workloads,
+`commitBatchWithin[IO](100, 5.seconds)` is an FS2 pipe which commits whenever it
+collects 100 offsets or five seconds elapse, whichever happens first.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,

@@ -21,11 +21,14 @@
 
 package xkafka
 
+import scala.concurrent.duration.FiniteDuration
+
 import cats.{Applicative, Foldable}
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
+import cats.effect.Temporal
 import cats.tagless.FunctorK
-import fs2.Stream
+import fs2.{Pipe, Stream}
 
 final case class ClientSettings(bootstrapServers: NonEmptyList[String], clientId: Option[String] = None, properties: Map[String, String] = Map.empty)
 
@@ -142,6 +145,10 @@ object CommittableOffsetBatch:
     offsets.updatedWith(topicPartition):
       case current @ Some(value) if value.value >= offset.value => current
       case Some(_) | None                                       => Some(offset)
+
+/** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
+def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =
+  _.groupWithin(n, d).evalMap(offsets => CommittableOffsetBatch.fromFoldable(offsets).commit)
 
 final case class CommittableConsumerRecord[F[_], K, V](record: ConsumerRecord[K, V], offset: CommittableOffset[F]):
   def mapK[G[_]](fk: FunctionK[F, G]): CommittableConsumerRecord[G, K, V] = CommittableConsumerRecord(record, offset.mapK(fk))

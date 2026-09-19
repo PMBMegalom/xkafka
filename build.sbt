@@ -96,7 +96,8 @@ val commonSettings = Seq(
     "org.typelevel" %%% "cats-effect"       % catsEffectVersion,
     "org.typelevel" %%% "cats-tagless-core" % catsTaglessVersion,
     "co.fs2"        %%% "fs2-core"          % fs2Version,
-    "org.scalameta" %%% "munit"             % munitVersion % Test
+    "org.scalameta" %%% "munit"             % munitVersion           % Test,
+    "org.typelevel" %%% "munit-cats-effect" % munitCatsEffectVersion % Test
   )
 )
 
@@ -114,10 +115,9 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .dependsOn(kernel)
   .settings(commonSettings)
   .settings(
-    name                                    := "xkafka-client",
-    description                             := "Cross-platform functional Kafka client for Scala",
-    Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
-    libraryDependencies += "org.typelevel" %%% "munit-cats-effect" % munitCatsEffectVersion % Test
+    name        := "xkafka-client",
+    description := "Cross-platform functional Kafka client for Scala",
+    Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md")
   )
   .jsConfigure(
     _.enablePlugins(ScalaJSBundlerPlugin)
