@@ -37,42 +37,38 @@ import fs2.Stream
 import xkafka.internal.confluent
 
 private[xkafka] object KafkaClientPlatform:
-  def apply[F[_]: Async]: KafkaClient[F] =
-    fromDriver(ConfluentKafkaDriver.live)
+  def apply[F[_]: Async]: KafkaClient[F] = fromDriver(ConfluentKafkaDriver.live)
 
-  private[xkafka] def fromDriver[F[_]: Async](
-      driver: ConfluentKafkaDriver
-  ): KafkaClient[F] =
-    new ConfluentKafkaClient[F](driver)
+  private[xkafka] def fromDriver[F[_]: Async](driver: ConfluentKafkaDriver): KafkaClient[F] = new ConfluentKafkaClient[F](driver)
 
 private[xkafka] trait ConfluentKafkaDriver:
-  def producer(settings: ClientSettings): confluent.Producer
+  def producer(settings: ClientSettings, properties: Map[String, String]): confluent.Producer
 
   def consumer(
       settings: ClientSettings,
       groupId: ConsumerGroup,
-      autoOffsetReset: AutoOffsetReset
+      autoOffsetReset: AutoOffsetReset,
+      properties: Map[String, String]
   ): confluent.Consumer
 
 private object ConfluentKafkaDriver:
   val live: ConfluentKafkaDriver = new ConfluentKafkaDriver:
-    override def producer(settings: ClientSettings): confluent.Producer =
-      kafka(settings).producer()
+    override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.Producer =
+      kafka(settings).producer(confluent.Values.producerConfig(properties))
 
     override def consumer(
         settings: ClientSettings,
         groupId: ConsumerGroup,
-        autoOffsetReset: AutoOffsetReset
-    ): confluent.Consumer =
-      kafka(settings).consumer(
-        confluent.Values.consumerConfig(groupId.value, autoOffsetReset)
-      )
+        autoOffsetReset: AutoOffsetReset,
+        properties: Map[String, String]
+    ): confluent.Consumer = kafka(settings).consumer(confluent.Values.consumerConfig(groupId.value, autoOffsetReset, properties))
 
     private def kafka(settings: ClientSettings): confluent.Kafka =
       confluent.Values.kafka(
         confluent.Values.kafkaConfig(
           settings.bootstrapServers.toList.toJSArray,
-          settings.clientId.orUndefined
+          settings.clientId.orUndefined,
+          settings.properties
         )
       )
 
@@ -81,26 +77,22 @@ private final class ConfluentKafkaClient[F[_]](
 )(using F: Async[F])
     extends KafkaClient[F]:
 
-  override def producer[K, V](
-      settings: ProducerSettings[F, K, V]
-  ): Resource[F, KafkaProducer[F, K, V]] =
-    Resource.eval(F.delay(driver.producer(settings.client))).flatMap { producer =>
+  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
+    Resource.eval(F.delay(driver.producer(settings.client, settings.properties))).flatMap { producer =>
       Resource
         .make(await(producer.connect()))(_ => await(producer.disconnect()))
         .as(new ConfluentKafkaProducer(producer, settings))
     }
 
-  override def consumer[K, V](
-      settings: ConsumerSettings[F, K, V],
-      subscription: Subscription
-  ): Resource[F, KafkaConsumer[F, K, V]] =
+  override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
       underlying <- Resource.eval(
         F.delay(
           driver.consumer(
             settings.client,
             settings.groupId,
-            settings.autoOffsetReset
+            settings.autoOffsetReset,
+            settings.properties
           )
         )
       )

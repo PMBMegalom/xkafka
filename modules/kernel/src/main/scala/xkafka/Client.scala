@@ -24,15 +24,13 @@ package xkafka
 import cats.data.NonEmptyList
 import fs2.Stream
 
-final case class ClientSettings(
-    bootstrapServers: NonEmptyList[String],
-    clientId: Option[String] = None
-)
+final case class ClientSettings(bootstrapServers: NonEmptyList[String], clientId: Option[String] = None, properties: Map[String, String] = Map.empty)
 
 final case class ProducerSettings[F[_], K, V](
     client: ClientSettings,
     keySerializer: Serializer[F, K],
-    valueSerializer: Serializer[F, V]
+    valueSerializer: Serializer[F, V],
+    properties: Map[String, String] = Map.empty
 )
 
 enum AutoOffsetReset:
@@ -43,7 +41,8 @@ final case class ConsumerSettings[F[_], K, V](
     groupId: ConsumerGroup,
     keyDeserializer: Deserializer[F, K],
     valueDeserializer: Deserializer[F, V],
-    autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest
+    autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
+    properties: Map[String, String] = Map.empty
 )
 
 enum Subscription:

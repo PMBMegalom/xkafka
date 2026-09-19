@@ -43,3 +43,15 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
     KafkaClient[IO].producer(settings).use(_ => IO.unit)
   }
+
+  test("passes custom producer properties to librdkafka") {
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings(
+      ClientSettings(NonEmptyList.one("localhost:9092")),
+      serializer,
+      serializer,
+      Map("message.timeout.ms" -> "not-a-duration")
+    )
+
+    interceptIO[RuntimeException](KafkaClient[IO].producer(settings).use(_ => IO.unit))
+  }

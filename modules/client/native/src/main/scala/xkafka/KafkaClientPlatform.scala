@@ -34,8 +34,7 @@ import fs2.Stream
 import xkafka.internal.librdkafka.Bindings
 
 private[xkafka] object KafkaClientPlatform:
-  def apply[F[_]: Async]: KafkaClient[F] =
-    new LibrdkafkaClient[F]
+  def apply[F[_]: Async]: KafkaClient[F] = new LibrdkafkaClient[F]
 
 private[xkafka] object LibrdkafkaPlatform:
   def version: String = fromCString(Bindings.xkafka_version_str())
@@ -45,20 +44,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private val PollTimeoutMillis   = 100
   private val UnassignedPartition = -1
 
-  override def producer[K, V](
-      settings: ProducerSettings[F, K, V]
-  ): Resource[F, KafkaProducer[F, K, V]] =
+  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     for
       semaphore <- Resource.eval(Semaphore[F](1))
-      handle    <- Resource.make(createProducer(settings.client))(producer =>
-        semaphore.permit.use(_ => F.blocking(Bindings.xkafka_producer_destroy(producer)))
-      )
+      handle <- Resource.make(createProducer(settings))(producer => semaphore.permit.use(_ => F.blocking(Bindings.xkafka_producer_destroy(producer))))
     yield new LibrdkafkaProducer(handle, semaphore, settings)
 
-  override def consumer[K, V](
-      settings: ConsumerSettings[F, K, V],
-      subscription: Subscription
-  ): Resource[F, KafkaConsumer[F, K, V]] =
+  override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
       semaphore <- Resource.eval(Semaphore[F](1))
       handle <- Resource.make(createConsumer(settings))(consumer => semaphore.permit.use(_ => F.blocking(Bindings.xkafka_consumer_destroy(consumer))))
@@ -67,14 +59,18 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       )
     yield new LibrdkafkaConsumer(handle, semaphore, settings)
 
-  private def createProducer(settings: ClientSettings): F[CVoidPtr] =
+  private def createProducer[K, V](settings: ProducerSettings[F, K, V]): F[CVoidPtr] =
     F.blocking {
       Zone.acquire { zone =>
-        given Zone   = zone
-        val error    = stackalloc[CChar](ErrorBufferSize)
-        val producer = Bindings.xkafka_producer_new(
-          toCString(settings.bootstrapServers.toList.mkString(",")),
-          settings.clientId.fold[CString](null)(toCString),
+        given Zone                        = zone
+        val error                         = stackalloc[CChar](ErrorBufferSize)
+        val (names, values, propertySize) = nativeProperties(settings.client.properties ++ settings.properties)
+        val producer                      = Bindings.xkafka_producer_new(
+          toCString(settings.client.bootstrapServers.toList.mkString(",")),
+          settings.client.clientId.fold[CString](null)(toCString),
+          names,
+          values,
+          propertySize,
           error,
           ErrorBufferSize.toUSize
         )
@@ -83,14 +79,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       }
     }
 
-  private def createConsumer[K, V](
-      settings: ConsumerSettings[F, K, V]
-  ): F[CVoidPtr] =
+  private def createConsumer[K, V](settings: ConsumerSettings[F, K, V]): F[CVoidPtr] =
     F.blocking {
       Zone.acquire { zone =>
-        given Zone   = zone
-        val error    = stackalloc[CChar](ErrorBufferSize)
-        val consumer = Bindings.xkafka_consumer_new(
+        given Zone                        = zone
+        val error                         = stackalloc[CChar](ErrorBufferSize)
+        val (names, values, propertySize) = nativeProperties(settings.client.properties ++ settings.properties)
+        val consumer                      = Bindings.xkafka_consumer_new(
           toCString(settings.client.bootstrapServers.toList.mkString(",")),
           settings.client.clientId.fold[CString](null)(toCString),
           toCString(settings.groupId.value),
@@ -99,6 +94,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               case AutoOffsetReset.Earliest => "earliest"
               case AutoOffsetReset.Latest   => "latest"
           ),
+          names,
+          values,
+          propertySize,
           error,
           ErrorBufferSize.toUSize
         )
@@ -106,6 +104,18 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         consumer
       }
     }
+
+  private def nativeProperties(properties: Map[String, String])(using Zone): (Ptr[CString], Ptr[CString], CSize) =
+    val entries = properties.removedAll(ManagedProperties).toVector
+    if entries.isEmpty then (null, null, 0.toUSize)
+    else
+      val names  = alloc[CString](entries.size)
+      val values = alloc[CString](entries.size)
+      entries.iterator.zipWithIndex.foreach { case ((name, value), index) =>
+        names(index) = toCString(name)
+        values(index) = toCString(value)
+      }
+      (names, values, entries.size.toUSize)
 
   private def subscribe(
       consumer: CVoidPtr,
@@ -200,13 +210,19 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         value: Option[Chunk[Byte]]
     ): RecordMetadata =
       Zone.acquire { zone =>
-        given Zone  = zone
-        val error   = stackalloc[CChar](ErrorBufferSize)
-        val headers =
-          Bindings.xkafka_headers_new(record.headers.values.size.toUSize)
+        given Zone                    = zone
+        val error                     = stackalloc[CChar](ErrorBufferSize)
+        val (keyPointer, keySize)     = cBytes(key)
+        val (valuePointer, valueSize) = cBytes(value)
+        val resultPartition           = stackalloc[CInt]()
+        val resultOffset              = stackalloc[CLongLong]()
+        val resultTimestamp           = stackalloc[CLongLong]()
+        val topic                     = toCString(record.topic.value)
+        val partition                 = record.partition.fold(UnassignedPartition)(_.value)
+        val timestamp                 = record.timestamp.fold(-1L)(_.epochMillis)
+        val headers                   = Bindings.xkafka_headers_new(record.headers.values.size.toUSize)
         if headers == null then throw new LibrdkafkaException("could not allocate message headers")
 
-        var passedToProducer = false
         try
           record.headers.values.foreach { header =>
             val (headerValue, headerSize) = cBytes(header.value)
@@ -220,61 +236,58 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             )
             if result != 0 then throw nativeError(error)
           }
+        catch
+          case error: Throwable =>
+            Bindings.xkafka_headers_destroy(headers)
+            throw error
 
-          val (keyPointer, keySize)     = cBytes(key)
-          val (valuePointer, valueSize) = cBytes(value)
-          val resultPartition           = stackalloc[CInt]()
-          val resultOffset              = stackalloc[CLongLong]()
-          val resultTimestamp           = stackalloc[CLongLong]()
-          passedToProducer = true
-          val result = Bindings.xkafka_producer_send(
-            handle,
-            toCString(record.topic.value),
-            record.partition.fold(UnassignedPartition)(_.value),
-            record.timestamp.fold(-1L)(_.epochMillis),
-            keyPointer,
-            keySize,
-            valuePointer,
-            valueSize,
-            headers,
-            resultPartition,
-            resultOffset,
-            resultTimestamp,
-            error,
-            ErrorBufferSize.toUSize
+        val result = Bindings.xkafka_producer_send(
+          handle,
+          topic,
+          partition,
+          timestamp,
+          keyPointer,
+          keySize,
+          valuePointer,
+          valueSize,
+          headers,
+          resultPartition,
+          resultOffset,
+          resultTimestamp,
+          error,
+          ErrorBufferSize.toUSize
+        )
+        if result != 0 then throw nativeError(error)
+
+        val portablePartition = Partition
+          .from(!resultPartition)
+          .fold(
+            error =>
+              throw invalidBackendValue(
+                "partition",
+                !resultPartition,
+                error
+              ),
+            identity
           )
-          if result != 0 then throw nativeError(error)
-
-          val portablePartition = Partition
-            .from(!resultPartition)
+        val offsetValue    = !resultOffset
+        val timestampValue = !resultTimestamp
+        val portableOffset = Option.when(offsetValue >= 0L)(
+          Offset
+            .from(offsetValue)
             .fold(
-              error =>
-                throw invalidBackendValue(
-                  "partition",
-                  !resultPartition,
-                  error
-                ),
+              error => throw invalidBackendValue("offset", offsetValue, error),
               identity
             )
-          val offsetValue    = !resultOffset
-          val timestampValue = !resultTimestamp
-          val portableOffset = Option.when(offsetValue >= 0L)(
-            Offset
-              .from(offsetValue)
-              .fold(
-                error => throw invalidBackendValue("offset", offsetValue, error),
-                identity
-              )
-          )
+        )
 
-          RecordMetadata(
-            TopicPartition(record.topic, portablePartition),
-            portableOffset,
-            Option
-              .when(timestampValue >= 0L)(timestampValue)
-              .map(Timestamp.fromEpochMillis)
-          )
-        finally if !passedToProducer then Bindings.xkafka_headers_destroy(headers)
+        RecordMetadata(
+          TopicPartition(record.topic, portablePartition),
+          portableOffset,
+          Option
+            .when(timestampValue >= 0L)(timestampValue)
+            .map(Timestamp.fromEpochMillis)
+        )
       }
 
   private final case class NativeRecord(

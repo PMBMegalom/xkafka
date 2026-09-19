@@ -31,6 +31,9 @@ private[xkafka] object Bindings:
   def xkafka_producer_new(
       brokers: CString,
       clientId: CString,
+      propertyNames: Ptr[CString],
+      propertyValues: Ptr[CString],
+      propertyCount: CSize,
       error: CString,
       errorSize: CSize
   ): CVoidPtr = extern
@@ -72,6 +75,9 @@ private[xkafka] object Bindings:
       clientId: CString,
       groupId: CString,
       autoOffsetReset: CString,
+      propertyNames: Ptr[CString],
+      propertyValues: Ptr[CString],
+      propertyCount: CSize,
       error: CString,
       errorSize: CSize
   ): CVoidPtr = extern

@@ -75,6 +75,29 @@ With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `FunctorK` instances for transforming their effect with a natural
 transformation.
 
+Client, producer, and consumer settings each accept an immutable `properties`
+map for backend configuration not modeled directly by xkafka:
+
+```scala
+val client = ClientSettings(
+  bootstrapServers = NonEmptyList.one("localhost:9092"),
+  properties = Map("metadata.max.age.ms" -> "30000")
+)
+
+val producer = ProducerSettings(
+  client = client,
+  keySerializer = utf8,
+  valueSerializer = utf8,
+  properties = Map("linger.ms" -> "5")
+)
+```
+
+Producer or consumer properties override client properties. Values managed by
+xkafka, including bootstrap servers, client and group IDs, offset reset, and
+automatic commits, cannot be overridden through the map. Property names and
+values are interpreted by the selected backend; portable applications should
+use only properties supported with the same meaning by each target backend.
+
 ## Building
 
 The build uses sbt. Run all ordinary tests with:

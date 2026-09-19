@@ -32,6 +32,22 @@ static int xkafka_conf_set(rd_kafka_conf_t *conf,
         return 0;
 }
 
+static int xkafka_conf_set_all(rd_kafka_conf_t *conf,
+                               const char *const *names,
+                               const char *const *values,
+                               size_t count,
+                               char *error,
+                               size_t error_size) {
+        size_t index;
+
+        for (index = 0; index < count; index++) {
+                if (xkafka_conf_set(conf, names[index], values[index], error,
+                                    error_size) != 0)
+                        return -1;
+        }
+        return 0;
+}
+
 static void xkafka_delivery_callback(rd_kafka_t *client,
                                      const rd_kafka_message_t *message,
                                      void *opaque) {
@@ -52,12 +68,17 @@ static void xkafka_delivery_callback(rd_kafka_t *client,
 
 rd_kafka_t *xkafka_producer_new(const char *brokers,
                                 const char *client_id,
+                                const char *const *property_names,
+                                const char *const *property_values,
+                                size_t property_count,
                                 char *error,
                                 size_t error_size) {
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *producer;
 
-        if (xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
+        if (xkafka_conf_set_all(conf, property_names, property_values,
+                                property_count, error, error_size) != 0 ||
+            xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
                             error_size) != 0) {
                 rd_kafka_conf_destroy(conf);
                 return NULL;
@@ -170,13 +191,18 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
                                 const char *client_id,
                                 const char *group_id,
                                 const char *auto_offset_reset,
+                                const char *const *property_names,
+                                const char *const *property_values,
+                                size_t property_count,
                                 char *error,
                                 size_t error_size) {
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *consumer;
         rd_kafka_resp_err_t result;
 
-        if (xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
+        if (xkafka_conf_set_all(conf, property_names, property_values,
+                                property_count, error, error_size) != 0 ||
+            xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
                             error_size) != 0 ||
             xkafka_conf_set(conf, "group.id", group_id, error, error_size) !=
                 0 ||

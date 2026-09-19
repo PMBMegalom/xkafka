@@ -50,10 +50,13 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       new ByteArraySerializer
     )
     given MkProducer[IO] with
-      override def apply[G[_]](
-          settings: Fs2ProducerSettings[G, ?, ?]
-      ): IO[KafkaByteProducer] =
-        IO.pure(mock)
+      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO {
+        assertEquals(settings.properties.get("bootstrap.servers"), Some("unused:9092"))
+        assertEquals(settings.properties.get("client.id"), Some("client"))
+        assertEquals(settings.properties.get("compression.type"), Some("lz4"))
+        assertEquals(settings.properties.get("acks"), Some("all"))
+        mock
+      }
 
     val topic         = Topic.from("events").toOption.get
     val partition     = Partition.from(0).toOption.get
@@ -64,9 +67,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       IO.pure(Some(Chunk.array(value.getBytes("UTF-8"))))
     }
     val settings = ProducerSettings(
-      ClientSettings(NonEmptyList.one("unused:9092"), Some("client")),
+      ClientSettings(
+        NonEmptyList.one("unused:9092"),
+        Some("client"),
+        Map("compression.type" -> "gzip", "client.id" -> "ignored")
+      ),
       keySerializer,
-      valueSerializer
+      valueSerializer,
+      Map("compression.type" -> "lz4", "acks" -> "all", "bootstrap.servers" -> "ignored:9092")
     )
     val record = ProducerRecord(
       topic = topic,
@@ -118,10 +126,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       )
     )
     given MkConsumer[IO] with
-      override def apply[G[_]](
-          settings: Fs2ConsumerSettings[G, ?, ?]
-      ): IO[KafkaByteConsumer] =
-        IO.pure(mock)
+      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO {
+        assertEquals(settings.properties.get("bootstrap.servers"), Some("unused:9092"))
+        assertEquals(settings.properties.get("group.id"), Some("workers"))
+        assertEquals(settings.properties.get("fetch.min.bytes"), Some("2"))
+        assertEquals(settings.properties.get("enable.auto.commit"), Some("false"))
+        assertEquals(settings.properties.get("auto.offset.reset"), Some("earliest"))
+        mock
+      }
 
     val keyDeserializer = Deserializer.instance[IO, String] { (_, _, bytes) =>
       IO.pure(
@@ -134,10 +146,12 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       )
     }
     val settings = ConsumerSettings(
-      ClientSettings(NonEmptyList.one("unused:9092")),
+      ClientSettings(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1", "group.id" -> "ignored")),
       group,
       keyDeserializer,
-      valueDeserializer
+      valueDeserializer,
+      AutoOffsetReset.Earliest,
+      Map("fetch.min.bytes" -> "2", "enable.auto.commit" -> "true", "auto.offset.reset" -> "none")
     )
 
     KafkaClientPlatform

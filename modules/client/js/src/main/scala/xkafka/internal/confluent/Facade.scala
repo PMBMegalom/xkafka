@@ -26,6 +26,7 @@ import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
 
 import xkafka.AutoOffsetReset
+import xkafka.ManagedProperties
 
 private[xkafka] type JsHeaders = js.Dictionary[js.Any]
 
@@ -36,11 +37,14 @@ private[xkafka] object KafkaJS extends js.Object:
 
 @js.native
 private[xkafka] trait Kafka extends js.Object:
-  def producer(): Producer                       = js.native
+  def producer(config: ProducerConfig): Producer = js.native
   def consumer(config: ConsumerConfig): Consumer = js.native
 
 @js.native
 private[xkafka] trait KafkaConfig extends js.Object
+
+@js.native
+private[xkafka] trait ProducerConfig extends js.Object
 
 @js.native
 private[xkafka] trait ConsumerConfig extends js.Object
@@ -119,23 +123,18 @@ private[xkafka] object Buffer extends js.Object:
   def from(bytes: Uint8Array): Uint8Array = js.native
 
 private[xkafka] object Values:
-  def kafka(config: KafkaConfig): Kafka =
-    js.Dynamic.newInstance(KafkaJS.Kafka)(config).asInstanceOf[Kafka]
+  def kafka(config: KafkaConfig): Kafka = js.Dynamic.newInstance(KafkaJS.Kafka)(config).asInstanceOf[Kafka]
 
-  def kafkaConfig(
-      brokers: js.Array[String],
-      clientId: js.UndefOr[String]
-  ): KafkaConfig =
-    val result = js.Dynamic.literal()
+  def kafkaConfig(brokers: js.Array[String], clientId: js.UndefOr[String], properties: Map[String, String]): KafkaConfig =
+    val result = configuration(properties)
     result.updateDynamic("bootstrap.servers")(brokers.mkString(","))
     clientId.foreach(value => result.updateDynamic("client.id")(value))
     result.asInstanceOf[KafkaConfig]
 
-  def consumerConfig(
-      groupId: String,
-      autoOffsetReset: AutoOffsetReset
-  ): ConsumerConfig =
-    val result = js.Dynamic.literal()
+  def producerConfig(properties: Map[String, String]): ProducerConfig = configuration(properties).asInstanceOf[ProducerConfig]
+
+  def consumerConfig(groupId: String, autoOffsetReset: AutoOffsetReset, properties: Map[String, String]): ConsumerConfig =
+    val result = configuration(properties)
     result.updateDynamic("group.id")(groupId)
     result.updateDynamic("enable.auto.commit")(false)
     result.updateDynamic("auto.offset.reset")(
@@ -144,6 +143,13 @@ private[xkafka] object Values:
         case AutoOffsetReset.Latest   => "latest"
     )
     result.asInstanceOf[ConsumerConfig]
+
+  private def configuration(properties: Map[String, String]): js.Dynamic =
+    val result = js.Dynamic.literal()
+    properties.removedAll(ManagedProperties).foreach { case (key, value) =>
+      result.updateDynamic(key)(value)
+    }
+    result
 
   def message(
       key: Uint8Array | Null,

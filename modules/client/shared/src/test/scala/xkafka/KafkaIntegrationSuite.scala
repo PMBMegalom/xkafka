@@ -46,7 +46,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val suffix         = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
     val topic          = validTopic(s"xkafka-integration-$suffix")
     val group          = validConsumerGroup(s"xkafka-integration-$suffix")
-    val clientSettings = ClientSettings(NonEmptyList.one(bootstrapServer))
+    val clientSettings = ClientSettings(NonEmptyList.one(bootstrapServer), properties = Map("metadata.max.age.ms" -> "30000"))
     val headers        = Headers(
       Header("x-xkafka-integration", Some(Chunk.array(Array[Byte](1, 2, 3))))
     )
@@ -68,14 +68,16 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val producerSettings = ProducerSettings(
       clientSettings,
       utf8Serializer,
-      utf8Serializer
+      utf8Serializer,
+      Map("linger.ms" -> "0")
     )
     val consumerSettings = ConsumerSettings(
       clientSettings,
       group,
       utf8Deserializer,
       utf8Deserializer,
-      AutoOffsetReset.Earliest
+      AutoOffsetReset.Earliest,
+      Map("fetch.min.bytes" -> "1")
     )
 
     for

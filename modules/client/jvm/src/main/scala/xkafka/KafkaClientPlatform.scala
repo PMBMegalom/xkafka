@@ -46,8 +46,7 @@ import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 
 private[xkafka] object KafkaClientPlatform:
-  def apply[F[_]: Async]: KafkaClient[F] =
-    new Fs2KafkaClient[F]
+  def apply[F[_]: Async]: KafkaClient[F] = new Fs2KafkaClient[F]
 
   private[xkafka] def fromFs2[F[_]](using
       Async[F],
@@ -63,18 +62,12 @@ private final class Fs2KafkaClient[F[_]](using
     mkProducer: MkProducer[F],
     mkConsumer: MkConsumer[F]
 ) extends KafkaClient[F]:
-
-  override def producer[K, V](
-      settings: ProducerSettings[F, K, V]
-  ): Resource[F, KafkaProducer[F, K, V]] =
+  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     Fs2KafkaProducer
       .resource(producerSettings(settings))
       .map(new Fs2KafkaProducerAdapter(_))
 
-  override def consumer[K, V](
-      settings: ConsumerSettings[F, K, V],
-      subscription: Subscription
-  ): Resource[F, KafkaConsumer[F, K, V]] =
+  override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
       consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings))
       _        <- Resource.eval(
@@ -84,25 +77,25 @@ private final class Fs2KafkaClient[F[_]](using
       )
     yield new Fs2KafkaConsumerAdapter(consumer)
 
-  private def producerSettings[K, V](
-      settings: ProducerSettings[F, K, V]
-  ): Fs2ProducerSettings[F, K, V] =
+  private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base = Fs2ProducerSettings(
       serializer(settings.keySerializer),
       serializer(settings.valueSerializer)
-    ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
+    )
+      .withProperties((settings.client.properties ++ settings.properties).removedAll(ManagedProperties))
+      .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
 
     settings.client.clientId.fold(base)(base.withClientId)
 
-  private def consumerSettings[K, V](
-      settings: ConsumerSettings[F, K, V]
-  ): Fs2ConsumerSettings[F, K, V] =
+  private def consumerSettings[K, V](settings: ConsumerSettings[F, K, V]): Fs2ConsumerSettings[F, K, V] =
     val base = Fs2ConsumerSettings(
       deserializer(settings.keyDeserializer),
       deserializer(settings.valueDeserializer)
     )
+      .withProperties((settings.client.properties ++ settings.properties).removedAll(ManagedProperties))
       .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
       .withGroupId(settings.groupId.value)
+      .withProperty("enable.auto.commit", "false")
       .withAutoOffsetReset(
         settings.autoOffsetReset match
           case AutoOffsetReset.Earliest => Fs2AutoOffsetReset.Earliest
