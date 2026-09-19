@@ -28,12 +28,9 @@ model on every platform. For example, a producer can be created and used as
 follows:
 
 ```scala
-import java.nio.charset.StandardCharsets
-
 import cats.data.NonEmptyList
 import cats.effect.{IO, IOApp}
 import cats.syntax.all.*
-import fs2.Chunk
 
 import xkafka.*
 
@@ -43,11 +40,7 @@ object ProduceExample extends IOApp.Simple:
       .from("events")
       .fold(error => throw new IllegalArgumentException(error.toString), identity)
 
-  private val utf8 = Serializer.instance[IO, String] { (_, _, value) =>
-    IO.pure(
-      Some(Chunk.array(value.getBytes(StandardCharsets.UTF_8)))
-    )
-  }
+  private val utf8 = Serializer.utf8[IO]
 
   private val settings = ProducerSettings(
     client = ClientSettings(NonEmptyList.one("localhost:9092")),
@@ -81,6 +74,11 @@ producers, and consumers have cats-tagless `FunctorK` instances for transforming
 their effect with a natural transformation. `KafkaClient.imapK` transforms a
 complete client between effects in both directions while preserving `Resource`
 cancellation semantics.
+
+`Serializer.bytes`, `Deserializer.bytes`, `Serializer.utf8`, and
+`Deserializer.utf8` provide portable codecs for common values. Their `.option`
+combinator represents Kafka null keys and values explicitly as `None`, which is
+also how tombstone records should be modeled.
 
 Client, producer, and consumer settings each accept an immutable `properties`
 map for backend configuration not modeled directly by xkafka:

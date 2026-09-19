@@ -28,7 +28,8 @@ import fs2.Chunk
 import munit.FunSuite
 
 final class SerdeSuite extends FunSuite:
-  private type ErrorOr[A] = Either[String, A]
+  private type ErrorOr[A]     = Either[String, A]
+  private type ThrowableOr[A] = Either[Throwable, A]
 
   private val topic = Topic.from("events").toOption.get
   private val bytes = Some(Chunk.array(Array[Byte](1, 2, 3)))
@@ -60,3 +61,30 @@ final class SerdeSuite extends FunSuite:
     val transformed  = FunctorK[[F[_]] =>> Deserializer[F, Int]].mapK(deserializer)(optionToErrorOr)
 
     assertEquals(transformed.deserialize(topic, Headers.empty, bytes), Right(3))
+
+  test("byte codecs preserve chunks and reject unexpected nulls"):
+    val chunk        = Chunk.array(Array[Byte](1, 2, 3))
+    val serialized   = Serializer.bytes[Option].serialize(topic, Headers.empty, chunk)
+    val deserialized = Deserializer.bytes[ThrowableOr].deserialize(topic, Headers.empty, serialized.flatten)
+    val nullResult   = Deserializer.bytes[ThrowableOr].deserialize(topic, Headers.empty, None)
+
+    assertEquals(serialized, Some(Some(chunk)))
+    assertEquals(deserialized, Right(chunk))
+    nullResult match
+      case Left(error: Deserializer.NullValueException) => assertEquals(error.topic, topic)
+      case value                                        => fail(s"expected a null-value error, got $value")
+
+  test("UTF-8 codecs round trip Unicode strings"):
+    val value        = "héllø 👋"
+    val serialized   = Serializer.utf8[Option].serialize(topic, Headers.empty, value)
+    val deserialized = Deserializer.utf8[ThrowableOr].deserialize(topic, Headers.empty, serialized.flatten)
+
+    assertEquals(deserialized, Right(value))
+
+  test("option codecs preserve Kafka nulls"):
+    val serializer   = Serializer.utf8[Option].option
+    val deserializer = Deserializer.utf8[ThrowableOr].option
+
+    assertEquals(serializer.serialize(topic, Headers.empty, None), Some(None))
+    assertEquals(deserializer.deserialize(topic, Headers.empty, None), Right(None))
+    assertEquals(deserializer.deserialize(topic, Headers.empty, Some(Chunk.array("value".getBytes("UTF-8")))), Right(Some("value")))

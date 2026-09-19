@@ -104,12 +104,8 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     PlatformKafkaClient().consumer(settings, subscription).use(_.records.take(1).compile.lastOrError)
       .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
-  private val utf8Serializer: Serializer[IO, String] = Serializer.instance((_, _, value) => IO.pure(Some(Chunk.array(value.getBytes("UTF-8")))))
-
-  private val utf8Deserializer: Deserializer[IO, String] =
-    Deserializer.instance((_, _, bytes) =>
-      IO.fromOption(bytes)(new IllegalStateException("expected non-null bytes")).map(chunk => new String(chunk.toArray, "UTF-8"))
-    )
+  private val utf8Serializer   = Serializer.utf8[IO]
+  private val utf8Deserializer = Deserializer.utf8[IO]
 
   private def validTopic(value: String): Topic = Topic.from(value).fold(error => fail(s"invalid test topic: $error"), identity)
 

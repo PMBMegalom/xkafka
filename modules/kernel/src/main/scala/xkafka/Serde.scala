@@ -21,7 +21,9 @@
 
 package xkafka
 
-import cats.{Applicative, Contravariant, Functor}
+import java.nio.charset.StandardCharsets
+
+import cats.{Applicative, ApplicativeThrow, Contravariant, Functor}
 import cats.arrow.FunctionK
 import cats.tagless.FunctorK
 import fs2.Chunk
@@ -33,6 +35,11 @@ trait Serializer[F[_], -A]:
 
   final def mapK[G[_]](fk: FunctionK[F, G]): Serializer[G, A] =
     Serializer.instance((topic, headers, value) => fk(self.serialize(topic, headers, value)))
+
+  final def option(using F: Applicative[F]): Serializer[F, Option[A]] =
+    Serializer.instance:
+      case (topic, headers, Some(value)) => self.serialize(topic, headers, value)
+      case (_, _, None)                  => F.pure(None)
 
   final def contramap[B](f: B => A): Serializer[F, B] =
     new Serializer[F, B]:
@@ -53,6 +60,10 @@ object Serializer:
 
   def const[F[_]: Applicative, A](bytes: Option[Chunk[Byte]]): Serializer[F, A] = instance((_, _, _) => Applicative[F].pure(bytes))
 
+  def bytes[F[_]: Applicative]: Serializer[F, Chunk[Byte]] = instance((_, _, value) => Applicative[F].pure(Some(value)))
+
+  def utf8[F[_]: Applicative]: Serializer[F, String] = bytes[F].contramap(value => Chunk.array(value.getBytes(StandardCharsets.UTF_8)))
+
 trait Deserializer[F[_], A]:
   self =>
 
@@ -61,11 +72,18 @@ trait Deserializer[F[_], A]:
   final def mapK[G[_]](fk: FunctionK[F, G]): Deserializer[G, A] =
     Deserializer.instance((topic, headers, bytes) => fk(self.deserialize(topic, headers, bytes)))
 
+  final def option(using F: Applicative[F]): Deserializer[F, Option[A]] =
+    Deserializer.instance:
+      case (topic, headers, bytes @ Some(_)) => F.map(self.deserialize(topic, headers, bytes))(Some(_))
+      case (_, _, None)                      => F.pure(None)
+
   final def map[B](f: A => B)(using F: Functor[F]): Deserializer[F, B] =
     new Deserializer[F, B]:
       override def deserialize(topic: Topic, headers: Headers, bytes: Option[Chunk[Byte]]): F[B] = F.map(self.deserialize(topic, headers, bytes))(f)
 
 object Deserializer:
+  final class NullValueException(val topic: Topic) extends RuntimeException(s"cannot deserialize a null value from topic '${topic.value}'")
+
   given [F[_]: Functor]: Functor[[A] =>> Deserializer[F, A]] with
     override def map[A, B](deserializer: Deserializer[F, A])(f: A => B): Deserializer[F, B] = deserializer.map(f)
 
@@ -77,3 +95,8 @@ object Deserializer:
   def instance[F[_], A](f: (Topic, Headers, Option[Chunk[Byte]]) => F[A]): Deserializer[F, A] =
     new Deserializer[F, A]:
       override def deserialize(topic: Topic, headers: Headers, bytes: Option[Chunk[Byte]]): F[A] = f(topic, headers, bytes)
+
+  def bytes[F[_]](using F: ApplicativeThrow[F]): Deserializer[F, Chunk[Byte]] =
+    instance((topic, _, value) => F.fromOption(value, new NullValueException(topic)))
+
+  def utf8[F[_]: ApplicativeThrow]: Deserializer[F, String] = bytes[F].map(value => new String(value.toArray, StandardCharsets.UTF_8))

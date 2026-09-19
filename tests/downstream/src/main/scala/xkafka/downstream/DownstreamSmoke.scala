@@ -28,7 +28,6 @@ import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
-import fs2.Chunk
 
 object DownstreamSmoke extends IOApp.Simple:
   private val bootstrapServer = sys.env.getOrElse(
@@ -36,10 +35,8 @@ object DownstreamSmoke extends IOApp.Simple:
     "127.0.0.1:19092"
   )
 
-  private val utf8Serializer = Serializer.instance[IO, String]((_, _, value) => IO.pure(Some(Chunk.array(value.getBytes("UTF-8")))))
-  private val utf8Deserializer = Deserializer.instance[IO, String]((_, _, bytes) =>
-    IO.fromOption(bytes)(new IllegalStateException("expected non-null bytes")).map(chunk => new String(chunk.toArray, "UTF-8"))
-  )
+  private val utf8Serializer   = Serializer.utf8[IO]
+  private val utf8Deserializer = Deserializer.utf8[IO]
 
   override val run: IO[Unit] =
     val suffix           = System.currentTimeMillis().toString
