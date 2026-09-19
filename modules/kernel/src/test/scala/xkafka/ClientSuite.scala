@@ -72,6 +72,35 @@ final class ClientSuite extends FunSuite:
     assertEquals(mappedRecord.record, consumerRecord)
     assertEquals(mappedRecord.offset.commit, Right(()))
 
+  test("offset batches retain the greatest next offset per topic-partition"):
+    val otherPartition = Partition.from(1).toOption.get
+    val laterOffset    = Offset.from(2L).toOption.get
+    val batch          =
+      CommittableOffsetBatch.fromFoldable(NonEmptyList.of(committableOffset, offsetAt(partition, laterOffset), offsetAt(otherPartition, nextOffset)))
+
+    assertEquals(batch.size, 2)
+    assertEquals(
+      batch.offsets(optionCommitter),
+      Map(TopicPartition(topic, partition) -> laterOffset, TopicPartition(topic, otherPartition) -> nextOffset)
+    )
+    assertEquals(batch.commit, Some(()))
+
+  test("offset batches support natural transformations"):
+    val batch  = CommittableOffsetBatch.fromFoldable(NonEmptyList.one(committableOffset))
+    val mapped = FunctorK[CommittableOffsetBatch].mapK(batch)(optionToErrorOr)
+
+    assertEquals(mapped.commit, Right(()))
+
+  test("individually transformed offsets retain their shared committer"):
+    val laterOffset = Offset.from(2L).toOption.get
+    val offsets     = NonEmptyList.of(committableOffset, offsetAt(partition, laterOffset)).map(_.mapK(optionToErrorOr))
+    val batch       = CommittableOffsetBatch.fromFoldable(offsets)
+
+    assertEquals(batch.offsets.size, 1)
+    assertEquals(batch.size, 1)
+    assertEquals(batch.offsets.valuesIterator.flatMap(_.valuesIterator).toList, List(laterOffset))
+    assertEquals(batch.commit, Right(()))
+
   test("KafkaProducer supports natural transformations"):
     val source =
       new KafkaProducer[Option, String, String]:
@@ -92,8 +121,14 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(result, consumerRecord)
 
-  private def committableOffset: CommittableOffset[Option] =
+  private def committableOffset: CommittableOffset[Option] = offsetAt(partition, nextOffset)
+
+  private val optionCommitter: OffsetCommitter[Option] =
+    new OffsetCommitter[Option]:
+      override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+
+  private def offsetAt(partition: Partition, nextOffsetValue: Offset): CommittableOffset[Option] =
     new CommittableOffset[Option]:
-      override val topicPartition: TopicPartition = TopicPartition(topic, partition)
-      override val nextOffset: Offset             = ClientSuite.this.nextOffset
-      override def commit: Option[Unit]           = Some(())
+      override val topicPartition: TopicPartition     = TopicPartition(topic, partition)
+      override val nextOffset: Offset                 = nextOffsetValue
+      override val committer: OffsetCommitter[Option] = optionCommitter

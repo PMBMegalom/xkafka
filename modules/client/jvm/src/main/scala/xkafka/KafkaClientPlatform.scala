@@ -34,7 +34,9 @@ import fs2.kafka.{
 }
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
+import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
+import org.apache.kafka.common.TopicPartition as JavaTopicPartition
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new Fs2KafkaClient[F]
@@ -139,6 +141,15 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private final class Fs2KafkaConsumerAdapter[K, V](underlying: Fs2KafkaConsumer[F, K, V]) extends KafkaConsumer[F, K, V]:
 
+    private val offsetCommitter: OffsetCommitter[F] =
+      new OffsetCommitter[F]:
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+          underlying.commitSync(
+            offsets.map:
+              case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
+                  new OffsetAndMetadata(offset.value)
+          )
+
     override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] = underlying.records.evalMap(consumerRecord)
 
     private def consumerRecord(committable: Fs2CommittableConsumerRecord[F, K, V]): F[CommittableConsumerRecord[F, K, V]] =
@@ -166,7 +177,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
               override val nextOffset: Offset = portableNextOffset
 
-              override def commit: F[Unit] = committable.offset.commit
+              override val committer: OffsetCommitter[F] = offsetCommitter
 
           CommittableConsumerRecord(portableRecord, portableOffset)
 

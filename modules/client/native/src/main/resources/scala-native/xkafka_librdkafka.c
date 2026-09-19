@@ -366,20 +366,26 @@ int xkafka_message_header_at(const rd_kafka_message_t *message,
 }
 
 int xkafka_consumer_commit(rd_kafka_t *consumer,
-                           const char *topic,
-                           int32_t partition,
-                           int64_t offset,
+                           const char *const *topics,
+                           const int32_t *partitions,
+                           const int64_t *offset_values,
+                           size_t count,
                            char *error,
                            size_t error_size) {
-        rd_kafka_topic_partition_list_t *offsets =
-            rd_kafka_topic_partition_list_new(1);
-        rd_kafka_topic_partition_t *entry =
-            rd_kafka_topic_partition_list_add(offsets, topic, partition);
+        rd_kafka_topic_partition_list_t *native_offsets =
+            rd_kafka_topic_partition_list_new((int)count);
         rd_kafka_resp_err_t result;
+        size_t index;
 
-        entry->offset = offset;
-        result = rd_kafka_commit(consumer, offsets, 0);
-        rd_kafka_topic_partition_list_destroy(offsets);
+        for (index = 0; index < count; index++) {
+                rd_kafka_topic_partition_t *entry =
+                    rd_kafka_topic_partition_list_add(native_offsets,
+                                                      topics[index],
+                                                      partitions[index]);
+                entry->offset = offset_values[index];
+        }
+        result = rd_kafka_commit(consumer, native_offsets, 0);
+        rd_kafka_topic_partition_list_destroy(native_offsets);
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 xkafka_set_error(error, error_size, rd_kafka_err2str(result));

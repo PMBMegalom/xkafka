@@ -115,4 +115,12 @@ private[xkafka] object Bindings:
       hasValue: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_consumer_commit(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern
+  def xkafka_consumer_commit(
+      consumer: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      offsets: Ptr[CLongLong],
+      count: CSize,
+      error: CString,
+      errorSize: CSize
+  ): CInt = extern

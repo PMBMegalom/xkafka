@@ -227,6 +227,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private final class LibrdkafkaConsumer[K, V](handle: CVoidPtr, semaphore: Semaphore[F], settings: ConsumerSettings[F, K, V])
       extends KafkaConsumer[F, K, V]:
 
+    private val offsetCommitter: OffsetCommitter[F] =
+      new OffsetCommitter[F]:
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = semaphore.permit.use(_ => F.blocking(commitOffsets(offsets)))
+
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
       Stream.repeatEval(semaphore.permit.use(_ => F.blocking(poll()))).unNone.evalMap(decode)
 
@@ -286,15 +290,26 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
             override val nextOffset: Offset = portableNextOffset
 
-            override def commit: F[Unit] = semaphore.permit.use(_ => F.blocking(commitOffset(topic, partition, portableNextOffset)))
+            override val committer: OffsetCommitter[F] = offsetCommitter
 
         CommittableConsumerRecord(record, committable)
 
-    private def commitOffset(topic: Topic, partition: Partition, offset: Offset): Unit =
-      Zone.acquire: zone =>
-        given Zone = zone
-        val error  = stackalloc[CChar](ErrorBufferSize)
-        val result = Bindings.xkafka_consumer_commit(handle, toCString(topic.value), partition.value, offset.value, error, ErrorBufferSize.toUSize)
-        if result != 0 then throw nativeError(error)
+    private def commitOffsets(offsets: Map[TopicPartition, Offset]): Unit =
+      if offsets.nonEmpty then
+        Zone.acquire: zone =>
+          given Zone        = zone
+          val entries       = offsets.toVector
+          val topics        = alloc[CString](entries.size)
+          val partitions    = alloc[CInt](entries.size)
+          val nativeOffsets = alloc[CLongLong](entries.size)
+          entries.iterator.zipWithIndex.foreach:
+            case ((topicPartition, offset), index) =>
+              topics(index) = toCString(topicPartition.topic.value)
+              partitions(index) = topicPartition.partition.value
+              nativeOffsets(index) = offset.value
+          val error  = stackalloc[CChar](ErrorBufferSize)
+          val result =
+            Bindings.xkafka_consumer_commit(handle, topics, partitions, nativeOffsets, entries.size.toUSize, error, ErrorBufferSize.toUSize)
+          if result != 0 then throw nativeError(error)
 
 private final class LibrdkafkaException(message: String) extends RuntimeException(message)

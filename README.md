@@ -67,6 +67,11 @@ topics matching a non-empty `TopicPattern` with `Subscription.Pattern`. Patterns
 match complete topic names; portable patterns should use regular-expression
 syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
 
+Offsets can be accumulated with `CommittableOffsetBatch.fromFoldable` and
+committed together while the consumer resource remains active. A batch retains
+only the greatest next offset for each topic-partition and performs one backend
+commit per originating consumer.
+
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
 deserializers, producer and consumer settings, committable offsets and records,

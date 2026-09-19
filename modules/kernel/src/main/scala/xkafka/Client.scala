@@ -21,6 +21,7 @@
 
 package xkafka
 
+import cats.{Applicative, Foldable}
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
 import cats.tagless.FunctorK
@@ -63,6 +64,23 @@ enum Subscription:
   case Topics(topics: NonEmptyList[Topic])
   case Pattern(pattern: TopicPattern)
 
+trait OffsetCommitter[F[_]]:
+  self =>
+
+  def commit(offsets: Map[TopicPartition, Offset]): F[Unit]
+
+  final def mapK[G[_]](fk: FunctionK[F, G]): OffsetCommitter[G] = OffsetCommitter.transformed(self, fk)
+
+object OffsetCommitter:
+  given FunctorK[OffsetCommitter] with
+    override def mapK[F[_], G[_]](committer: OffsetCommitter[F])(fk: FunctionK[F, G]): OffsetCommitter[G] = committer.mapK(fk)
+
+  private def transformed[F[_], G[_]](committer: OffsetCommitter[F], fk: FunctionK[F, G]): OffsetCommitter[G] =
+    TransformedOffsetCommitter(committer, fk)
+
+  private final case class TransformedOffsetCommitter[F[_], G[_]](underlying: OffsetCommitter[F], fk: FunctionK[F, G]) extends OffsetCommitter[G]:
+    override def commit(offsets: Map[TopicPartition, Offset]): G[Unit] = fk(underlying.commit(offsets))
+
 trait CommittableOffset[F[_]]:
   self =>
 
@@ -71,7 +89,9 @@ trait CommittableOffset[F[_]]:
   /** The next offset to consume after this commit succeeds. */
   def nextOffset: Offset
 
-  def commit: F[Unit]
+  def committer: OffsetCommitter[F]
+
+  final def commit: F[Unit] = committer.commit(Map(topicPartition -> nextOffset))
 
   final def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffset[G] =
     new CommittableOffset[G]:
@@ -79,11 +99,49 @@ trait CommittableOffset[F[_]]:
 
       override def nextOffset: Offset = self.nextOffset
 
-      override def commit: G[Unit] = fk(self.commit)
+      override def committer: OffsetCommitter[G] = self.committer.mapK(fk)
 
 object CommittableOffset:
   given FunctorK[CommittableOffset] with
     override def mapK[F[_], G[_]](offset: CommittableOffset[F])(fk: FunctionK[F, G]): CommittableOffset[G] = offset.mapK(fk)
+
+opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, Offset]]
+
+object CommittableOffsetBatch:
+  def empty[F[_]]: CommittableOffsetBatch[F] = Map.empty
+
+  def fromFoldable[F[_], G[_]: Foldable](offsets: G[CommittableOffset[F]]): CommittableOffsetBatch[F] =
+    Foldable[G].foldLeft(offsets, empty[F])((batch, offset) => batch.updated(offset))
+
+  extension [F[_]](batch: CommittableOffsetBatch[F])
+    def updated(offset: CommittableOffset[F]): CommittableOffsetBatch[F] =
+      batch.updated(offset.committer, include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, offset.nextOffset))
+
+    def updated(other: CommittableOffsetBatch[F]): CommittableOffsetBatch[F] =
+      other.foldLeft(batch):
+        case (result, (committer, offsets)) => result.updated(
+            committer,
+            offsets.foldLeft(result.getOrElse(committer, Map.empty)):
+              case (committerOffsets, (topicPartition, offset)) => include(committerOffsets, topicPartition, offset)
+          )
+
+    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch
+
+    def size: Int = batch.valuesIterator.map(_.size).sum
+
+    def commit(using F: Applicative[F]): F[Unit] =
+      batch.foldLeft(F.unit):
+        case (result, (committer, offsets)) => F.productR(result)(committer.commit(offsets))
+
+    def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.map((committer, offsets) => committer.mapK(fk) -> offsets)
+
+  given FunctorK[CommittableOffsetBatch] with
+    override def mapK[F[_], G[_]](batch: CommittableOffsetBatch[F])(fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.mapK(fk)
+
+  private def include(offsets: Map[TopicPartition, Offset], topicPartition: TopicPartition, offset: Offset): Map[TopicPartition, Offset] =
+    offsets.updatedWith(topicPartition):
+      case current @ Some(value) if value.value >= offset.value => current
+      case Some(_) | None                                       => Some(offset)
 
 final case class CommittableConsumerRecord[F[_], K, V](record: ConsumerRecord[K, V], offset: CommittableOffset[F]):
   def mapK[G[_]](fk: FunctionK[F, G]): CommittableConsumerRecord[G, K, V] = CommittableConsumerRecord(record, offset.mapK(fk))

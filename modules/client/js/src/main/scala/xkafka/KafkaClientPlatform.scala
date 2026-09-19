@@ -186,6 +186,16 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       shutdown: Deferred[F, Unit]
   ) extends KafkaConsumer[F, K, V]:
 
+    private val offsetCommitter: OffsetCommitter[F] =
+      new OffsetCommitter[F]:
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+          val values =
+            offsets.iterator.map:
+              case (topicPartition, offset) => confluent.Values
+                  .topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString)
+            .toJSArray
+          await(underlying.commitOffsets(values))
+
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
       Stream.fromQueueUnterminated(queue).mergeHaltBoth(Stream.eval(failure.get).flatMap(Stream.raiseError[F]))
 
@@ -231,9 +241,6 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
             override val nextOffset: Offset = portableNextOffset
 
-            override def commit: F[Unit] =
-              await(underlying.commitOffsets(
-                js.Array(confluent.Values.topicPartitionOffset(portableTopic.value, portablePartition.value, portableNextOffset.value.toString))
-              ))
+            override val committer: OffsetCommitter[F] = offsetCommitter
 
         CommittableConsumerRecord(record, committableOffset)
