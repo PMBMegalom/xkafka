@@ -40,7 +40,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
 
   private def roundTrip(bootstrapServer: String): IO[Unit] =
     val suffix         = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topic          = validTopic(s"xkafka-integration-$suffix")
+    val topicPrefix    = s"xkafka-integration-$suffix"
+    val topic          = validTopic(s"$topicPrefix-events")
+    val topicPattern   = validTopicPattern(s"$topicPrefix-.*")
     val group          = validConsumerGroup(s"xkafka-integration-$suffix")
     val clientSettings = ClientSettings(NonEmptyList.one(bootstrapServer), properties = Map("metadata.max.age.ms" -> "30000"))
     val headers        = Headers(Header("x-xkafka-integration", Some(Chunk.array(Array[Byte](1, 2, 3)))))
@@ -71,7 +73,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
           .timeoutTo(45.seconds, IO.raiseError(new RuntimeException("Kafka producer timed out")))
       consumed <- consumeTwoAndCommitFirst(consumerSettings, topic)
       (consumedFirst, observedSecond) = consumed
-      consumedSecond <- consumeOne(consumerSettings, topic)
+      consumedSecond <- consumeOne(consumerSettings, Subscription.Pattern(topicPattern))
     yield
       assert(produced.metadata.nonEmpty)
       assertEquals(consumedFirst.record.topicPartition, TopicPartition(topic, partition))
@@ -95,8 +97,11 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         case records                => IO.raiseError(new AssertionError(s"expected two records, got ${records.size}"))
     .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
-  private def consumeOne(settings: ConsumerSettings[IO, String, String], topic: Topic): IO[CommittableConsumerRecord[IO, String, String]] =
-    PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use(_.records.take(1).compile.lastOrError)
+  private def consumeOne(
+      settings: ConsumerSettings[IO, String, String],
+      subscription: Subscription
+  ): IO[CommittableConsumerRecord[IO, String, String]] =
+    PlatformKafkaClient().consumer(settings, subscription).use(_.records.take(1).compile.lastOrError)
       .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
   private val utf8Serializer: Serializer[IO, String] = Serializer.instance((_, _, value) => IO.pure(Some(Chunk.array(value.getBytes("UTF-8")))))
@@ -107,6 +112,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     )
 
   private def validTopic(value: String): Topic = Topic.from(value).fold(error => fail(s"invalid test topic: $error"), identity)
+
+  private def validTopicPattern(value: String): TopicPattern =
+    TopicPattern.from(value).fold(error => fail(s"invalid test topic pattern: $error"), identity)
 
   private def validConsumerGroup(value: String): ConsumerGroup =
     ConsumerGroup.from(value).fold(error => fail(s"invalid test consumer group: $error"), identity)

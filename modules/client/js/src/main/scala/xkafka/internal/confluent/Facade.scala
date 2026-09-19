@@ -26,7 +26,8 @@ import scala.scalajs.js
 import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
 
-private[xkafka] type JsHeaders = js.Dictionary[js.Any]
+private[xkafka] type JsHeaders         = js.Dictionary[js.Any]
+private[xkafka] type SubscriptionTopic = String | js.RegExp
 
 @js.native
 @JSImport("@confluentinc/kafka-javascript", "KafkaJS")
@@ -163,7 +164,7 @@ private[xkafka] object Values:
   def producerBatch(topicMessages: js.Array[TopicMessages]): ProducerBatch =
     js.Dynamic.literal(topicMessages = topicMessages).asInstanceOf[ProducerBatch]
 
-  def subscription(topics: js.Array[String]): ConsumerSubscribe = js.Dynamic.literal(topics = topics).asInstanceOf[ConsumerSubscribe]
+  def subscription(topics: js.Array[SubscriptionTopic]): ConsumerSubscribe = js.Dynamic.literal(topics = topics).asInstanceOf[ConsumerSubscribe]
 
   def consumerRun(eachBatch: js.Function1[EachBatchPayload, js.Promise[Unit]]): ConsumerRunConfig =
     js.Dynamic.literal(eachBatchAutoResolve = false, eachBatch = eachBatch).asInstanceOf[ConsumerRunConfig]

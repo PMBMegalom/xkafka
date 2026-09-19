@@ -26,6 +26,7 @@ import fs2.Chunk
 
 enum ValidationError derives CanEqual:
   case EmptyTopic
+  case EmptyTopicPattern
   case NegativePartition(value: Int)
   case NegativeOffset(value: Long)
   case OffsetOverflow
@@ -37,6 +38,20 @@ object Topic:
   def from(value: String): Either[ValidationError, Topic] = Either.cond(value.nonEmpty, value, ValidationError.EmptyTopic)
 
   extension (topic: Topic) def value: String = topic
+
+/** A non-empty regular expression matched against complete topic names.
+  *
+  * Portable patterns should use syntax supported by Java, ECMAScript, and POSIX extended regular expressions.
+  */
+opaque type TopicPattern = String
+
+object TopicPattern:
+  def from(value: String): Either[ValidationError, TopicPattern] = Either.cond(value.nonEmpty, value, ValidationError.EmptyTopicPattern)
+
+  extension (pattern: TopicPattern)
+    def value: String = pattern
+
+    private[xkafka] def anchored: String = s"^($pattern)$$"
 
 opaque type Partition = Int
 

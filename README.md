@@ -68,7 +68,11 @@ object ProduceExample extends IOApp.Simple:
 
 Consumers expose an FS2 stream of `CommittableConsumerRecord`. A successful
 `record.offset.commit` stores `record.offset.nextOffset`; processing and commit
-policy therefore remain explicit in the calling effect.
+policy therefore remain explicit in the calling effect. A consumer can
+subscribe either to a non-empty list of topics with `Subscription.Topics` or to
+topics matching a non-empty `TopicPattern` with `Subscription.Pattern`. Patterns
+match complete topic names; portable patterns should use regular-expression
+syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Both also have cats-tagless

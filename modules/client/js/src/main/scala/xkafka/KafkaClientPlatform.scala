@@ -75,20 +75,24 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       underlying <- Resource.eval(F.delay(driver.consumer(settings.client, settings.groupId, settings.autoOffsetReset, settings.properties)))
       dispatcher <- Dispatcher.parallel[F]
       _          <- Resource.make(await(underlying.connect()))(_ => await(underlying.disconnect()))
-      _          <-
-        Resource.eval(
-          subscription match
-            case Subscription.Topics(topics) => await(underlying.subscribe(confluent.Values.subscription(topics.map(_.value).toList.toJSArray)))
-        )
-      queue    <- Resource.eval(Queue.bounded[F, CommittableConsumerRecord[F, K, V]](256))
-      failure  <- Resource.eval(Deferred[F, Throwable])
-      shutdown <- Resource.eval(Deferred[F, Unit])
+      _          <- Resource.eval(subscribe(underlying, subscription))
+      queue      <- Resource.eval(Queue.bounded[F, CommittableConsumerRecord[F, K, V]](256))
+      failure    <- Resource.eval(Deferred[F, Throwable])
+      shutdown   <- Resource.eval(Deferred[F, Unit])
       adapter = new ConfluentKafkaConsumer(underlying, settings, dispatcher, queue, failure, shutdown)
       _ <- Resource.eval(adapter.run)
       _ <- Resource.make(F.unit)(_ => shutdown.complete(()).void)
     yield adapter
 
   private def await[A](promise: => js.Promise[A]): F[A] = F.fromPromise(F.delay(promise))
+
+  private def subscribe(consumer: confluent.Consumer, subscription: Subscription): F[Unit] =
+    subscription match
+      case Subscription.Topics(topics) =>
+        val values = topics.toList.map[confluent.SubscriptionTopic](_.value).toJSArray
+        await(consumer.subscribe(confluent.Values.subscription(values)))
+      case Subscription.Pattern(pattern) => F.delay(new js.RegExp(pattern.anchored)).flatMap: compiled =>
+          await(consumer.subscribe(confluent.Values.subscription(js.Array[confluent.SubscriptionTopic](compiled))))
 
   private def invalidBackendValue(field: String, value: String, error: Any): IllegalStateException =
     new IllegalStateException(s"Confluent Kafka JavaScript returned an invalid $field '$value': $error")

@@ -47,6 +47,7 @@ final case class ConsumerSettings[F[_], K, V](
 
 enum Subscription:
   case Topics(topics: NonEmptyList[Topic])
+  case Pattern(pattern: TopicPattern)
 
 trait CommittableOffset[F[_]]:
   def topicPartition: TopicPartition

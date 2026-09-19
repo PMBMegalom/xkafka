@@ -49,12 +49,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
       consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings))
-      _        <-
-        Resource.eval(
-          subscription match
-            case Subscription.Topics(topics) => consumer.subscribe(topics.map(_.value))
-        )
+      _        <- Resource.eval(subscribe(consumer, subscription))
     yield new Fs2KafkaConsumerAdapter(consumer)
+
+  private def subscribe[K, V](consumer: Fs2KafkaConsumer[F, K, V], subscription: Subscription): F[Unit] =
+    subscription match
+      case Subscription.Topics(topics)   => consumer.subscribe(topics.map(_.value))
+      case Subscription.Pattern(pattern) => F.delay(pattern.anchored.r).flatMap(consumer.subscribe)
 
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =

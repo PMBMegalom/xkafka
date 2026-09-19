@@ -116,12 +116,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       given Zone = zone
       val topics =
         subscription match
-          case Subscription.Topics(values) => values
+          case Subscription.Topics(values)   => values.map(_.value)
+          case Subscription.Pattern(pattern) => NonEmptyList.one(pattern.anchored)
       val nativeSubscription = Bindings.xkafka_subscription_new(topics.length.toUSize)
       if nativeSubscription == null then throw new LibrdkafkaException("could not allocate a subscription")
 
       try
-        topics.toList.foreach(topic => Bindings.xkafka_subscription_add(nativeSubscription, toCString(topic.value)))
+        topics.toList.foreach(topic => Bindings.xkafka_subscription_add(nativeSubscription, toCString(topic)))
         val error  = stackalloc[CChar](ErrorBufferSize)
         val result = Bindings.xkafka_consumer_subscribe(consumer, nativeSubscription, error, ErrorBufferSize.toUSize)
         if result != 0 then throw nativeError(error)

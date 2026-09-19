@@ -28,6 +28,14 @@ final class ModelSuite extends FunSuite:
   test("topic rejects an empty name"):
     assertEquals(Topic.from(""), Left(ValidationError.EmptyTopic))
 
+  test("topic pattern rejects an empty expression"):
+    assertEquals(TopicPattern.from(""), Left(ValidationError.EmptyTopicPattern))
+
+  test("topic pattern is anchored for backend subscriptions"):
+    val pattern = TopicPattern.from("events-.*").toOption.get
+
+    assertEquals(pattern.anchored, "^(events-.*)$")
+
   test("partition rejects a negative value"):
     assertEquals(Partition.from(-1), Left(ValidationError.NegativePartition(-1)))
 

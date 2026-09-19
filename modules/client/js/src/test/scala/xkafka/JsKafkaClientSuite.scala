@@ -46,7 +46,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         AutoOffsetReset.Earliest,
         Map("fetch.wait.max.ms" -> "10", "group.id" -> "ignored", "enable.auto.offset.store" -> "true")
       ))
-    val subscription = dynamic(confluent.Values.subscription(js.Array("events")))
+    val subscription = dynamic(confluent.Values.subscription(js.Array[confluent.SubscriptionTopic]("events")))
     val run          = dynamic(confluent.Values.consumerRun(_ => js.Promise.resolve(())))
 
     assertEquals(common.selectDynamic("bootstrap.servers").asInstanceOf[String], "broker-1:9092,broker-2:9092")
