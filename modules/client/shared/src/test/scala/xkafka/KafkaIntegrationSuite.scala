@@ -38,6 +38,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       test("resume from a committed offset against Kafka".ignore)(IO.unit)
       test("resume from batched offsets across topic-partitions".ignore)(IO.unit)
       test("inspect assignment and committed offsets and seek".ignore)(IO.unit)
+      test("consume partition-scoped streams".ignore)(IO.unit)
     case Some(bootstrapServer) =>
       test("resume from a committed offset against Kafka"):
         roundTrip(bootstrapServer)
@@ -45,6 +46,8 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         batchRoundTrip(bootstrapServer)
       test("inspect assignment and committed offsets and seek"):
         controlRoundTrip(bootstrapServer)
+      test("consume partition-scoped streams"):
+        partitionedRoundTrip(bootstrapServer)
 
   private def roundTrip(bootstrapServer: String): IO[Unit] =
     val suffix         = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
@@ -153,6 +156,30 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(stored, Map(topicPartition -> Some(first._1.offset.nextOffset)))
       assertEquals(replayed._1.record.offset, first._1.record.offset)
       assertEquals(replayed._1.record.value, "control-value")
+
+  private def partitionedRoundTrip(bootstrapServer: String): IO[Unit] =
+    val suffix           = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
+    val topicPrefix      = s"xkafka-partitioned-integration-$suffix"
+    val firstTopic       = validTopic(s"$topicPrefix-first")
+    val secondTopic      = validTopic(s"$topicPrefix-second")
+    val subscription     = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
+    val group            = validConsumerGroup(s"xkafka-partitioned-integration-$suffix")
+    val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
+    val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
+    val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
+    val records          = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
+
+    for
+      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(records)).timeout(45.seconds)
+      consumed <-
+        PlatformKafkaClient().consumer(consumerSettings, subscription).use: consumer =>
+          consumer.partitionedRecords(100.millis, 16).map: partition =>
+            partition.records.take(1).map(partition.topicPartition -> _)
+          .parJoinUnbounded.take(2).compile.toList
+        .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka partitioned consumer timed out")))
+    yield
+      assertEquals(consumed.map(_._1.topic).toSet, Set(firstTopic, secondTopic))
+      assert(consumed.forall((topicPartition, record) => topicPartition == record.record.topicPartition))
 
   private def consumeTwoAndCommitFirst(
       settings: ConsumerSettings[IO, String, String],

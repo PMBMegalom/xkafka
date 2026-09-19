@@ -26,7 +26,7 @@ import scala.concurrent.duration.FiniteDuration
 import cats.{Applicative, Foldable}
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
-import cats.effect.Temporal
+import cats.effect.{Async, Temporal}
 import cats.tagless.FunctorK
 import fs2.{Pipe, Stream}
 
@@ -184,6 +184,18 @@ trait KafkaConsumer[F[_], K, V]:
       .mapAccumulate(Option.empty[Set[TopicPartition]]):
         case (previous, current) => Some(current) -> Option.when(!previous.contains(current))(current)
       .map(_._2).unNone
+
+  /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.
+    *
+    * Every emitted stream must be consumed concurrently; backpressure from one partition otherwise backpressures the shared record source.
+    *
+    * @param pollInterval
+    *   how often to observe assignment changes
+    * @param maxQueuedRecords
+    *   positive queue bound for each partition stream
+    */
+  final def partitionedRecords(pollInterval: FiniteDuration, maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
+    PartitionRecords.fromConsumer(self, pollInterval, maxQueuedRecords)
 
   /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
   def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]

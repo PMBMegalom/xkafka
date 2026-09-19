@@ -79,15 +79,18 @@ topic-partitions, `committed` returns their broker-stored next offsets without
 sentinel values, and `seek` changes the next offset fetched for an assigned
 topic-partition. `assignmentChanges(pollInterval)` is an FS2 stream which emits
 the current assignment immediately and subsequently only when a poll observes
-a different assignment.
+a different assignment. `partitionedRecords(pollInterval)` exposes a bounded
+record stream for each assigned topic-partition and ends that stream after the
+partition is revoked. Consume the emitted partition streams concurrently; an
+unconsumed stream eventually backpressures the shared record source.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
 deserializers, producer and consumer settings, committable offsets and records,
-producers, and consumers have cats-tagless `FunctorK` instances for transforming
-their effect with a natural transformation. `KafkaClient.imapK` transforms a
-complete client between effects in both directions while preserving `Resource`
-cancellation semantics.
+partition record streams, producers, and consumers have cats-tagless `FunctorK`
+instances for transforming their effect with a natural transformation.
+`KafkaClient.imapK` transforms a complete client between effects in both
+directions while preserving `Resource` cancellation semantics.
 
 `Serializer.bytes`, `Deserializer.bytes`, `Serializer.utf8`, and
 `Deserializer.utf8` provide portable codecs for common values. Their `.option`

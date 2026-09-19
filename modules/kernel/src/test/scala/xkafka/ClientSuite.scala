@@ -73,6 +73,14 @@ final class ClientSuite extends FunSuite:
     assertEquals(mappedRecord.record, consumerRecord)
     assertEquals(mappedRecord.offset.commit, Right(()))
 
+  test("partition records support natural transformations"):
+    val sourceRecord = CommittableConsumerRecord(consumerRecord, committableOffset)
+    val source       = PartitionRecords(consumerRecord.topicPartition, Stream.emit(sourceRecord).covary[Option])
+    val mapped       = FunctorK[[F[_]] =>> PartitionRecords[F, String, String]].mapK(source)(optionToSyncIO)
+
+    assertEquals(mapped.topicPartition, consumerRecord.topicPartition)
+    assertEquals(mapped.records.compile.toList.unsafeRunSync().map(_.record), List(consumerRecord))
+
   test("offset batches retain the greatest next offset per topic-partition"):
     val otherPartition = Partition.from(1).toOption.get
     val laterOffset    = Offset.from(2L).toOption.get
