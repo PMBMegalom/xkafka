@@ -134,6 +134,8 @@ final class ClientSuite extends FunSuite:
           Some(topicPartitions.map(_ -> nextOffset).toMap)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(timestampsToSearch.keys.map(_ -> Some(offset)).toMap)
+        override def partitionsFor(topic: Topic): Option[Set[Partition]]                = Some(Set(partition))
+        override def listTopics: Option[Map[Topic, Set[Partition]]]                     = Some(Map(topic -> Set(partition)))
         override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit] = Some(())
     val mapped = FunctorK[[F[_]] =>> KafkaConsumer[F, String, String]].mapK(source)(optionToSyncIO)
 
@@ -161,6 +163,8 @@ final class ClientSuite extends FunSuite:
         Map(consumerRecord.topicPartition -> Some(offset))
       )
     )
+    assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), Set(partition))
+    assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> Set(partition)))
 
   private def committableOffset: CommittableOffset[Option] = offsetAt(partition, nextOffset)
 

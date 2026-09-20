@@ -70,8 +70,21 @@ private[xkafka] trait Consumer extends js.Object:
 private[xkafka] trait Admin extends js.Object:
   def connect(): js.Promise[Unit]                                                                                = js.native
   def disconnect(): js.Promise[Unit]                                                                             = js.native
+  def fetchTopicMetadata(options: TopicMetadataOptions): js.Promise[js.Array[TopicMetadata]]                     = js.native
   def fetchTopicOffsets(topic: String): js.Promise[js.Array[TopicOffsets]]                                       = js.native
   def fetchTopicOffsetsByTimestamp(topic: String, timestamp: Double): js.Promise[js.Array[TopicPartitionOffset]] = js.native
+
+@js.native
+private[xkafka] trait TopicMetadataOptions extends js.Object
+
+@js.native
+private[xkafka] trait TopicMetadata extends js.Object:
+  val name: String                            = js.native
+  val partitions: js.Array[PartitionMetadata] = js.native
+
+@js.native
+private[xkafka] trait PartitionMetadata extends js.Object:
+  val partitionId: Int = js.native
 
 @js.native
 private[xkafka] trait ProducerBatch extends js.Object
@@ -198,3 +211,8 @@ private[xkafka] object Values:
 
   def topicPartition(topic: String, partition: Int): TopicPartition =
     js.Dynamic.literal(topic = topic, partition = partition).asInstanceOf[TopicPartition]
+
+  def topicMetadataOptions(topics: js.UndefOr[js.Array[String]]): TopicMetadataOptions =
+    val result = js.Dynamic.literal()
+    topics.foreach(result.updateDynamic("topics")(_))
+    result.asInstanceOf[TopicMetadataOptions]

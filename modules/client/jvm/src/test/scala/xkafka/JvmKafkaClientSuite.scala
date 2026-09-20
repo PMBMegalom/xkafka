@@ -35,7 +35,7 @@ import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
 import org.apache.kafka.clients.consumer.{ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp}
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
-import org.apache.kafka.common.TopicPartition as JavaTopicPartition
+import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.serialization.ByteArraySerializer
 
 final class JvmKafkaClientSuite extends CatsEffectSuite:
@@ -93,6 +93,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         override def offsetsForTimes(
             timestampsToSearch: java.util.Map[JavaTopicPartition, java.lang.Long]
         ): java.util.Map[JavaTopicPartition, OffsetAndTimestamp] = JavaMap.of(javaTopicPartition, new OffsetAndTimestamp(0L, 1234L))
+    mock.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
     mock.schedulePollTask(() =>
       mock.rebalance(JavaList.of(javaTopicPartition))
       mock.updateBeginningOffsets(JavaMap.of(javaTopicPartition, Long.box(0L)))
@@ -134,6 +135,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         beginning  <- consumer.beginningOffsets(Set(consumed.record.topicPartition))
         end        <- consumer.endOffsets(Set(consumed.record.topicPartition))
         timed      <- consumer.offsetsForTimes(Map(consumed.record.topicPartition -> Timestamp.fromEpochMillis(1234L)))
+        partitions <- consumer.partitionsFor(topic)
+        topics     <- consumer.listTopics
         _          <- consumer.seek(consumed.record.topicPartition, consumed.record.offset)
         position = mock.position(javaTopicPartition)
       yield
@@ -146,5 +149,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(beginning, Map(consumed.record.topicPartition -> consumed.record.offset))
         assertEquals(end, Map(consumed.record.topicPartition -> consumed.offset.nextOffset))
         assertEquals(timed, Map(consumed.record.topicPartition -> Some(consumed.record.offset)))
+        assertEquals(partitions, Set(consumed.record.topicPartition.partition))
+        assertEquals(topics.get(topic), Some(partitions))
         assertEquals(position, 0L)
     .timeout(5.seconds)

@@ -78,8 +78,9 @@ Within the consumer resource, `assignment` reports the currently assigned
 topic-partitions, `committed` returns their broker-stored next offsets without
 sentinel values, `beginningOffsets` and `endOffsets` query the available offset
 range, `offsetsForTimes` finds the earliest available offsets at or after given
-timestamps, and `seek` changes the next offset fetched for an assigned
-topic-partition. `assignmentChanges(pollInterval)` is an FS2 stream which emits
+timestamps, `partitionsFor` and `listTopics` expose visible topic metadata, and
+`seek` changes the next offset fetched for an assigned topic-partition.
+`assignmentChanges(pollInterval)` is an FS2 stream which emits
 the current assignment immediately and subsequently only when a poll observes
 a different assignment. `partitionedRecords(pollInterval)` exposes a bounded
 record stream for each assigned topic-partition and ends that stream after the

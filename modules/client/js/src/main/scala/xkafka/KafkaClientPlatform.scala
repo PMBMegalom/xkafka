@@ -236,6 +236,18 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
               .map(_.flatten)
           .map(_.flatten.toMap)
 
+    override def partitionsFor(topic: Topic): F[Set[Partition]] =
+      topicMetadata(Some(js.Array(topic.value))).flatMap: values =>
+        values.find(_.name == topic.value) match
+          case Some(value) => value.partitions.toList.traverse(portablePartition).map(_.toSet)
+          case None => F.raiseError(new IllegalStateException(s"Confluent Kafka JavaScript did not return metadata for topic '${topic.value}'"))
+
+    override def listTopics: F[Map[Topic, Set[Partition]]] =
+      topicMetadata(None).flatMap(
+        _.toList.traverse: value =>
+          (topic(value.name), value.partitions.toList.traverse(portablePartition).map(_.toSet)).mapN(_ -> _)
+      ).map(_.toMap)
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
       F.delay(
         underlying.seek(confluent.Values.topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString))
@@ -290,6 +302,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     private def portableTopicPartition(value: confluent.TopicPartition): F[TopicPartition] =
       (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
 
+    private def portablePartition(value: confluent.PartitionMetadata): F[Partition] = partition(value.partitionId)
+
     private def optionalOffset(field: String, value: String | Null): F[Option[Offset]] =
       Option(value).fold(F.pure(Option.empty[Offset])): raw =>
         parseLong(field, raw).flatMap: parsed =>
@@ -320,6 +334,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
     private def missingOffset(field: String, topicPartition: TopicPartition): IllegalStateException =
       new IllegalStateException(s"Confluent Kafka JavaScript did not return a $field for $topicPartition")
+
+    private def topicMetadata(topics: Option[js.Array[String]]): F[js.Array[confluent.TopicMetadata]] =
+      admin.use(value => await(value.fetchTopicMetadata(confluent.Values.topicMetadataOptions(topics.orUndefined))))
 
     private def admin: Resource[F, confluent.Admin] =
       Resource.eval(F.delay(underlying.dependentAdmin())).flatMap: value =>

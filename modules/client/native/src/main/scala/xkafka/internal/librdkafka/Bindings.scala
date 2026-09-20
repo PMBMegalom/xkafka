@@ -156,6 +156,18 @@ private[xkafka] object Bindings:
       errorSize: CSize
   ): CInt = extern
 
+  def xkafka_consumer_metadata(consumer: CVoidPtr, topic: CString, error: CString, errorSize: CSize): CVoidPtr = extern
+
+  def xkafka_metadata_destroy(metadata: CVoidPtr): Unit = extern
+
+  def xkafka_metadata_topic_count(metadata: CVoidPtr): CSize = extern
+
+  def xkafka_metadata_topic_at(metadata: CVoidPtr, topicIndex: CSize): CString = extern
+
+  def xkafka_metadata_partition_count_at(metadata: CVoidPtr, topicIndex: CSize): CSize = extern
+
+  def xkafka_metadata_partition_at(metadata: CVoidPtr, topicIndex: CSize, partitionIndex: CSize): CInt = extern
+
   def xkafka_consumer_seek(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern
 
   def xkafka_consumer_commit(

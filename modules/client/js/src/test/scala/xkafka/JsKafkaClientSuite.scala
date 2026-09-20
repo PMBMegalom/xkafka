@@ -142,6 +142,17 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           js.Dynamic.literal(
             connect = (() => promise(dispatcher)(adminConnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
             disconnect = (() => promise(dispatcher)(adminDisconnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
+            fetchTopicMetadata =
+              (
+                  (_: confluent.TopicMetadataOptions) =>
+                    js.Promise.resolve(js.Array(
+                      js.Dynamic
+                        .literal(name = "events", partitions = js.Array(js.Dynamic.literal(partitionId = 4), js.Dynamic.literal(partitionId = 5)))
+                        .asInstanceOf[confluent.TopicMetadata],
+                      js.Dynamic.literal(name = "other", partitions = js.Array(js.Dynamic.literal(partitionId = 0)))
+                        .asInstanceOf[confluent.TopicMetadata]
+                    ))
+              ): js.Function1[confluent.TopicMetadataOptions, js.Promise[js.Array[confluent.TopicMetadata]]],
             fetchTopicOffsets =
               (
                   (_: String) =>
@@ -217,23 +228,25 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                   portable.offsetsForTimes(
                     Map(record.record.topicPartition -> Timestamp.fromEpochMillis(5678L), otherTopicPartition -> Timestamp.fromEpochMillis(5678L))
                   )
+                partitions     <- portable.partitionsFor(record.record.topicPartition.topic)
+                topics         <- portable.listTopics
                 _              <- portable.seek(record.record.topicPartition, record.record.offset)
                 seekedOffset   <- seeked.get
                 resolvedOffset <- resolved.get
                 timestampValue <- requestedTimestamp.get
-              yield (record, assignment, stored, beginning, end, timed, seekedOffset, resolvedOffset, timestampValue)
+              yield (record, assignment, stored, beginning, end, timed, partitions, topics, seekedOffset, resolvedOffset, timestampValue)
         connectedCount         <- connected.get
         disconnectedCount      <- disconnected.get
         adminConnectedCount    <- adminConnected.get
         adminDisconnectedCount <- adminDisconnected.get
         committedOffsets       <- committed.get
-        (record, assignment, stored, beginning, end, timed, seekedOffset, resolvedOffset, timestampValue) = result
+        (record, assignment, stored, beginning, end, timed, partitions, topics, seekedOffset, resolvedOffset, timestampValue) = result
         _ <-
           IO:
             assertEquals(connectedCount, 1)
             assertEquals(disconnectedCount, 1)
-            assertEquals(adminConnectedCount, 3)
-            assertEquals(adminDisconnectedCount, 3)
+            assertEquals(adminConnectedCount, 5)
+            assertEquals(adminDisconnectedCount, 5)
             assertEquals(record.record.topicPartition.topic, topic("events"))
             assertEquals(record.record.topicPartition.partition, partition(4))
             assertEquals(record.record.offset.value, 9007199254740993L)
@@ -251,6 +264,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 TopicPartition(record.record.topicPartition.topic, partition(5)) -> None
               )
             )
+            assertEquals(partitions, Set(partition(4), partition(5)))
+            assertEquals(topics, Map(topic("events") -> partitions, topic("other") -> Set(partition(0))))
             assertEquals(seekedOffset, ("events", 4, "9007199254740993"))
             assertEquals(resolvedOffset, "9007199254740993")
             assertEquals(timestampValue, 5678d)

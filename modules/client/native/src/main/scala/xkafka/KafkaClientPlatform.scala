@@ -248,6 +248,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
       if timestampsToSearch.isEmpty then F.pure(Map.empty) else semaphore.permit.use(_ => F.blocking(readOffsetsForTimes(timestampsToSearch)))
 
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = semaphore.permit.use(_ => F.blocking(readPartitionsFor(topic)))
+
+    override def listTopics: F[Map[Topic, Set[Partition]]] = semaphore.permit.use(_ => F.blocking(readTopicMetadata(None)))
+
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = semaphore.permit.use(_ => F.blocking(seekTo(topicPartition, offset)))
 
     private def poll(): Option[NativeRecord] =
@@ -427,6 +431,30 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               Option.when(value >= 0L)(Offset.from(value).fold(error => throw invalidBackendValue("timestamp offset", value, error), identity))
             topicPartition -> offset
         .toMap
+
+    private def readTopicMetadata(requestedTopic: Option[Topic]): Map[Topic, Set[Partition]] =
+      Zone.acquire: zone =>
+        given Zone   = zone
+        val error    = stackalloc[CChar](ErrorBufferSize)
+        val metadata =
+          Bindings
+            .xkafka_consumer_metadata(handle, requestedTopic.fold[CString](null)(topic => toCString(topic.value)), error, ErrorBufferSize.toUSize)
+        if metadata == null then throw nativeError(error)
+
+        try Vector.tabulate(Bindings.xkafka_metadata_topic_count(metadata).toInt): topicIndex =>
+            val topicValue = fromCString(Bindings.xkafka_metadata_topic_at(metadata, topicIndex.toUSize))
+            val topic      = Topic.from(topicValue).fold(error => throw invalidBackendValue("metadata topic", topicValue, error), identity)
+            val partitions =
+              Vector.tabulate(Bindings.xkafka_metadata_partition_count_at(metadata, topicIndex.toUSize).toInt): partitionIndex =>
+                val partitionValue = Bindings.xkafka_metadata_partition_at(metadata, topicIndex.toUSize, partitionIndex.toUSize)
+                Partition.from(partitionValue).fold(error => throw invalidBackendValue("metadata partition", partitionValue, error), identity)
+              .toSet
+            topic -> partitions
+          .toMap
+        finally Bindings.xkafka_metadata_destroy(metadata)
+
+    private def readPartitionsFor(topic: Topic): Set[Partition] =
+      readTopicMetadata(Some(topic)).getOrElse(topic, throw new LibrdkafkaException(s"librdkafka did not return metadata for topic '${topic.value}'"))
 
     private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =
       Zone.acquire: zone =>

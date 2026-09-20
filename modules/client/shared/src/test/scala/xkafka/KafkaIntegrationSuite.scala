@@ -130,10 +130,10 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
     val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
     val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
-    val timestamp        = Timestamp.fromEpochMillis(1700000000000L)
-    val record           = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition), timestamp = Some(timestamp))
 
     for
+      timestamp <- IO.realTime.map(value => Timestamp.fromEpochMillis(value.toMillis))
+      record = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition), timestamp = Some(timestamp))
       _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(NonEmptyList.one(record))).timeout(45.seconds)
       consumed <-
         PlatformKafkaClient().consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
@@ -146,16 +146,19 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
                 end        <- consumer.endOffsets(Set(topicPartition))
                 timed      <- consumer.offsetsForTimes(Map(topicPartition -> timestamp))
                 missing    <- consumer.offsetsForTimes(Map(topicPartition -> Timestamp.fromEpochMillis(timestamp.epochMillis + 1L)))
+                partitions <- consumer.partitionsFor(topic)
+                topics     <- consumer.listTopics
                 _          <- value.offset.commit
                 stored     <- consumer.committed(Set(topicPartition))
                 _          <- consumer.seek(topicPartition, value.record.offset)
-              yield (value, Some((assignment, before, stored, beginning, end, timed, missing)))
+              yield (value, Some((assignment, before, stored, beginning, end, timed, missing, partitions, topics)))
             case (value, _) => IO.pure((value, None))
           .take(2).compile.toList.timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer control test timed out")))
     yield
-      val first                                                        = consumed.head
-      val replayed                                                     = consumed.last
-      val (assignment, before, stored, beginning, end, timed, missing) = first._2.getOrElse(fail("missing consumer control results"))
+      val first                                                                            = consumed.head
+      val replayed                                                                         = consumed.last
+      val (assignment, before, stored, beginning, end, timed, missing, partitions, topics) =
+        first._2.getOrElse(fail("missing consumer control results"))
       assertEquals(assignment, Set(topicPartition))
       assertEquals(before, Map(topicPartition -> None))
       assertEquals(stored, Map(topicPartition -> Some(first._1.offset.nextOffset)))
@@ -163,6 +166,8 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(end, Map(topicPartition -> first._1.offset.nextOffset))
       assertEquals(timed, Map(topicPartition -> Some(first._1.record.offset)))
       assertEquals(missing, Map(topicPartition -> None))
+      assertEquals(partitions, Set(partition))
+      assertEquals(topics.get(topic), Some(partitions))
       assertEquals(replayed._1.record.offset, first._1.record.offset)
       assertEquals(replayed._1.record.value, "control-value")
 

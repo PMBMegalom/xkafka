@@ -50,4 +50,6 @@ final class AssignmentChangesSuite extends CatsEffectSuite:
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                      = IO.pure(Map.empty)
       override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                            = IO.pure(Map.empty)
       override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] = IO.pure(Map.empty)
+      override def partitionsFor(topic: Topic): IO[Set[Partition]]                                                              = IO.pure(Set.empty)
+      override def listTopics: IO[Map[Topic, Set[Partition]]]                                                                   = IO.pure(Map.empty)
       override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]                                               = IO.unit
