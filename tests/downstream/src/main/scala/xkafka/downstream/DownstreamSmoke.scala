@@ -24,7 +24,7 @@ package downstream
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, ValidatedNel}
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
@@ -42,12 +42,12 @@ object DownstreamSmoke extends IOApp.Simple:
     val suffix           = System.currentTimeMillis().toString
     val topic            = Topic.from(s"xkafka-downstream-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
     val group            = ConsumerGroup.from(s"xkafka-downstream-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
-    val client           = ClientSettings(NonEmptyList.one(bootstrapServer))
-    val producerSettings = ProducerSettings(client, utf8Serializer, utf8Serializer)
-    val consumerSettings = ConsumerSettings(client, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
     val expected         = ProducerRecord(topic, "downstream-key", "downstream-value")
 
     for
+      client           <- validated(ClientSettings.from(NonEmptyList.one(bootstrapServer)))
+      producerSettings <- validated(ProducerSettings.from(client, utf8Serializer, utf8Serializer))
+      consumerSettings <- validated(ConsumerSettings.from(client, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest))
       produced <- KafkaClient[IO].producer(producerSettings).use(_.produce(NonEmptyList.one(expected))).timeout(45.seconds)
       consumed <- KafkaClient[IO]
         .consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic)))
@@ -58,3 +58,6 @@ object DownstreamSmoke extends IOApp.Simple:
       _ <- IO.raiseUnless(consumed.record.value == expected.value)(new AssertionError(s"unexpected value: ${consumed.record.value}"))
       _ <- IO.println("xkafka downstream smoke test passed")
     yield ()
+
+  private def validated[A](result: ValidatedNel[SettingsError, A]): IO[A] =
+    IO.fromEither(result.toEither.leftMap(errors => new IllegalArgumentException(errors.toList.map(_.message).mkString("; "))))

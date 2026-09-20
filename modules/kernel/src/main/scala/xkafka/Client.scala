@@ -25,41 +25,101 @@ import scala.concurrent.duration.FiniteDuration
 
 import cats.{Applicative, Foldable}
 import cats.arrow.FunctionK
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, Validated, ValidatedNel}
 import cats.effect.{Async, Temporal}
 import cats.tagless.FunctorK
 import fs2.{Pipe, Stream}
 
-final case class ClientSettings(bootstrapServers: NonEmptyList[String], clientId: Option[String] = None, properties: Map[String, String] = Map.empty)
+enum SettingsError derives CanEqual:
+  case BlankBootstrapServer(index: Int)
+  case BlankPropertyName(scope: SettingsError.PropertyScope)
 
-final case class ProducerSettings[F[_], K, V](
+  def message: String =
+    this match
+      case BlankBootstrapServer(index) => s"bootstrapServers[$index] must not be blank"
+      case BlankPropertyName(scope)    => s"${scope.label} properties must not contain a blank name"
+
+object SettingsError:
+  enum PropertyScope(val label: String) derives CanEqual:
+    case Client   extends PropertyScope("client")
+    case Producer extends PropertyScope("producer")
+    case Consumer extends PropertyScope("consumer")
+
+private def validateSettings(errors: List[SettingsError]): ValidatedNel[SettingsError, Unit] =
+  NonEmptyList.fromList(errors).fold[ValidatedNel[SettingsError, Unit]](Validated.Valid(()))(Validated.Invalid(_))
+
+private def propertyErrors(properties: Map[String, String], scope: SettingsError.PropertyScope): List[SettingsError] =
+  Option.when(properties.keysIterator.exists(_.trim.isEmpty))(SettingsError.BlankPropertyName(scope)).toList
+
+private def redacted(properties: Map[String, String]): Map[String, String] = properties.keysIterator.map(_ -> "<redacted>").toMap
+
+sealed abstract case class ClientSettings private (bootstrapServers: NonEmptyList[String], clientId: Option[String], properties: Map[String, String]):
+  override def toString: String = s"ClientSettings($bootstrapServers,$clientId,${redacted(properties)})"
+
+object ClientSettings:
+  def from(
+      bootstrapServers: NonEmptyList[String],
+      clientId: Option[String] = None,
+      properties: Map[String, String] = Map.empty
+  ): ValidatedNel[SettingsError, ClientSettings] =
+    val bootstrapErrors =
+      bootstrapServers.toList.zipWithIndex.collect:
+        case (server, index) if server.trim.isEmpty => SettingsError.BlankBootstrapServer(index)
+    validateSettings(bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client))
+      .map(_ => new ClientSettings(bootstrapServers, clientId, properties) {})
+
+sealed abstract case class ProducerSettings[F[_], K, V] private (
     client: ClientSettings,
     keySerializer: Serializer[F, K],
     valueSerializer: Serializer[F, V],
-    properties: Map[String, String] = Map.empty
+    properties: Map[String, String]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
-    ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties)
+    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties) {}
+
+  override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)})"
 
 object ProducerSettings:
+  def from[F[_], K, V](
+      client: ClientSettings,
+      keySerializer: Serializer[F, K],
+      valueSerializer: Serializer[F, V],
+      properties: Map[String, String] = Map.empty
+  ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Producer))
+      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties) {})
+
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
 
 enum AutoOffsetReset:
   case Earliest, Latest
 
-final case class ConsumerSettings[F[_], K, V](
+sealed abstract case class ConsumerSettings[F[_], K, V] private (
     client: ClientSettings,
     groupId: ConsumerGroup,
     keyDeserializer: Deserializer[F, K],
     valueDeserializer: Deserializer[F, V],
-    autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
-    properties: Map[String, String] = Map.empty
+    autoOffsetReset: AutoOffsetReset,
+    properties: Map[String, String]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
-    ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, properties)
+    new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, properties) {}
+
+  override def toString: String = s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,${redacted(properties)})"
 
 object ConsumerSettings:
+  def from[F[_], K, V](
+      client: ClientSettings,
+      groupId: ConsumerGroup,
+      keyDeserializer: Deserializer[F, K],
+      valueDeserializer: Deserializer[F, V],
+      autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
+      properties: Map[String, String] = Map.empty
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Consumer))
+      .map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, properties) {})
+
   given [K, V]: FunctorK[[F[_]] =>> ConsumerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ConsumerSettings[F, K, V])(fk: FunctionK[F, G]): ConsumerSettings[G, K, V] = settings.mapK(fk)
 

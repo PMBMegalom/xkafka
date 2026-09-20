@@ -42,21 +42,15 @@ object ProduceExample extends IOApp.Simple:
 
   private val utf8 = Serializer.utf8[IO]
 
-  private val settings = ProducerSettings(
-    client = ClientSettings(NonEmptyList.one("localhost:9092")),
-    keySerializer = utf8,
-    valueSerializer = utf8
-  )
+  private val settings =
+    ClientSettings.from(NonEmptyList.one("localhost:9092")).andThen: client =>
+      ProducerSettings.from(client, utf8, utf8)
 
   override def run: IO[Unit] =
-    KafkaClient[IO]
-      .producer(settings)
-      .use(
-        _.produce(
-          NonEmptyList.one(ProducerRecord(topic, "key", "value"))
-        )
-      )
-      .void
+    settings.fold(
+      errors => IO.raiseError(new IllegalArgumentException(errors.toList.map(_.message).mkString("; "))),
+      settings => KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.one(ProducerRecord(topic, "key", "value")))).void
+    )
 ```
 
 Consumers expose an FS2 stream of `CommittableConsumerRecord`. A successful
@@ -104,17 +98,11 @@ Client, producer, and consumer settings each accept an immutable `properties`
 map for backend configuration not modeled directly by xkafka:
 
 ```scala
-val client = ClientSettings(
+val producer = ClientSettings.from(
   bootstrapServers = NonEmptyList.one("localhost:9092"),
   properties = Map("metadata.max.age.ms" -> "30000")
-)
-
-val producer = ProducerSettings(
-  client = client,
-  keySerializer = utf8,
-  valueSerializer = utf8,
-  properties = Map("linger.ms" -> "5")
-)
+).andThen: client =>
+  ProducerSettings.from(client, utf8, utf8, properties = Map("linger.ms" -> "5"))
 ```
 
 Producer or consumer properties override client properties. Values managed by
@@ -122,6 +110,10 @@ xkafka, including bootstrap servers, client and group IDs, offset reset, and
 automatic commits, cannot be overridden through the map. Property names and
 values are interpreted by the selected backend; portable applications should
 use only properties supported with the same meaning by each target backend.
+The `from` constructors return `ValidatedNel[SettingsError, *]`, accumulate
+portable configuration errors, and only construct valid settings. Blank
+bootstrap servers and property names are rejected; backend-specific
+configuration remains the selected backend's responsibility.
 
 Backend-reported failures are exposed as `KafkaException.BackendFailure`, which
 preserves the original cause and includes error codes and retriable or fatal

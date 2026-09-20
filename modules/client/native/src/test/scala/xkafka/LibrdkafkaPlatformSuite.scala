@@ -32,13 +32,14 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
   test("allocates and releases a native producer"):
     val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
-    val settings   = ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092"), Some("native-test")), serializer, serializer)
+    val client     = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("native-test")).toOption.get
+    val settings   = ProducerSettings.from(client, serializer, serializer).toOption.get
 
     KafkaClient[IO].producer(settings).use(_ => IO.unit)
 
   test("passes custom producer properties to librdkafka"):
     val serializer = Serializer.const[IO, String](None)
-    val settings   =
-      ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092")), serializer, serializer, Map("message.timeout.ms" -> "not-a-duration"))
+    val client     = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
+    val settings   = ProducerSettings.from(client, serializer, serializer, Map("message.timeout.ms" -> "not-a-duration")).toOption.get
 
     interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))

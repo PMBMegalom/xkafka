@@ -45,8 +45,9 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     val client           = source.imapK(ioToErrorIO)(errorIOToIO)
     val serializer       = Serializer.const[ErrorIO, String](Some(Chunk.array(Array[Byte](1))))
     val deserializer     = Deserializer.instance[ErrorIO, String]((_, _, _) => EitherT.rightT("value"))
-    val producerSettings = ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092")), serializer, serializer)
-    val consumerSettings = ConsumerSettings(ClientSettings(NonEmptyList.one("localhost:9092")), group, deserializer, deserializer)
+    val clientSettings   = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
+    val producerSettings = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val consumerSettings = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
     val record           = ProducerRecord(topic, "key", "value")
 
     for

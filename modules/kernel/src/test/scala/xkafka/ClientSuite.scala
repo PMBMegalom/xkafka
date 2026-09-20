@@ -21,9 +21,11 @@
 
 package xkafka
 
+import scala.compiletime.testing.typeCheckErrors
+
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
-import cats.effect.SyncIO
+import cats.effect.{IO, SyncIO}
 import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.{Chunk, Stream}
@@ -38,7 +40,7 @@ final class ClientSuite extends FunSuite:
   private val nextOffset     = Offset.from(1L).toOption.get
   private val timestamp      = Timestamp.fromEpochMillis(1234L)
   private val group          = ConsumerGroup.from("workers").toOption.get
-  private val clientSettings = ClientSettings(NonEmptyList.one("localhost:9092"))
+  private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
   private val producerRecord = ProducerRecord(topic, "key", "value")
   private val consumerRecord = ConsumerRecord(TopicPartition(topic, partition), offset, None, "key", "value", Headers.empty)
 
@@ -50,11 +52,74 @@ final class ClientSuite extends FunSuite:
     new FunctionK[Option, SyncIO]:
       override def apply[A](value: Option[A]): SyncIO[A] = value.fold(SyncIO.raiseError(new NoSuchElementException("empty")))(SyncIO.pure)
 
+  test("valid settings succeed"):
+    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> ""))
+
+    assert(settings.isValid)
+
+  test("settings cannot bypass their validated constructors"):
+    assert(typeCheckErrors("new xkafka.ClientSettings(???, ???, ???)").nonEmpty)
+    assert(typeCheckErrors("new xkafka.ProducerSettings(???, ???, ???, ???)").nonEmpty)
+    assert(typeCheckErrors("new xkafka.ConsumerSettings(???, ???, ???, ???, ???, ???)").nonEmpty)
+    assert(typeCheckErrors("xkafka.ClientSettings(???, ???, ???)").nonEmpty)
+    assert(typeCheckErrors("xkafka.ProducerSettings(???, ???, ???, ???)").nonEmpty)
+    assert(typeCheckErrors("xkafka.ConsumerSettings(???, ???, ???, ???, ???, ???)").nonEmpty)
+    assert(typeCheckErrors("(??? : xkafka.ClientSettings).copy()").nonEmpty)
+
+  test("settings retain structural case-class semantics without exposing property values"):
+    val firstClient    = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> "client-secret")).toOption.get
+    val secondClient   = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> "client-secret")).toOption.get
+    val serializer     = Serializer.const[IO, String](None)
+    val firstProducer  = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
+    val secondProducer = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
+    val deserializer   = Deserializer.utf8[IO]
+    val firstConsumer  =
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("sasl.password" -> "consumer-secret")).toOption.get
+    val secondConsumer =
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("sasl.password" -> "consumer-secret")).toOption.get
+    val renderedSettings = List(firstClient.toString, firstProducer.toString, firstConsumer.toString)
+
+    assertEquals(firstClient, secondClient)
+    assertEquals(firstClient.hashCode, secondClient.hashCode)
+    assertEquals(firstClient.productPrefix, "ClientSettings")
+    assertEquals(firstProducer, secondProducer)
+    assertEquals(firstProducer.hashCode, secondProducer.hashCode)
+    assertEquals(firstProducer.productPrefix, "ProducerSettings")
+    assertEquals(firstConsumer, secondConsumer)
+    assertEquals(firstConsumer.hashCode, secondConsumer.hashCode)
+    assertEquals(firstConsumer.productPrefix, "ConsumerSettings")
+    assert(renderedSettings.forall(_.contains("<redacted>")))
+    assert(renderedSettings.forall(!_.contains("-secret")))
+
+  test("client settings accumulate portable validation errors"):
+    val settings = ClientSettings.from(NonEmptyList.of("", " ", "localhost:9092"), properties = Map("" -> "value"))
+
+    assertEquals(
+      settings.toEither,
+      Left(NonEmptyList.of(
+        SettingsError.BlankBootstrapServer(0),
+        SettingsError.BlankBootstrapServer(1),
+        SettingsError.BlankPropertyName(SettingsError.PropertyScope.Client)
+      ))
+    )
+
+  test("producer settings validate producer properties during construction"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer, properties = Map(" " -> "value"))
+
+    assertEquals(settings.toEither, Left(NonEmptyList.one(SettingsError.BlankPropertyName(SettingsError.PropertyScope.Producer))))
+
+  test("consumer settings validate consumer properties during construction"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer, properties = Map("" -> "value"))
+
+    assertEquals(settings.toEither, Left(NonEmptyList.one(SettingsError.BlankPropertyName(SettingsError.PropertyScope.Consumer))))
+
   test("producer and consumer settings support natural transformations"):
     val serializer     = Serializer.instance[Option, String]((_, _, value) => Some(Some(Chunk.array(value.getBytes("UTF-8")))))
     val deserializer   = Deserializer.instance[Option, String]((_, _, bytes) => bytes.map(chunk => new String(chunk.toArray, "UTF-8")))
-    val producer       = ProducerSettings(clientSettings, serializer, serializer)
-    val consumer       = ConsumerSettings(clientSettings, group, deserializer, deserializer)
+    val producer       = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val consumer       = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
     val mappedProducer = FunctorK[[F[_]] =>> ProducerSettings[F, String, String]].mapK(producer)(optionToErrorOr)
     val mappedConsumer = FunctorK[[F[_]] =>> ConsumerSettings[F, String, String]].mapK(consumer)(optionToErrorOr)
     val bytes          = Some(Chunk.array("value".getBytes("UTF-8")))

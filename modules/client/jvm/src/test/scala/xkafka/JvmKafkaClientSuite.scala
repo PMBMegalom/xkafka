@@ -46,7 +46,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.raiseError(cause)
 
     val serializer = Serializer.const[IO, String](None)
-    val settings   = ProducerSettings(ClientSettings(NonEmptyList.one("unused:9092")), serializer, serializer)
+    val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings   = ProducerSettings.from(client, serializer, serializer).toOption.get
 
     interceptIO[KafkaException.BackendFailure](KafkaClientPlatform.fromFs2[IO].producer(settings).use(_ => IO.unit)).map: error =>
       assertEquals(error.retriable, Some(true))
@@ -71,13 +72,12 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val valueSerializer =
       Serializer.instance[IO, String]: (_, _, value) =>
         IO.pure(Some(Chunk.array(value.getBytes("UTF-8"))))
+    val client =
+      ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip", "client.id" -> "ignored")).toOption.get
     val settings =
-      ProducerSettings(
-        ClientSettings(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip", "client.id" -> "ignored")),
-        keySerializer,
-        valueSerializer,
-        Map("compression.type" -> "lz4", "acks" -> "all", "bootstrap.servers" -> "ignored:9092")
-      )
+      ProducerSettings
+        .from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4", "acks" -> "all", "bootstrap.servers" -> "ignored:9092"))
+        .toOption.get
     val record =
       ProducerRecord(
         topic = topic,
@@ -129,15 +129,17 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val valueDeserializer =
       Deserializer.instance[IO, String]: (_, _, bytes) =>
         IO.pure(new String(bytes.get.toArray, StandardCharsets.UTF_8))
+    val client =
+      ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1", "group.id" -> "ignored")).toOption.get
     val settings =
-      ConsumerSettings(
-        ClientSettings(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1", "group.id" -> "ignored")),
+      ConsumerSettings.from(
+        client,
         group,
         keyDeserializer,
         valueDeserializer,
         AutoOffsetReset.Earliest,
         Map("fetch.min.bytes" -> "2", "enable.auto.commit" -> "true", "auto.offset.reset" -> "none")
-      )
+      ).toOption.get
 
     KafkaClientPlatform.fromFs2[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
       for

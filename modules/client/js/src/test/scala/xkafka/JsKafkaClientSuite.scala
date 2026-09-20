@@ -42,7 +42,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           disconnect = (() => js.Promise.resolve(())): js.Function0[js.Promise[Unit]]
         ).asInstanceOf[confluent.Producer]
       val serializer = Serializer.const[IO, String](None)
-      val settings   = ProducerSettings(clientSettings, serializer, serializer)
+      val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
 
       interceptIO[KafkaException.BackendFailure](
         KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use(_ => IO.unit)
@@ -112,7 +112,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 Header("nullable", None)
               )
           )
-        settings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "5"))
+        settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "5")).toOption.get
         result <-
           KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5")))
             .producer(settings).use(_.produce(NonEmptyList.one(record)))
@@ -215,7 +215,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               ): js.Function1[confluent.TopicPartitionOffset, Unit]
           ).asInstanceOf[confluent.Consumer]
         settings =
-          ConsumerSettings(clientSettings, consumerGroup("tests"), utf8Deserializer, utf8Deserializer, properties = Map("fetch.min.bytes" -> "2"))
+          ConsumerSettings
+            .from(clientSettings, consumerGroup("tests"), utf8Deserializer, utf8Deserializer, properties = Map("fetch.min.bytes" -> "2")).toOption.get
         result <-
           KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.min.bytes" -> "2")))
             .consumer(settings, Subscription.Topics(NonEmptyList.one(topic("events")))).use: portable =>
@@ -288,7 +289,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             assertEquals(committedOffsets, Vector(("events", 4, "9007199254740994")))
       yield ()
 
-  private val clientSettings = ClientSettings(NonEmptyList.one("localhost:9092"), Some("tests"))
+  private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 
   private val utf8Serializer: Serializer[IO, String] = Serializer.instance((_, _, value) => IO.pure(Some(Chunk.array(value.getBytes("UTF-8")))))
 

@@ -55,7 +55,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val topic          = validTopic(s"$topicPrefix-events")
     val topicPattern   = validTopicPattern(s"$topicPrefix-.*")
     val group          = validConsumerGroup(s"xkafka-integration-$suffix")
-    val clientSettings = ClientSettings(NonEmptyList.one(bootstrapServer), properties = Map("metadata.max.age.ms" -> "30000"))
+    val clientSettings = ClientSettings.from(NonEmptyList.one(bootstrapServer), properties = Map("metadata.max.age.ms" -> "30000")).toOption.get
     val headers        = Headers(Header("x-xkafka-integration", Some(Chunk.array(Array[Byte](1, 2, 3)))))
     val partition      = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
     val first          =
@@ -74,9 +74,10 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         partition = Some(partition),
         headers = headers
       )
-    val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "0"))
+    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "0")).toOption.get
     val consumerSettings =
-      ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, Map("fetch.min.bytes" -> "1"))
+      ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, Map("fetch.min.bytes" -> "1"))
+        .toOption.get
 
     for
       produced <-
@@ -105,9 +106,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val secondTopic      = validTopic(s"$topicPrefix-second")
     val subscription     = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
     val group            = validConsumerGroup(s"xkafka-batch-integration-$suffix")
-    val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
-    val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
-    val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
+    val clientSettings   = ClientSettings.from(NonEmptyList.one(bootstrapServer)).toOption.get
+    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
+    val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
     val firstRecords     = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-1"), ProducerRecord(secondTopic, "second-key", "second-1"))
     val secondRecords    = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-2"), ProducerRecord(secondTopic, "second-key", "second-2"))
 
@@ -127,9 +128,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val partition        = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
     val topicPartition   = TopicPartition(topic, partition)
     val group            = validConsumerGroup(s"xkafka-control-integration-$suffix")
-    val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
-    val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
-    val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
+    val clientSettings   = ClientSettings.from(NonEmptyList.one(bootstrapServer)).toOption.get
+    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
+    val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
 
     for
       timestamp <- IO.realTime.map(value => Timestamp.fromEpochMillis(value.toMillis))
@@ -178,9 +179,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val secondTopic      = validTopic(s"$topicPrefix-second")
     val subscription     = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
     val group            = validConsumerGroup(s"xkafka-partitioned-integration-$suffix")
-    val clientSettings   = ClientSettings(NonEmptyList.one(bootstrapServer))
-    val producerSettings = ProducerSettings(clientSettings, utf8Serializer, utf8Serializer)
-    val consumerSettings = ConsumerSettings(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
+    val clientSettings   = ClientSettings.from(NonEmptyList.one(bootstrapServer)).toOption.get
+    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
+    val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
     val records          = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
 
     for
