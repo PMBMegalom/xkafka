@@ -25,7 +25,7 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import cats.data.NonEmptyList
-import cats.effect.{Async, Resource}
+import cats.effect.{Async, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Semaphore, Supervisor}
 import cats.syntax.all.*
@@ -43,20 +43,36 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private val PollTimeoutMillis   = 100
   private val UnassignedPartition = -1
 
-  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
+  /** A librdkafka client.handle, and the gate that keeps calls from reaching it once it has been destroyed.
+    *
+    * Destroying takes the permit, so whatever call is already running finishes first, and sets the flag, so a call that arrives afterwards is refused
+    * while the pointer it would have passed to librdkafka is already freed.
+    */
+  private final class NativeClient(val handle: CVoidPtr, semaphore: Semaphore[F], closed: Ref[F, Boolean]):
+    def apply[A](operation: => A): F[A] =
+      semaphore.permit.use: _ =>
+        closed.get.flatMap: isClosed =>
+          if isClosed then F.raiseError(new IllegalStateException("the client is closed")) else F.blocking(operation)
+
+  private def nativeClient(acquire: F[CVoidPtr], destroy: CVoidPtr => Unit): Resource[F, NativeClient] =
     for
       semaphore <- Resource.eval(Semaphore[F](1))
-      handle <- Resource.make(createProducer(settings))(producer => semaphore.permit.use(_ => F.blocking(Bindings.xkafka_producer_destroy(producer))))
-      // Outstanding acknowledgements finish before the handle they poll is destroyed.
+      closed    <- Resource.eval(Ref.of[F, Boolean](false))
+      handle    <- Resource.make(acquire)(value => semaphore.permit.use(_ => closed.set(true) >> F.blocking(destroy(value))))
+    yield new NativeClient(handle, semaphore, closed)
+
+  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
+    for
+      client <- nativeClient(createProducer(settings), Bindings.xkafka_producer_destroy)
+      // Outstanding acknowledgements finish before the client.handle they poll is destroyed.
       supervisor <- Supervisor[F](await = true)
-    yield new LibrdkafkaProducer(handle, semaphore, supervisor, settings)
+    yield new LibrdkafkaProducer(client, supervisor, settings)
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      semaphore <- Resource.eval(Semaphore[F](1))
-      handle <- Resource.make(createConsumer(settings))(consumer => semaphore.permit.use(_ => F.blocking(Bindings.xkafka_consumer_destroy(consumer))))
-      _      <- Resource.eval(semaphore.permit.use(_ => F.blocking(subscribe(handle, subscription))))
-    yield new LibrdkafkaConsumer(handle, semaphore, settings)
+      client <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
+      _      <- Resource.eval(client(subscribe(client.handle, subscription)))
+    yield new LibrdkafkaConsumer(client, settings)
 
   private def createProducer[K, V](settings: ProducerSettings[F, K, V]): F[CVoidPtr] =
     F.blocking:
@@ -167,25 +183,17 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     val bytes = pointer.asInstanceOf[Ptr[Byte]]
     Chunk.array(Array.tabulate(size.toInt)(bytes(_)))
 
-  private final class LibrdkafkaProducer[K, V](
-      handle: CVoidPtr,
-      semaphore: Semaphore[F],
-      supervisor: Supervisor[F],
-      settings: ProducerSettings[F, K, V]
-  ) extends KafkaProducer[F, K, V]:
+  private final class LibrdkafkaProducer[K, V](client: NativeClient, supervisor: Supervisor[F], settings: ProducerSettings[F, K, V])
+      extends KafkaProducer[F, K, V]:
 
     /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip. */
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
       for
         encoded <- records.traverse(encodeRecord)
-        batch   <- semaphore.permit.use(_ => F.blocking(enqueue(encoded)))
+        batch   <- client(enqueue(encoded))
         // The batch is heap allocated and librdkafka writes into it after the enqueue returns, so releasing it
         // is owned by a supervised fiber. Dropping the acknowledgement therefore cannot leak it.
-        awaiting <-
-          supervisor.supervise(
-            semaphore.permit.use(_ => F.blocking(awaitBatch(batch, records)))
-              .guarantee(semaphore.permit.use(_ => F.blocking(Bindings.xkafka_batch_destroy(handle, batch))))
-          )
+        awaiting <- supervisor.supervise(client(awaitBatch(batch, records)).guarantee(client(Bindings.xkafka_batch_destroy(client.handle, batch))))
       yield awaiting.joinWithNever
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
@@ -208,7 +216,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             val headers                   = nativeHeaders(record.headers, error, errorCode)
             val result                    =
               Bindings.xkafka_batch_add(
-                handle,
+                client.handle,
                 batch,
                 toCString(record.topic.value),
                 record.partition.fold(UnassignedPartition)(_.value),
@@ -226,7 +234,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         batch
       catch
         case failure: Throwable =>
-          Bindings.xkafka_batch_destroy(handle, batch)
+          Bindings.xkafka_batch_destroy(client.handle, batch)
           throw failure
 
     private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
@@ -248,7 +256,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       Zone.acquire: zone =>
         given Zone             = zone
         val (error, errorCode) = errorSlots
-        val result             = Bindings.xkafka_batch_await(handle, batch, error, ErrorBufferSize.toUSize, errorCode)
+        val result             = Bindings.xkafka_batch_await(client.handle, batch, error, ErrorBufferSize.toUSize, errorCode)
         if result != 0 then throw nativeError(error, errorCode)
 
         val reported = Bindings.xkafka_batch_count(batch).toInt
@@ -285,20 +293,18 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       headers: Headers
   )
 
-  private final class LibrdkafkaConsumer[K, V](handle: CVoidPtr, semaphore: Semaphore[F], settings: ConsumerSettings[F, K, V])
-      extends KafkaConsumer[F, K, V]:
+  private final class LibrdkafkaConsumer[K, V](client: NativeClient, settings: ConsumerSettings[F, K, V]) extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = semaphore.permit.use(_ => F.blocking(commitOffsets(offsets)))
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
 
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      Stream.repeatEval(semaphore.permit.use(_ => F.blocking(poll()))).unNone.evalMap(decode)
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = Stream.repeatEval(client(poll())).unNone.evalMap(decode)
 
-    override def assignment: F[Set[TopicPartition]] = semaphore.permit.use(_ => F.blocking(readAssignment()))
+    override def assignment: F[Set[TopicPartition]] = client(readAssignment())
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
-      if topicPartitions.isEmpty then F.pure(Map.empty) else semaphore.permit.use(_ => F.blocking(readCommitted(topicPartitions)))
+      if topicPartitions.isEmpty then F.pure(Map.empty) else client(readCommitted(topicPartitions))
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "beginning offset", (low, _) => low)
@@ -307,20 +313,20 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       boundaryOffsets(topicPartitions, "end offset", (_, high) => high)
 
     override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
-      if timestampsToSearch.isEmpty then F.pure(Map.empty) else semaphore.permit.use(_ => F.blocking(readOffsetsForTimes(timestampsToSearch)))
+      if timestampsToSearch.isEmpty then F.pure(Map.empty) else client(readOffsetsForTimes(timestampsToSearch))
 
-    override def partitionsFor(topic: Topic): F[Set[Partition]] = semaphore.permit.use(_ => F.blocking(readPartitionsFor(topic)))
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(topic))
 
-    override def listTopics: F[Map[Topic, Set[Partition]]] = semaphore.permit.use(_ => F.blocking(readTopicMetadata(None)))
+    override def listTopics: F[Map[Topic, Set[Partition]]] = client(readTopicMetadata(None))
 
-    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = semaphore.permit.use(_ => F.blocking(seekTo(topicPartition, offset)))
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = client(seekTo(topicPartition, offset))
 
     private def poll(): Option[NativeRecord] =
       Zone.acquire: zone =>
         given Zone             = zone
         val status             = stackalloc[CInt]()
         val (error, errorCode) = errorSlots
-        val message            = Bindings.xkafka_consumer_poll(handle, PollTimeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
+        val message            = Bindings.xkafka_consumer_poll(client.handle, PollTimeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
 
         if !status < 0 then throw nativeError(error, errorCode)
         else if !status == 0 then None
@@ -391,15 +397,23 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               nativeOffsets(index) = offset.value
           val (error, errorCode) = errorSlots
           val result             =
-            Bindings
-              .xkafka_consumer_commit(handle, topics, partitions, nativeOffsets, entries.size.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+            Bindings.xkafka_consumer_commit(
+              client.handle,
+              topics,
+              partitions,
+              nativeOffsets,
+              entries.size.toUSize,
+              error,
+              ErrorBufferSize.toUSize,
+              errorCode
+            )
           if result != 0 then throw nativeError(error, errorCode)
 
     private def readAssignment(): Set[TopicPartition] =
       Zone.acquire: zone =>
         given Zone             = zone
         val (error, errorCode) = errorSlots
-        val assignment         = Bindings.xkafka_consumer_assignment(handle, error, ErrorBufferSize.toUSize, errorCode)
+        val assignment         = Bindings.xkafka_consumer_assignment(client.handle, error, ErrorBufferSize.toUSize, errorCode)
         if assignment == null then throw nativeError(error, errorCode)
 
         try Vector.tabulate(Bindings.xkafka_assignment_count(assignment).toInt): index =>
@@ -425,8 +439,16 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             partitions(index) = topicPartition.partition.value
         val (error, errorCode) = errorSlots
         val result             =
-          Bindings
-            .xkafka_consumer_committed(handle, topics, partitions, entries.size.toUSize, committedOffsets, error, ErrorBufferSize.toUSize, errorCode)
+          Bindings.xkafka_consumer_committed(
+            client.handle,
+            topics,
+            partitions,
+            entries.size.toUSize,
+            committedOffsets,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
         if result != 0 then throw nativeError(error, errorCode)
         entries.iterator.zipWithIndex.map:
           case (topicPartition, index) =>
@@ -438,8 +460,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         .toMap
 
     private def boundaryOffsets(topicPartitions: Set[TopicPartition], field: String, select: (Long, Long) => Long): F[Map[TopicPartition, Offset]] =
-      if topicPartitions.isEmpty then F.pure(Map.empty)
-      else semaphore.permit.use(_ => F.blocking(readBoundaryOffsets(topicPartitions, field, select)))
+      if topicPartitions.isEmpty then F.pure(Map.empty) else client(readBoundaryOffsets(topicPartitions, field, select))
 
     private def readBoundaryOffsets(topicPartitions: Set[TopicPartition], field: String, select: (Long, Long) => Long): Map[TopicPartition, Offset] =
       Zone.acquire: zone =>
@@ -450,7 +471,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           val (error, errorCode) = errorSlots
           val result             =
             Bindings.xkafka_consumer_watermark_offsets(
-              handle,
+              client.handle,
               toCString(topicPartition.topic.value),
               topicPartition.partition.value,
               low,
@@ -481,7 +502,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         val (error, errorCode) = errorSlots
         val result             =
           Bindings.xkafka_consumer_offsets_for_times(
-            handle,
+            client.handle,
             topics,
             partitions,
             timestamps,
@@ -505,8 +526,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         given Zone             = zone
         val (error, errorCode) = errorSlots
         val metadata           =
-          Bindings
-            .xkafka_consumer_metadata(handle, requestedTopic.map(topic => toCString(topic.value)).orNull, error, ErrorBufferSize.toUSize, errorCode)
+          Bindings.xkafka_consumer_metadata(
+            client.handle,
+            requestedTopic.map(topic => toCString(topic.value)).orNull,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
         if metadata == null then throw nativeError(error, errorCode)
 
         try Vector.tabulate(Bindings.xkafka_metadata_topic_count(metadata).toInt): topicIndex =>
@@ -530,7 +556,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         val (error, errorCode) = errorSlots
         val result             =
           Bindings.xkafka_consumer_seek(
-            handle,
+            client.handle,
             toCString(topicPartition.topic.value),
             topicPartition.partition.value,
             offset.value,

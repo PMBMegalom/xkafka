@@ -37,6 +37,26 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
     KafkaClient[IO].producer(settings).use(_ => IO.unit)
 
+  test("a consumer refuses work once its resource has closed"):
+    val deserializer = Deserializer.utf8[IO]
+    val client       = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("native-test")).toOption.get
+    val group        = ConsumerGroup.from("native-lifecycle").toOption.get
+    val settings     = ConsumerSettings.from(client, group, deserializer, deserializer).toOption.get
+    val topic        = Topic.from("events").toOption.get
+
+    // Leaking the consumer past its resource used to reach a destroyed handle.
+    KafkaClient[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use(IO.pure).flatMap: escaped =>
+      interceptIO[IllegalStateException](escaped.assignment)
+
+  test("a producer refuses work once its resource has closed"):
+    val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
+    val client     = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("native-test")).toOption.get
+    val settings   = ProducerSettings.from(client, serializer, serializer).toOption.get
+    val topic      = Topic.from("events").toOption.get
+
+    KafkaClient[IO].producer(settings).use(IO.pure).flatMap: escaped =>
+      interceptIO[IllegalStateException](escaped.produce(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
+
   test("passes custom producer properties to librdkafka"):
     val serializer = Serializer.const[IO, String](None)
     val client     = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
