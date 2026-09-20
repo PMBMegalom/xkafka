@@ -129,7 +129,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         IO.pure(new String(bytes.get.toArray, StandardCharsets.UTF_8))
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1")).toOption.get
     val settings =
-      ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, Map("fetch.min.bytes" -> "2")).toOption.get
+      ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "2"))
+        .toOption.get
 
     KafkaClientPlatform.fromFs2[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
       for

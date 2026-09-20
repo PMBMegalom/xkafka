@@ -238,6 +238,7 @@ final class ClientSuite extends FunSuite:
       new KafkaConsumer[Option, String, String]:
         override val records: Stream[Option, CommittableConsumerRecord[Option, String, String]] = Stream.emit(sourceRecord).covary[Option]
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
+        override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
         override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(topicPartitions.map(_ -> Some(nextOffset)).toMap)
         override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =

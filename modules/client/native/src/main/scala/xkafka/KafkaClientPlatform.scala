@@ -21,12 +21,11 @@
 
 package xkafka
 
-import scala.concurrent.duration.FiniteDuration
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import cats.data.NonEmptyList
-import cats.effect.{Async, Ref, Resource, Temporal}
+import cats.effect.{Async, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Semaphore, Supervisor}
 import cats.syntax.all.*
@@ -306,12 +305,11 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
     /** librdkafka runs its rebalance callback while the consumer is polled, so a rebalance is only observable once something polls.
       *
-      * `pollInterval` therefore still paces this, but it now reads a generation counter that the callback bumps, and fetches the assignment itself
-      * only when that changes, which costs one integer read where it used to copy a partition list.
+      * `ConsumerSettings.pollInterval` therefore still paces this, but it now reads a generation counter that the callback bumps, and fetches the
+      * assignment itself only when that changes, which costs one integer read where it used to copy a partition list.
       */
-    override def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] =
-      (Stream.emit(()) ++ Stream.awakeEvery[F](pollInterval).void).evalMap(_ => client(Bindings.xkafka_consumer_generation(client.handle))).changes
-        .evalMap(_ => assignment).changes
+    override val assignmentChanges: Stream[F, Set[TopicPartition]] = (Stream.emit(()) ++ Stream.awakeEvery[F](settings.pollInterval).void)
+      .evalMap(_ => client(Bindings.xkafka_consumer_generation(client.handle))).changes.evalMap(_ => assignment).changes
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty) else client(readCommitted(topicPartitions))

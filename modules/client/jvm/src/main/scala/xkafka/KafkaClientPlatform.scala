@@ -21,12 +21,10 @@
 
 package xkafka
 
-import scala.concurrent.duration.FiniteDuration
-
 import cats.Parallel
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
-import cats.effect.{Async, Resource, Temporal}
+import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -179,14 +177,14 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     override def assignment: F[Set[TopicPartition]] = backend(underlying.assignment).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
-    /** fs2-kafka reports assignments as the group rebalances, so nothing is polled and `pollInterval` is unused here. */
-    override def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] =
+    /** fs2-kafka reports assignments as the group rebalances, so nothing is polled. */
+    override val assignmentChanges: Stream[F, Set[TopicPartition]] =
       underlying.assignmentStream.translate(handleBackendErrors).evalMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
-    /** Delegates to fs2-kafka, whose partition streams are fed independently, so neither parameter applies and one slow partition cannot stall
-      * another.
+    /** Delegates to fs2-kafka, whose partition streams are fed independently, so `maxQueuedRecords` does not apply and one slow partition cannot
+      * stall another.
       */
-    override def partitionedRecords(pollInterval: FiniteDuration, maxQueuedRecords: Int)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
+    override def partitionedRecords(maxQueuedRecords: Int)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
       underlying.partitionsMapStream.translate(handleBackendErrors).flatMap: partitions =>
         Stream.emits(partitions.toList).evalMap: (javaTopicPartition, records) =>
           portableTopicPartition(javaTopicPartition)

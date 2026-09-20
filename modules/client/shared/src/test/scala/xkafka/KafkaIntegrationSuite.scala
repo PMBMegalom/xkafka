@@ -76,7 +76,8 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       )
     val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "0")).toOption.get
     val consumerSettings =
-      ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, Map("fetch.min.bytes" -> "1"))
+      ConsumerSettings
+        .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "1"))
         .toOption.get
 
     for
@@ -188,7 +189,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(records)).timeout(45.seconds)
       consumed <-
         PlatformKafkaClient().consumer(consumerSettings, subscription).use: consumer =>
-          consumer.partitionedRecords(100.millis, 16).map: partition =>
+          consumer.partitionedRecords(16).map: partition =>
             partition.records.take(1).map(partition.topicPartition -> _)
           .parJoinUnbounded.take(2).compile.toList
         .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka partitioned consumer timed out")))

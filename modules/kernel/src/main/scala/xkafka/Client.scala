@@ -21,7 +21,7 @@
 
 package xkafka
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.{FiniteDuration, *}
 
 import cats.{Applicative, FlatMap, Foldable, Functor, Show}
 import cats.arrow.FunctionK
@@ -145,39 +145,49 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     keyDeserializer: Deserializer[F, K],
     valueDeserializer: Deserializer[F, V],
     autoOffsetReset: AutoOffsetReset,
+    pollInterval: FiniteDuration,
     properties: Map[String, String]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, pollInterval, properties) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, properties) {}
+    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, properties) {}
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, properties) {}
+    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, properties) {}
 
   def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, pollInterval, properties) {}
+
+  /** How often a backend that cannot report rebalances of its own looks for one. Backends that can report them ignore this. */
+  def withPollInterval(value: FiniteDuration): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, properties) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, values)
+    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, values)
 
-  override def toString: String = s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,${redacted(properties)})"
+  override def toString: String =
+    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$pollInterval,${redacted(properties)})"
 
 object ConsumerSettings:
+  /** Matches what fs2-kafka and node-rdkafka settle on for their own consume loops. */
+  val DefaultPollInterval: FiniteDuration = 500.millis
+
   def from[F[_], K, V](
       client: ClientSettings,
       groupId: ConsumerGroup,
       keyDeserializer: Deserializer[F, K],
       valueDeserializer: Deserializer[F, V],
       autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
+      pollInterval: FiniteDuration = ConsumerSettings.DefaultPollInterval,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Consumer))
-      .map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, properties) {})
+      .map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, properties) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ConsumerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ConsumerSettings[F, K, V])(fk: FunctionK[F, G]): ConsumerSettings[G, K, V] = settings.mapK(fk)
@@ -303,27 +313,21 @@ trait KafkaConsumer[F[_], K, V]:
   def assignment: F[Set[TopicPartition]]
 
   /** Polls `assignment` immediately and at the supplied interval, emitting only changes. */
-  /** Emits the current assignment and then each distinct one observed afterwards.
+  /** Emits the current assignment and then each distinct one afterwards.
     *
-    * A backend that reports rebalances of its own overrides this, in which case `pollInterval` is unused.
+    * A backend that cannot report rebalances of its own looks for them at `ConsumerSettings.pollInterval`.
     */
-  def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] =
-    (Stream.emit(()).covary[F] ++ Stream.awakeEvery[F](pollInterval).map(_ => ())).evalMap(_ => assignment)
-      .mapAccumulate(Option.empty[Set[TopicPartition]]):
-        case (previous, current) => Some(current) -> Option.when(!previous.contains(current))(current)
-      .map(_._2).unNone
+  def assignmentChanges: Stream[F, Set[TopicPartition]]
 
   /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.
     *
     * Every emitted stream must be consumed concurrently; backpressure from one partition otherwise backpressures the shared record source.
     *
-    * @param pollInterval
-    *   how often to observe assignment changes
     * @param maxQueuedRecords
     *   positive queue bound for each partition stream
     */
-  def partitionedRecords(pollInterval: FiniteDuration, maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
-    PartitionRecords.fromConsumer(self, assignmentChanges(pollInterval), maxQueuedRecords)
+  def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
+    PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords)
 
   /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
   def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]
@@ -350,6 +354,8 @@ trait KafkaConsumer[F[_], K, V]:
       override val records: Stream[G, CommittableConsumerRecord[G, K, V]] = self.records.map(_.mapK(fk)).translate(fk)
 
       override def assignment: G[Set[TopicPartition]] = fk(self.assignment)
+
+      override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
 
       override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[Offset]]] = fk(self.committed(topicPartitions))
 

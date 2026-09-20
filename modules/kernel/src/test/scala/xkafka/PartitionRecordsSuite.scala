@@ -41,7 +41,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       firstConsumed <- Deferred[IO, Unit]
       consumer = testConsumer(assignment, input)
       observed <-
-        consumer.partitionedRecords(10.millis, 2).evalMap: partition =>
+        consumer.partitionedRecords(2).evalMap: partition =>
           val records =
             if partition.topicPartition == firstPartition then
               Stream.exec(firstOpened.complete(()).void) ++ partition.records.evalTap(_ => firstConsumed.complete(()).void)
@@ -68,7 +68,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       early = record(firstPartition, 0L, "early")
       _        <- input.offer(early)
       observed <-
-        testConsumer(assignment, input).partitionedRecords(1.hour, 2)
+        testConsumer(assignment, input).partitionedRecords(2)
           .evalMap(partition => partition.records.take(1).compile.toList.map(partition.topicPartition -> _)).take(1).compile.toList
           .timeout(10.seconds)
     yield assertEquals(observed, List(firstPartition -> List(early)))
@@ -77,7 +77,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
     for
       assignment <- Ref[IO].of(Set.empty[TopicPartition])
       input      <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
-      result     <- testConsumer(assignment, input).partitionedRecords(10.millis, 0).compile.drain.attempt
+      result     <- testConsumer(assignment, input).partitionedRecords(0).compile.drain.attempt
     yield result match
       case Left(error: IllegalArgumentException) => assertEquals(error.getMessage, "maxQueuedRecords must be positive")
       case Left(error)                           => fail(s"unexpected error: $error")
@@ -88,11 +88,12 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       input: Queue[IO, CommittableConsumerRecord[IO, String, String]]
   ): KafkaConsumer[IO, String, String] =
     new KafkaConsumer[IO, String, String]:
-      override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]]                       = Stream.fromQueueUnterminated(input)
-      override def assignment: IO[Set[TopicPartition]]                                                      = currentAssignment.get
-      override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] = IO.pure(Map.empty)
-      override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]  = IO.pure(Map.empty)
-      override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]        = IO.pure(Map.empty)
+      override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.fromQueueUnterminated(input)
+      override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
+      override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes
+      override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]]                     = IO.pure(Map.empty)
+      override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                      = IO.pure(Map.empty)
+      override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                            = IO.pure(Map.empty)
       override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] = IO.pure(Map.empty)
       override def partitionsFor(topic: Topic): IO[Set[Partition]]                                                              = IO.pure(Set.empty)
       override def listTopics: IO[Map[Topic, Set[Partition]]]                                                                   = IO.pure(Map.empty)

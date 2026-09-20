@@ -223,7 +223,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             ]
         ).asInstanceOf[confluent.RdConsumer]
       settings =
-        ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10"))
+        ConsumerSettings
+          .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.wait.max.ms" -> "10"))
           .toOption.get
       record <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10")))

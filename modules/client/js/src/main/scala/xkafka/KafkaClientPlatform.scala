@@ -21,13 +21,12 @@
 
 package xkafka
 
-import scala.concurrent.duration.FiniteDuration
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.Uint8Array
 
 import cats.data.NonEmptyList
-import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
+import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.std.Dispatcher
 import fs2.concurrent.SignallingRef
 import cats.syntax.all.*
@@ -279,8 +278,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
     private def fetch: F[js.Array[confluent.RdMessage]] = callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done))
 
-    /** librdkafka reports rebalances, so nothing is polled and `pollInterval` is unused here. */
-    override def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] = assignments.discrete
+    /** librdkafka reports rebalances, so nothing is polled. */
+    override val assignmentChanges: Stream[F, Set[TopicPartition]] = assignments.discrete
 
     override def assignment: F[Set[TopicPartition]] =
       F.delay(underlying.assignments()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
