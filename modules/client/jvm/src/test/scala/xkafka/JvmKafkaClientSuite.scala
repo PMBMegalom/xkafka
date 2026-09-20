@@ -72,13 +72,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val valueSerializer =
       Serializer.instance[IO, String]: (_, _, value) =>
         IO.pure(Some(Chunk.array(value.getBytes("UTF-8"))))
-    val client =
-      ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip", "client.id" -> "ignored")).toOption.get
-    val settings =
-      ProducerSettings
-        .from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4", "acks" -> "all", "bootstrap.servers" -> "ignored:9092"))
-        .toOption.get
-    val record =
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip")).toOption.get
+    val settings = ProducerSettings.from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4", "acks" -> "all")).toOption.get
+    val record   =
       ProducerRecord(
         topic = topic,
         key = "key",
@@ -129,17 +125,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val valueDeserializer =
       Deserializer.instance[IO, String]: (_, _, bytes) =>
         IO.pure(new String(bytes.get.toArray, StandardCharsets.UTF_8))
-    val client =
-      ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1", "group.id" -> "ignored")).toOption.get
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1")).toOption.get
     val settings =
-      ConsumerSettings.from(
-        client,
-        group,
-        keyDeserializer,
-        valueDeserializer,
-        AutoOffsetReset.Earliest,
-        Map("fetch.min.bytes" -> "2", "enable.auto.commit" -> "true", "auto.offset.reset" -> "none")
-      ).toOption.get
+      ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, Map("fetch.min.bytes" -> "2")).toOption.get
 
     KafkaClientPlatform.fromFs2[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
       for

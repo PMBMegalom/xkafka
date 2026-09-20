@@ -21,23 +21,61 @@
 
 package xkafka
 
+import cats.{Order, Show}
 import cats.data.NonEmptyList
 import fs2.Chunk
 
 enum ValidationError derives CanEqual:
   case EmptyTopic
+  case TopicTooLong(length: Int)
+  case InvalidTopicCharacters(value: String)
+  case ReservedTopicName(value: String)
   case EmptyTopicPattern
   case NegativePartition(value: Int)
   case NegativeOffset(value: Long)
   case OffsetOverflow
   case EmptyConsumerGroup
 
+  def message: String =
+    this match
+      case EmptyTopic                    => "topic must not be empty"
+      case TopicTooLong(length)          => s"topic must be at most ${Topic.MaxLength} characters, was $length"
+      case InvalidTopicCharacters(value) => s"topic '$value' must contain only [a-zA-Z0-9._-]"
+      case ReservedTopicName(value)      => s"topic must not be '$value'"
+      case EmptyTopicPattern             => "topic pattern must not be empty"
+      case NegativePartition(value)      => s"partition must not be negative, was $value"
+      case NegativeOffset(value)         => s"offset must not be negative, was $value"
+      case OffsetOverflow                => "offset cannot be advanced past Long.MaxValue"
+      case EmptyConsumerGroup            => "consumer group must not be empty"
+
+object ValidationError:
+  given Show[ValidationError] = Show.show(_.message)
+
 opaque type Topic = String
 
 object Topic:
-  def from(value: String): Either[ValidationError, Topic] = Either.cond(value.nonEmpty, value, ValidationError.EmptyTopic)
+  /** The broker's own limit on topic name length. */
+  val MaxLength = 249
+
+  private val Reserved = Set(".", "..")
+
+  private def legal(character: Char): Boolean =
+    (character >= 'a' && character <= 'z') ||
+      (character >= 'A' && character <= 'Z') ||
+      (character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-'
+
+  /** Applies the broker's topic naming rules, so an unusable name is caught at construction. */
+  def from(value: String): Either[ValidationError, Topic] =
+    if value.isEmpty then Left(ValidationError.EmptyTopic)
+    else if Reserved.contains(value) then Left(ValidationError.ReservedTopicName(value))
+    else if value.length > MaxLength then Left(ValidationError.TopicTooLong(value.length))
+    else if !value.forall(legal) then Left(ValidationError.InvalidTopicCharacters(value))
+    else Right(value)
 
   extension (topic: Topic) def value: String = topic
+
+  given Order[Topic] = Order.from((x, y) => x.value.compareTo(y.value))
+  given Show[Topic]  = Show.show(_.value)
 
 /** A non-empty regular expression matched against complete topic names.
   *
@@ -53,12 +91,18 @@ object TopicPattern:
 
     private[xkafka] def anchored: String = s"^($pattern)$$"
 
+  given Order[TopicPattern] = Order.from((x, y) => x.value.compareTo(y.value))
+  given Show[TopicPattern]  = Show.show(_.value)
+
 opaque type Partition = Int
 
 object Partition:
   def from(value: Int): Either[ValidationError, Partition] = Either.cond(value >= 0, value, ValidationError.NegativePartition(value))
 
   extension (partition: Partition) def value: Int = partition
+
+  given Order[Partition] = Order.from((x, y) => Integer.compare(x.value, y.value))
+  given Show[Partition]  = Show.show(_.value.toString)
 
 opaque type Offset = Long
 
@@ -70,12 +114,19 @@ object Offset:
 
     def next: Either[ValidationError, Offset] = Either.cond(offset < Long.MaxValue, offset + 1L, ValidationError.OffsetOverflow)
 
+  given Order[Offset] = Order.from((x, y) => java.lang.Long.compare(x.value, y.value))
+  given Show[Offset]  = Show.show(_.value.toString)
+
 opaque type ConsumerGroup = String
 
 object ConsumerGroup:
-  def from(value: String): Either[ValidationError, ConsumerGroup] = Either.cond(value.nonEmpty, value, ValidationError.EmptyConsumerGroup)
+  /** Rejects blank names. Brokers accept them, but they make group ownership impossible to attribute. */
+  def from(value: String): Either[ValidationError, ConsumerGroup] = Either.cond(value.trim.nonEmpty, value, ValidationError.EmptyConsumerGroup)
 
   extension (group: ConsumerGroup) def value: String = group
+
+  given Order[ConsumerGroup] = Order.from((x, y) => x.value.compareTo(y.value))
+  given Show[ConsumerGroup]  = Show.show(_.value)
 
 opaque type Timestamp = Long
 
@@ -84,7 +135,14 @@ object Timestamp:
 
   extension (timestamp: Timestamp) def epochMillis: Long = timestamp
 
+  given Order[Timestamp] = Order.from((x, y) => java.lang.Long.compare(x.epochMillis, y.epochMillis))
+  given Show[Timestamp]  = Show.show(_.epochMillis.toString)
+
 final case class TopicPartition(topic: Topic, partition: Partition)
+
+object TopicPartition:
+  given Order[TopicPartition] = Order.whenEqual(Order.by(_.topic), Order.by(_.partition))
+  given Show[TopicPartition]  = Show.show(value => s"${value.topic.value}-${value.partition.value}")
 
 final case class Header(key: String, value: Option[Chunk[Byte]])
 

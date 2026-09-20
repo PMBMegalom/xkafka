@@ -88,6 +88,26 @@ val repositoryRoot    = file(".")
 val librdkafkaPrefix  = settingKey[File]("Directory containing the librdkafka include and lib directories")
 val prepareLibrdkafka = taskKey[File]("Downloads, verifies, and builds the pinned librdkafka release")
 
+// librdkafka links TLS, SASL SCRAM/OAUTHBEARER, and gzip/zstd decompression against these system
+// libraries rather than vendoring them, so both its build and the Scala Native link need to find them.
+// Linux distributions install them where the toolchain already looks; Homebrew keeps them keg-only,
+// so on macOS their prefixes have to be discovered and passed explicitly. pkg-config is deliberately
+// not used: it is absent from stock macOS, and librdkafka's own configure falls back to compile checks.
+val librdkafkaSystemLibraries = Seq("openssl@3", "zstd", "zlib")
+
+val isMacOs = sys.props.getOrElse("os.name", "").toLowerCase.contains("mac")
+
+def commandOutput(command: Seq[String]): Option[String] =
+  scala.util.Try(Process(command).!!(ProcessLogger(_ => (), _ => ())).trim).toOption.filter(_.nonEmpty)
+
+def homebrewPrefixes: Seq[File] =
+  if (!isMacOs) Nil
+  else librdkafkaSystemLibraries.flatMap(formula => commandOutput(Seq("brew", "--prefix", formula)).map(file)).filter(_.isDirectory)
+
+def librdkafkaIncludeFlags: Seq[String] = homebrewPrefixes.map(prefix => s"-I${prefix.getAbsolutePath}/include")
+
+def librdkafkaSearchFlags: Seq[String] = homebrewPrefixes.map(prefix => s"-L${prefix.getAbsolutePath}/lib")
+
 val commonSettings = Seq(
   headerLicense := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
   scalacOptions += "-Wnonunit-statement",
@@ -137,7 +157,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       val prefix      = librdkafkaPrefix.value
       val header      = prefix / "include" / "librdkafka" / "rdkafka.h"
       val library     = prefix / "lib" / "librdkafka.a"
-      val buildMarker = prefix / ".xkafka-static-build-v2"
+      val buildMarker = prefix / ".xkafka-static-build-v3"
 
       if (sys.env.contains("XKAFKA_LIBRDKAFKA_PREFIX")) {
         if (!header.isFile || !library.isFile)
@@ -179,19 +199,22 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
           ),
           buildRoot
         )
+        val includeFlags = librdkafkaIncludeFlags
+        val libraryFlags = librdkafkaSearchFlags
+
         run(
           Seq(
             "./configure",
             s"--prefix=${prefix.getAbsolutePath}",
             "--enable-static",
-            "--disable-ssl",
+            "--enable-ssl",
+            "--enable-zlib",
+            "--enable-zstd",
             "--disable-gssapi",
             "--disable-curl",
-            "--disable-zlib",
-            "--disable-zstd",
             "--disable-lz4-ext",
-            "--CPPFLAGS=-Drwlock_init=xkafka_librdkafka_rwlock_init"
-          ),
+            ("--CPPFLAGS=-Drwlock_init=xkafka_librdkafka_rwlock_init" +: includeFlags).mkString(" ")
+          ) ++ (if (libraryFlags.isEmpty) Nil else Seq(s"--LDFLAGS=${libraryFlags.mkString(" ")}")),
           source
         )
         run(
@@ -218,9 +241,12 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     nativeConfig         := {
       val config = nativeConfig.value
       val prefix = librdkafkaPrefix.value
+      // The static librdkafka archive leaves TLS and compression symbols undefined, so the final
+      // link needs the system libraries it was built against.
+      val systemLinkFlags = librdkafkaSearchFlags ++ Seq("-lssl", "-lcrypto", "-lz", "-lzstd")
       config
         .withCompileOptions(_ :+ s"-I${prefix.getAbsolutePath}/include")
-        .withLinkingOptions(_ :+ s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}")
+        .withLinkingOptions(_ ++ (s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}" +: systemLinkFlags))
     }
   )
   .jvmSettings(

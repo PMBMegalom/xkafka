@@ -24,9 +24,6 @@ package xkafka
 import cats.arrow.FunctionK
 import cats.effect.{Async, MonadCancelThrow, Resource}
 
-private[xkafka] val ManagedProperties =
-  Set("bootstrap.servers", "client.id", "group.id", "auto.offset.reset", "enable.auto.commit", "enable.auto.offset.store")
-
 trait KafkaClient[F[_]]:
   self =>
 

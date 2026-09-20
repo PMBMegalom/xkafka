@@ -50,18 +50,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         assert(error.getCause ne null)
 
   test("Confluent facade uses direct librdkafka configuration"):
-    val common =
-      dynamic(
-        confluent.Values
-          .kafkaConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("socket.timeout.ms" -> "123", "client.id" -> "ignored"))
-      )
-    val producer = dynamic(confluent.Values.producerConfig(Map("linger.ms" -> "5", "bootstrap.servers" -> "ignored:9092")))
-    val consumer =
-      dynamic(confluent.Values.consumerConfig(
-        "group",
-        AutoOffsetReset.Earliest,
-        Map("fetch.wait.max.ms" -> "10", "group.id" -> "ignored", "enable.auto.offset.store" -> "true")
-      ))
+    val common       = dynamic(confluent.Values.kafkaConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("socket.timeout.ms" -> "123")))
+    val producer     = dynamic(confluent.Values.producerConfig(Map("linger.ms" -> "5")))
+    val consumer     = dynamic(confluent.Values.consumerConfig("group", AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10")))
     val subscription = dynamic(confluent.Values.subscription(js.Array[confluent.SubscriptionTopic]("events")))
     val run          = dynamic(confluent.Values.consumerRun(_ => js.Promise.resolve(())))
 
@@ -69,11 +60,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     assertEquals(common.selectDynamic("client.id").asInstanceOf[String], "client")
     assertEquals(common.selectDynamic("socket.timeout.ms").asInstanceOf[String], "123")
     assertEquals(producer.selectDynamic("linger.ms").asInstanceOf[String], "5")
-    assert(js.isUndefined(producer.selectDynamic("bootstrap.servers")))
     assertEquals(consumer.selectDynamic("group.id").asInstanceOf[String], "group")
     assertEquals(consumer.selectDynamic("fetch.wait.max.ms").asInstanceOf[String], "10")
     assertEquals(consumer.selectDynamic("enable.auto.commit").asInstanceOf[Boolean], false)
-    assert(js.isUndefined(consumer.selectDynamic("enable.auto.offset.store")))
     assertEquals(consumer.selectDynamic("auto.offset.reset").asInstanceOf[String], "earliest")
     assert(js.isUndefined(subscription.selectDynamic("fromBeginning")))
     assert(js.isUndefined(run.selectDynamic("autoCommit")))

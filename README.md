@@ -105,15 +105,21 @@ val producer = ClientSettings.from(
   ProducerSettings.from(client, utf8, utf8, properties = Map("linger.ms" -> "5"))
 ```
 
-Producer or consumer properties override client properties. Values managed by
-xkafka, including bootstrap servers, client and group IDs, offset reset, and
-automatic commits, cannot be overridden through the map. Property names and
+Producer or consumer properties override client properties. Property names and
 values are interpreted by the selected backend; portable applications should
 use only properties supported with the same meaning by each target backend.
+
 The `from` constructors return `ValidatedNel[SettingsError, *]`, accumulate
-portable configuration errors, and only construct valid settings. Blank
-bootstrap servers and property names are rejected; backend-specific
+portable configuration errors, and only construct valid settings. They reject
+blank property names and bootstrap servers that are not `host:port`. They also
+reject the names listed in `ManagedProperties`: bootstrap servers, client and
+group IDs, offset reset, and automatic commits. xkafka derives those from the
+typed settings, so supplying them through the map is an error. Backend-specific
 configuration remains the selected backend's responsibility.
+
+Each settings type also has `with*` methods for deriving one value from
+another. Those that can invalidate the result, such as `withProperty`, return
+`ValidatedNel[SettingsError, *]` and revalidate in full.
 
 Backend-reported failures are exposed as `KafkaException.BackendFailure`, which
 preserves the original cause and includes error codes and retriable or fatal
@@ -137,7 +143,15 @@ nvm use
 ```
 
 The Native build downloads librdkafka 2.15.1, verifies its SHA-256 checksum,
-builds it, and links it statically. To prepare it explicitly:
+builds it, and links it statically. It is built with TLS, SASL SCRAM and
+OAUTHBEARER, and gzip and zstd compression enabled, so the Native backend can
+reach authenticated brokers and read compressed topics.
+
+Those features are linked against system libraries rather than vendored, so the
+build and any application linking the Native backend need OpenSSL, zlib, and
+zstd available: `libssl-dev`, `zlib1g-dev`, and `libzstd-dev` on Debian and
+Ubuntu, or `brew install openssl@3 zstd zlib` on macOS, where their keg-only
+prefixes are discovered automatically. To prepare librdkafka explicitly:
 
 ```sh
 sbt clientNative/prepareLibrdkafka

@@ -179,7 +179,7 @@ private[xkafka] object Values:
 
   private def configuration(properties: Map[String, String]): js.Dynamic =
     val result = js.Dynamic.literal()
-    properties.removedAll(ManagedProperties).foreach:
+    properties.foreach:
       case (key, value) => result.updateDynamic(key)(value)
     result
 

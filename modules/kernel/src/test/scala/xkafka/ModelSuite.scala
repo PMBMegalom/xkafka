@@ -21,12 +21,37 @@
 
 package xkafka
 
+import cats.Order
+import cats.syntax.all.*
 import fs2.Chunk
 import munit.FunSuite
 
 final class ModelSuite extends FunSuite:
   test("topic rejects an empty name"):
     assertEquals(Topic.from(""), Left(ValidationError.EmptyTopic))
+
+  test("topic applies the broker naming rules"):
+    assertEquals(Topic.from("."), Left(ValidationError.ReservedTopicName(".")))
+    assertEquals(Topic.from(".."), Left(ValidationError.ReservedTopicName("..")))
+    assertEquals(Topic.from("a b"), Left(ValidationError.InvalidTopicCharacters("a b")))
+    assertEquals(Topic.from("a/b"), Left(ValidationError.InvalidTopicCharacters("a/b")))
+    assertEquals(Topic.from("a" * 250), Left(ValidationError.TopicTooLong(250)))
+    assertEquals(Topic.from("a" * 249).map(_.value), Right("a" * 249))
+    assertEquals(Topic.from("events.v1_final-2").map(_.value), Right("events.v1_final-2"))
+    assertEquals(Topic.from("...").map(_.value), Right("..."))
+
+  test("consumer group rejects a blank name"):
+    assertEquals(ConsumerGroup.from("   "), Left(ValidationError.EmptyConsumerGroup))
+
+  test("model types order and render portably"):
+    val first  = TopicPartition(Topic.from("a").toOption.get, Partition.from(1).toOption.get)
+    val second = TopicPartition(Topic.from("a").toOption.get, Partition.from(10).toOption.get)
+    val third  = TopicPartition(Topic.from("b").toOption.get, Partition.from(0).toOption.get)
+
+    assertEquals(List(third, second, first).sorted(Order[TopicPartition].toOrdering), List(first, second, third))
+    assertEquals(third.show, "b-0")
+    assertEquals(Offset.from(7L).toOption.get.show, "7")
+    assertEquals(ValidationError.OffsetOverflow.show, "offset cannot be advanced past Long.MaxValue")
 
   test("topic pattern rejects an empty expression"):
     assertEquals(TopicPattern.from(""), Left(ValidationError.EmptyTopicPattern))

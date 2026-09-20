@@ -23,21 +23,32 @@ package xkafka
 
 import scala.concurrent.duration.FiniteDuration
 
-import cats.{Applicative, Foldable}
+import cats.{Applicative, Foldable, Show}
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, Validated, ValidatedNel}
 import cats.effect.{Async, Temporal}
 import cats.tagless.FunctorK
 import fs2.{Pipe, Stream}
 
+/** Backend property names xkafka derives from the typed settings.
+  *
+  * Settings construction rejects them, so the portable model stays the single source for these values.
+  */
+val ManagedProperties: Set[String] =
+  Set("bootstrap.servers", "client.id", "group.id", "auto.offset.reset", "enable.auto.commit", "enable.auto.offset.store")
+
 enum SettingsError derives CanEqual:
   case BlankBootstrapServer(index: Int)
+  case InvalidBootstrapServer(index: Int, value: String)
   case BlankPropertyName(scope: SettingsError.PropertyScope)
+  case ManagedProperty(name: String, scope: SettingsError.PropertyScope)
 
   def message: String =
     this match
-      case BlankBootstrapServer(index) => s"bootstrapServers[$index] must not be blank"
-      case BlankPropertyName(scope)    => s"${scope.label} properties must not contain a blank name"
+      case BlankBootstrapServer(index)          => s"bootstrapServers[$index] must not be blank"
+      case InvalidBootstrapServer(index, value) => s"bootstrapServers[$index] must be host:port, was '$value'"
+      case BlankPropertyName(scope)             => s"${scope.label} properties must not contain a blank name"
+      case ManagedProperty(name, scope)         => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
 
 object SettingsError:
   enum PropertyScope(val label: String) derives CanEqual:
@@ -45,15 +56,42 @@ object SettingsError:
     case Producer extends PropertyScope("producer")
     case Consumer extends PropertyScope("consumer")
 
+  given Show[SettingsError] = Show.show(_.message)
+
 private def validateSettings(errors: List[SettingsError]): ValidatedNel[SettingsError, Unit] =
   NonEmptyList.fromList(errors).fold[ValidatedNel[SettingsError, Unit]](Validated.Valid(()))(Validated.Invalid(_))
 
 private def propertyErrors(properties: Map[String, String], scope: SettingsError.PropertyScope): List[SettingsError] =
-  Option.when(properties.keysIterator.exists(_.trim.isEmpty))(SettingsError.BlankPropertyName(scope)).toList
+  val blank   = Option.when(properties.keysIterator.exists(_.trim.isEmpty))(SettingsError.BlankPropertyName(scope)).toList
+  val managed = properties.keysIterator.filter(name => ManagedProperties.contains(name.trim.toLowerCase)).toList.sorted
+  blank ++ managed.map(SettingsError.ManagedProperty(_, scope))
+
+/** Accepts `host:port`, including bracketed IPv6 literals, so an unusable endpoint is caught at construction. */
+private def bootstrapServerError(value: String, index: Int): Option[SettingsError] =
+  val trimmed   = value.trim
+  val separator = if trimmed.startsWith("[") then trimmed.indexOf(']') + 1 else trimmed.lastIndexOf(':')
+  val host      = if separator > 0 then trimmed.substring(0, separator).stripPrefix("[").stripSuffix("]") else ""
+  val port      = if separator > 0 && separator < trimmed.length then trimmed.substring(separator + 1) else ""
+  val validPort = port.nonEmpty && port.forall(_.isDigit) && port.toIntOption.exists(value => value >= 1 && value <= 65535)
+  if trimmed.isEmpty then Some(SettingsError.BlankBootstrapServer(index))
+  else if host.isEmpty || !validPort then Some(SettingsError.InvalidBootstrapServer(index, value))
+  else None
 
 private def redacted(properties: Map[String, String]): Map[String, String] = properties.keysIterator.map(_ -> "<redacted>").toMap
 
 sealed abstract case class ClientSettings private (bootstrapServers: NonEmptyList[String], clientId: Option[String], properties: Map[String, String]):
+  def withBootstrapServers(values: NonEmptyList[String]): ValidatedNel[SettingsError, ClientSettings] =
+    ClientSettings.from(values, clientId, properties)
+
+  def withClientId(value: String): ClientSettings = new ClientSettings(bootstrapServers, Some(value), properties) {}
+
+  def withoutClientId: ClientSettings = new ClientSettings(bootstrapServers, None, properties) {}
+
+  def withProperty(name: String, value: String): ValidatedNel[SettingsError, ClientSettings] = withProperties(properties.updated(name, value))
+
+  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ClientSettings] =
+    ClientSettings.from(bootstrapServers, clientId, values)
+
   override def toString: String = s"ClientSettings($bootstrapServers,$clientId,${redacted(properties)})"
 
 object ClientSettings:
@@ -62,9 +100,7 @@ object ClientSettings:
       clientId: Option[String] = None,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, ClientSettings] =
-    val bootstrapErrors =
-      bootstrapServers.toList.zipWithIndex.collect:
-        case (server, index) if server.trim.isEmpty => SettingsError.BlankBootstrapServer(index)
+    val bootstrapErrors = bootstrapServers.toList.zipWithIndex.flatMap((server, index) => bootstrapServerError(server, index))
     validateSettings(bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client))
       .map(_ => new ClientSettings(bootstrapServers, clientId, properties) {})
 
@@ -76,6 +112,14 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
     new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties) {}
+
+  def withClient(value: ClientSettings): ProducerSettings[F, K, V] = new ProducerSettings(value, keySerializer, valueSerializer, properties) {}
+
+  def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    withProperties(properties.updated(name, value))
+
+  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, values)
 
   override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)})"
 
@@ -105,6 +149,21 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, properties) {}
+
+  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, properties) {}
+
+  def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, properties) {}
+
+  def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, properties) {}
+
+  def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    withProperties(properties.updated(name, value))
+
+  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, values)
 
   override def toString: String = s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,${redacted(properties)})"
 

@@ -115,6 +115,51 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(settings.toEither, Left(NonEmptyList.one(SettingsError.BlankPropertyName(SettingsError.PropertyScope.Consumer))))
 
+  test("settings reject properties xkafka manages itself"):
+    val client = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("group.id" -> "mine", "bootstrap.servers" -> "other"))
+
+    assertEquals(
+      client.toEither,
+      Left(NonEmptyList.of(
+        SettingsError.ManagedProperty("bootstrap.servers", SettingsError.PropertyScope.Client),
+        SettingsError.ManagedProperty("group.id", SettingsError.PropertyScope.Client)
+      ))
+    )
+
+  test("managed property rejection is scoped to the settings that declared it"):
+    val serializer = Serializer.const[IO, String](None)
+    val producer   = ProducerSettings.from(clientSettings, serializer, serializer, Map("enable.auto.commit" -> "true"))
+    val consumer   =
+      ConsumerSettings.from(clientSettings, group, Deserializer.utf8[IO], Deserializer.utf8[IO], properties = Map("AUTO.OFFSET.RESET" -> "earliest"))
+
+    assertEquals(producer.toEither, Left(NonEmptyList.one(SettingsError.ManagedProperty("enable.auto.commit", SettingsError.PropertyScope.Producer))))
+    assertEquals(consumer.toEither, Left(NonEmptyList.one(SettingsError.ManagedProperty("AUTO.OFFSET.RESET", SettingsError.PropertyScope.Consumer))))
+
+  test("bootstrap servers must be host:port"):
+    val invalid = ClientSettings.from(NonEmptyList.of("localhost", "localhost:0", "localhost:70000", "host:port"))
+
+    assertEquals(
+      invalid.toEither,
+      Left(NonEmptyList.of(
+        SettingsError.InvalidBootstrapServer(0, "localhost"),
+        SettingsError.InvalidBootstrapServer(1, "localhost:0"),
+        SettingsError.InvalidBootstrapServer(2, "localhost:70000"),
+        SettingsError.InvalidBootstrapServer(3, "host:port")
+      ))
+    )
+    assert(ClientSettings.from(NonEmptyList.of("localhost:9092", "[::1]:9092", "10.0.0.1:1")).isValid)
+
+  test("withers revalidate and preserve the remaining settings"):
+    val updated = clientSettings.withClientId("probe").withProperty("linger.ms", "5")
+
+    assertEquals(updated.toEither.map(_.clientId), Right(Some("probe")))
+    assertEquals(updated.toEither.map(_.properties), Right(Map("linger.ms" -> "5")))
+    assertEquals(
+      clientSettings.withProperty("group.id", "mine").toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("group.id", SettingsError.PropertyScope.Client)))
+    )
+    assertEquals(clientSettings.withClientId("probe").withoutClientId.clientId, None)
+
   test("producer and consumer settings support natural transformations"):
     val serializer     = Serializer.instance[Option, String]((_, _, value) => Some(Some(Chunk.array(value.getBytes("UTF-8")))))
     val deserializer   = Deserializer.instance[Option, String]((_, _, bytes) => bytes.map(chunk => new String(chunk.toArray, "UTF-8")))

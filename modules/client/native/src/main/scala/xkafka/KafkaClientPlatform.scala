@@ -100,7 +100,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         consumer
 
   private def nativeProperties(properties: Map[String, String])(using Zone): (Ptr[CString], Ptr[CString], CSize) =
-    val entries = properties.removedAll(ManagedProperties).toVector
+    val entries = properties.toVector
     if entries.isEmpty then (null, null, 0.toUSize)
     else
       val names  = alloc[CString](entries.size)
