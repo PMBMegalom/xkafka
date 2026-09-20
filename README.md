@@ -93,12 +93,16 @@ sentinel values, `beginningOffsets` and `endOffsets` query the available offset
 range, `offsetsForTimes` finds the earliest available offsets at or after given
 timestamps, `partitionsFor` and `listTopics` expose visible topic metadata, and
 `seek` changes the next offset fetched for an assigned topic-partition.
-`assignmentChanges(pollInterval)` is an FS2 stream which emits
-the current assignment immediately and subsequently only when a poll observes
-a different assignment. `partitionedRecords(pollInterval)` exposes a bounded
-record stream for each assigned topic-partition and ends that stream after the
-partition is revoked. Consume the emitted partition streams concurrently; an
-unconsumed stream eventually backpressures the shared record source.
+`assignmentChanges(pollInterval)` is an FS2 stream which emits the current
+assignment and then each distinct one observed afterwards.
+`partitionedRecords(pollInterval)` exposes a record stream for each assigned
+topic-partition and ends that stream after the partition is revoked.
+
+On the JVM both come from fs2-kafka as the group rebalances, so `pollInterval`
+is unused there and the partition streams are fed independently. On Scala.js
+and Scala Native the assignment is polled at `pollInterval`, and the emitted
+streams share one record source: consume them concurrently, because an
+unconsumed stream eventually backpressures the others.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,

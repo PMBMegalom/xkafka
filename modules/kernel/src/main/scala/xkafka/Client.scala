@@ -303,7 +303,11 @@ trait KafkaConsumer[F[_], K, V]:
   def assignment: F[Set[TopicPartition]]
 
   /** Polls `assignment` immediately and at the supplied interval, emitting only changes. */
-  final def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] =
+  /** Emits the current assignment and then each distinct one observed afterwards.
+    *
+    * A backend that reports rebalances of its own overrides this, in which case `pollInterval` is unused.
+    */
+  def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] =
     (Stream.emit(()).covary[F] ++ Stream.awakeEvery[F](pollInterval).map(_ => ())).evalMap(_ => assignment)
       .mapAccumulate(Option.empty[Set[TopicPartition]]):
         case (previous, current) => Some(current) -> Option.when(!previous.contains(current))(current)
@@ -318,8 +322,8 @@ trait KafkaConsumer[F[_], K, V]:
     * @param maxQueuedRecords
     *   positive queue bound for each partition stream
     */
-  final def partitionedRecords(pollInterval: FiniteDuration, maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
-    PartitionRecords.fromConsumer(self, pollInterval, maxQueuedRecords)
+  def partitionedRecords(pollInterval: FiniteDuration, maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
+    PartitionRecords.fromConsumer(self, assignmentChanges(pollInterval), maxQueuedRecords)
 
   /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
   def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]

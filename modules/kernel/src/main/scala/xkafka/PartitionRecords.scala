@@ -21,10 +21,8 @@
 
 package xkafka
 
-import scala.concurrent.duration.{Duration, FiniteDuration}
-
 import cats.arrow.FunctionK
-import cats.effect.{Async, Deferred, Ref}
+import cats.effect.{Async, Ref}
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import cats.tagless.FunctorK
@@ -41,71 +39,74 @@ object PartitionRecords:
 
   private[xkafka] def fromConsumer[F[_]: Async, K, V](
       consumer: KafkaConsumer[F, K, V],
-      pollInterval: FiniteDuration,
+      assignments: Stream[F, Set[TopicPartition]],
       maxQueuedRecords: Int
   ): Stream[F, PartitionRecords[F, K, V]] =
-    if pollInterval <= Duration.Zero then Stream.raiseError(new IllegalArgumentException("pollInterval must be positive"))
-    else if maxQueuedRecords <= 0 then Stream.raiseError(new IllegalArgumentException("maxQueuedRecords must be positive"))
+    if maxQueuedRecords <= 0 then Stream.raiseError(new IllegalArgumentException("maxQueuedRecords must be positive"))
     else
-      Stream.eval(Runtime.create(consumer, pollInterval, maxQueuedRecords)).flatMap: runtime =>
+      Stream.eval(Runtime.create(consumer, assignments, maxQueuedRecords)).flatMap: runtime =>
         runtime.stream.onFinalize(runtime.close)
 
   private final case class PartitionState[F[_], K, V](topicPartition: TopicPartition, channel: Channel[F, CommittableConsumerRecord[F, K, V]]):
     def public: PartitionRecords[F, K, V] = PartitionRecords(topicPartition, channel.stream)
 
-  private final case class Registry[F[_], K, V](states: Map[TopicPartition, PartitionState[F, K, V]], nextPoll: Deferred[F, Unit])
-
   private final class Runtime[F[_], K, V](
       consumer: KafkaConsumer[F, K, V],
-      pollInterval: FiniteDuration,
+      assignments: Stream[F, Set[TopicPartition]],
       maxQueuedRecords: Int,
       output: Channel[F, PartitionRecords[F, K, V]],
-      registry: Ref[F, Registry[F, K, V]],
+      states: Ref[F, Map[TopicPartition, PartitionState[F, K, V]]],
       mutex: Mutex[F]
   )(using F: Async[F]):
-    def stream: Stream[F, PartitionRecords[F, K, V]] = output.stream.concurrently(pollAssignments).concurrently(consumer.records.evalMap(route).drain)
-
-    def initialize: F[Unit] = consumer.assignment.flatMap(reconcile)
+    def stream: Stream[F, PartitionRecords[F, K, V]] =
+      output.stream.concurrently(followAssignments).concurrently(consumer.records.evalMap(route).drain)
 
     def close: F[Unit] =
       mutex.lock.surround:
         F.uncancelable: _ =>
-          registry.get.flatMap: current =>
-            current.states.values.toList.traverse_(_.channel.close.void) >> current.nextPoll.complete(()).void >> output.close.void
+          states.get.flatMap(current => current.values.toList.traverse_(_.channel.close.void)) >> output.close.void
 
-    private def pollAssignments: Stream[F, Nothing] = Stream.awakeEvery[F](pollInterval).evalMap(_ => consumer.assignment.flatMap(reconcile)).drain
+    private def followAssignments: Stream[F, Nothing] = assignments.evalMap(reconcile).drain
 
-    private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
-      registry.get.flatMap: current =>
-        current.states.get(record.record.topicPartition) match
-          case Some(state) => state.channel.send(record).void
-          case None => current.nextPoll.get >> registry.get.flatMap(_.states.get(record.record.topicPartition).traverse_(_.channel.send(record).void))
-
+    /** Opens a stream for each assigned partition, so one appears as soon as the partition is owned, and ends the streams of revoked ones. */
     private def reconcile(assignment: Set[TopicPartition]): F[Unit] =
+      assignment.toList.traverse_(stateFor.andThen(_.void)) >> revokeMissing(assignment)
+
+    /** Routes a record, opening the partition's stream first if the assignment has not reported it yet.
+      *
+      * A record is itself proof that its partition is assigned, so routing never waits for confirmation and never discards one for want of it.
+      */
+    private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
+      stateFor(record.record.topicPartition).flatMap(state => state.channel.send(record).void)
+
+    private def stateFor(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
+      mutex.lock.surround:
+        states.get.flatMap: current =>
+          current.get(topicPartition) match
+            case Some(state) => F.pure(state)
+            case None        =>
+              for
+                channel <- Channel.bounded[F, CommittableConsumerRecord[F, K, V]](maxQueuedRecords)
+                state = PartitionState(topicPartition, channel)
+                _ <- states.set(current.updated(topicPartition, state))
+                _ <- output.send(state.public).void
+              yield state
+
+    private def revokeMissing(assignment: Set[TopicPartition]): F[Unit] =
       mutex.lock.surround:
         F.uncancelable: _ =>
-          for
-            current  <- registry.get
-            nextPoll <- Deferred[F, Unit]
-            added    <- (assignment -- current.states.keySet).toList.traverse(createState).map(_.map(state => state.topicPartition -> state).toMap)
-            removed  = current.states.removedAll(assignment)
-            retained = current.states.removedAll(removed.keySet)
-            _ <- registry.set(Registry(retained ++ added, nextPoll))
-            _ <- removed.values.toList.traverse_(_.channel.close.void)
-            _ <- added.values.toList.traverse_(state => output.send(state.public).void)
-            _ <- current.nextPoll.complete(()).void
-          yield ()
-
-    private def createState(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
-      Channel.bounded[F, CommittableConsumerRecord[F, K, V]](maxQueuedRecords).map(PartitionState(topicPartition, _))
+          states.get.flatMap: current =>
+            val revoked = current.removedAll(assignment)
+            states.set(current.removedAll(revoked.keySet)) >> revoked.values.toList.traverse_(_.channel.close.void)
 
   private object Runtime:
-    def create[F[_]: Async, K, V](consumer: KafkaConsumer[F, K, V], pollInterval: FiniteDuration, maxQueuedRecords: Int): F[Runtime[F, K, V]] =
+    def create[F[_]: Async, K, V](
+        consumer: KafkaConsumer[F, K, V],
+        assignments: Stream[F, Set[TopicPartition]],
+        maxQueuedRecords: Int
+    ): F[Runtime[F, K, V]] =
       for
-        output   <- Channel.unbounded[F, PartitionRecords[F, K, V]]
-        nextPoll <- Deferred[F, Unit]
-        registry <- Ref.of[F, Registry[F, K, V]](Registry(Map.empty, nextPoll))
-        mutex    <- Mutex[F]
-        runtime = Runtime(consumer, pollInterval, maxQueuedRecords, output, registry, mutex)
-        _ <- runtime.initialize
-      yield runtime
+        output <- Channel.unbounded[F, PartitionRecords[F, K, V]]
+        states <- Ref.of[F, Map[TopicPartition, PartitionState[F, K, V]]](Map.empty)
+        mutex  <- Mutex[F]
+      yield Runtime(consumer, assignments, maxQueuedRecords, output, states, mutex)

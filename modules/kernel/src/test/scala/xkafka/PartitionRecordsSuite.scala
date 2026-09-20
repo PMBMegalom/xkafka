@@ -60,6 +60,19 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       assertEquals(result.map(_._1), List(firstPartition, secondPartition))
       assertEquals(result.map(_._2), List(List(first), List(second)))
 
+  test("a record whose partition the assignment has not reported yet is still delivered"):
+    for
+      // The assignment never reports the partition, so the old routing waited a poll for it and then discarded the record.
+      assignment <- Ref[IO].of(Set.empty[TopicPartition])
+      input      <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      early = record(firstPartition, 0L, "early")
+      _        <- input.offer(early)
+      observed <-
+        testConsumer(assignment, input).partitionedRecords(1.hour, 2)
+          .evalMap(partition => partition.records.take(1).compile.toList.map(partition.topicPartition -> _)).take(1).compile.toList
+          .timeout(10.seconds)
+    yield assertEquals(observed, List(firstPartition -> List(early)))
+
   test("partitionedRecords rejects a non-positive queue bound"):
     for
       assignment <- Ref[IO].of(Set.empty[TopicPartition])
