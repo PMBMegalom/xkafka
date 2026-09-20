@@ -27,14 +27,40 @@ final class ErrorSuite extends FunSuite:
   test("backend failures retain portable classification and their cause"):
     val cause = new RuntimeException("boom")
     val error =
-      new KafkaException.BackendFailure("request failed", code = Some("TIMED_OUT"), retriable = Some(true), fatal = Some(false), cause = cause)
+      new KafkaException.BackendFailure(
+        "request failed",
+        code = Some(ErrorCode.RequestTimedOut),
+        retriable = Some(true),
+        fatal = Some(false),
+        cause = cause
+      )
 
     assertEquals(error.detail, "request failed")
-    assertEquals(error.code, Some("TIMED_OUT"))
+    assertEquals(error.code, Some(ErrorCode.RequestTimedOut))
     assertEquals(error.retriable, Some(true))
     assertEquals(error.fatal, Some(false))
     assertEquals(error.getCause, cause)
-    assertEquals(error.getMessage, "Kafka backend failure [TIMED_OUT]: request failed")
+    assertEquals(error.getMessage, "Kafka backend failure [RequestTimedOut]: request failed")
+
+  test("protocol codes classify the same on every backend"):
+    assertEquals(ErrorCode.fromProtocol(3), ErrorCode.UnknownTopicOrPartition)
+    assertEquals(ErrorCode.fromProtocol(1), ErrorCode.OffsetOutOfRange)
+    assertEquals(ErrorCode.fromProtocol(27), ErrorCode.RebalanceInProgress)
+    assertEquals(ErrorCode.fromProtocol(999), ErrorCode.Other(999))
+
+  test("librdkafka client-side codes map onto the portable ones"):
+    assertEquals(ErrorCode.fromLibrdkafka(-195), ErrorCode.NetworkException)
+    assertEquals(ErrorCode.fromLibrdkafka(-187), ErrorCode.NetworkException)
+    assertEquals(ErrorCode.fromLibrdkafka(-185), ErrorCode.RequestTimedOut)
+    assertEquals(ErrorCode.fromLibrdkafka(-193), ErrorCode.NetworkException)
+    assertEquals(ErrorCode.fromLibrdkafka(-192), ErrorCode.RequestTimedOut)
+    assertEquals(ErrorCode.fromLibrdkafka(-169), ErrorCode.SaslAuthenticationFailed)
+    // _OUTDATED and _FAIL have no portable meaning, so they stay raw.
+    assertEquals(ErrorCode.fromLibrdkafka(-167), ErrorCode.Other(-167))
+    assertEquals(ErrorCode.fromLibrdkafka(-196), ErrorCode.Other(-196))
+    // Positive librdkafka codes are protocol codes, so they classify identically.
+    assertEquals(ErrorCode.fromLibrdkafka(3), ErrorCode.UnknownTopicOrPartition)
+    assertEquals(ErrorCode.fromLibrdkafka(-1), ErrorCode.Other(-1))
 
   test("invalid backend responses retain their detail"):
     val error = new KafkaException.InvalidBackendResponse("negative offset")

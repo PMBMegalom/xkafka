@@ -31,19 +31,38 @@ typedef struct xkafka_batch_s {
 
 const char *xkafka_version_str(void) { return rd_kafka_version_str(); }
 
-static void xkafka_set_error(char *error, size_t error_size, const char *value) {
+/* Failures report their librdkafka code alongside their text, both written
+ * through the caller's own out-parameters. Nothing is shared between clients,
+ * so concurrent failures on separate handles cannot overwrite each other. */
+static void xkafka_set_error_at(char *error,
+                                size_t error_size,
+                                int32_t *error_code,
+                                const char *value,
+                                int32_t code) {
+        if (error_code != NULL)
+                *error_code = code;
         if (error != NULL && error_size > 0)
                 snprintf(error, error_size, "%s", value);
+}
+
+/* RD_KAFKA_RESP_ERR_UNKNOWN, for failures the shim raises itself. */
+static void xkafka_set_error(char *error, size_t error_size, int32_t *error_code, const char *value) {
+        xkafka_set_error_at(error, error_size, error_code, value, -1);
 }
 
 static int xkafka_conf_set(rd_kafka_conf_t *conf,
                            const char *name,
                            const char *value,
                            char *error,
-                           size_t error_size) {
+                           size_t error_size,
+                           int32_t *error_code) {
+        /* rd_kafka_conf_set writes its own message, so only the code is set here. */
         if (rd_kafka_conf_set(conf, name, value, error, error_size) !=
-            RD_KAFKA_CONF_OK)
+            RD_KAFKA_CONF_OK) {
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
                 return -1;
+        }
         return 0;
 }
 
@@ -52,12 +71,13 @@ static int xkafka_conf_set_all(rd_kafka_conf_t *conf,
                                const char *const *values,
                                size_t count,
                                char *error,
-                               size_t error_size) {
+                               size_t error_size,
+                               int32_t *error_code) {
         size_t index;
 
         for (index = 0; index < count; index++) {
                 if (xkafka_conf_set(conf, names[index], values[index], error,
-                                    error_size) != 0)
+                                    error_size, error_code) != 0)
                         return -1;
         }
         return 0;
@@ -90,19 +110,20 @@ rd_kafka_t *xkafka_producer_new(const char *brokers,
                                 const char *const *property_values,
                                 size_t property_count,
                                 char *error,
-                                size_t error_size) {
+                                size_t error_size,
+                                int32_t *error_code) {
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *producer;
 
         if (xkafka_conf_set_all(conf, property_names, property_values,
-                                property_count, error, error_size) != 0 ||
+                                property_count, error, error_size, error_code) != 0 ||
             xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
-                            error_size) != 0) {
+                            error_size, error_code) != 0) {
                 rd_kafka_conf_destroy(conf);
                 return NULL;
         }
         if (client_id != NULL &&
-            xkafka_conf_set(conf, "client.id", client_id, error, error_size) !=
+            xkafka_conf_set(conf, "client.id", client_id, error, error_size, error_code) !=
                 0) {
                 rd_kafka_conf_destroy(conf);
                 return NULL;
@@ -135,11 +156,12 @@ int xkafka_headers_add(rd_kafka_headers_t *headers,
                        const void *value,
                        size_t value_size,
                        char *error,
-                       size_t error_size) {
+                       size_t error_size,
+                       int32_t *error_code) {
         rd_kafka_resp_err_t result =
             rd_kafka_header_add(headers, name, -1, value, value_size);
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
         return 0;
@@ -179,14 +201,15 @@ int xkafka_batch_add(rd_kafka_t *producer,
                      size_t value_size,
                      rd_kafka_headers_t *headers,
                      char *error,
-                     size_t error_size) {
+                     size_t error_size,
+                     int32_t *error_code) {
         xkafka_delivery_t *slot;
         rd_kafka_resp_err_t result;
 
         if (batch == NULL || batch->count >= batch->capacity) {
                 if (headers != NULL)
                         rd_kafka_headers_destroy(headers);
-                xkafka_set_error(error, error_size, "batch is full");
+                xkafka_set_error(error, error_size, error_code, "batch is full");
                 return -1;
         }
 
@@ -221,7 +244,7 @@ int xkafka_batch_add(rd_kafka_t *producer,
                 /* librdkafka only takes ownership of the headers on success. */
                 if (headers != NULL)
                         rd_kafka_headers_destroy(headers);
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
 
@@ -234,11 +257,12 @@ int xkafka_batch_add(rd_kafka_t *producer,
 int xkafka_batch_await(rd_kafka_t *producer,
                        xkafka_batch_t *batch,
                        char *error,
-                       size_t error_size) {
+                       size_t error_size,
+                       int32_t *error_code) {
         size_t index;
 
         if (batch == NULL) {
-                xkafka_set_error(error, error_size, "batch is not allocated");
+                xkafka_set_error(error, error_size, error_code, "batch is not allocated");
                 return -1;
         }
 
@@ -248,9 +272,7 @@ int xkafka_batch_await(rd_kafka_t *producer,
         for (index = 0; index < batch->count; index++) {
                 if (batch->slots[index].error !=
                     RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(
-                            error, error_size,
-                            rd_kafka_err2str(batch->slots[index].error));
+                        xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(batch->slots[index].error), batch->slots[index].error);
                         return -1;
                 }
         }
@@ -294,28 +316,29 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
                                 const char *const *property_values,
                                 size_t property_count,
                                 char *error,
-                                size_t error_size) {
+                                size_t error_size,
+                                int32_t *error_code) {
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *consumer;
         rd_kafka_resp_err_t result;
 
         if (xkafka_conf_set_all(conf, property_names, property_values,
-                                property_count, error, error_size) != 0 ||
+                                property_count, error, error_size, error_code) != 0 ||
             xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
-                            error_size) != 0 ||
-            xkafka_conf_set(conf, "group.id", group_id, error, error_size) !=
+                            error_size, error_code) != 0 ||
+            xkafka_conf_set(conf, "group.id", group_id, error, error_size, error_code) !=
                 0 ||
             xkafka_conf_set(conf, "auto.offset.reset", auto_offset_reset, error,
-                            error_size) != 0 ||
+                            error_size, error_code) != 0 ||
             xkafka_conf_set(conf, "enable.auto.commit", "false", error,
-                            error_size) != 0 ||
+                            error_size, error_code) != 0 ||
             xkafka_conf_set(conf, "enable.auto.offset.store", "false", error,
-                            error_size) != 0) {
+                            error_size, error_code) != 0) {
                 rd_kafka_conf_destroy(conf);
                 return NULL;
         }
         if (client_id != NULL &&
-            xkafka_conf_set(conf, "client.id", client_id, error, error_size) !=
+            xkafka_conf_set(conf, "client.id", client_id, error, error_size, error_code) !=
                 0) {
                 rd_kafka_conf_destroy(conf);
                 return NULL;
@@ -328,7 +351,7 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
 
         result = rd_kafka_poll_set_consumer(consumer);
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 rd_kafka_destroy(consumer);
                 return NULL;
         }
@@ -362,10 +385,11 @@ int xkafka_consumer_subscribe(
     rd_kafka_t *consumer,
     const rd_kafka_topic_partition_list_t *subscription,
     char *error,
-    size_t error_size) {
+    size_t error_size,
+    int32_t *error_code) {
         rd_kafka_resp_err_t result = rd_kafka_subscribe(consumer, subscription);
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
         return 0;
@@ -375,7 +399,8 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                                          int timeout_ms,
                                          int *status,
                                          char *error,
-                                         size_t error_size) {
+                                         size_t error_size,
+                                         int32_t *error_code) {
         rd_kafka_message_t *message =
             rd_kafka_consumer_poll(consumer, timeout_ms);
         if (message == NULL) {
@@ -388,7 +413,7 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                 return NULL;
         }
         if (message->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size,
+                xkafka_set_error(error, error_size, error_code,
                                  rd_kafka_message_errstr(message));
                 rd_kafka_message_destroy(message);
                 *status = -1;
@@ -487,12 +512,13 @@ xkafka_topic_partition_list(const char *const *topics,
 
 void *xkafka_consumer_assignment(rd_kafka_t *consumer,
                                  char *error,
-                                 size_t error_size) {
+                                 size_t error_size,
+                                 int32_t *error_code) {
         rd_kafka_topic_partition_list_t *assignment = NULL;
         rd_kafka_resp_err_t result = rd_kafka_assignment(consumer, &assignment);
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return NULL;
         }
         return assignment;
@@ -520,7 +546,8 @@ int xkafka_consumer_committed(rd_kafka_t *consumer,
                               size_t count,
                               int64_t *offset_values,
                               char *error,
-                              size_t error_size) {
+                              size_t error_size,
+                              int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, NULL, count);
         rd_kafka_resp_err_t result =
@@ -528,14 +555,14 @@ int xkafka_consumer_committed(rd_kafka_t *consumer,
         size_t index;
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 rd_kafka_topic_partition_list_destroy(native_offsets);
                 return -1;
         }
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size,
+                        xkafka_set_error(error, error_size, error_code,
                                          rd_kafka_err2str(entry->err));
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return -1;
@@ -552,12 +579,13 @@ int xkafka_consumer_watermark_offsets(rd_kafka_t *consumer,
                                       int64_t *low,
                                       int64_t *high,
                                       char *error,
-                                      size_t error_size) {
+                                      size_t error_size,
+                                      int32_t *error_code) {
         rd_kafka_resp_err_t result = rd_kafka_query_watermark_offsets(
             consumer, topic, partition, low, high, -1);
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
         return 0;
@@ -570,7 +598,8 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
                                       size_t count,
                                       int64_t *offset_values,
                                       char *error,
-                                      size_t error_size) {
+                                      size_t error_size,
+                                      int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, timestamps, count);
         rd_kafka_resp_err_t result =
@@ -578,14 +607,14 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
         size_t index;
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 rd_kafka_topic_partition_list_destroy(native_offsets);
                 return -1;
         }
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size,
+                        xkafka_set_error(error, error_size, error_code,
                                          rd_kafka_err2str(entry->err));
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return -1;
@@ -599,7 +628,8 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
 void *xkafka_consumer_metadata(rd_kafka_t *consumer,
                                const char *topic,
                                char *error,
-                               size_t error_size) {
+                               size_t error_size,
+                               int32_t *error_code) {
         rd_kafka_topic_t *native_topic = NULL;
         const struct rd_kafka_metadata *metadata = NULL;
         rd_kafka_resp_err_t result;
@@ -608,7 +638,7 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
         if (topic != NULL) {
                 native_topic = rd_kafka_topic_new(consumer, topic, NULL);
                 if (native_topic == NULL) {
-                        xkafka_set_error(error, error_size,
+                        xkafka_set_error(error, error_size, error_code,
                                          rd_kafka_err2str(rd_kafka_last_error()));
                         return NULL;
                 }
@@ -619,7 +649,7 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
         if (native_topic != NULL)
                 rd_kafka_topic_destroy(native_topic);
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return NULL;
         }
 
@@ -629,7 +659,7 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
                 int partition_index;
 
                 if (topic_metadata->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size,
+                        xkafka_set_error(error, error_size, error_code,
                                          rd_kafka_err2str(topic_metadata->err));
                         rd_kafka_metadata_destroy(metadata);
                         return NULL;
@@ -640,7 +670,7 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
                         rd_kafka_resp_err_t partition_error =
                             topic_metadata->partitions[partition_index].err;
                         if (partition_error != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                                xkafka_set_error(error, error_size,
+                                xkafka_set_error(error, error_size, error_code,
                                                  rd_kafka_err2str(partition_error));
                                 rd_kafka_metadata_destroy(metadata);
                                 return NULL;
@@ -687,7 +717,8 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
                          int32_t partition,
                          int64_t offset,
                          char *error,
-                         size_t error_size) {
+                         size_t error_size,
+                         int32_t *error_code) {
         const char *topics[] = {topic};
         const int32_t partitions[] = {partition};
         const int64_t offsets[] = {offset};
@@ -697,14 +728,14 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
             rd_kafka_seek_partitions(consumer, native_offsets, -1);
 
         if (result != NULL) {
-                xkafka_set_error(error, error_size,
+                xkafka_set_error(error, error_size, error_code,
                                  rd_kafka_error_string(result));
                 rd_kafka_error_destroy(result);
                 rd_kafka_topic_partition_list_destroy(native_offsets);
                 return -1;
         }
         if (native_offsets->elems[0].err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size,
+                xkafka_set_error(error, error_size, error_code,
                                  rd_kafka_err2str(native_offsets->elems[0].err));
                 rd_kafka_topic_partition_list_destroy(native_offsets);
                 return -1;
@@ -719,7 +750,8 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
                            const int64_t *offset_values,
                            size_t count,
                            char *error,
-                           size_t error_size) {
+                           size_t error_size,
+                           int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, offset_values,
                                         count);
@@ -729,7 +761,7 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
         rd_kafka_topic_partition_list_destroy(native_offsets);
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, rd_kafka_err2str(result));
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
         return 0;

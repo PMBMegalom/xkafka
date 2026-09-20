@@ -34,7 +34,8 @@ private[xkafka] object Bindings:
       propertyValues: Ptr[CString],
       propertyCount: CSize,
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
   def xkafka_producer_destroy(producer: CVoidPtr): Unit = extern
@@ -43,7 +44,15 @@ private[xkafka] object Bindings:
 
   def xkafka_headers_destroy(headers: CVoidPtr): Unit = extern
 
-  def xkafka_headers_add(headers: CVoidPtr, name: CString, value: CVoidPtr, valueSize: CSize, error: CString, errorSize: CSize): CInt = extern
+  def xkafka_headers_add(
+      headers: CVoidPtr,
+      name: CString,
+      value: CVoidPtr,
+      valueSize: CSize,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
 
   def xkafka_batch_new(capacity: CSize): CVoidPtr = extern
 
@@ -59,10 +68,11 @@ private[xkafka] object Bindings:
       valueSize: CSize,
       headers: CVoidPtr,
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_batch_await(producer: CVoidPtr, batch: CVoidPtr, error: CString, errorSize: CSize): CInt = extern
+  def xkafka_batch_await(producer: CVoidPtr, batch: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
 
   def xkafka_batch_count(batch: CVoidPtr): CSize = extern
 
@@ -83,7 +93,8 @@ private[xkafka] object Bindings:
       propertyValues: Ptr[CString],
       propertyCount: CSize,
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
   def xkafka_consumer_destroy(consumer: CVoidPtr): Unit = extern
@@ -94,9 +105,10 @@ private[xkafka] object Bindings:
 
   def xkafka_subscription_add(subscription: CVoidPtr, topic: CString): Unit = extern
 
-  def xkafka_consumer_subscribe(consumer: CVoidPtr, subscription: CVoidPtr, error: CString, errorSize: CSize): CInt = extern
+  def xkafka_consumer_subscribe(consumer: CVoidPtr, subscription: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
 
-  def xkafka_consumer_poll(consumer: CVoidPtr, timeoutMs: CInt, status: Ptr[CInt], error: CString, errorSize: CSize): CVoidPtr = extern
+  def xkafka_consumer_poll(consumer: CVoidPtr, timeoutMs: CInt, status: Ptr[CInt], error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr =
+    extern
 
   def xkafka_message_destroy(message: CVoidPtr): Unit = extern
 
@@ -127,7 +139,7 @@ private[xkafka] object Bindings:
       hasValue: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_consumer_assignment(consumer: CVoidPtr, error: CString, errorSize: CSize): CVoidPtr = extern
+  def xkafka_consumer_assignment(consumer: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
 
   def xkafka_assignment_destroy(assignment: CVoidPtr): Unit = extern
 
@@ -144,7 +156,8 @@ private[xkafka] object Bindings:
       count: CSize,
       offsets: Ptr[CLongLong],
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CInt = extern
 
   def xkafka_consumer_watermark_offsets(
@@ -154,7 +167,8 @@ private[xkafka] object Bindings:
       low: Ptr[CLongLong],
       high: Ptr[CLongLong],
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CInt = extern
 
   def xkafka_consumer_offsets_for_times(
@@ -165,10 +179,11 @@ private[xkafka] object Bindings:
       count: CSize,
       offsets: Ptr[CLongLong],
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_consumer_metadata(consumer: CVoidPtr, topic: CString, error: CString, errorSize: CSize): CVoidPtr = extern
+  def xkafka_consumer_metadata(consumer: CVoidPtr, topic: CString, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
 
   def xkafka_metadata_destroy(metadata: CVoidPtr): Unit = extern
 
@@ -180,7 +195,15 @@ private[xkafka] object Bindings:
 
   def xkafka_metadata_partition_at(metadata: CVoidPtr, topicIndex: CSize, partitionIndex: CSize): CInt = extern
 
-  def xkafka_consumer_seek(consumer: CVoidPtr, topic: CString, partition: CInt, offset: CLongLong, error: CString, errorSize: CSize): CInt = extern
+  def xkafka_consumer_seek(
+      consumer: CVoidPtr,
+      topic: CString,
+      partition: CInt,
+      offset: CLongLong,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
 
   def xkafka_consumer_commit(
       consumer: CVoidPtr,
@@ -189,5 +212,6 @@ private[xkafka] object Bindings:
       offsets: Ptr[CLongLong],
       count: CSize,
       error: CString,
-      errorSize: CSize
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
   ): CInt = extern

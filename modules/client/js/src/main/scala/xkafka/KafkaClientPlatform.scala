@@ -127,7 +127,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     if value == null || js.isUndefined(value) then None else Some(error.asInstanceOf[confluent.RdError])
 
   private def rdFailure(error: confluent.RdError): KafkaException.BackendFailure =
-    new KafkaException.BackendFailure(error.message, Some(error.code.toString), error.isRetriable.toOption, error.isFatal.toOption)
+    new KafkaException.BackendFailure(error.message, Some(ErrorCode.fromLibrdkafka(error.code)), error.isRetriable.toOption, error.isFatal.toOption)
 
   private def callback[A](register: js.Function2[confluent.RdError | Null, A, Unit] => Unit): F[A] =
     F.async_ : resume =>
@@ -166,11 +166,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       Chunk.array(Array.tabulate(array.length)(index => array(index).toByte))
 
   private def nodeBuffer(value: Option[Chunk[Byte]]): Uint8Array | Null =
-    value.fold[Uint8Array | Null](null): chunk =>
+    value.map: chunk =>
       val array = new Uint8Array(chunk.size)
       chunk.iterator.zipWithIndex.foreach:
         case (byte, index) => array(index) = byte.toShort
       confluent.Buffer.from(array)
+    .orNull
 
   /** librdkafka hands back one single-entry object per header, so duplicate names and their order both survive the round trip. */
   private def portableHeaders(headers: js.UndefOr[js.Array[confluent.RdHeader]]): Headers =

@@ -143,8 +143,12 @@ another. Those that can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full.
 
 Backend-reported failures are exposed as `KafkaException.BackendFailure`, which
-preserves the original cause and includes error codes and retriable or fatal
-classifications when the backend supplies them.
+preserves the original cause and carries a portable `ErrorCode` along with
+retriable and fatal classifications. The named `ErrorCode` cases are Kafka
+protocol errors, which every broker reports under the same code, plus the
+client-side conditions each backend raises on its own; `ErrorCode.Other` carries
+a code with no portable meaning. Matching on `ErrorCode.OffsetOutOfRange`
+therefore behaves the same on all three platforms.
 `KafkaException.InvalidBackendResponse` indicates that a backend returned data
 which cannot be represented by the portable API.
 

@@ -38,7 +38,8 @@ import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
-import org.apache.kafka.common.errors.RetriableException
+import org.apache.kafka.common.errors.{InvalidPidMappingException, ProducerFencedException, RetriableException}
+import org.apache.kafka.common.protocol.Errors
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new Fs2KafkaClient[F]
@@ -69,9 +70,15 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     value.adaptError:
       case error: JavaKafkaException => new KafkaException.BackendFailure(
           Option(error.getMessage).getOrElse(error.getClass.getName),
+          code = protocolCode(error),
           retriable = Some(error.isInstanceOf[RetriableException]),
+          fatal = Some(error.isInstanceOf[InvalidPidMappingException] || error.isInstanceOf[ProducerFencedException]),
           cause = error
         )
+
+  /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports. */
+  private def protocolCode(error: JavaKafkaException): Option[ErrorCode] =
+    Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
 
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =
@@ -97,7 +104,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       for
         portableTopic <- F.fromEither(validTopic(topic))
         bytes         <- value.serialize(portableTopic, portableHeaders(headers), input)
-      yield bytes.fold[Array[Byte]](null)(_.toArray)
+      yield bytes.map(_.toArray).orNull
 
   private def deserializer[A](value: Deserializer[F, A]): Fs2Deserializer[F, A] =
     Fs2Deserializer.instance: (topic, headers, bytes) =>
@@ -134,7 +141,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     private def fs2Headers(headers: Headers): Fs2Headers =
       Fs2Headers.fromSeq(
         headers.values.map: header =>
-          val bytes = header.value.fold[Array[Byte]](null)(_.toArray)
+          val bytes = header.value.map(_.toArray).orNull
           Fs2Header(header.key, bytes)
       )
 

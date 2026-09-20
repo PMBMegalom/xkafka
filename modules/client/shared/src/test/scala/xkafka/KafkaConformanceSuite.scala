@@ -131,6 +131,22 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             assertEquals(consumed.map(_.record.value), List("a", "b", "c", "d").map(Some(_)))
         .timeout(60.seconds)
 
+  test(conformance("an unreachable broker fails with the same portable classification")):
+    val unreachable = "127.0.0.1:1"
+    val settings    =
+      ClientSettings.from(NonEmptyList.one(unreachable), properties = Map("socket.timeout.ms" -> "1000", "message.timeout.ms" -> "2000"))
+        .andThen(client => ProducerSettings.from(client, optionalSerializer, optionalSerializer))
+
+    validated(settings).flatMap: producerSettings =>
+      PlatformKafkaClient().producer(producerSettings)
+        .use(_.produceAndAwait(NonEmptyList.one(record(uniqueTopic("unreachable"), Some("k"), Some("v"), validPartition(0))))).attempt.map:
+          case Left(failure: KafkaException.BackendFailure) =>
+            assert(failure.code.isDefined, s"expected a portable code, got ${failure.code}")
+            assert(!failure.code.contains(ErrorCode.Other(-1)), s"expected a classified code, got ${failure.code}")
+          case Left(other) => fail(s"expected a BackendFailure, got $other")
+          case Right(_)    => fail("expected producing to an unreachable broker to fail")
+    .timeout(90.seconds)
+
   test(conformance("a consumer resource can be allocated and released repeatedly")):
     withBroker: server =>
       val topic = uniqueTopic("lifecycle")

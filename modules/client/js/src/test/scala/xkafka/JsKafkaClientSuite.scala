@@ -63,7 +63,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use(_ => IO.unit)
     ).map: error =>
       assertEquals(error.detail, "connection failed")
-      assertEquals(error.code, Some("-195"))
+      assertEquals(error.code, Some(ErrorCode.NetworkException))
       assertEquals(error.retriable, Some(true))
       assertEquals(error.fatal, Some(false))
 

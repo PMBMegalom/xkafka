@@ -62,31 +62,32 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     F.blocking:
       Zone.acquire: zone =>
         given Zone                        = zone
-        val error                         = stackalloc[CChar](ErrorBufferSize)
+        val (error, errorCode)            = errorSlots
         val (names, values, propertySize) = nativeProperties(settings.client.properties ++ settings.properties)
         val producer                      =
           Bindings.xkafka_producer_new(
             toCString(settings.client.bootstrapServers.toList.mkString(",")),
-            settings.client.clientId.fold[CString](null)(toCString),
+            settings.client.clientId.map(toCString).orNull,
             names,
             values,
             propertySize,
             error,
-            ErrorBufferSize.toUSize
+            ErrorBufferSize.toUSize,
+            errorCode
           )
-        if producer == null then throw nativeError(error)
+        if producer == null then throw nativeError(error, errorCode)
         producer
 
   private def createConsumer[K, V](settings: ConsumerSettings[F, K, V]): F[CVoidPtr] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone                        = zone
-        val error                         = stackalloc[CChar](ErrorBufferSize)
+        val (error, errorCode)            = errorSlots
         val (names, values, propertySize) = nativeProperties(settings.client.properties ++ settings.properties)
         val consumer                      =
           Bindings.xkafka_consumer_new(
             toCString(settings.client.bootstrapServers.toList.mkString(",")),
-            settings.client.clientId.fold[CString](null)(toCString),
+            settings.client.clientId.map(toCString).orNull,
             toCString(settings.groupId.value),
             toCString(
               settings.autoOffsetReset match
@@ -97,9 +98,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             values,
             propertySize,
             error,
-            ErrorBufferSize.toUSize
+            ErrorBufferSize.toUSize,
+            errorCode
           )
-        if consumer == null then throw nativeError(error)
+        if consumer == null then throw nativeError(error, errorCode)
         consumer
 
   private def nativeProperties(properties: Map[String, String])(using Zone): (Ptr[CString], Ptr[CString], CSize) =
@@ -126,12 +128,28 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
       try
         topics.toList.foreach(topic => Bindings.xkafka_subscription_add(nativeSubscription, toCString(topic)))
-        val error  = stackalloc[CChar](ErrorBufferSize)
-        val result = Bindings.xkafka_consumer_subscribe(consumer, nativeSubscription, error, ErrorBufferSize.toUSize)
-        if result != 0 then throw nativeError(error)
+        val (error, errorCode) = errorSlots
+        val result             = Bindings.xkafka_consumer_subscribe(consumer, nativeSubscription, error, ErrorBufferSize.toUSize, errorCode)
+        if result != 0 then throw nativeError(error, errorCode)
       finally Bindings.xkafka_subscription_destroy(nativeSubscription)
 
-  private def nativeError(error: CString): KafkaException.BackendFailure = backendFailure(fromCString(error))
+  /** Builds a failure from the message and code the call wrote into its own out-parameters. */
+  private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure =
+    val classified = ErrorCode.fromLibrdkafka(!code)
+    new KafkaException.BackendFailure(fromCString(error), Some(classified), retriable = Some(retriable(classified)), fatal = Some(false))
+
+  /** Allocates the out-parameters a shim call reports a failure through. They live in this frame, so concurrent calls cannot share them. */
+  private def errorSlots(using Zone): (CString, Ptr[CInt]) =
+    val error = alloc[CChar](ErrorBufferSize)
+    val code  = alloc[CInt](1)
+    !code = 0
+    (error, code)
+
+  private def retriable(code: ErrorCode): Boolean =
+    code match
+      case ErrorCode.NetworkException | ErrorCode.RequestTimedOut | ErrorCode.LeaderNotAvailable | ErrorCode.NotLeaderOrFollower | ErrorCode
+            .BrokerNotAvailable | ErrorCode.CoordinatorNotAvailable | ErrorCode.NotCoordinator | ErrorCode.CoordinatorLoadInProgress => true
+      case _ => false
 
   private def backendFailure(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
 
@@ -182,12 +200,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
       try
         Zone.acquire: zone =>
-          given Zone = zone
-          val error  = stackalloc[CChar](ErrorBufferSize)
+          given Zone             = zone
+          val (error, errorCode) = errorSlots
           records.toList.foreach: record =>
             val (keyPointer, keySize)     = cBytes(record.key)
             val (valuePointer, valueSize) = cBytes(record.value)
-            val headers                   = nativeHeaders(record.headers, error)
+            val headers                   = nativeHeaders(record.headers, error, errorCode)
             val result                    =
               Bindings.xkafka_batch_add(
                 handle,
@@ -201,24 +219,25 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
                 valueSize,
                 headers,
                 error,
-                ErrorBufferSize.toUSize
+                ErrorBufferSize.toUSize,
+                errorCode
               )
-            if result != 0 then throw nativeError(error)
+            if result != 0 then throw nativeError(error, errorCode)
         batch
       catch
         case failure: Throwable =>
           Bindings.xkafka_batch_destroy(handle, batch)
           throw failure
 
-    private def nativeHeaders(headers: Headers, error: CString)(using Zone): CVoidPtr =
+    private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
       val native = Bindings.xkafka_headers_new(headers.values.size.toUSize)
       if native == null then throw backendFailure("could not allocate message headers")
 
       try
         headers.values.foreach: header =>
           val (value, size) = cBytes(header.value)
-          val result        = Bindings.xkafka_headers_add(native, toCString(header.key), value, size, error, ErrorBufferSize.toUSize)
-          if result != 0 then throw nativeError(error)
+          val result        = Bindings.xkafka_headers_add(native, toCString(header.key), value, size, error, ErrorBufferSize.toUSize, errorCode)
+          if result != 0 then throw nativeError(error, errorCode)
         native
       catch
         case failure: Throwable =>
@@ -226,14 +245,16 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           throw failure
 
     private def awaitBatch(batch: CVoidPtr, records: NonEmptyList[ProducerRecord[K, V]]): ProducerResult[K, V] =
-      val error  = stackalloc[CChar](ErrorBufferSize)
-      val result = Bindings.xkafka_batch_await(handle, batch, error, ErrorBufferSize.toUSize)
-      if result != 0 then throw nativeError(error)
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val result             = Bindings.xkafka_batch_await(handle, batch, error, ErrorBufferSize.toUSize, errorCode)
+        if result != 0 then throw nativeError(error, errorCode)
 
-      val reported = Bindings.xkafka_batch_count(batch).toInt
-      if reported != records.size then throw new KafkaException.InvalidBackendResponse(s"expected ${records.size} delivery reports, got $reported")
+        val reported = Bindings.xkafka_batch_count(batch).toInt
+        if reported != records.size then throw new KafkaException.InvalidBackendResponse(s"expected ${records.size} delivery reports, got $reported")
 
-      ProducerResult(records.zipWithIndex.map((record, index) => record -> Some(metadataAt(batch, index, record.topic))))
+        ProducerResult(records.zipWithIndex.map((record, index) => record -> Some(metadataAt(batch, index, record.topic))))
 
     private def metadataAt(batch: CVoidPtr, index: Int, topic: Topic): RecordMetadata =
       val partitionValue = Bindings.xkafka_batch_partition_at(batch, index.toUSize)
@@ -295,12 +316,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = semaphore.permit.use(_ => F.blocking(seekTo(topicPartition, offset)))
 
     private def poll(): Option[NativeRecord] =
-      Zone.acquire: _ =>
-        val status  = stackalloc[CInt]()
-        val error   = stackalloc[CChar](ErrorBufferSize)
-        val message = Bindings.xkafka_consumer_poll(handle, PollTimeoutMillis, status, error, ErrorBufferSize.toUSize)
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val status             = stackalloc[CInt]()
+        val (error, errorCode) = errorSlots
+        val message            = Bindings.xkafka_consumer_poll(handle, PollTimeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
 
-        if !status < 0 then throw nativeError(error)
+        if !status < 0 then throw nativeError(error, errorCode)
         else if !status == 0 then None
         else
           try Some(copyMessage(message))
@@ -367,25 +389,28 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               topics(index) = toCString(topicPartition.topic.value)
               partitions(index) = topicPartition.partition.value
               nativeOffsets(index) = offset.value
-          val error  = stackalloc[CChar](ErrorBufferSize)
-          val result =
-            Bindings.xkafka_consumer_commit(handle, topics, partitions, nativeOffsets, entries.size.toUSize, error, ErrorBufferSize.toUSize)
-          if result != 0 then throw nativeError(error)
+          val (error, errorCode) = errorSlots
+          val result             =
+            Bindings
+              .xkafka_consumer_commit(handle, topics, partitions, nativeOffsets, entries.size.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+          if result != 0 then throw nativeError(error, errorCode)
 
     private def readAssignment(): Set[TopicPartition] =
-      val error      = stackalloc[CChar](ErrorBufferSize)
-      val assignment = Bindings.xkafka_consumer_assignment(handle, error, ErrorBufferSize.toUSize)
-      if assignment == null then throw nativeError(error)
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val assignment         = Bindings.xkafka_consumer_assignment(handle, error, ErrorBufferSize.toUSize, errorCode)
+        if assignment == null then throw nativeError(error, errorCode)
 
-      try Vector.tabulate(Bindings.xkafka_assignment_count(assignment).toInt): index =>
-          val topicValue     = fromCString(Bindings.xkafka_assignment_topic_at(assignment, index.toUSize))
-          val partitionValue = Bindings.xkafka_assignment_partition_at(assignment, index.toUSize)
-          val topic          = Topic.from(topicValue).fold(error => throw invalidBackendValue("assigned topic", topicValue, error), identity)
-          val partition      =
-            Partition.from(partitionValue).fold(error => throw invalidBackendValue("assigned partition", partitionValue, error), identity)
-          TopicPartition(topic, partition)
-        .toSet
-      finally Bindings.xkafka_assignment_destroy(assignment)
+        try Vector.tabulate(Bindings.xkafka_assignment_count(assignment).toInt): index =>
+            val topicValue     = fromCString(Bindings.xkafka_assignment_topic_at(assignment, index.toUSize))
+            val partitionValue = Bindings.xkafka_assignment_partition_at(assignment, index.toUSize)
+            val topic          = Topic.from(topicValue).fold(error => throw invalidBackendValue("assigned topic", topicValue, error), identity)
+            val partition      =
+              Partition.from(partitionValue).fold(error => throw invalidBackendValue("assigned partition", partitionValue, error), identity)
+            TopicPartition(topic, partition)
+          .toSet
+        finally Bindings.xkafka_assignment_destroy(assignment)
 
     private def readCommitted(topicPartitions: Set[TopicPartition]): Map[TopicPartition, Option[Offset]] =
       Zone.acquire: zone =>
@@ -398,10 +423,11 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           case (topicPartition, index) =>
             topics(index) = toCString(topicPartition.topic.value)
             partitions(index) = topicPartition.partition.value
-        val error  = stackalloc[CChar](ErrorBufferSize)
-        val result =
-          Bindings.xkafka_consumer_committed(handle, topics, partitions, entries.size.toUSize, committedOffsets, error, ErrorBufferSize.toUSize)
-        if result != 0 then throw nativeError(error)
+        val (error, errorCode) = errorSlots
+        val result             =
+          Bindings
+            .xkafka_consumer_committed(handle, topics, partitions, entries.size.toUSize, committedOffsets, error, ErrorBufferSize.toUSize, errorCode)
+        if result != 0 then throw nativeError(error, errorCode)
         entries.iterator.zipWithIndex.map:
           case (topicPartition, index) =>
             val offsetValue = committedOffsets(index)
@@ -419,10 +445,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       Zone.acquire: zone =>
         given Zone = zone
         topicPartitions.iterator.map: topicPartition =>
-          val low    = stackalloc[CLongLong]()
-          val high   = stackalloc[CLongLong]()
-          val error  = stackalloc[CChar](ErrorBufferSize)
-          val result =
+          val low                = stackalloc[CLongLong]()
+          val high               = stackalloc[CLongLong]()
+          val (error, errorCode) = errorSlots
+          val result             =
             Bindings.xkafka_consumer_watermark_offsets(
               handle,
               toCString(topicPartition.topic.value),
@@ -430,9 +456,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               low,
               high,
               error,
-              ErrorBufferSize.toUSize
+              ErrorBufferSize.toUSize,
+              errorCode
             )
-          if result != 0 then throw nativeError(error)
+          if result != 0 then throw nativeError(error, errorCode)
           val value  = select(!low, !high)
           val offset = Offset.from(value).fold(error => throw invalidBackendValue(field, value, error), identity)
           topicPartition -> offset
@@ -451,8 +478,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             topics(index) = toCString(topicPartition.topic.value)
             partitions(index) = topicPartition.partition.value
             timestamps(index) = timestamp.epochMillis
-        val error  = stackalloc[CChar](ErrorBufferSize)
-        val result =
+        val (error, errorCode) = errorSlots
+        val result             =
           Bindings.xkafka_consumer_offsets_for_times(
             handle,
             topics,
@@ -461,9 +488,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             entries.size.toUSize,
             timestampOffsets,
             error,
-            ErrorBufferSize.toUSize
+            ErrorBufferSize.toUSize,
+            errorCode
           )
-        if result != 0 then throw nativeError(error)
+        if result != 0 then throw nativeError(error, errorCode)
         entries.iterator.zipWithIndex.map:
           case ((topicPartition, _), index) =>
             val value  = timestampOffsets(index)
@@ -474,12 +502,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
     private def readTopicMetadata(requestedTopic: Option[Topic]): Map[Topic, Set[Partition]] =
       Zone.acquire: zone =>
-        given Zone   = zone
-        val error    = stackalloc[CChar](ErrorBufferSize)
-        val metadata =
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val metadata           =
           Bindings
-            .xkafka_consumer_metadata(handle, requestedTopic.fold[CString](null)(topic => toCString(topic.value)), error, ErrorBufferSize.toUSize)
-        if metadata == null then throw nativeError(error)
+            .xkafka_consumer_metadata(handle, requestedTopic.map(topic => toCString(topic.value)).orNull, error, ErrorBufferSize.toUSize, errorCode)
+        if metadata == null then throw nativeError(error, errorCode)
 
         try Vector.tabulate(Bindings.xkafka_metadata_topic_count(metadata).toInt): topicIndex =>
             val topicValue = fromCString(Bindings.xkafka_metadata_topic_at(metadata, topicIndex.toUSize))
@@ -498,15 +526,16 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
     private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =
       Zone.acquire: zone =>
-        given Zone = zone
-        val error  = stackalloc[CChar](ErrorBufferSize)
-        val result =
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val result             =
           Bindings.xkafka_consumer_seek(
             handle,
             toCString(topicPartition.topic.value),
             topicPartition.partition.value,
             offset.value,
             error,
-            ErrorBufferSize.toUSize
+            ErrorBufferSize.toUSize,
+            errorCode
           )
-        if result != 0 then throw nativeError(error)
+        if result != 0 then throw nativeError(error, errorCode)
