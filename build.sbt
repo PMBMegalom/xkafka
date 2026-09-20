@@ -54,6 +54,9 @@ ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
 )
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
+// The matrix is small, so a failure on one entry should not hide the state of the others.
+ThisBuild / githubWorkflowBuildMatrixFailFast := Some(false)
+
 // Only the Native build is worth running twice: it is the one whose result depends on the host toolchain.
 ThisBuild / githubWorkflowBuildMatrixExclusions ++= Seq(
   MatrixExclude(Map("os" -> "macos-latest", "project" -> "rootJVM")),
@@ -287,9 +290,11 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     nativeConfig         := {
       val config = nativeConfig.value
       val prefix = librdkafkaPrefix.value
-      // The static librdkafka archive leaves TLS and compression symbols undefined, so the final
-      // link needs the system libraries it was built against.
-      val systemLinkFlags = librdkafkaSearchFlags ++ Seq("-lssl", "-lcrypto", "-lz", "-lzstd")
+      // The static librdkafka archive leaves TLS and compression symbols undefined, so the final link needs
+      // the system libraries it was built against. GNU ld resolves archives left to right and drops members
+      // nothing has referenced yet, so librdkafka has to precede them; ld64 resolves across all inputs and
+      // does not care, which is why this only shows up on Linux.
+      val systemLinkFlags = librdkafkaSearchFlags ++ Seq("-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd")
       config
         .withCompileOptions(_ :+ s"-I${prefix.getAbsolutePath}/include")
         .withLinkingOptions(_ ++ (s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}" +: systemLinkFlags))
