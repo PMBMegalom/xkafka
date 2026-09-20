@@ -101,8 +101,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         val expected = List[(String, Option[List[Byte]])](("a", Some(List[Byte](1))), ("b", Some(List[Byte](2))), ("a", Some(List[Byte](3))))
         assertEquals(observed, expected)
 
-  // The Confluent JavaScript driver reports one metadata entry per topic-partition batch rather than per record.
-  test(conformance("producing reports metadata for every record", divergent = Set("js"))):
+  test(conformance("producing reports metadata for every record")):
     withBroker: server =>
       val topic     = uniqueTopic("metadata")
       val partition = validPartition(0)

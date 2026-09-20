@@ -33,21 +33,39 @@ import internal.confluent
 import munit.CatsEffectSuite
 
 final class JsKafkaClientSuite extends CatsEffectSuite:
-  test("wraps rejected backend promises"):
-    Dispatcher.sequential[IO].use: dispatcher =>
-      val cause    = new RuntimeException("connection failed")
-      val producer =
-        js.Dynamic.literal(
-          connect = (() => promise[Unit](dispatcher)(IO.raiseError(cause))): js.Function0[js.Promise[Unit]],
-          disconnect = (() => js.Promise.resolve(())): js.Function0[js.Promise[Unit]]
-        ).asInstanceOf[confluent.Producer]
-      val serializer = Serializer.const[IO, String](None)
-      val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+  test("wraps librdkafka failures with their code and classification"):
+    val failure  = js.Dynamic.literal(message = "connection failed", code = -195, isRetriable = true, isFatal = false).asInstanceOf[confluent.RdError]
+    val producer =
+      js.Dynamic.literal(
+        connect =
+          ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(failure, ())): js.Function2[
+            js.Any,
+            js.Function2[confluent.RdError | Null, js.Any, Unit],
+            Unit
+          ],
+        disconnect =
+          ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+            js.Function2[confluent.RdError | Null, js.Any, Unit],
+            Unit
+          ],
+        setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
+        on =
+          ((_: String, _: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) => ()): js.Function2[
+            String,
+            js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit],
+            Unit
+          ]
+      ).asInstanceOf[confluent.RdProducer]
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
 
-      interceptIO[KafkaException.BackendFailure](
-        KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use(_ => IO.unit)
-      ).map: error =>
-        assert(error.getCause ne null)
+    interceptIO[KafkaException.BackendFailure](
+      KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use(_ => IO.unit)
+    ).map: error =>
+      assertEquals(error.detail, "connection failed")
+      assertEquals(error.code, Some("-195"))
+      assertEquals(error.retriable, Some(true))
+      assertEquals(error.fatal, Some(false))
 
   test("Confluent facade uses direct librdkafka configuration"):
     val common       = dynamic(confluent.Values.kafkaConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("socket.timeout.ms" -> "123")))
@@ -68,25 +86,45 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     assert(js.isUndefined(run.selectDynamic("autoCommit")))
     assertEquals(run.selectDynamic("eachBatchAutoResolve").asInstanceOf[Boolean], false)
 
-  test("producer delegates serialization and preserves large offsets"):
+  test("producer enqueues each record with its own opaque and reports metadata per record"):
     Dispatcher.sequential[IO].use: dispatcher =>
       for
         connected    <- Ref.of[IO, Int](0)
         disconnected <- Ref.of[IO, Int](0)
-        sent         <- Deferred[IO, confluent.ProducerBatch]
-        metadata =
-          js.Dynamic.literal(topicName = "events", partition = 2, errorCode = 0, offset = "9007199254740993", timestamp = "1234")
-            .asInstanceOf[confluent.RecordMetadata]
+        produced     <- IO(js.Array[js.Dynamic]())
+        reporter     <- Deferred[IO, js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]]
         producer =
           js.Dynamic.literal(
-            connect = (() => promise(dispatcher)(connected.update(_ + 1))): js.Function0[js.Promise[Unit]],
-            disconnect = (() => promise(dispatcher)(disconnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
-            sendBatch =
-              ((batch: confluent.ProducerBatch) => promise(dispatcher)(sent.complete(batch).as(js.Array(metadata)))): js.Function1[
-                confluent.ProducerBatch,
-                js.Promise[js.Array[confluent.RecordMetadata]]
-              ]
-          ).asInstanceOf[confluent.Producer]
+            connect =
+              (
+                  (_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+                    dispatcher.unsafeRunAndForget(connected.update(_ + 1) >> IO(done(null, ())))
+              ): js.Function2[js.Any, js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
+            disconnect =
+              (
+                  (done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+                    dispatcher.unsafeRunAndForget(disconnected.update(_ + 1) >> IO(done(null, ())))
+              ): js.Function1[js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
+            setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
+            on =
+              (
+                  (_: String, listener: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) =>
+                    dispatcher.unsafeRunAndForget(reporter.complete(listener).void)
+              ): js.Function2[String, js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit], Unit],
+            produce =
+              (
+                  (topic: String, partition: js.Any, value: js.Any, key: js.Any, timestamp: js.Any, opaque: js.Any, headers: js.Any) =>
+                    produced.push(js.Dynamic.literal(
+                      topic = topic,
+                      partition = partition,
+                      value = value,
+                      key = key,
+                      timestamp = timestamp,
+                      opaque = opaque,
+                      headers = headers
+                    )): Unit
+              ): js.Function7[String, js.Any, js.Any, js.Any, js.Any, js.Any, js.Any, Unit]
+          ).asInstanceOf[confluent.RdProducer]
         record =
           ProducerRecord(
             topic = topic("events"),
@@ -97,38 +135,46 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             headers =
               Headers(
                 Header("trace", Some(Chunk.array(Array[Byte](1)))),
-                Header("trace", Some(Chunk.array(Array[Byte](2)))),
-                Header("nullable", None)
+                Header("other", Some(Chunk.array(Array[Byte](9)))),
+                Header("trace", Some(Chunk.array(Array[Byte](2))))
               )
           )
         settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "5")).toOption.get
         result <-
           KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5")))
-            .producer(settings).use(_.produceAndAwait(NonEmptyList.one(record)))
+            .producer(settings).use: underlying =>
+              for
+                acknowledgement <- underlying.produce(NonEmptyList.one(record))
+                listener        <- reporter.get
+                opaque = produced(0).opaque
+                _ <-
+                  IO(listener(
+                    null,
+                    js.Dynamic.literal(topic = "events", partition = 2, offset = 41d, timestamp = 1234d, opaque = opaque)
+                      .asInstanceOf[confluent.RdDeliveryReport]
+                  ))
+                value <- acknowledgement
+              yield value
         connectedCount    <- connected.get
         disconnectedCount <- disconnected.get
-        batch             <- sent.get
         _                 <-
           IO:
             assertEquals(connectedCount, 1)
             assertEquals(disconnectedCount, 1)
+            assertEquals(produced.length, 1)
+            assertEquals(produced(0).topic.asInstanceOf[String], "events")
+            assertEquals(produced(0).partition.asInstanceOf[Int], 2)
+            assertEquals(produced(0).timestamp.asInstanceOf[Double], 1234d)
+            assertEquals(byteVector(produced(0).key.asInstanceOf[Uint8Array]), "key".getBytes("UTF-8").toVector)
+
+            // librdkafka takes headers as an ordered array, so duplicate names keep their produced order.
+            val headers = produced(0).headers.asInstanceOf[js.Array[js.Dictionary[Uint8Array]]]
+            assertEquals(headers.length, 3)
+            assertEquals(headers.toList.flatMap(_.keys.toList), List("trace", "other", "trace"))
+            assertEquals(headers.toList.flatMap(_.values.toList).map(byteVector), List(Vector(1.toByte), Vector(9.toByte), Vector(2.toByte)))
+
             assertEquals(result.records.map((value, _) => value), NonEmptyList.one(record))
-            assertEquals(result.metadata.map(_.offset.map(_.value)), List(Some(9007199254740993L)))
-
-            val topicMessages = dynamic(batch).topicMessages.asInstanceOf[js.Array[js.Dynamic]]
-            assertEquals(topicMessages.length, 1)
-            assertEquals(topicMessages(0).topic.asInstanceOf[String], "events")
-
-            val messages = topicMessages(0).messages.asInstanceOf[js.Array[js.Dynamic]]
-            assertEquals(messages.length, 1)
-            assertEquals(messages(0).partition.asInstanceOf[Int], 2)
-            assertEquals(messages(0).timestamp.asInstanceOf[String], "1234")
-            assertEquals(byteVector(messages(0).key.asInstanceOf[Uint8Array]), "key".getBytes("UTF-8").toVector)
-
-            val headers = messages(0).headers.asInstanceOf[js.Dictionary[js.Any]]
-            val traces  = headers("trace").asInstanceOf[js.Array[Uint8Array]]
-            assertEquals(traces.map(byteVector).toVector, Vector(Vector(1.toByte), Vector(2.toByte)))
-            assertEquals(headers("nullable"), null)
+            assertEquals(result.records.toList.map((_, metadata) => metadata.flatMap(_.offset.map(_.value))), List(Some(41L)))
       yield ()
 
   test("consumer decodes a batch and commits the exact next offset"):
@@ -286,13 +332,13 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     Deserializer.instance((_, _, value) => IO.pure(value.fold("")(bytes => new String(bytes.toArray, "UTF-8"))))
 
   private def driver(
-      producerValue: confluent.Producer = null,
+      producerValue: confluent.RdProducer = null,
       consumerValue: confluent.Consumer = null,
       expectedProducerProperties: Map[String, String] = Map.empty,
       expectedConsumerProperties: Map[String, String] = Map.empty
   ): ConfluentKafkaDriver =
     new ConfluentKafkaDriver:
-      override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.Producer =
+      override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer =
         assertEquals(properties, expectedProducerProperties)
         producerValue
 

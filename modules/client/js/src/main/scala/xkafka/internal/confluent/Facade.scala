@@ -29,6 +29,57 @@ import scala.scalajs.js.typedarray.Uint8Array
 private[xkafka] type JsHeaders         = js.Dictionary[js.Any]
 private[xkafka] type SubscriptionTopic = String | js.RegExp
 
+/** The librdkafka surface the package exports alongside its KafkaJS compatibility layer.
+  *
+  * Unlike that layer it reports one delivery report per message, carries an opaque through which a report is matched back to the record that produced
+  * it, and represents headers as an ordered array of single-entry objects.
+  */
+@js.native
+@JSImport("@confluentinc/kafka-javascript", JSImport.Namespace)
+private[xkafka] object RdKafka extends js.Object:
+  val Producer: js.Dynamic      = js.native
+  val KafkaConsumer: js.Dynamic = js.native
+
+@js.native
+private[xkafka] trait RdProducer extends js.Object:
+  def connect(metadataOptions: js.UndefOr[js.Any], callback: js.Function2[RdError | Null, js.Any, Unit]): this.type = js.native
+
+  def disconnect(callback: js.Function2[RdError | Null, js.Any, Unit]): this.type = js.native
+
+  def produce(
+      topic: String,
+      partition: js.UndefOr[Int] | Null,
+      message: Uint8Array | Null,
+      key: Uint8Array | Null,
+      timestamp: js.UndefOr[Double] | Null,
+      opaque: js.Any,
+      headers: js.UndefOr[js.Array[RdHeader]]
+  ): js.Any = js.native
+
+  def setPollInterval(interval: Int): this.type = js.native
+
+  def flush(timeout: js.UndefOr[Int], callback: js.Function1[RdError | Null, Unit]): this.type = js.native
+
+  def on(event: String, listener: js.Function2[RdError | Null, RdDeliveryReport, Unit]): this.type = js.native
+
+/** One header. librdkafka keeps these in an array, so duplicate names and their order both survive. */
+private[xkafka] type RdHeader = js.Dictionary[Uint8Array | String]
+
+@js.native
+private[xkafka] trait RdError extends js.Object:
+  val message: String                  = js.native
+  val code: Int                        = js.native
+  val isFatal: js.UndefOr[Boolean]     = js.native
+  val isRetriable: js.UndefOr[Boolean] = js.native
+
+@js.native
+private[xkafka] trait RdDeliveryReport extends js.Object:
+  val topic: String                 = js.native
+  val partition: Int                = js.native
+  val offset: js.UndefOr[Double]    = js.native
+  val timestamp: js.UndefOr[Double] = js.native
+  val opaque: js.UndefOr[Double]    = js.native
+
 @js.native
 @JSImport("@confluentinc/kafka-javascript", "KafkaJS")
 private[xkafka] object KafkaJS extends js.Object:
@@ -165,6 +216,20 @@ private[xkafka] object Values:
     result.asInstanceOf[KafkaConfig]
 
   def producerConfig(properties: Map[String, String]): ProducerConfig = configuration(properties).asInstanceOf[ProducerConfig]
+
+  /** Config for the librdkafka producer. `dr_cb` turns on the per-message delivery reports the batch layer cannot give us. */
+  def rdProducerConfig(brokers: js.Array[String], clientId: js.UndefOr[String], properties: Map[String, String]): js.Dictionary[js.Any] =
+    val result = js.Dictionary.empty[js.Any]
+    properties.foreach((name, value) => result(name) = value)
+    result("bootstrap.servers") = brokers.mkString(",")
+    clientId.foreach(value => result("client.id") = value)
+    result("dr_cb") = true
+    result
+
+  def rdHeader(name: String, value: Uint8Array | Null): RdHeader =
+    val result = js.Dictionary.empty[Uint8Array | String]
+    result(name) = if value == null then "" else value.asInstanceOf[Uint8Array]
+    result
 
   def consumerConfig(groupId: String, autoOffsetReset: AutoOffsetReset, properties: Map[String, String]): ConsumerConfig =
     val result = configuration(properties)

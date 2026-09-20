@@ -26,7 +26,7 @@ import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.Uint8Array
 
 import cats.data.NonEmptyList
-import cats.effect.{Async, Deferred, Resource}
+import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.std.{Dispatcher, Queue}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -38,7 +38,7 @@ private[xkafka] object KafkaClientPlatform:
   private[xkafka] def fromDriver[F[_]: Async](driver: ConfluentKafkaDriver): KafkaClient[F] = new ConfluentKafkaClient[F](driver)
 
 private[xkafka] trait ConfluentKafkaDriver:
-  def producer(settings: ClientSettings, properties: Map[String, String]): confluent.Producer
+  def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer
 
   def consumer(
       settings: ClientSettings,
@@ -50,8 +50,11 @@ private[xkafka] trait ConfluentKafkaDriver:
 private object ConfluentKafkaDriver:
   val live: ConfluentKafkaDriver =
     new ConfluentKafkaDriver:
-      override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.Producer =
-        kafka(settings).producer(confluent.Values.producerConfig(properties))
+      override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer =
+        val config =
+          confluent.Values
+            .rdProducerConfig(settings.bootstrapServers.toList.toJSArray, settings.clientId.orUndefined, settings.properties ++ properties)
+        js.Dynamic.newInstance(confluent.RdKafka.Producer)(config).asInstanceOf[confluent.RdProducer]
 
       override def consumer(
           settings: ClientSettings,
@@ -65,10 +68,60 @@ private object ConfluentKafkaDriver:
           .kafka(confluent.Values.kafkaConfig(settings.bootstrapServers.toList.toJSArray, settings.clientId.orUndefined, settings.properties))
 
 private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(using F: Async[F]) extends KafkaClient[F]:
+  private val DeliveryPollIntervalMillis = 10
+  private val MaxExactInteger            = 9007199254740991d
+
+  private def ignore(value: js.Any): Unit = ()
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
-    Resource.eval(F.delay(driver.producer(settings.client, settings.properties))).flatMap: producer =>
-      Resource.make(await(producer.connect()))(_ => await(producer.disconnect())).as(new ConfluentKafkaProducer(producer, settings))
+    for
+      underlying <- Resource.eval(F.delay(driver.producer(settings.client, settings.properties)))
+      dispatcher <- Dispatcher.sequential[F]
+      pending    <- Resource.eval(Ref.of[F, Map[Double, Deferred[F, Either[Throwable, RecordMetadata]]]](Map.empty))
+      counter    <- Resource.eval(Ref.of[F, Double](0d))
+      _          <- Resource.eval(F.delay(underlying.on("delivery-report", deliveryReport(dispatcher, pending))))
+      _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
+      // librdkafka only surfaces delivery reports while the client is polled.
+      _ <- Resource.eval(F.delay(underlying.setPollInterval(DeliveryPollIntervalMillis)))
+    yield new ConfluentKafkaProducer(underlying, settings, pending, counter)
+
+  private def deliveryReport[K, V](
+      dispatcher: Dispatcher[F],
+      pending: Ref[F, Map[Double, Deferred[F, Either[Throwable, RecordMetadata]]]]
+  ): js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit] =
+    (error, report) =>
+      report.opaque.toOption.foreach: token =>
+        val outcome =
+          Option(error.asInstanceOf[confluent.RdError]) match
+            case Some(failure) => Left(rdFailure(failure))
+            case None          => reportMetadata(report)
+        dispatcher.unsafeRunAndForget(pending.modify(current => (current - token, current.get(token))).flatMap(_.traverse_(_.complete(outcome))))
+
+  private def reportMetadata(report: confluent.RdDeliveryReport): Either[Throwable, RecordMetadata] =
+    for
+      topic     <- Topic.from(report.topic).leftMap(error => invalidBackendValue("topic", report.topic, error))
+      partition <- Partition.from(report.partition).leftMap(error => invalidBackendValue("partition", report.partition.toString, error))
+      offset    <- report.offset.toOption.filter(_ >= 0d).traverse(exactOffset("offset", _))
+    yield RecordMetadata(
+      TopicPartition(topic, partition),
+      offset,
+      report.timestamp.toOption.filter(_ >= 0d).map(value => Timestamp.fromEpochMillis(value.toLong))
+    )
+
+  /** librdkafka reports offsets as JavaScript numbers, which are exact only below 2^53. */
+  private def exactOffset(field: String, value: Double): Either[Throwable, Offset] =
+    if value > MaxExactInteger then Left(new KafkaException.InvalidBackendResponse(s"$field $value exceeds the range JavaScript represents exactly"))
+    else Offset.from(value.toLong).leftMap(error => invalidBackendValue(field, value.toString, error))
+
+  private def rdFailure(error: confluent.RdError): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(error.message, Some(error.code.toString), error.isRetriable.toOption, error.isFatal.toOption)
+
+  private def callback[A](register: js.Function2[confluent.RdError | Null, A, Unit] => Unit): F[A] =
+    F.async_ : resume =>
+      register: (error, value) =>
+        Option(error.asInstanceOf[confluent.RdError]) match
+          case Some(failure) => resume(Left(rdFailure(failure)))
+          case None          => resume(Right(value))
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
@@ -125,14 +178,6 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         case (byte, index) => array(index) = byte.toShort
       confluent.Buffer.from(array)
 
-  private def jsHeaders(headers: Headers): confluent.JsHeaders =
-    val result = js.Dictionary.empty[js.Any]
-    headers.values.groupMap(_.key)(_.value).foreach:
-      case (key, values) =>
-        val encoded = values.map(value => nodeBuffer(value).asInstanceOf[js.Any])
-        result(key) = if encoded.sizeIs == 1 then encoded.head else encoded.toJSArray
-    result
-
   private def portableHeaders(headers: js.UndefOr[confluent.JsHeaders]): Headers =
     headers.toOption.fold(Headers.empty): values =>
       val result =
@@ -143,55 +188,58 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         .toVector
       Headers.fromVector(result)
 
-  private final class ConfluentKafkaProducer[K, V](underlying: confluent.Producer, settings: ProducerSettings[F, K, V])
-      extends KafkaProducer[F, K, V]:
+  private final class ConfluentKafkaProducer[K, V](
+      underlying: confluent.RdProducer,
+      settings: ProducerSettings[F, K, V],
+      pending: Ref[F, Map[Double, Deferred[F, Either[Throwable, RecordMetadata]]]],
+      counter: Ref[F, Double]
+  ) extends KafkaProducer[F, K, V]:
 
-    // The KafkaJS-compatible sendBatch only resolves once the broker has acknowledged, so the enqueue stage
-    // cannot be observed separately here. Moving to the rdkafka-native surface makes this genuinely two-stage.
-    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] = F.pure(acknowledge(records))
+    /** Each record is enqueued with its own opaque token, so its delivery report is matched back to it exactly. */
+    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
+      for
+        encoded <- records.traverse(encodeRecord)
+        awaited <- encoded.traverse(record => register.map(record -> _))
+        _       <- F.delay(awaited.toList.foreach((record, token) => enqueue(record, token._1)))
+      yield awaited.traverse((record, token) => token._2.get.flatMap(F.fromEither).map(metadata => record.source -> Some(metadata)))
+        .map(ProducerResult(_))
 
-    private def acknowledge(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
-      records.toList.traverse(encodeRecord).flatMap: encoded =>
-        val grouped =
-          encoded.groupMap(_._1)(_._2).iterator.map:
-            case (topic, messages) => confluent.Values.topicMessages(topic, messages.toJSArray)
-          .toJSArray
+    private def register: F[(Double, Deferred[F, Either[Throwable, RecordMetadata]])] =
+      for
+        token    <- counter.updateAndGet(_ + 1d)
+        deferred <- Deferred[F, Either[Throwable, RecordMetadata]]
+        _        <- pending.update(_.updated(token, deferred))
+      yield token -> deferred
 
-        await(underlying.sendBatch(confluent.Values.producerBatch(grouped))).flatMap(_.toList.traverse(recordMetadata))
-      .map(metadata => ProducerResult(attribute(records, metadata)))
+    private def enqueue(record: EncodedRecord[K, V], token: Double): Unit =
+      val enqueued: js.Any =
+        underlying.produce(
+          record.source.topic.value,
+          record.source.partition.map(_.value).orUndefined,
+          nodeBuffer(record.value),
+          nodeBuffer(record.key),
+          record.source.timestamp.map(_.epochMillis.toDouble).orUndefined,
+          token,
+          record.headers
+        )
+      ignore(enqueued)
 
-    /** sendBatch reports metadata per topic-partition batch, so it can only be attributed to individual records when the counts line up. */
-    private def attribute(
-        records: NonEmptyList[ProducerRecord[K, V]],
-        metadata: List[RecordMetadata]
-    ): NonEmptyList[(ProducerRecord[K, V], Option[RecordMetadata])] =
-      NonEmptyList.fromList(metadata).filter(_.size == records.size) match
-        case Some(values) => records.zipWith(values)((record, value) => record -> Some(value))
-        case None         => records.map(_ -> None)
-
-    private def encodeRecord(record: ProducerRecord[K, V]): F[(String, confluent.Message)] =
+    private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord[K, V]] =
       (
         settings.keySerializer.serialize(record.topic, record.headers, record.key),
         settings.valueSerializer.serialize(record.topic, record.headers, record.value)
-      ).mapN: (key, value) =>
-        record.topic.value -> confluent.Values.message(
-          nodeBuffer(key),
-          nodeBuffer(value),
-          record.partition.map(_.value).orUndefined,
-          record.timestamp.map(_.epochMillis.toString).orUndefined,
-          jsHeaders(record.headers)
-        )
+      ).mapN((key, value) => EncodedRecord(record, key, value, rdHeaders(record.headers)))
 
-    private def recordMetadata(metadata: confluent.RecordMetadata): F[RecordMetadata] =
-      if metadata.errorCode != 0 then
-        F.raiseError(new KafkaException.BackendFailure("producer request failed", code = Some(metadata.errorCode.toString)))
-      else
-        for
-          portableTopic     <- topic(metadata.topicName)
-          portablePartition <- partition(metadata.partition)
-          portableOffset    <- metadata.offset.toOption.orElse(metadata.baseOffset.toOption).traverse(offset("offset", _))
-          portableTimestamp <- metadata.timestamp.toOption.orElse(metadata.logAppendTime.toOption).traverse(parseLong("timestamp", _))
-        yield RecordMetadata(TopicPartition(portableTopic, portablePartition), portableOffset, portableTimestamp.map(Timestamp.fromEpochMillis))
+  /** librdkafka takes headers as an ordered array of single-entry objects, so duplicate names keep their produced order. */
+  private def rdHeaders(headers: Headers): js.Array[confluent.RdHeader] =
+    headers.values.map(header => confluent.Values.rdHeader(header.key, nodeBuffer(header.value))).toJSArray
+
+  private final case class EncodedRecord[K, V](
+      source: ProducerRecord[K, V],
+      key: Option[Chunk[Byte]],
+      value: Option[Chunk[Byte]],
+      headers: js.Array[confluent.RdHeader]
+  )
 
   private final class ConfluentKafkaConsumer[K, V](
       underlying: confluent.Consumer,
