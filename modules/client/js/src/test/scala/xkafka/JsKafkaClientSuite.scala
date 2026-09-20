@@ -104,7 +104,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "5")).toOption.get
         result <-
           KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5")))
-            .producer(settings).use(_.produce(NonEmptyList.one(record)))
+            .producer(settings).use(_.produceAndAwait(NonEmptyList.one(record)))
         connectedCount    <- connected.get
         disconnectedCount <- disconnected.get
         batch             <- sent.get
@@ -112,7 +112,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           IO:
             assertEquals(connectedCount, 1)
             assertEquals(disconnectedCount, 1)
-            assertEquals(result.records, NonEmptyList.one(record))
+            assertEquals(result.records.map((value, _) => value), NonEmptyList.one(record))
             assertEquals(result.metadata.map(_.offset.map(_.value)), List(Some(9007199254740993L)))
 
             val topicMessages = dynamic(batch).topicMessages.asInstanceOf[js.Array[js.Dynamic]]

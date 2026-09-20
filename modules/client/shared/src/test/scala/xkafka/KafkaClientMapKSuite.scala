@@ -51,10 +51,10 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     val record           = ProducerRecord(topic, "key", "value")
 
     for
-      produced <- client.producer(producerSettings).use(_.produce(NonEmptyList.one(record))).value
+      produced <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
       consumed <- client.consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use(_.records.compile.drain).value
     yield
-      assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record), Nil)))
+      assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record -> None))))
       assertEquals(consumed, Right(()))
 
   private val source: KafkaClient[IO] =
@@ -62,12 +62,12 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override def producer[K, V](settings: ProducerSettings[IO, K, V]): Resource[IO, KafkaProducer[IO, K, V]] =
         Resource.pure:
           new KafkaProducer[IO, K, V]:
-            override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[ProducerResult[K, V]] =
+            override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[ProducerResult[K, V]]] =
               val first = records.head
               (
                 settings.keySerializer.serialize(first.topic, first.headers, first.key),
                 settings.valueSerializer.serialize(first.topic, first.headers, first.value)
-              ).tupled.as(ProducerResult(records, Nil))
+              ).tupled.as(IO.pure(ProducerResult(records.map(_ -> None))))
 
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], subscription: Subscription): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:

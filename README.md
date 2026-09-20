@@ -49,9 +49,28 @@ object ProduceExample extends IOApp.Simple:
   override def run: IO[Unit] =
     settings.fold(
       errors => IO.raiseError(new IllegalArgumentException(errors.toList.map(_.message).mkString("; "))),
-      settings => KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.one(ProducerRecord(topic, "key", "value")))).void
+      settings => KafkaClient[IO].producer(settings).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value")))).void
     )
 ```
+
+`produce` returns `F[F[ProducerResult]]`. The outer effect completes once the
+backend has accepted the records for delivery, and the inner one once the
+broker has acknowledged them, so several batches can be in flight at once:
+
+```scala
+for
+  first  <- producer.produce(firstBatch)
+  second <- producer.produce(secondBatch)
+  _      <- first
+  _      <- second
+yield ()
+```
+
+`produceAndAwait` combines both stages when that pipelining is not wanted.
+
+A `ProducerResult` pairs every record with the metadata its backend reported
+for it. A `None` means the backend acknowledged the record but reported no
+metadata for it.
 
 Consumers expose an FS2 stream of `CommittableConsumerRecord`. A successful
 `record.offset.commit` stores `record.offset.nextOffset`; processing and commit
@@ -84,8 +103,10 @@ unconsumed stream eventually backpressures the shared record source.
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
 deserializers, producer and consumer settings, committable offsets and records,
-partition record streams, producers, and consumers have cats-tagless `FunctorK`
-instances for transforming their effect with a natural transformation.
+partition record streams, and consumers have cats-tagless `FunctorK` instances
+for transforming their effect with a natural transformation. `KafkaProducer` has
+`mapK` but no `FunctorK` instance: translating the acknowledgement nested inside
+the enqueue needs a `Functor` for the target effect.
 `KafkaClient.imapK` transforms a complete client between effects in both
 directions while preserving `Resource` cancellation semantics.
 
@@ -147,9 +168,8 @@ builds it, and links it statically. It is built with TLS, SASL SCRAM and
 OAUTHBEARER, and gzip and zstd compression enabled, so the Native backend can
 reach authenticated brokers and read compressed topics.
 
-Those features are linked against system libraries rather than vendored, so the
-build and any application linking the Native backend need OpenSSL, zlib, and
-zstd available: `libssl-dev`, `zlib1g-dev`, and `libzstd-dev` on Debian and
+librdkafka links these against system libraries, so the build and any
+application linking the Native backend need OpenSSL, zlib, and zstd available: `libssl-dev`, `zlib1g-dev`, and `libzstd-dev` on Debian and
 Ubuntu, or `brew install openssl@3 zstd zlib` on macOS, where their keg-only
 prefixes are discovered automatically. To prepare librdkafka explicitly:
 

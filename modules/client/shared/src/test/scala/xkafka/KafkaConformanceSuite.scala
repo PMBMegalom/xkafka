@@ -109,7 +109,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       val records   = NonEmptyList.of("a", "b", "c").map(value => record(topic, Some("k"), Some(value), partition))
 
       produce(server, records).map: result =>
-        assertEquals(result.metadata.size, records.size)
+        assertEquals(result.records.size, records.size)
+        assert(result.records.forall((_, metadata) => metadata.isDefined), "every record should carry its own metadata")
         assertEquals(result.metadata.flatMap(_.offset.map(_.value)), List(0L, 1L, 2L))
 
   test(conformance("a consumer resource can be allocated and released repeatedly")):
@@ -130,7 +131,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       records: NonEmptyList[ProducerRecord[Option[String], Option[String]]]
   ): IO[ProducerResult[Option[String], Option[String]]] =
     producerSettings(server).flatMap: settings =>
-      PlatformKafkaClient().producer(settings).use(_.produce(records)).timeout(60.seconds)
+      PlatformKafkaClient().producer(settings).use(_.produceAndAwait(records)).timeout(60.seconds)
 
   private def consume(server: String, topic: Topic, count: Int): IO[List[CommittableConsumerRecord[IO, Option[String], Option[String]]]] =
     consumerSettings(server, uniqueGroup("conformance")).flatMap: settings =>

@@ -116,11 +116,14 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private final class Fs2KafkaProducerAdapter[K, V](underlying: Fs2KafkaProducer[F, K, V]) extends KafkaProducer[F, K, V]:
 
-    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
-      backend(underlying.produce(Chunk.from(records.toList.map(producerRecord))).flatten).flatMap: result =>
-        result.toList.traverse:
-          case (_, metadata) => recordMetadata(metadata)
-        .map(metadata => ProducerResult(records, metadata))
+    // fs2-kafka is already two-stage, and pairs each record with its own metadata, so both survive unflattened.
+    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
+      backend(underlying.produce(Chunk.from(records.toList.map(producerRecord)))).map: acknowledgement =>
+        backend(acknowledgement).flatMap: result =>
+          result.toList.traverse((_, metadata) => recordMetadata(metadata)).flatMap: reported =>
+            NonEmptyList.fromList(reported).filter(_.size == records.size) match
+              case Some(values) => F.pure(ProducerResult(records.zipWith(values)((record, value) => record -> Some(value))))
+              case None => F.raiseError(new KafkaException.InvalidBackendResponse(s"expected ${records.size} metadata entries, got ${reported.size}"))
 
     private def producerRecord(record: ProducerRecord[K, V]): Fs2ProducerRecord[K, V] =
       val base        = Fs2ProducerRecord(record.topic.value, record.key, record.value).withHeaders(fs2Headers(record.headers))

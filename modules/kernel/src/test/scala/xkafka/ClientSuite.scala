@@ -221,14 +221,16 @@ final class ClientSuite extends FunSuite:
     assertEquals(batch.offsets.valuesIterator.flatMap(_.valuesIterator).toList, List(laterOffset))
     assertEquals(batch.commit, Right(()))
 
-  test("KafkaProducer supports natural transformations"):
+  test("KafkaProducer transforms both the enqueue and the acknowledgement"):
+    val result = ProducerResult(NonEmptyList.one(producerRecord -> None))
     val source =
       new KafkaProducer[Option, String, String]:
-        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[ProducerResult[String, String]] =
-          Some(ProducerResult(records, Nil))
-    val mapped = FunctorK[[F[_]] =>> KafkaProducer[F, String, String]].mapK(source)(optionToErrorOr)
+        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[Option[ProducerResult[String, String]]] =
+          Some(Some(ProducerResult(records.map(_ -> None))))
+    val mapped = source.mapK(optionToErrorOr)
 
-    assertEquals(mapped.produce(NonEmptyList.one(producerRecord)), Right(ProducerResult(NonEmptyList.one(producerRecord), Nil)))
+    assertEquals(mapped.produce(NonEmptyList.one(producerRecord)), Right(Right(result)))
+    assertEquals(mapped.produceAndAwait(NonEmptyList.one(producerRecord)), Right(result))
 
   test("KafkaConsumer transforms both its stream and committable offsets"):
     val sourceRecord = CommittableConsumerRecord(consumerRecord, committableOffset)

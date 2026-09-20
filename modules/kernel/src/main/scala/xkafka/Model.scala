@@ -175,12 +175,14 @@ final case class ProducerRecord[K, V](
 
 final case class RecordMetadata(topicPartition: TopicPartition, offset: Option[Offset], timestamp: Option[Timestamp])
 
-/** The acknowledged result of producing a non-empty collection of records.
+/** The acknowledged result of producing a non-empty collection of records, pairing each record with the metadata its backend reported for it.
   *
-  * Metadata cardinality is backend-defined. The JVM and Native drivers can report metadata per record, while the Confluent JavaScript driver reports
-  * it per topic-partition batch.
+  * A `None` means the backend acknowledged the record but did not attribute metadata to it individually, so the absence is visible to the caller
+  * instead of being inferred from a shorter list.
   */
-final case class ProducerResult[K, V](records: NonEmptyList[ProducerRecord[K, V]], metadata: List[RecordMetadata])
+final case class ProducerResult[K, V](records: NonEmptyList[(ProducerRecord[K, V], Option[RecordMetadata])]):
+  /** Every record that the backend attributed metadata to, in the order the records were produced. */
+  def metadata: List[RecordMetadata] = records.toList.flatMap((_, value) => value)
 
 final case class ConsumerRecord[K, V](
     topicPartition: TopicPartition,

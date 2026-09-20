@@ -81,13 +81,13 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
 
     for
       produced <-
-        PlatformKafkaClient().producer(producerSettings).use(_.produce(NonEmptyList.of(first, second)))
+        PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.of(first, second)))
           .timeoutTo(45.seconds, IO.raiseError(new RuntimeException("Kafka producer timed out")))
       consumed <- consumeTwoAndCommitFirst(consumerSettings, topic)
       (consumedFirst, observedSecond) = consumed
       consumedSecond <- consumeOne(consumerSettings, Subscription.Pattern(topicPattern))
     yield
-      assert(produced.metadata.nonEmpty)
+      assertEquals(produced.records.size, 2)
       assertEquals(consumedFirst.record.topicPartition, TopicPartition(topic, partition))
       assertEquals(consumedFirst.record.key, first.key)
       assertEquals(consumedFirst.record.value, first.value)
@@ -113,9 +113,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val secondRecords    = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-2"), ProducerRecord(secondTopic, "second-key", "second-2"))
 
     for
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(firstRecords)).timeout(45.seconds)
+      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(firstRecords)).timeout(45.seconds)
       consumed <- consumeAndCommitBatch(consumerSettings, subscription, 2)
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(secondRecords)).timeout(45.seconds)
+      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(secondRecords)).timeout(45.seconds)
       resumed  <- consume(consumerSettings, subscription, 2)
     yield
       assertEquals(consumed.map(record => record.record.topicPartition.topic).toSet, Set(firstTopic, secondTopic))
@@ -135,7 +135,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     for
       timestamp <- IO.realTime.map(value => Timestamp.fromEpochMillis(value.toMillis))
       record = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition), timestamp = Some(timestamp))
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(NonEmptyList.one(record))).timeout(45.seconds)
+      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).timeout(45.seconds)
       consumed <-
         PlatformKafkaClient().consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
           consumer.records.zipWithIndex.evalMap:
@@ -185,7 +185,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val records          = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
 
     for
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produce(records)).timeout(45.seconds)
+      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(records)).timeout(45.seconds)
       consumed <-
         PlatformKafkaClient().consumer(consumerSettings, subscription).use: consumer =>
           consumer.partitionedRecords(100.millis, 16).map: partition =>

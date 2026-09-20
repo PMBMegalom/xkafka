@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.FiniteDuration
 
-import cats.{Applicative, Foldable, Show}
+import cats.{Applicative, FlatMap, Foldable, Functor, Show}
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, Validated, ValidatedNel}
 import cats.effect.{Async, Temporal}
@@ -280,15 +280,20 @@ object CommittableConsumerRecord:
 trait KafkaProducer[F[_], K, V]:
   self =>
 
-  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]]
+  /** Enqueues `records` with the backend and returns the effect that completes once the broker has acknowledged them.
+    *
+    * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once. Awaiting the inner
+    * effect immediately makes production fully synchronous.
+    */
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]]
 
-  final def mapK[G[_]](fk: FunctionK[F, G]): KafkaProducer[G, K, V] =
+  /** Enqueues `records` and waits for the broker to acknowledge them. */
+  final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[ProducerResult[K, V]] = F.flatten(produce(records))
+
+  /** Transforms the effect. Translating the acknowledgement nested inside the enqueue needs a `Functor[G]`, so this is not a lawful `FunctorK`. */
+  final def mapK[G[_]](fk: FunctionK[F, G])(using G: Functor[G]): KafkaProducer[G, K, V] =
     new KafkaProducer[G, K, V]:
-      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[ProducerResult[K, V]] = fk(self.produce(records))
-
-object KafkaProducer:
-  given [K, V]: FunctorK[[F[_]] =>> KafkaProducer[F, K, V]] with
-    override def mapK[F[_], G[_]](producer: KafkaProducer[F, K, V])(fk: FunctionK[F, G]): KafkaProducer[G, K, V] = producer.mapK(fk)
+      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[ProducerResult[K, V]]] = G.map(fk(self.produce(records)))(fk.apply)
 
 trait KafkaConsumer[F[_], K, V]:
   self =>

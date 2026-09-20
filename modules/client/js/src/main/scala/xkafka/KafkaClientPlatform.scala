@@ -146,7 +146,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private final class ConfluentKafkaProducer[K, V](underlying: confluent.Producer, settings: ProducerSettings[F, K, V])
       extends KafkaProducer[F, K, V]:
 
-    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
+    // The KafkaJS-compatible sendBatch only resolves once the broker has acknowledged, so the enqueue stage
+    // cannot be observed separately here. Moving to the rdkafka-native surface makes this genuinely two-stage.
+    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] = F.pure(acknowledge(records))
+
+    private def acknowledge(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
       records.toList.traverse(encodeRecord).flatMap: encoded =>
         val grouped =
           encoded.groupMap(_._1)(_._2).iterator.map:
@@ -154,7 +158,16 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           .toJSArray
 
         await(underlying.sendBatch(confluent.Values.producerBatch(grouped))).flatMap(_.toList.traverse(recordMetadata))
-      .map(metadata => ProducerResult(records, metadata))
+      .map(metadata => ProducerResult(attribute(records, metadata)))
+
+    /** sendBatch reports metadata per topic-partition batch, so it can only be attributed to individual records when the counts line up. */
+    private def attribute(
+        records: NonEmptyList[ProducerRecord[K, V]],
+        metadata: List[RecordMetadata]
+    ): NonEmptyList[(ProducerRecord[K, V], Option[RecordMetadata])] =
+      NonEmptyList.fromList(metadata).filter(_.size == records.size) match
+        case Some(values) => records.zipWith(values)((record, value) => record -> Some(value))
+        case None         => records.map(_ -> None)
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[(String, confluent.Message)] =
       (

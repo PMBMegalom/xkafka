@@ -83,15 +83,17 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         headers = Headers(Header("trace", Some(Chunk.array(Array[Byte](1)))), Header("trace", None))
       )
 
-    KafkaClientPlatform.fromFs2[IO].producer(settings).use(_.produce(NonEmptyList.one(record))).map: metadata =>
+    KafkaClientPlatform.fromFs2[IO].producer(settings).use(_.produceAndAwait(NonEmptyList.one(record))).map: result =>
       val produced = mock.history().get(0)
 
       assertEquals(new String(produced.key(), StandardCharsets.UTF_8), "key")
       assertEquals(new String(produced.value(), StandardCharsets.UTF_8), "value")
       val headerKeys: List[String] = produced.headers().toArray.toList.map(_.key())
       assertEquals(headerKeys, List("trace", "trace"))
-      assertEquals(metadata.metadata.head.topicPartition, TopicPartition(topic, partition))
-      assertEquals(metadata.metadata.head.offset.map(_.value), Some(0L))
+      assertEquals(result.metadata.head.topicPartition, TopicPartition(topic, partition))
+      assertEquals(result.metadata.head.offset.map(_.value), Some(0L))
+      assertEquals(result.records.size, 1)
+      assert(result.records.forall((_, metadata) => metadata.isDefined))
 
   test("consumer delegates streaming and offset commits to fs2-kafka"):
     val topic              = Topic.from("events").toOption.get

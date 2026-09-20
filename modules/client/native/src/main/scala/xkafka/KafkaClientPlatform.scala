@@ -149,8 +149,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private final class LibrdkafkaProducer[K, V](handle: CVoidPtr, semaphore: Semaphore[F], settings: ProducerSettings[F, K, V])
       extends KafkaProducer[F, K, V]:
 
-    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
-      records.toList.traverse(produceRecord).map(metadata => ProducerResult(records, metadata))
+    // Each send still blocks for its own delivery report, so the enqueue stage is not observable yet.
+    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
+      F.pure(records.traverse(record => produceRecord(record).map(metadata => record -> Some(metadata))).map(ProducerResult(_)))
 
     private def produceRecord(record: ProducerRecord[K, V]): F[RecordMetadata] =
       for
