@@ -36,9 +36,22 @@ import munit.CatsEffectSuite
 import org.apache.kafka.clients.consumer.{ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp}
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
 import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.errors.TimeoutException
 import org.apache.kafka.common.serialization.ByteArraySerializer
 
 final class JvmKafkaClientSuite extends CatsEffectSuite:
+  test("wraps Kafka client failures"):
+    val cause = new TimeoutException("timed out")
+    given MkProducer[IO] with
+      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.raiseError(cause)
+
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings(ClientSettings(NonEmptyList.one("unused:9092")), serializer, serializer)
+
+    interceptIO[KafkaException.BackendFailure](KafkaClientPlatform.fromFs2[IO].producer(settings).use(_ => IO.unit)).map: error =>
+      assertEquals(error.retriable, Some(true))
+      assertEquals(error.getCause, cause)
+
   test("producer delegates serialization and production to fs2-kafka"):
     val mock = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
     given MkProducer[IO] with

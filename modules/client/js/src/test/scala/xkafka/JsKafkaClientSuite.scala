@@ -33,6 +33,22 @@ import internal.confluent
 import munit.CatsEffectSuite
 
 final class JsKafkaClientSuite extends CatsEffectSuite:
+  test("wraps rejected backend promises"):
+    Dispatcher.sequential[IO].use: dispatcher =>
+      val cause    = new RuntimeException("connection failed")
+      val producer =
+        js.Dynamic.literal(
+          connect = (() => promise[Unit](dispatcher)(IO.raiseError(cause))): js.Function0[js.Promise[Unit]],
+          disconnect = (() => js.Promise.resolve(())): js.Function0[js.Promise[Unit]]
+        ).asInstanceOf[confluent.Producer]
+      val serializer = Serializer.const[IO, String](None)
+      val settings   = ProducerSettings(clientSettings, serializer, serializer)
+
+      interceptIO[KafkaException.BackendFailure](
+        KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use(_ => IO.unit)
+      ).map: error =>
+        assert(error.getCause ne null)
+
   test("Confluent facade uses direct librdkafka configuration"):
     val common =
       dynamic(

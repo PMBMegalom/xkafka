@@ -84,7 +84,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       _ <- Resource.make(F.unit)(_ => shutdown.complete(()).void)
     yield adapter
 
-  private def await[A](promise: => js.Promise[A]): F[A] = F.fromPromise(F.delay(promise))
+  private def await[A](promise: => js.Promise[A]): F[A] =
+    F.fromPromise(F.delay(promise)).adaptError:
+      case error: KafkaException => error
+      case error                 => new KafkaException.BackendFailure(Option(error.getMessage).getOrElse(error.getClass.getName), cause = error)
 
   private def subscribe(consumer: confluent.Consumer, subscription: Subscription): F[Unit] =
     subscription match
@@ -94,12 +97,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       case Subscription.Pattern(pattern) => F.delay(new js.RegExp(pattern.anchored)).flatMap: compiled =>
           await(consumer.subscribe(confluent.Values.subscription(js.Array[confluent.SubscriptionTopic](compiled))))
 
-  private def invalidBackendValue(field: String, value: String, error: Any): IllegalStateException =
-    new IllegalStateException(s"Confluent Kafka JavaScript returned an invalid $field '$value': $error")
+  private def invalidBackendValue(field: String, value: String, error: Any, cause: Throwable = null): KafkaException.InvalidBackendResponse =
+    new KafkaException.InvalidBackendResponse(s"$field '$value': $error", cause)
 
   private def parseLong(field: String, value: String): F[Long] =
     F.catchNonFatal(java.lang.Long.parseLong(value)).adaptError:
-      case error => invalidBackendValue(field, value, error.getMessage)
+      case error => invalidBackendValue(field, value, error.getMessage, error)
 
   private def topic(value: String): F[Topic] = F.fromEither(Topic.from(value).leftMap(error => invalidBackendValue("topic", value, error)))
 
@@ -168,7 +171,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
     private def recordMetadata(metadata: confluent.RecordMetadata): F[RecordMetadata] =
       if metadata.errorCode != 0 then
-        F.raiseError(new IllegalStateException(s"Confluent Kafka JavaScript returned producer error code ${metadata.errorCode}"))
+        F.raiseError(new KafkaException.BackendFailure("producer request failed", code = Some(metadata.errorCode.toString)))
       else
         for
           portableTopic     <- topic(metadata.topicName)
@@ -240,7 +243,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       topicMetadata(Some(js.Array(topic.value))).flatMap: values =>
         values.find(_.name == topic.value) match
           case Some(value) => value.partitions.toList.traverse(portablePartition).map(_.toSet)
-          case None => F.raiseError(new IllegalStateException(s"Confluent Kafka JavaScript did not return metadata for topic '${topic.value}'"))
+          case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
 
     override def listTopics: F[Map[Topic, Set[Partition]]] =
       topicMetadata(None).flatMap(
@@ -332,8 +335,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
                   case None          => F.raiseError(missingOffset(field, topicPartition))
           .map(_.flatten.toMap)
 
-    private def missingOffset(field: String, topicPartition: TopicPartition): IllegalStateException =
-      new IllegalStateException(s"Confluent Kafka JavaScript did not return a $field for $topicPartition")
+    private def missingOffset(field: String, topicPartition: TopicPartition): KafkaException.InvalidBackendResponse =
+      new KafkaException.InvalidBackendResponse(s"missing $field for $topicPartition")
 
     private def topicMetadata(topics: Option[js.Array[String]]): F[js.Array[confluent.TopicMetadata]] =
       admin.use(value => await(value.fetchTopicMetadata(confluent.Values.topicMetadataOptions(topics.orUndefined))))

@@ -22,6 +22,7 @@
 package xkafka
 
 import cats.Parallel
+import cats.arrow.FunctionK
 import cats.data.NonEmptyList
 import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
@@ -36,7 +37,8 @@ import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
-import org.apache.kafka.common.TopicPartition as JavaTopicPartition
+import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.errors.RetriableException
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new Fs2KafkaClient[F]
@@ -46,18 +48,30 @@ private[xkafka] object KafkaClientPlatform:
 private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkProducer: MkProducer[F], mkConsumer: MkConsumer[F])
     extends KafkaClient[F]:
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
-    Fs2KafkaProducer.resource(producerSettings(settings)).map(new Fs2KafkaProducerAdapter(_))
+    Fs2KafkaProducer.resource(producerSettings(settings)).mapK(handleBackendErrors).map(new Fs2KafkaProducerAdapter(_))
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings))
+      consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings)).mapK(handleBackendErrors)
       _        <- Resource.eval(subscribe(consumer, subscription))
     yield new Fs2KafkaConsumerAdapter(consumer)
 
   private def subscribe[K, V](consumer: Fs2KafkaConsumer[F, K, V], subscription: Subscription): F[Unit] =
     subscription match
-      case Subscription.Topics(topics)   => consumer.subscribe(topics.map(_.value))
-      case Subscription.Pattern(pattern) => F.delay(pattern.anchored.r).flatMap(consumer.subscribe)
+      case Subscription.Topics(topics)   => backend(consumer.subscribe(topics.map(_.value)))
+      case Subscription.Pattern(pattern) => F.delay(pattern.anchored.r).flatMap(value => backend(consumer.subscribe(value)))
+
+  private val handleBackendErrors: FunctionK[F, F] =
+    new FunctionK[F, F]:
+      override def apply[A](value: F[A]): F[A] = backend(value)
+
+  private def backend[A](value: F[A]): F[A] =
+    value.adaptError:
+      case error: JavaKafkaException => new KafkaException.BackendFailure(
+          Option(error.getMessage).getOrElse(error.getClass.getName),
+          retriable = Some(error.isInstanceOf[RetriableException]),
+          cause = error
+        )
 
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =
@@ -99,13 +113,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       Header(header.key, Option(header.value).map(Chunk.array))
     .toVector)
 
-  private def invalidBackendValue(field: String, error: ValidationError): IllegalStateException =
-    new IllegalStateException(s"fs2-kafka returned an invalid $field: $error")
+  private def invalidBackendValue(field: String, error: ValidationError): KafkaException.InvalidBackendResponse =
+    new KafkaException.InvalidBackendResponse(s"$field: $error")
 
   private final class Fs2KafkaProducerAdapter[K, V](underlying: Fs2KafkaProducer[F, K, V]) extends KafkaProducer[F, K, V]:
 
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
-      underlying.produce(Chunk.from(records.toList.map(producerRecord))).flatten.flatMap: result =>
+      backend(underlying.produce(Chunk.from(records.toList.map(producerRecord))).flatten).flatMap: result =>
         result.toList.traverse:
           case (_, metadata) => recordMetadata(metadata)
         .map(metadata => ProducerResult(records, metadata))
@@ -144,20 +158,21 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
         override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
-          underlying.commitSync(
+          backend(underlying.commitSync(
             offsets.map:
               case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
                   new OffsetAndMetadata(offset.value)
-          )
+          ))
 
-    override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] = underlying.records.evalMap(consumerRecord)
+    override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] =
+      underlying.records.translate(handleBackendErrors).evalMap(consumerRecord)
 
-    override def assignment: F[Set[TopicPartition]] = underlying.assignment.flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
+    override def assignment: F[Set[TopicPartition]] = backend(underlying.assignment).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else
-        underlying.committed(topicPartitions.map(javaTopicPartition)).flatMap: values =>
+        backend(underlying.committed(topicPartitions.map(javaTopicPartition))).flatMap: values =>
           topicPartitions.toList.traverse: topicPartition =>
             Option(values.getOrElse(javaTopicPartition(topicPartition), null)).traverse: metadata =>
               F.fromEither(Offset.from(metadata.offset).leftMap(error => invalidBackendValue("committed offset", error)))
@@ -166,11 +181,12 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
-      else underlying.beginningOffsets(topicPartitions.map(javaTopicPartition)).flatMap(portableOffsets("beginning offset", topicPartitions, _))
+      else
+        backend(underlying.beginningOffsets(topicPartitions.map(javaTopicPartition))).flatMap(portableOffsets("beginning offset", topicPartitions, _))
 
     override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
-      else underlying.endOffsets(topicPartitions.map(javaTopicPartition)).flatMap(portableOffsets("end offset", topicPartitions, _))
+      else backend(underlying.endOffsets(topicPartitions.map(javaTopicPartition))).flatMap(portableOffsets("end offset", topicPartitions, _))
 
     override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
       if timestampsToSearch.isEmpty then F.pure(Map.empty)
@@ -178,22 +194,23 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
         val requested =
           timestampsToSearch.map: (topicPartition, timestamp) =>
             javaTopicPartition(topicPartition) -> timestamp.epochMillis
-        underlying.offsetsForTimes(requested).flatMap: values =>
+        backend(underlying.offsetsForTimes(requested)).flatMap: values =>
           timestampsToSearch.keys.toList.traverse: topicPartition =>
             values.get(javaTopicPartition(topicPartition)).flatten.traverse: value =>
               F.fromEither(Offset.from(value.offset).leftMap(error => invalidBackendValue("timestamp offset", error)))
             .map(topicPartition -> _)
           .map(_.toMap)
 
-    override def partitionsFor(topic: Topic): F[Set[Partition]] = underlying.partitionsFor(topic.value).flatMap(portablePartitions)
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = backend(underlying.partitionsFor(topic.value)).flatMap(portablePartitions)
 
     override def listTopics: F[Map[Topic, Set[Partition]]] =
-      underlying.listTopics.flatMap: values =>
+      backend(underlying.listTopics).flatMap: values =>
         values.toList.traverse: (topicValue, partitions) =>
           (F.fromEither(validTopic(topicValue)), portablePartitions(partitions)).mapN(_ -> _)
         .map(_.toMap)
 
-    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = underlying.seek(javaTopicPartition(topicPartition), offset.value)
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
+      backend(underlying.seek(javaTopicPartition(topicPartition), offset.value))
 
     private def portableOffsets(
         field: String,
@@ -203,7 +220,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       requested.toList.traverse: topicPartition =>
         values.get(javaTopicPartition(topicPartition)) match
           case Some(value) => F.fromEither(Offset.from(value).leftMap(error => invalidBackendValue(field, error))).map(topicPartition -> _)
-          case None        => F.raiseError(new IllegalStateException(s"fs2-kafka did not return a $field for $topicPartition"))
+          case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing $field for $topicPartition"))
       .map(_.toMap)
 
     private def portablePartitions(values: Iterable[org.apache.kafka.common.PartitionInfo]): F[Set[Partition]] =

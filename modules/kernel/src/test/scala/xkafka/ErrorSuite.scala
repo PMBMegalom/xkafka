@@ -21,24 +21,23 @@
 
 package xkafka
 
-import cats.data.NonEmptyList
-import cats.effect.IO
-import fs2.Chunk
-import munit.CatsEffectSuite
+import munit.FunSuite
 
-final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
-  test("loads librdkafka through the native shim"):
-    assert(LibrdkafkaPlatform.version.nonEmpty)
+final class ErrorSuite extends FunSuite:
+  test("backend failures retain portable classification and their cause"):
+    val cause = new RuntimeException("boom")
+    val error =
+      new KafkaException.BackendFailure("request failed", code = Some("TIMED_OUT"), retriable = Some(true), fatal = Some(false), cause = cause)
 
-  test("allocates and releases a native producer"):
-    val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
-    val settings   = ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092"), Some("native-test")), serializer, serializer)
+    assertEquals(error.detail, "request failed")
+    assertEquals(error.code, Some("TIMED_OUT"))
+    assertEquals(error.retriable, Some(true))
+    assertEquals(error.fatal, Some(false))
+    assertEquals(error.getCause, cause)
+    assertEquals(error.getMessage, "Kafka backend failure [TIMED_OUT]: request failed")
 
-    KafkaClient[IO].producer(settings).use(_ => IO.unit)
+  test("invalid backend responses retain their detail"):
+    val error = new KafkaException.InvalidBackendResponse("negative offset")
 
-  test("passes custom producer properties to librdkafka"):
-    val serializer = Serializer.const[IO, String](None)
-    val settings   =
-      ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092")), serializer, serializer, Map("message.timeout.ms" -> "not-a-duration"))
-
-    interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))
+    assertEquals(error.detail, "negative offset")
+    assertEquals(error.getMessage, "Kafka backend returned an invalid response: negative offset")

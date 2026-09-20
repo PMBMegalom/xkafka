@@ -119,7 +119,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           case Subscription.Topics(values)   => values.map(_.value)
           case Subscription.Pattern(pattern) => NonEmptyList.one(pattern.anchored)
       val nativeSubscription = Bindings.xkafka_subscription_new(topics.length.toUSize)
-      if nativeSubscription == null then throw new LibrdkafkaException("could not allocate a subscription")
+      if nativeSubscription == null then throw backendFailure("could not allocate a subscription")
 
       try
         topics.toList.foreach(topic => Bindings.xkafka_subscription_add(nativeSubscription, toCString(topic)))
@@ -128,10 +128,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         if result != 0 then throw nativeError(error)
       finally Bindings.xkafka_subscription_destroy(nativeSubscription)
 
-  private def nativeError(error: CString): LibrdkafkaException = new LibrdkafkaException(fromCString(error))
+  private def nativeError(error: CString): KafkaException.BackendFailure = backendFailure(fromCString(error))
 
-  private def invalidBackendValue(field: String, value: Any, error: ValidationError): LibrdkafkaException =
-    new LibrdkafkaException(s"librdkafka returned an invalid $field '$value': $error")
+  private def backendFailure(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
+
+  private def invalidBackendValue(field: String, value: Any, error: ValidationError): KafkaException.InvalidBackendResponse =
+    new KafkaException.InvalidBackendResponse(s"$field '$value': $error")
 
   private def cBytes(value: Option[Chunk[Byte]])(using Zone): (CVoidPtr, CSize) =
     value.fold[(CVoidPtr, CSize)]((null, 0.toUSize)): bytes =>
@@ -170,7 +172,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         val partition                 = record.partition.fold(UnassignedPartition)(_.value)
         val timestamp                 = record.timestamp.fold(-1L)(_.epochMillis)
         val headers                   = Bindings.xkafka_headers_new(record.headers.values.size.toUSize)
-        if headers == null then throw new LibrdkafkaException("could not allocate message headers")
+        if headers == null then throw backendFailure("could not allocate message headers")
 
         try
           record.headers.values.foreach: header =>
@@ -289,7 +291,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           val valueSize = stackalloc[CSize]()
           val hasValue  = stackalloc[CInt]()
           val result    = Bindings.xkafka_message_header_at(message, index.toUSize, name, value, valueSize, hasValue)
-          if result != 0 then throw new LibrdkafkaException(s"could not read message header at index $index")
+          if result != 0 then throw backendFailure(s"could not read message header at index $index")
           Header(fromCString(!name), Option.when(!hasValue != 0)(chunk(!value, !valueSize)))
       Headers.fromVector(values)
 
@@ -454,7 +456,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         finally Bindings.xkafka_metadata_destroy(metadata)
 
     private def readPartitionsFor(topic: Topic): Set[Partition] =
-      readTopicMetadata(Some(topic)).getOrElse(topic, throw new LibrdkafkaException(s"librdkafka did not return metadata for topic '${topic.value}'"))
+      readTopicMetadata(Some(topic)).getOrElse(topic, throw new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
 
     private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =
       Zone.acquire: zone =>
@@ -470,5 +472,3 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             ErrorBufferSize.toUSize
           )
         if result != 0 then throw nativeError(error)
-
-private final class LibrdkafkaException(message: String) extends RuntimeException(message)

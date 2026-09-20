@@ -21,24 +21,24 @@
 
 package xkafka
 
-import cats.data.NonEmptyList
-import cats.effect.IO
-import fs2.Chunk
-import munit.CatsEffectSuite
+sealed abstract class KafkaException(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
 
-final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
-  test("loads librdkafka through the native shim"):
-    assert(LibrdkafkaPlatform.version.nonEmpty)
+object KafkaException:
+  /** A failure reported by a Kafka backend.
+    *
+    * `None` means that the backend did not make the corresponding classification available.
+    */
+  final class BackendFailure(
+      val detail: String,
+      val code: Option[String] = None,
+      val retriable: Option[Boolean] = None,
+      val fatal: Option[Boolean] = None,
+      cause: Throwable = null
+  ) extends KafkaException(BackendFailure.message(detail, code), cause)
 
-  test("allocates and releases a native producer"):
-    val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
-    val settings   = ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092"), Some("native-test")), serializer, serializer)
+  object BackendFailure:
+    private def message(detail: String, code: Option[String]): String = s"Kafka backend failure${code.fold("")(value => s" [$value]")}: $detail"
 
-    KafkaClient[IO].producer(settings).use(_ => IO.unit)
-
-  test("passes custom producer properties to librdkafka"):
-    val serializer = Serializer.const[IO, String](None)
-    val settings   =
-      ProducerSettings(ClientSettings(NonEmptyList.one("localhost:9092")), serializer, serializer, Map("message.timeout.ms" -> "not-a-duration"))
-
-    interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))
+  /** A backend response that cannot be represented by the portable API. */
+  final class InvalidBackendResponse(val detail: String, cause: Throwable = null)
+      extends KafkaException(s"Kafka backend returned an invalid response: $detail", cause)

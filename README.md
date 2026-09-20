@@ -123,6 +123,12 @@ automatic commits, cannot be overridden through the map. Property names and
 values are interpreted by the selected backend; portable applications should
 use only properties supported with the same meaning by each target backend.
 
+Backend-reported failures are exposed as `KafkaException.BackendFailure`, which
+preserves the original cause and includes error codes and retriable or fatal
+classifications when the backend supplies them.
+`KafkaException.InvalidBackendResponse` indicates that a backend returned data
+which cannot be represented by the portable API.
+
 ## Building
 
 The build uses sbt. Run all ordinary tests with:
