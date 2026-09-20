@@ -204,6 +204,12 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               Unit
             ],
           setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+          on =
+            ((_: String, _: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) => ()): js.Function2[
+              String,
+              js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit],
+              Unit
+            ],
           subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
           consume =
             (

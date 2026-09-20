@@ -308,6 +308,48 @@ void xkafka_batch_destroy(rd_kafka_t *producer, xkafka_batch_t *batch) {
         free(batch);
 }
 
+/* Registering a rebalance callback turns off librdkafka's own assignment, so this
+ * has to reproduce it, including the split between the eager and cooperative
+ * protocols. The generation counter lives in the client's opaque, so it belongs
+ * to one consumer and is only ever touched while its permit is held. */
+static void xkafka_rebalance_callback(rd_kafka_t *client,
+                                      rd_kafka_resp_err_t err,
+                                      rd_kafka_topic_partition_list_t *partitions,
+                                      void *opaque) {
+        int *generation = (int *)opaque;
+        int cooperative =
+            strcmp(rd_kafka_rebalance_protocol(client), "COOPERATIVE") == 0;
+
+        switch (err) {
+        case RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS:
+                if (cooperative)
+                        rd_kafka_incremental_assign(client, partitions);
+                else
+                        rd_kafka_assign(client, partitions);
+                break;
+        case RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS:
+                if (cooperative)
+                        rd_kafka_incremental_unassign(client, partitions);
+                else
+                        rd_kafka_assign(client, NULL);
+                break;
+        default:
+                /* Any other outcome needs the assignment cleared to resynchronise. */
+                rd_kafka_assign(client, NULL);
+                break;
+        }
+
+        if (generation != NULL)
+                (*generation)++;
+}
+
+/* Bumped once per rebalance, so the consumer can notice one without comparing
+ * assignments. Reading it costs nothing, so the poll loop can check every time. */
+int xkafka_consumer_generation(rd_kafka_t *consumer) {
+        int *generation = (int *)rd_kafka_opaque(consumer);
+        return generation == NULL ? 0 : *generation;
+}
+
 rd_kafka_t *xkafka_consumer_new(const char *brokers,
                                 const char *client_id,
                                 const char *group_id,
@@ -321,6 +363,19 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *consumer;
         rd_kafka_resp_err_t result;
+        int *generation = (int *)calloc(1, sizeof(int));
+
+        if (generation == NULL) {
+                rd_kafka_conf_destroy(conf);
+                xkafka_set_error(error, error_size, error_code,
+                                 "could not allocate the rebalance counter");
+                return NULL;
+        }
+
+        /* The opaque travels with the client, so the callback and
+         * xkafka_consumer_generation reach the same counter. */
+        rd_kafka_conf_set_opaque(conf, generation);
+        rd_kafka_conf_set_rebalance_cb(conf, xkafka_rebalance_callback);
 
         if (xkafka_conf_set_all(conf, property_names, property_values,
                                 property_count, error, error_size, error_code) != 0 ||
@@ -341,28 +396,39 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
             xkafka_conf_set(conf, "client.id", client_id, error, error_size, error_code) !=
                 0) {
                 rd_kafka_conf_destroy(conf);
+                free(generation);
                 return NULL;
         }
 
         consumer =
             rd_kafka_new(RD_KAFKA_CONSUMER, conf, error, error_size);
-        if (consumer == NULL)
+        if (consumer == NULL) {
+                /* rd_kafka_new owns conf only on success, and the opaque with it. */
+                free(generation);
                 return NULL;
+        }
 
         result = rd_kafka_poll_set_consumer(consumer);
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 rd_kafka_destroy(consumer);
+                free(generation);
                 return NULL;
         }
         return consumer;
 }
 
 void xkafka_consumer_destroy(rd_kafka_t *consumer) {
+        int *generation;
+
         if (consumer == NULL)
                 return;
+
+        /* Read before destroying, since the opaque is unreachable afterwards. */
+        generation = (int *)rd_kafka_opaque(consumer);
         rd_kafka_consumer_close(consumer);
         rd_kafka_destroy(consumer);
+        free(generation);
 }
 
 rd_kafka_topic_partition_list_t *xkafka_subscription_new(size_t count) {

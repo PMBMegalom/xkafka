@@ -99,6 +99,8 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_destroy(consumer: CVoidPtr): Unit = extern
 
+  def xkafka_consumer_generation(consumer: CVoidPtr): CInt = extern
+
   def xkafka_subscription_new(count: CSize): CVoidPtr = extern
 
   def xkafka_subscription_destroy(subscription: CVoidPtr): Unit = extern

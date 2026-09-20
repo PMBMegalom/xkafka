@@ -21,13 +21,15 @@
 
 package xkafka
 
+import scala.concurrent.duration.FiniteDuration
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.Uint8Array
 
 import cats.data.NonEmptyList
-import cats.effect.{Async, Deferred, Ref, Resource}
+import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
 import cats.effect.std.Dispatcher
+import fs2.concurrent.SignallingRef
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import internal.confluent
@@ -138,11 +140,32 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      underlying <- Resource.eval(F.delay(driver.consumer(settings.client, settings.groupId, settings.autoOffsetReset, settings.properties)))
+      underlying  <- Resource.eval(F.delay(driver.consumer(settings.client, settings.groupId, settings.autoOffsetReset, settings.properties)))
+      dispatcher  <- Dispatcher.sequential[F]
+      assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
+      _           <- Resource.eval(F.delay(underlying.on("rebalance", rebalanced(underlying, dispatcher, assignments))))
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
       _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(ConsumeTimeoutMillis)))
       _ <- Resource.eval(subscribe(underlying, subscription))
-    yield new ConfluentKafkaConsumer(underlying, settings)
+    yield new ConfluentKafkaConsumer(underlying, settings, assignments)
+
+  /** node-rdkafka emits the event before it applies the change, and reports only the partitions added or revoked, which differ by rebalance protocol.
+    *
+    * The effect the dispatcher schedules runs after the synchronous handler has assigned, and reads the whole assignment, so neither detail matters
+    * here.
+    */
+  private def rebalanced(
+      underlying: confluent.RdConsumer,
+      dispatcher: Dispatcher[F],
+      assignments: SignallingRef[F, Set[TopicPartition]]
+  ): js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit] =
+    (_, _) =>
+      dispatcher.unsafeRunAndForget(
+        F.delay(underlying.assignments()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet)).flatMap(assignments.set)
+      )
+
+  private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
+    (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
 
   private def subscribe(consumer: confluent.RdConsumer, subscription: Subscription): F[Unit] =
     val topics =
@@ -235,8 +258,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       headers: js.Array[confluent.RdHeader]
   )
 
-  private final class ConfluentKafkaConsumer[K, V](underlying: confluent.RdConsumer, settings: ConsumerSettings[F, K, V])
-      extends KafkaConsumer[F, K, V]:
+  private final class ConfluentKafkaConsumer[K, V](
+      underlying: confluent.RdConsumer,
+      settings: ConsumerSettings[F, K, V],
+      assignments: SignallingRef[F, Set[TopicPartition]]
+  ) extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
@@ -252,6 +278,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       Stream.repeatEval(fetch).flatMap(batch => Stream.emits(batch.toList)).evalMap(consumerRecord)
 
     private def fetch: F[js.Array[confluent.RdMessage]] = callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done))
+
+    /** librdkafka reports rebalances, so nothing is polled and `pollInterval` is unused here. */
+    override def assignmentChanges(pollInterval: FiniteDuration)(using Temporal[F]): Stream[F, Set[TopicPartition]] = assignments.discrete
 
     override def assignment: F[Set[TopicPartition]] =
       F.delay(underlying.assignments()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
@@ -351,9 +380,6 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
             override val committer: OffsetCommitter[F]  = offsetCommitter
 
         CommittableConsumerRecord(record, committableOffset)
-
-    private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
-      (topic(value.topic), portablePartition(value.partition)).mapN(TopicPartition.apply)
 
     private def portableTopic(value: String): F[Topic] = topic(value)
 

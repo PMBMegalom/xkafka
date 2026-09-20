@@ -99,6 +99,8 @@ private[xkafka] trait RdConsumer extends js.Object:
 
   def setDefaultConsumeTimeout(timeoutMs: Int): Unit = js.native
 
+  def on(event: String, listener: js.Function2[RdError | Null, js.Array[RdTopicPartition], Unit]): this.type = js.native
+
 @js.native
 private[xkafka] trait RdTopicPartition extends js.Object:
   val topic: String  = js.native
@@ -180,6 +182,9 @@ private[xkafka] object Values:
     clientId.foreach(value => result("client.id") = value)
     result("group.id") = groupId
     result("enable.auto.commit") = false
+    // node-rdkafka only wires the rebalance event when this is set, and the boolean form keeps its own
+    // assign and unassign, including the cooperative protocol split.
+    result("rebalance_cb") = true
     result("auto.offset.reset") = (
       autoOffsetReset match
         case AutoOffsetReset.Earliest => "earliest"
