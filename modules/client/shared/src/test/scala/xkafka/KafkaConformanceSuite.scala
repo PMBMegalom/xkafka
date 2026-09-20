@@ -113,6 +113,27 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assert(result.records.forall((_, metadata) => metadata.isDefined), "every record should carry its own metadata")
         assertEquals(result.metadata.flatMap(_.offset.map(_.value)), List(0L, 1L, 2L))
 
+  test(conformance("acknowledgements can be held while further batches are enqueued")):
+    withBroker: server =>
+      val topic     = uniqueTopic("pipeline")
+      val partition = validPartition(0)
+      val first     = NonEmptyList.of("a", "b").map(value => record(topic, Some("k"), Some(value), partition))
+      val second    = NonEmptyList.of("c", "d").map(value => record(topic, Some("k"), Some(value), partition))
+
+      producerSettings(server).flatMap: settings =>
+        PlatformKafkaClient().producer(settings).use: producer =>
+          for
+            firstAck     <- producer.produce(first)
+            secondAck    <- producer.produce(second)
+            firstResult  <- firstAck
+            secondResult <- secondAck
+            consumed     <- consume(server, topic, 4)
+          yield
+            assertEquals(firstResult.records.size, 2)
+            assertEquals(secondResult.records.size, 2)
+            assertEquals(consumed.map(_.record.value), List("a", "b", "c", "d").map(Some(_)))
+        .timeout(60.seconds)
+
   test(conformance("a consumer resource can be allocated and released repeatedly")):
     withBroker: server =>
       val topic = uniqueTopic("lifecycle")

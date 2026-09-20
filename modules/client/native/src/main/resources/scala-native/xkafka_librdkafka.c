@@ -4,7 +4,10 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+struct xkafka_batch_s;
 
 typedef struct xkafka_delivery_s {
         int complete;
@@ -12,7 +15,19 @@ typedef struct xkafka_delivery_s {
         int32_t partition;
         int64_t offset;
         int64_t timestamp;
+        struct xkafka_batch_s *owner;
 } xkafka_delivery_t;
+
+/* Delivery reports arrive after the enqueue returns, so the slots they write
+ * into are heap allocated and outlive the call that produced them. Every
+ * access happens on the thread holding the producer's permit, so the counters
+ * need no synchronisation of their own. */
+typedef struct xkafka_batch_s {
+        size_t capacity;
+        size_t count;
+        size_t pending;
+        xkafka_delivery_t *slots;
+} xkafka_batch_t;
 
 const char *xkafka_version_str(void) { return rd_kafka_version_str(); }
 
@@ -64,6 +79,9 @@ static void xkafka_delivery_callback(rd_kafka_t *client,
         delivery->offset = message->offset;
         delivery->timestamp = rd_kafka_message_timestamp(message, NULL);
         delivery->complete = 1;
+
+        if (delivery->owner != NULL && delivery->owner->pending > 0)
+                delivery->owner->pending--;
 }
 
 rd_kafka_t *xkafka_producer_new(const char *brokers,
@@ -127,23 +145,56 @@ int xkafka_headers_add(rd_kafka_headers_t *headers,
         return 0;
 }
 
-int xkafka_producer_send(rd_kafka_t *producer,
-                         const char *topic,
-                         int32_t partition,
-                         int64_t timestamp,
-                         const void *key,
-                         size_t key_size,
-                         const void *value,
-                         size_t value_size,
-                         rd_kafka_headers_t *headers,
-                         int32_t *result_partition,
-                         int64_t *result_offset,
-                         int64_t *result_timestamp,
-                         char *error,
-                         size_t error_size) {
-        xkafka_delivery_t delivery = {0, RD_KAFKA_RESP_ERR_NO_ERROR, -1, -1,
-                                      -1};
+xkafka_batch_t *xkafka_batch_new(size_t capacity) {
+        xkafka_batch_t *batch;
+
+        if (capacity == 0)
+                return NULL;
+
+        batch = (xkafka_batch_t *)calloc(1, sizeof(xkafka_batch_t));
+        if (batch == NULL)
+                return NULL;
+
+        batch->slots =
+            (xkafka_delivery_t *)calloc(capacity, sizeof(xkafka_delivery_t));
+        if (batch->slots == NULL) {
+                free(batch);
+                return NULL;
+        }
+
+        batch->capacity = capacity;
+        return batch;
+}
+
+/* Enqueues one message. The message owns a copy of its payload, so the caller's
+ * buffers may be released as soon as this returns. */
+int xkafka_batch_add(rd_kafka_t *producer,
+                     xkafka_batch_t *batch,
+                     const char *topic,
+                     int32_t partition,
+                     int64_t timestamp,
+                     const void *key,
+                     size_t key_size,
+                     const void *value,
+                     size_t value_size,
+                     rd_kafka_headers_t *headers,
+                     char *error,
+                     size_t error_size) {
+        xkafka_delivery_t *slot;
         rd_kafka_resp_err_t result;
+
+        if (batch == NULL || batch->count >= batch->capacity) {
+                if (headers != NULL)
+                        rd_kafka_headers_destroy(headers);
+                xkafka_set_error(error, error_size, "batch is full");
+                return -1;
+        }
+
+        slot = &batch->slots[batch->count];
+        slot->owner = batch;
+        slot->partition = RD_KAFKA_PARTITION_UA;
+        slot->offset = -1;
+        slot->timestamp = -1;
 
         if (timestamp >= 0) {
                 result = rd_kafka_producev(
@@ -153,7 +204,7 @@ int xkafka_producer_send(rd_kafka_t *producer,
                     RD_KAFKA_V_TIMESTAMP(timestamp),
                     RD_KAFKA_V_KEY((void *)key, key_size),
                     RD_KAFKA_V_VALUE((void *)value, value_size),
-                    RD_KAFKA_V_HEADERS(headers), RD_KAFKA_V_OPAQUE(&delivery),
+                    RD_KAFKA_V_HEADERS(headers), RD_KAFKA_V_OPAQUE(slot),
                     RD_KAFKA_V_END);
         } else {
                 result = rd_kafka_producev(
@@ -162,29 +213,77 @@ int xkafka_producer_send(rd_kafka_t *producer,
                     RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_COPY),
                     RD_KAFKA_V_KEY((void *)key, key_size),
                     RD_KAFKA_V_VALUE((void *)value, value_size),
-                    RD_KAFKA_V_HEADERS(headers), RD_KAFKA_V_OPAQUE(&delivery),
+                    RD_KAFKA_V_HEADERS(headers), RD_KAFKA_V_OPAQUE(slot),
                     RD_KAFKA_V_END);
         }
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                rd_kafka_headers_destroy(headers);
+                /* librdkafka only takes ownership of the headers on success. */
+                if (headers != NULL)
+                        rd_kafka_headers_destroy(headers);
                 xkafka_set_error(error, error_size, rd_kafka_err2str(result));
                 return -1;
         }
 
-        while (!delivery.complete)
-                rd_kafka_poll(producer, 100);
+        batch->count++;
+        batch->pending++;
+        return 0;
+}
 
-        if (delivery.error != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size,
-                                 rd_kafka_err2str(delivery.error));
+/* Serves delivery reports until every enqueued message has one. */
+int xkafka_batch_await(rd_kafka_t *producer,
+                       xkafka_batch_t *batch,
+                       char *error,
+                       size_t error_size) {
+        size_t index;
+
+        if (batch == NULL) {
+                xkafka_set_error(error, error_size, "batch is not allocated");
                 return -1;
         }
 
-        *result_partition = delivery.partition;
-        *result_offset = delivery.offset;
-        *result_timestamp = delivery.timestamp;
+        while (batch->pending > 0)
+                rd_kafka_poll(producer, 100);
+
+        for (index = 0; index < batch->count; index++) {
+                if (batch->slots[index].error !=
+                    RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error(
+                            error, error_size,
+                            rd_kafka_err2str(batch->slots[index].error));
+                        return -1;
+                }
+        }
         return 0;
+}
+
+size_t xkafka_batch_count(const xkafka_batch_t *batch) {
+        return batch == NULL ? 0 : batch->count;
+}
+
+int32_t xkafka_batch_partition_at(const xkafka_batch_t *batch, size_t index) {
+        return batch->slots[index].partition;
+}
+
+int64_t xkafka_batch_offset_at(const xkafka_batch_t *batch, size_t index) {
+        return batch->slots[index].offset;
+}
+
+int64_t xkafka_batch_timestamp_at(const xkafka_batch_t *batch, size_t index) {
+        return batch->slots[index].timestamp;
+}
+
+/* Drains any outstanding reports before freeing, so librdkafka never writes
+ * into slots that have already been released. */
+void xkafka_batch_destroy(rd_kafka_t *producer, xkafka_batch_t *batch) {
+        if (batch == NULL)
+                return;
+
+        while (batch->pending > 0)
+                rd_kafka_poll(producer, 100);
+
+        free(batch->slots);
+        free(batch);
 }
 
 rd_kafka_t *xkafka_consumer_new(const char *brokers,

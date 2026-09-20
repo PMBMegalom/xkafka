@@ -26,7 +26,8 @@ import scala.scalanative.unsigned.*
 
 import cats.data.NonEmptyList
 import cats.effect.{Async, Resource}
-import cats.effect.std.Semaphore
+import cats.effect.implicits.*
+import cats.effect.std.{Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import internal.librdkafka.Bindings
@@ -46,7 +47,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     for
       semaphore <- Resource.eval(Semaphore[F](1))
       handle <- Resource.make(createProducer(settings))(producer => semaphore.permit.use(_ => F.blocking(Bindings.xkafka_producer_destroy(producer))))
-    yield new LibrdkafkaProducer(handle, semaphore, settings)
+      // Outstanding acknowledgements finish before the handle they poll is destroyed.
+      supervisor <- Supervisor[F](await = true)
+    yield new LibrdkafkaProducer(handle, semaphore, supervisor, settings)
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
@@ -146,76 +149,110 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     val bytes = pointer.asInstanceOf[Ptr[Byte]]
     Chunk.array(Array.tabulate(size.toInt)(bytes(_)))
 
-  private final class LibrdkafkaProducer[K, V](handle: CVoidPtr, semaphore: Semaphore[F], settings: ProducerSettings[F, K, V])
-      extends KafkaProducer[F, K, V]:
+  private final class LibrdkafkaProducer[K, V](
+      handle: CVoidPtr,
+      semaphore: Semaphore[F],
+      supervisor: Supervisor[F],
+      settings: ProducerSettings[F, K, V]
+  ) extends KafkaProducer[F, K, V]:
 
-    // Each send still blocks for its own delivery report, so the enqueue stage is not observable yet.
+    /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip. */
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
-      F.pure(records.traverse(record => produceRecord(record).map(metadata => record -> Some(metadata))).map(ProducerResult(_)))
-
-    private def produceRecord(record: ProducerRecord[K, V]): F[RecordMetadata] =
       for
-        key      <- settings.keySerializer.serialize(record.topic, record.headers, record.key)
-        value    <- settings.valueSerializer.serialize(record.topic, record.headers, record.value)
-        metadata <- semaphore.permit.use(_ => F.blocking(send(record, key, value)))
-      yield metadata
-
-    private def send(record: ProducerRecord[K, V], key: Option[Chunk[Byte]], value: Option[Chunk[Byte]]): RecordMetadata =
-      Zone.acquire: zone =>
-        given Zone                    = zone
-        val error                     = stackalloc[CChar](ErrorBufferSize)
-        val (keyPointer, keySize)     = cBytes(key)
-        val (valuePointer, valueSize) = cBytes(value)
-        val resultPartition           = stackalloc[CInt]()
-        val resultOffset              = stackalloc[CLongLong]()
-        val resultTimestamp           = stackalloc[CLongLong]()
-        val topic                     = toCString(record.topic.value)
-        val partition                 = record.partition.fold(UnassignedPartition)(_.value)
-        val timestamp                 = record.timestamp.fold(-1L)(_.epochMillis)
-        val headers                   = Bindings.xkafka_headers_new(record.headers.values.size.toUSize)
-        if headers == null then throw backendFailure("could not allocate message headers")
-
-        try
-          record.headers.values.foreach: header =>
-            val (headerValue, headerSize) = cBytes(header.value)
-            val result = Bindings.xkafka_headers_add(headers, toCString(header.key), headerValue, headerSize, error, ErrorBufferSize.toUSize)
-            if result != 0 then throw nativeError(error)
-        catch
-          case error: Throwable =>
-            Bindings.xkafka_headers_destroy(headers)
-            throw error
-
-        val result =
-          Bindings.xkafka_producer_send(
-            handle,
-            topic,
-            partition,
-            timestamp,
-            keyPointer,
-            keySize,
-            valuePointer,
-            valueSize,
-            headers,
-            resultPartition,
-            resultOffset,
-            resultTimestamp,
-            error,
-            ErrorBufferSize.toUSize
+        encoded <- records.traverse(encodeRecord)
+        batch   <- semaphore.permit.use(_ => F.blocking(enqueue(encoded)))
+        // The batch is heap allocated and librdkafka writes into it after the enqueue returns, so releasing it
+        // is owned by a supervised fiber. Dropping the acknowledgement therefore cannot leak it.
+        awaiting <-
+          supervisor.supervise(
+            semaphore.permit.use(_ => F.blocking(awaitBatch(batch, records)))
+              .guarantee(semaphore.permit.use(_ => F.blocking(Bindings.xkafka_batch_destroy(handle, batch))))
           )
-        if result != 0 then throw nativeError(error)
+      yield awaiting.joinWithNever
 
-        val portablePartition =
-          Partition.from(!resultPartition).fold(error => throw invalidBackendValue("partition", !resultPartition, error), identity)
-        val offsetValue    = !resultOffset
-        val timestampValue = !resultTimestamp
-        val portableOffset =
-          Option.when(offsetValue >= 0L)(Offset.from(offsetValue).fold(error => throw invalidBackendValue("offset", offsetValue, error), identity))
+    private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
+      (
+        settings.keySerializer.serialize(record.topic, record.headers, record.key),
+        settings.valueSerializer.serialize(record.topic, record.headers, record.value)
+      ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
 
-        RecordMetadata(
-          TopicPartition(record.topic, portablePartition),
-          portableOffset,
-          Option.when(timestampValue >= 0L)(timestampValue).map(Timestamp.fromEpochMillis)
-        )
+    private def enqueue(records: NonEmptyList[EncodedRecord]): CVoidPtr =
+      val batch = Bindings.xkafka_batch_new(records.size.toUSize)
+      if batch == null then throw backendFailure("could not allocate a producer batch")
+
+      try
+        Zone.acquire: zone =>
+          given Zone = zone
+          val error  = stackalloc[CChar](ErrorBufferSize)
+          records.toList.foreach: record =>
+            val (keyPointer, keySize)     = cBytes(record.key)
+            val (valuePointer, valueSize) = cBytes(record.value)
+            val headers                   = nativeHeaders(record.headers, error)
+            val result                    =
+              Bindings.xkafka_batch_add(
+                handle,
+                batch,
+                toCString(record.topic.value),
+                record.partition.fold(UnassignedPartition)(_.value),
+                record.timestamp.fold(-1L)(_.epochMillis),
+                keyPointer,
+                keySize,
+                valuePointer,
+                valueSize,
+                headers,
+                error,
+                ErrorBufferSize.toUSize
+              )
+            if result != 0 then throw nativeError(error)
+        batch
+      catch
+        case failure: Throwable =>
+          Bindings.xkafka_batch_destroy(handle, batch)
+          throw failure
+
+    private def nativeHeaders(headers: Headers, error: CString)(using Zone): CVoidPtr =
+      val native = Bindings.xkafka_headers_new(headers.values.size.toUSize)
+      if native == null then throw backendFailure("could not allocate message headers")
+
+      try
+        headers.values.foreach: header =>
+          val (value, size) = cBytes(header.value)
+          val result        = Bindings.xkafka_headers_add(native, toCString(header.key), value, size, error, ErrorBufferSize.toUSize)
+          if result != 0 then throw nativeError(error)
+        native
+      catch
+        case failure: Throwable =>
+          Bindings.xkafka_headers_destroy(native)
+          throw failure
+
+    private def awaitBatch(batch: CVoidPtr, records: NonEmptyList[ProducerRecord[K, V]]): ProducerResult[K, V] =
+      val error  = stackalloc[CChar](ErrorBufferSize)
+      val result = Bindings.xkafka_batch_await(handle, batch, error, ErrorBufferSize.toUSize)
+      if result != 0 then throw nativeError(error)
+
+      val reported = Bindings.xkafka_batch_count(batch).toInt
+      if reported != records.size then throw new KafkaException.InvalidBackendResponse(s"expected ${records.size} delivery reports, got $reported")
+
+      ProducerResult(records.zipWithIndex.map((record, index) => record -> Some(metadataAt(batch, index, record.topic))))
+
+    private def metadataAt(batch: CVoidPtr, index: Int, topic: Topic): RecordMetadata =
+      val partitionValue = Bindings.xkafka_batch_partition_at(batch, index.toUSize)
+      val offsetValue    = Bindings.xkafka_batch_offset_at(batch, index.toUSize)
+      val timestampValue = Bindings.xkafka_batch_timestamp_at(batch, index.toUSize)
+      val partition      = Partition.from(partitionValue).fold(error => throw invalidBackendValue("partition", partitionValue, error), identity)
+      val offset         =
+        Option.when(offsetValue >= 0L)(Offset.from(offsetValue).fold(error => throw invalidBackendValue("offset", offsetValue, error), identity))
+
+      RecordMetadata(TopicPartition(topic, partition), offset, Option.when(timestampValue >= 0L)(timestampValue).map(Timestamp.fromEpochMillis))
+
+  private final case class EncodedRecord(
+      topic: Topic,
+      partition: Option[Partition],
+      timestamp: Option[Timestamp],
+      headers: Headers,
+      key: Option[Chunk[Byte]],
+      value: Option[Chunk[Byte]]
+  )
 
   private final case class NativeRecord(
       topic: String,

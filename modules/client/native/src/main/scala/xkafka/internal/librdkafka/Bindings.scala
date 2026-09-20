@@ -45,8 +45,11 @@ private[xkafka] object Bindings:
 
   def xkafka_headers_add(headers: CVoidPtr, name: CString, value: CVoidPtr, valueSize: CSize, error: CString, errorSize: CSize): CInt = extern
 
-  def xkafka_producer_send(
+  def xkafka_batch_new(capacity: CSize): CVoidPtr = extern
+
+  def xkafka_batch_add(
       producer: CVoidPtr,
+      batch: CVoidPtr,
       topic: CString,
       partition: CInt,
       timestamp: CLongLong,
@@ -55,12 +58,21 @@ private[xkafka] object Bindings:
       value: CVoidPtr,
       valueSize: CSize,
       headers: CVoidPtr,
-      resultPartition: Ptr[CInt],
-      resultOffset: Ptr[CLongLong],
-      resultTimestamp: Ptr[CLongLong],
       error: CString,
       errorSize: CSize
   ): CInt = extern
+
+  def xkafka_batch_await(producer: CVoidPtr, batch: CVoidPtr, error: CString, errorSize: CSize): CInt = extern
+
+  def xkafka_batch_count(batch: CVoidPtr): CSize = extern
+
+  def xkafka_batch_partition_at(batch: CVoidPtr, index: CSize): CInt = extern
+
+  def xkafka_batch_offset_at(batch: CVoidPtr, index: CSize): CLongLong = extern
+
+  def xkafka_batch_timestamp_at(batch: CVoidPtr, index: CSize): CLongLong = extern
+
+  def xkafka_batch_destroy(producer: CVoidPtr, batch: CVoidPtr): Unit = extern
 
   def xkafka_consumer_new(
       brokers: CString,
