@@ -63,6 +63,12 @@ jobs:
           cache: npm
           cache-dependency-path: modules/client/js/package-lock.json
 
+      - name: Install librdkafka system dependencies
+        if: matrix.project == 'rootNative'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
+
       - name: Check that workflows are up to date
         run: sbt githubWorkflowCheck
 
@@ -263,6 +269,11 @@ jobs:
           cache: npm
           cache-dependency-path: modules/client/js/package-lock.json
 
+      - name: Install librdkafka system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
+
       - name: Test all three backends against Kafka
         run: scripts/integration-test.sh
 
@@ -305,6 +316,11 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: modules/client/js/package-lock.json
+
+      - name: Install librdkafka system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
 
       - name: Select published version
         run: echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV

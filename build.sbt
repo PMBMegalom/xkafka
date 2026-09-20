@@ -35,14 +35,24 @@ val setupNode = WorkflowStep.Use(
 )
 val publishedArtifactCondition = "github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')"
 
+// librdkafka is built with TLS and compression, which need these headers present before the Native build runs.
+val installNativeDependencies = WorkflowStep.Run(
+  List("sudo apt-get update", "sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev"),
+  name = Some("Install librdkafka system dependencies")
+)
+
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
+)
+ThisBuild / githubWorkflowBuildPreamble += installNativeDependencies.withCond(
+  Some("matrix.project == 'rootNative'")
 )
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "integration",
   name = "Broker-backed integration tests",
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
+    installNativeDependencies,
     WorkflowStep.Run(
       List("scripts/integration-test.sh"),
       name = Some("Test all three backends against Kafka")
@@ -57,6 +67,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   name = "Published artifact smoke tests",
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
+    installNativeDependencies,
     WorkflowStep.Run(
       List("""echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV"""),
       name = Some("Select published version")
@@ -82,6 +93,9 @@ val librdkafkaVersion       = "2.15.1"
 val librdkafkaSha256        = "23c8575c7d1ced07246cb9cf200c11325b72201fd4134a02414ca869fbdd8ed3"
 val munitVersion            = "1.2.0"
 val munitCatsEffectVersion  = "2.2.0"
+val munitScalacheckVersion  = "1.2.0"
+val catsLawsVersion         = "2.13.0"
+val disciplineMunitVersion  = "2.0.0"
 val slf4jVersion            = "1.7.36"
 
 val repositoryRoot    = file(".")
@@ -117,7 +131,10 @@ val commonSettings = Seq(
     "org.typelevel" %%% "cats-tagless-core" % catsTaglessVersion,
     "co.fs2"        %%% "fs2-core"          % fs2Version,
     "org.scalameta" %%% "munit"             % munitVersion           % Test,
-    "org.typelevel" %%% "munit-cats-effect" % munitCatsEffectVersion % Test
+    "org.typelevel" %%% "munit-cats-effect" % munitCatsEffectVersion % Test,
+    "org.scalameta" %%% "munit-scalacheck"  % munitScalacheckVersion % Test,
+    "org.typelevel" %%% "cats-laws"         % catsLawsVersion        % Test,
+    "org.typelevel" %%% "discipline-munit"  % disciplineMunitVersion % Test
   )
 )
 
