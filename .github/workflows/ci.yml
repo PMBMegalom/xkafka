@@ -27,10 +27,15 @@ jobs:
     name: Test
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04, macos-latest]
         scala: [3]
         java: [temurin@17]
         project: [rootJS, rootJVM, rootNative]
+        exclude:
+          - os: macos-latest
+            project: rootJVM
+          - os: macos-latest
+            project: rootJS
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -64,16 +69,20 @@ jobs:
           cache-dependency-path: modules/client/js/package-lock.json
 
       - name: Install librdkafka system dependencies
-        if: matrix.project == 'rootNative'
+        if: matrix.project == 'rootNative' && startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
+
+      - name: Install librdkafka system dependencies
+        if: matrix.project == 'rootNative' && startsWith(matrix.os, 'macos')
+        run: brew install openssl@3 zstd zlib
 
       - name: Check that workflows are up to date
         run: sbt githubWorkflowCheck
 
       - name: Check headers and formatting
-        if: matrix.java == 'temurin@17' && matrix.os == 'ubuntu-22.04'
+        if: matrix.java == 'temurin@17' && matrix.os == 'ubuntu-24.04'
         run: sbt 'project ${{ matrix.project }}' '++ ${{ matrix.scala }}' headerCheckAll scalafmtCheckAll 'project /' scalafmtSbtCheck
 
       - name: scalaJSLink
@@ -88,11 +97,11 @@ jobs:
         run: sbt 'project ${{ matrix.project }}' '++ ${{ matrix.scala }}' test
 
       - name: Check binary compatibility
-        if: matrix.java == 'temurin@17' && matrix.os == 'ubuntu-22.04'
+        if: matrix.java == 'temurin@17' && matrix.os == 'ubuntu-24.04'
         run: sbt 'project ${{ matrix.project }}' '++ ${{ matrix.scala }}' mimaReportBinaryIssues
 
       - name: Generate API documentation
-        if: matrix.java == 'temurin@17' && matrix.os == 'ubuntu-22.04'
+        if: matrix.java == 'temurin@17' && matrix.os == 'ubuntu-24.04'
         run: sbt 'project ${{ matrix.project }}' '++ ${{ matrix.scala }}' doc
 
       - name: Make target directories
@@ -116,7 +125,7 @@ jobs:
     if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
     steps:
@@ -200,7 +209,7 @@ jobs:
     if: github.event.repository.fork == false && github.event_name != 'pull_request'
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
     steps:
@@ -235,7 +244,7 @@ jobs:
     name: Broker-backed integration tests
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
         scala: [3]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
@@ -270,6 +279,7 @@ jobs:
           cache-dependency-path: modules/client/js/package-lock.json
 
       - name: Install librdkafka system dependencies
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
@@ -283,7 +293,7 @@ jobs:
     if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
         scala: [3]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
@@ -318,6 +328,7 @@ jobs:
           cache-dependency-path: modules/client/js/package-lock.json
 
       - name: Install librdkafka system dependencies
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev

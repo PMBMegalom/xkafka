@@ -1,0 +1,28 @@
+# Opens pull requests for dependency updates. The continuous integration workflow
+# ignores update/** branches so that it runs once, on the pull request.
+#
+# Authenticating as a GitHub App rather than with GITHUB_TOKEN is what makes those
+# pull requests run continuous integration: GitHub does not trigger workflows from
+# events its own token created, so updates would otherwise arrive untested.
+#
+# Requires the APP_ID, APP_INSTALLATION_ID, and APP_PRIVATE_KEY repository secrets,
+# from an App installed on this repository with Metadata read, and Pull requests and
+# Contents read and write.
+name: Scala Steward
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+jobs:
+  scala-steward:
+    name: Check dependencies
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check dependencies
+        uses: scala-steward-org/scala-steward-action@v2
+        with:
+          github-app-id: ${{ secrets.APP_ID }}
+          github-app-installation-id: ${{ secrets.APP_INSTALLATION_ID }}
+          github-app-key: ${{ secrets.APP_PRIVATE_KEY }}

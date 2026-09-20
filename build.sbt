@@ -38,14 +38,33 @@ val publishedArtifactCondition = "github.event_name != 'pull_request' && (starts
 // librdkafka is built with TLS and compression, which need these headers present before the Native build runs.
 val installNativeDependencies = WorkflowStep.Run(
   List("sudo apt-get update", "sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev"),
-  name = Some("Install librdkafka system dependencies")
+  name = Some("Install librdkafka system dependencies"),
+  cond = Some("startsWith(matrix.os, 'ubuntu')")
+)
+
+// Homebrew keeps these keg-only, which the build already accounts for when it locates them.
+val installNativeDependenciesMacOs = WorkflowStep.Run(
+  List("brew install openssl@3 zstd zlib"),
+  name = Some("Install librdkafka system dependencies"),
+  cond = Some("startsWith(matrix.os, 'macos')")
 )
 
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
 )
+ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
+
+// Only the Native build is worth running twice: it is the one whose result depends on the host toolchain.
+ThisBuild / githubWorkflowBuildMatrixExclusions ++= Seq(
+  MatrixExclude(Map("os" -> "macos-latest", "project" -> "rootJVM")),
+  MatrixExclude(Map("os" -> "macos-latest", "project" -> "rootJS"))
+)
+
 ThisBuild / githubWorkflowBuildPreamble += installNativeDependencies.withCond(
-  Some("matrix.project == 'rootNative'")
+  Some("matrix.project == 'rootNative' && startsWith(matrix.os, 'ubuntu')")
+)
+ThisBuild / githubWorkflowBuildPreamble += installNativeDependenciesMacOs.withCond(
+  Some("matrix.project == 'rootNative' && startsWith(matrix.os, 'macos')")
 )
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "integration",
@@ -58,6 +77,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
       name = Some("Test all three backends against Kafka")
     )
   ),
+  oses = List("ubuntu-24.04"),
   scalas = List("3"),
   javas = List(JavaSpec.temurin("17")),
   timeoutMinutes = Some(45)
@@ -78,11 +98,20 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     )
   ),
   cond = Some(publishedArtifactCondition),
+  oses = List("ubuntu-24.04"),
   scalas = List("3"),
   javas = List(JavaSpec.temurin("17")),
   needs = List("publish"),
   timeoutMinutes = Some(45)
 )
+
+// sbt-typelevel builds its dependency submission job with the plugin's own default runner, which stays on
+// ubuntu-22.04. The job earns its keep through the security alerts, so only its runner is corrected.
+ThisBuild / githubWorkflowGeneratedCI := {
+  (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
+    if (job.id == "dependency-submission") job.withOses(List("ubuntu-24.04")) else job
+  }
+}
 
 val catsEffectVersion       = "3.7.0"
 val catsTaglessVersion      = "0.16.5"
