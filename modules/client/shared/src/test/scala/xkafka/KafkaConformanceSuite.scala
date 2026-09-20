@@ -85,9 +85,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(consumed.map(_.record.key), List(None))
         assertEquals(consumed.map(_.record.value), List(Some("value")))
 
-  // JavaScript encodes headers through a js.Dictionary keyed by header name, which cannot represent
-  // duplicate keys interleaved with other keys in their produced order.
-  test(conformance("headers keep their produced order, including duplicate names", divergent = Set("js"))):
+  test(conformance("headers keep their produced order, including duplicate names")):
     withBroker: server =>
       val topic   = uniqueTopic("headers")
       val headers = Headers(Header("a", byteHeader(1)), Header("b", byteHeader(2)), Header("a", byteHeader(3)))

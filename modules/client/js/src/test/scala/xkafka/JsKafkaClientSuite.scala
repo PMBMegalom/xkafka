@@ -67,24 +67,22 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       assertEquals(error.retriable, Some(true))
       assertEquals(error.fatal, Some(false))
 
-  test("Confluent facade uses direct librdkafka configuration"):
-    val common       = dynamic(confluent.Values.kafkaConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("socket.timeout.ms" -> "123")))
-    val producer     = dynamic(confluent.Values.producerConfig(Map("linger.ms" -> "5")))
-    val consumer     = dynamic(confluent.Values.consumerConfig("group", AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10")))
-    val subscription = dynamic(confluent.Values.subscription(js.Array[confluent.SubscriptionTopic]("events")))
-    val run          = dynamic(confluent.Values.consumerRun(_ => js.Promise.resolve(())))
+  test("librdkafka configuration is built directly, with the managed keys derived from typed settings"):
+    val producer = dynamic(confluent.Values.rdProducerConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("linger.ms" -> "5")))
+    val consumer =
+      dynamic(
+        confluent.Values.rdConsumerConfig(js.Array("broker-1:9092"), "client", "group", AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10"))
+      )
 
-    assertEquals(common.selectDynamic("bootstrap.servers").asInstanceOf[String], "broker-1:9092,broker-2:9092")
-    assertEquals(common.selectDynamic("client.id").asInstanceOf[String], "client")
-    assertEquals(common.selectDynamic("socket.timeout.ms").asInstanceOf[String], "123")
+    assertEquals(producer.selectDynamic("bootstrap.servers").asInstanceOf[String], "broker-1:9092,broker-2:9092")
+    assertEquals(producer.selectDynamic("client.id").asInstanceOf[String], "client")
     assertEquals(producer.selectDynamic("linger.ms").asInstanceOf[String], "5")
+    // Delivery reports are what make per-record metadata possible.
+    assertEquals(producer.selectDynamic("dr_cb").asInstanceOf[Boolean], true)
     assertEquals(consumer.selectDynamic("group.id").asInstanceOf[String], "group")
     assertEquals(consumer.selectDynamic("fetch.wait.max.ms").asInstanceOf[String], "10")
     assertEquals(consumer.selectDynamic("enable.auto.commit").asInstanceOf[Boolean], false)
     assertEquals(consumer.selectDynamic("auto.offset.reset").asInstanceOf[String], "earliest")
-    assert(js.isUndefined(subscription.selectDynamic("fromBeginning")))
-    assert(js.isUndefined(run.selectDynamic("autoCommit")))
-    assertEquals(run.selectDynamic("eachBatchAutoResolve").asInstanceOf[Boolean], false)
 
   test("producer enqueues each record with its own opaque and reports metadata per record"):
     Dispatcher.sequential[IO].use: dispatcher =>
@@ -177,152 +175,70 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             assertEquals(result.records.toList.map((_, metadata) => metadata.flatMap(_.offset.map(_.value))), List(Some(41L)))
       yield ()
 
-  test("consumer decodes a batch and commits the exact next offset"):
-    Dispatcher.sequential[IO].use: dispatcher =>
-      for
-        connected          <- Ref.of[IO, Int](0)
-        disconnected       <- Ref.of[IO, Int](0)
-        runConfig          <- Deferred[IO, confluent.ConsumerRunConfig]
-        committed          <- Ref.of[IO, Vector[(String, Int, String)]](Vector.empty)
-        resolved           <- Deferred[IO, String]
-        seeked             <- Deferred[IO, (String, Int, String)]
-        requestedTimestamp <- Deferred[IO, Double]
-        adminConnected     <- Ref.of[IO, Int](0)
-        adminDisconnected  <- Ref.of[IO, Int](0)
-        admin =
-          js.Dynamic.literal(
-            connect = (() => promise(dispatcher)(adminConnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
-            disconnect = (() => promise(dispatcher)(adminDisconnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
-            fetchTopicMetadata =
-              (
-                  (_: confluent.TopicMetadataOptions) =>
-                    js.Promise.resolve(js.Array(
-                      js.Dynamic
-                        .literal(name = "events", partitions = js.Array(js.Dynamic.literal(partitionId = 4), js.Dynamic.literal(partitionId = 5)))
-                        .asInstanceOf[confluent.TopicMetadata],
-                      js.Dynamic.literal(name = "other", partitions = js.Array(js.Dynamic.literal(partitionId = 0)))
-                        .asInstanceOf[confluent.TopicMetadata]
-                    ))
-              ): js.Function1[confluent.TopicMetadataOptions, js.Promise[js.Array[confluent.TopicMetadata]]],
-            fetchTopicOffsets =
-              (
-                  (_: String) =>
-                    js.Promise.resolve(js.Array(
-                      js.Dynamic.literal(partition = 4, offset = "9007199254740995", high = "9007199254740995", low = "9007199254740992")
-                        .asInstanceOf[confluent.TopicOffsets],
-                      js.Dynamic.literal(partition = 5, offset = "10", high = "10", low = "0").asInstanceOf[confluent.TopicOffsets]
-                    ))
-              ): js.Function1[String, js.Promise[js.Array[confluent.TopicOffsets]]],
-            fetchTopicOffsetsByTimestamp =
-              (
-                  (_: String, timestamp: Double) =>
-                    promise(dispatcher)(requestedTimestamp.complete(timestamp).void.as(js.Array(
-                      confluent.Values.topicPartitionOffset("events", 4, "9007199254740994"),
-                      confluent.Values.topicPartitionOffset("events", 5, "10")
-                    )))
-              ): js.Function2[String, Double, js.Promise[js.Array[confluent.TopicPartitionOffset]]]
-          ).asInstanceOf[confluent.Admin]
-        consumer =
-          js.Dynamic.literal(
-            connect = (() => promise(dispatcher)(connected.update(_ + 1))): js.Function0[js.Promise[Unit]],
-            disconnect = (() => promise(dispatcher)(disconnected.update(_ + 1))): js.Function0[js.Promise[Unit]],
-            subscribe = ((_: confluent.ConsumerSubscribe) => js.Promise.resolve(())): js.Function1[confluent.ConsumerSubscribe, js.Promise[Unit]],
-            run =
-              ((config: confluent.ConsumerRunConfig) => promise(dispatcher)(runConfig.complete(config).void)): js.Function1[
-                confluent.ConsumerRunConfig,
-                js.Promise[Unit]
-              ],
-            commitOffsets =
-              (
-                  (offsets: js.Array[confluent.TopicPartitionOffset]) =>
-                    promise(dispatcher)(committed.set(offsets.toVector.map(topicPartitionOffset)))
-              ): js.Function1[js.Array[confluent.TopicPartitionOffset], js.Promise[Unit]],
-            assignment = (() => js.Array(confluent.Values.topicPartition("events", 4))): js.Function0[js.Array[confluent.TopicPartition]],
-            committed =
-              (
-                  (_: js.Array[confluent.TopicPartition]) =>
-                    js.Promise.resolve(js.Array(confluent.Values.topicPartitionOffset("events", 4, "9007199254740994")))
-              ): js.Function1[js.Array[confluent.TopicPartition], js.Promise[js.Array[confluent.TopicPartitionOffset]]],
-            dependentAdmin = (() => admin): js.Function0[confluent.Admin],
-            seek =
-              (
-                  (offset: confluent.TopicPartitionOffset) => dispatcher.unsafeRunAndForget(seeked.complete(topicPartitionOffset(offset)).void)
-              ): js.Function1[confluent.TopicPartitionOffset, Unit]
-          ).asInstanceOf[confluent.Consumer]
-        settings =
-          ConsumerSettings
-            .from(clientSettings, consumerGroup("tests"), utf8Deserializer, utf8Deserializer, properties = Map("fetch.min.bytes" -> "2")).toOption.get
-        result <-
-          KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.min.bytes" -> "2")))
-            .consumer(settings, Subscription.Topics(NonEmptyList.one(topic("events")))).use: portable =>
-              for
-                config <- runConfig.get
-                callback = dynamic(config).eachBatch.asInstanceOf[js.Function1[confluent.EachBatchPayload, js.Promise[Unit]]]
-                payload  =
-                  consumerPayload(
-                    topic = "events",
-                    partition = 4,
-                    offset = "9007199254740993",
-                    timestamp = "5678",
-                    key = "key",
-                    value = "value",
-                    resolveOffset = offset => dispatcher.unsafeRunAndForget(resolved.complete(offset).void)
-                  )
-                _          <- IO.fromFuture(IO(callback(payload).toFuture))
-                record     <- portable.records.take(1).compile.lastOrError
-                _          <- record.offset.commit
-                assignment <- portable.assignment
-                stored     <- portable.committed(Set(record.record.topicPartition))
-                beginning  <- portable.beginningOffsets(Set(record.record.topicPartition))
-                end        <- portable.endOffsets(Set(record.record.topicPartition))
-                otherTopicPartition = TopicPartition(record.record.topicPartition.topic, partition(5))
-                timed <-
-                  portable.offsetsForTimes(
-                    Map(record.record.topicPartition -> Timestamp.fromEpochMillis(5678L), otherTopicPartition -> Timestamp.fromEpochMillis(5678L))
-                  )
-                partitions     <- portable.partitionsFor(record.record.topicPartition.topic)
-                topics         <- portable.listTopics
-                _              <- portable.seek(record.record.topicPartition, record.record.offset)
-                seekedOffset   <- seeked.get
-                resolvedOffset <- resolved.get
-                timestampValue <- requestedTimestamp.get
-              yield (record, assignment, stored, beginning, end, timed, partitions, topics, seekedOffset, resolvedOffset, timestampValue)
-        connectedCount         <- connected.get
-        disconnectedCount      <- disconnected.get
-        adminConnectedCount    <- adminConnected.get
-        adminDisconnectedCount <- adminDisconnected.get
-        committedOffsets       <- committed.get
-        (record, assignment, stored, beginning, end, timed, partitions, topics, seekedOffset, resolvedOffset, timestampValue) = result
-        _ <-
-          IO:
-            assertEquals(connectedCount, 1)
-            assertEquals(disconnectedCount, 1)
-            assertEquals(adminConnectedCount, 5)
-            assertEquals(adminDisconnectedCount, 5)
-            assertEquals(record.record.topicPartition.topic, topic("events"))
-            assertEquals(record.record.topicPartition.partition, partition(4))
-            assertEquals(record.record.offset.value, 9007199254740993L)
-            assertEquals(record.record.key, "key")
-            assertEquals(record.record.value, "value")
-            assertEquals(record.offset.nextOffset.value, 9007199254740994L)
-            assertEquals(assignment, Set(record.record.topicPartition))
-            assertEquals(stored, Map(record.record.topicPartition -> Some(record.offset.nextOffset)))
-            assertEquals(beginning, Map(record.record.topicPartition -> Offset.from(9007199254740992L).toOption.get))
-            assertEquals(end, Map(record.record.topicPartition -> Offset.from(9007199254740995L).toOption.get))
-            assertEquals(
-              timed,
-              Map(
-                record.record.topicPartition                                     -> Some(record.offset.nextOffset),
-                TopicPartition(record.record.topicPartition.topic, partition(5)) -> None
-              )
-            )
-            assertEquals(partitions, Set(partition(4), partition(5)))
-            assertEquals(topics, Map(topic("events") -> partitions, topic("other") -> Set(partition(0))))
-            assertEquals(seekedOffset, ("events", 4, "9007199254740993"))
-            assertEquals(resolvedOffset, "9007199254740993")
-            assertEquals(timestampValue, 5678d)
-            assertEquals(committedOffsets, Vector(("events", 4, "9007199254740994")))
-      yield ()
+  test("consumer decodes a pulled batch, keeps header order, and commits the exact next offset"):
+    for
+      committed <- IO(js.Array[js.Dynamic]())
+      delivered <- IO(js.Array[confluent.RdMessage]())
+      message =
+        js.Dynamic.literal(
+          topic = "events",
+          partition = 2,
+          offset = 41d,
+          key = uint8("key"),
+          value = uint8("value"),
+          timestamp = 1234d,
+          headers = js.Array(rdHeader("trace", Array[Byte](1)), rdHeader("other", Array[Byte](9)), rdHeader("trace", Array[Byte](2)))
+        ).asInstanceOf[confluent.RdMessage]
+      _ <- IO(delivered.push(message): Unit)
+      consumer =
+        js.Dynamic.literal(
+          connect =
+            ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+              js.Any,
+              js.Function2[confluent.RdError | Null, js.Any, Unit],
+              Unit
+            ],
+          disconnect =
+            ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+              js.Function2[confluent.RdError | Null, js.Any, Unit],
+              Unit
+            ],
+          setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+          subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
+          consume =
+            (
+                (_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) =>
+                  done(null, delivered.splice(0, delivered.length).toJSArray)
+            ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit], Unit],
+          commit =
+            ((offsets: js.Array[confluent.RdTopicPartitionOffset]) => offsets.foreach(value => committed.push(dynamic(value)): Unit)): js.Function1[
+              js.Array[confluent.RdTopicPartitionOffset],
+              Unit
+            ]
+        ).asInstanceOf[confluent.RdConsumer]
+      settings =
+        ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10"))
+          .toOption.get
+      record <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10")))
+          .consumer(settings, Subscription.Topics(NonEmptyList.one(topic("events")))).use(_.records.take(1).compile.lastOrError)
+      _ <- record.offset.commit
+    yield
+      assertEquals(record.record.topicPartition, TopicPartition(topic("events"), partition(2)))
+      assertEquals(record.record.key, "key")
+      assertEquals(record.record.value, "value")
+      assertEquals(record.record.offset.value, 41L)
+      assertEquals(record.record.timestamp.map(_.epochMillis), Some(1234L))
+
+      // librdkafka returns one object per header, so duplicate names keep their order.
+      assertEquals(record.record.headers.values.map(_.key), Vector("trace", "other", "trace"))
+      assertEquals(record.record.headers.values.map(_.value.map(_.toList)), Vector(Some(List[Byte](1)), Some(List[Byte](9)), Some(List[Byte](2))))
+
+      assertEquals(record.offset.nextOffset.value, 42L)
+      assertEquals(committed.length, 1)
+      assertEquals(committed(0).topic.asInstanceOf[String], "events")
+      assertEquals(committed(0).partition.asInstanceOf[Int], 2)
+      assertEquals(committed(0).offset.asInstanceOf[Double], 42d)
 
   private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 
@@ -333,7 +249,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   private def driver(
       producerValue: confluent.RdProducer = null,
-      consumerValue: confluent.Consumer = null,
+      consumerValue: confluent.RdConsumer = null,
       expectedProducerProperties: Map[String, String] = Map.empty,
       expectedConsumerProperties: Map[String, String] = Map.empty
   ): ConfluentKafkaDriver =
@@ -347,48 +263,22 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           groupId: ConsumerGroup,
           autoOffsetReset: AutoOffsetReset,
           properties: Map[String, String]
-      ): confluent.Consumer =
+      ): confluent.RdConsumer =
         assertEquals(properties, expectedConsumerProperties)
         consumerValue
 
-  private def consumerPayload(
-      topic: String,
-      partition: Int,
-      offset: String,
-      timestamp: String,
-      key: String,
-      value: String,
-      resolveOffset: String => Unit
-  ): confluent.EachBatchPayload =
-    val message =
-      js.Dynamic.literal(
-        key = uint8(key),
-        value = uint8(value),
-        timestamp = timestamp,
-        attributes = 0,
-        offset = offset,
-        size = key.length + value.length,
-        headers = js.Dictionary[js.Any]("trace" -> uint8("header"))
-      )
-    val batch = js.Dynamic.literal(topic = topic, partition = partition, messages = js.Array(message))
-    js.Dynamic.literal(
-      batch = batch,
-      isRunning = (() => true): js.Function0[Boolean],
-      isStale = (() => false): js.Function0[Boolean],
-      resolveOffset = ((offset: String) => resolveOffset(offset)): js.Function1[String, Unit]
-    ).asInstanceOf[confluent.EachBatchPayload]
-
-  private def promise[A](dispatcher: Dispatcher[IO])(value: IO[A]): js.Promise[A] = dispatcher.unsafeToFuture(value).toJSPromise
-
-  private def topicPartitionOffset(raw: confluent.TopicPartitionOffset): (String, Int, String) =
-    val value = dynamic(raw)
-    (value.topic.asInstanceOf[String], value.partition.asInstanceOf[Int], value.offset.asInstanceOf[String])
+  private def rdHeader(name: String, value: Array[Byte]): confluent.RdHeader =
+    val bytes = new Uint8Array(value.length)
+    value.zipWithIndex.foreach((byte, index) => bytes(index) = byte.toShort)
+    val result = js.Dictionary.empty[Uint8Array | String]
+    result(name) = bytes
+    result
 
   private def topic(value: String): Topic = Topic.from(value).fold(error => fail(error.toString), identity)
 
   private def partition(value: Int): Partition = Partition.from(value).fold(error => fail(error.toString), identity)
 
-  private def consumerGroup(value: String): ConsumerGroup = ConsumerGroup.from(value).fold(error => fail(error.toString), identity)
+  private val group = ConsumerGroup.from("workers").fold(error => fail(error.toString), identity)
 
   private def uint8(value: String): Uint8Array =
     val bytes  = value.getBytes("UTF-8")

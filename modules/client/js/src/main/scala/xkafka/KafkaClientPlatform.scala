@@ -27,7 +27,7 @@ import scala.scalajs.js.typedarray.Uint8Array
 
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
-import cats.effect.std.{Dispatcher, Queue}
+import cats.effect.std.Dispatcher
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import internal.confluent
@@ -45,7 +45,7 @@ private[xkafka] trait ConfluentKafkaDriver:
       groupId: ConsumerGroup,
       autoOffsetReset: AutoOffsetReset,
       properties: Map[String, String]
-  ): confluent.Consumer
+  ): confluent.RdConsumer
 
 private object ConfluentKafkaDriver:
   val live: ConfluentKafkaDriver =
@@ -61,14 +61,22 @@ private object ConfluentKafkaDriver:
           groupId: ConsumerGroup,
           autoOffsetReset: AutoOffsetReset,
           properties: Map[String, String]
-      ): confluent.Consumer = kafka(settings).consumer(confluent.Values.consumerConfig(groupId.value, autoOffsetReset, properties))
-
-      private def kafka(settings: ClientSettings): confluent.Kafka =
-        confluent.Values
-          .kafka(confluent.Values.kafkaConfig(settings.bootstrapServers.toList.toJSArray, settings.clientId.orUndefined, settings.properties))
+      ): confluent.RdConsumer =
+        val config =
+          confluent.Values.rdConsumerConfig(
+            settings.bootstrapServers.toList.toJSArray,
+            settings.clientId.orUndefined,
+            groupId.value,
+            autoOffsetReset,
+            settings.properties ++ properties
+          )
+        js.Dynamic.newInstance(confluent.RdKafka.KafkaConsumer)(config).asInstanceOf[confluent.RdConsumer]
 
 private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(using F: Async[F]) extends KafkaClient[F]:
   private val DeliveryPollIntervalMillis = 10
+  private val ConsumeTimeoutMillis       = 500
+  private val ConsumeBatchSize           = 256
+  private val RequestTimeoutMillis       = 10000
   private val MaxExactInteger            = 9007199254740991d
 
   private def ignore(value: js.Any): Unit = ()
@@ -92,7 +100,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     (error, report) =>
       report.opaque.toOption.foreach: token =>
         val outcome =
-          Option(error.asInstanceOf[confluent.RdError]) match
+          rdError(error) match
             case Some(failure) => Left(rdFailure(failure))
             case None          => reportMetadata(report)
         dispatcher.unsafeRunAndForget(pending.modify(current => (current - token, current.get(token))).flatMap(_.traverse_(_.complete(outcome))))
@@ -113,58 +121,44 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     if value > MaxExactInteger then Left(new KafkaException.InvalidBackendResponse(s"$field $value exceeds the range JavaScript represents exactly"))
     else Offset.from(value.toLong).leftMap(error => invalidBackendValue(field, value.toString, error))
 
+  /** node-rdkafka signals success with either null or undefined, and in Scala.js only the first of those is `null`. */
+  private def rdError(error: confluent.RdError | Null): Option[confluent.RdError] =
+    val value = error.asInstanceOf[js.Any]
+    if value == null || js.isUndefined(value) then None else Some(error.asInstanceOf[confluent.RdError])
+
   private def rdFailure(error: confluent.RdError): KafkaException.BackendFailure =
     new KafkaException.BackendFailure(error.message, Some(error.code.toString), error.isRetriable.toOption, error.isFatal.toOption)
 
   private def callback[A](register: js.Function2[confluent.RdError | Null, A, Unit] => Unit): F[A] =
     F.async_ : resume =>
       register: (error, value) =>
-        Option(error.asInstanceOf[confluent.RdError]) match
+        rdError(error) match
           case Some(failure) => resume(Left(rdFailure(failure)))
           case None          => resume(Right(value))
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
       underlying <- Resource.eval(F.delay(driver.consumer(settings.client, settings.groupId, settings.autoOffsetReset, settings.properties)))
-      dispatcher <- Dispatcher.parallel[F]
-      _          <- Resource.make(await(underlying.connect()))(_ => await(underlying.disconnect()))
-      _          <- Resource.eval(subscribe(underlying, subscription))
-      queue      <- Resource.eval(Queue.bounded[F, CommittableConsumerRecord[F, K, V]](256))
-      failure    <- Resource.eval(Deferred[F, Throwable])
-      shutdown   <- Resource.eval(Deferred[F, Unit])
-      adapter = new ConfluentKafkaConsumer(underlying, settings, dispatcher, queue, failure, shutdown)
-      _ <- Resource.eval(adapter.run)
-      _ <- Resource.make(F.unit)(_ => shutdown.complete(()).void)
-    yield adapter
+      _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
+      _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(ConsumeTimeoutMillis)))
+      _ <- Resource.eval(subscribe(underlying, subscription))
+    yield new ConfluentKafkaConsumer(underlying, settings)
 
-  private def await[A](promise: => js.Promise[A]): F[A] =
-    F.fromPromise(F.delay(promise)).adaptError:
-      case error: KafkaException => error
-      case error                 => new KafkaException.BackendFailure(Option(error.getMessage).getOrElse(error.getClass.getName), cause = error)
-
-  private def subscribe(consumer: confluent.Consumer, subscription: Subscription): F[Unit] =
-    subscription match
-      case Subscription.Topics(topics) =>
-        val values = topics.toList.map[confluent.SubscriptionTopic](_.value).toJSArray
-        await(consumer.subscribe(confluent.Values.subscription(values)))
-      case Subscription.Pattern(pattern) => F.delay(new js.RegExp(pattern.anchored)).flatMap: compiled =>
-          await(consumer.subscribe(confluent.Values.subscription(js.Array[confluent.SubscriptionTopic](compiled))))
+  private def subscribe(consumer: confluent.RdConsumer, subscription: Subscription): F[Unit] =
+    val topics =
+      subscription match
+        case Subscription.Topics(values) => values.toList.map[confluent.SubscriptionTopic](_.value).toJSArray
+        // librdkafka reads a topic beginning with "^" as a regular expression, which is what anchoring already produces.
+        case Subscription.Pattern(pattern) => js.Array[confluent.SubscriptionTopic](pattern.anchored)
+    F.delay(consumer.subscribe(topics)).void
 
   private def invalidBackendValue(field: String, value: String, error: Any, cause: Throwable = null): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error", cause)
-
-  private def parseLong(field: String, value: String): F[Long] =
-    F.catchNonFatal(java.lang.Long.parseLong(value)).adaptError:
-      case error => invalidBackendValue(field, value, error.getMessage, error)
 
   private def topic(value: String): F[Topic] = F.fromEither(Topic.from(value).leftMap(error => invalidBackendValue("topic", value, error)))
 
   private def partition(value: Int): F[Partition] =
     F.fromEither(Partition.from(value).leftMap(error => invalidBackendValue("partition", value.toString, error)))
-
-  private def offset(field: String, value: String): F[Offset] =
-    parseLong(field, value).flatMap: parsed =>
-      F.fromEither(Offset.from(parsed).leftMap(error => invalidBackendValue(field, value, error)))
 
   private def bytes(value: Uint8Array | Null): Option[Chunk[Byte]] =
     Option(value).map: raw =>
@@ -178,15 +172,14 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         case (byte, index) => array(index) = byte.toShort
       confluent.Buffer.from(array)
 
-  private def portableHeaders(headers: js.UndefOr[confluent.JsHeaders]): Headers =
-    headers.toOption.fold(Headers.empty): values =>
-      val result =
-        js.Object.keys(values.asInstanceOf[js.Object]).iterator.flatMap: key =>
-          val value = values(key)
-          if js.Array.isArray(value) then value.asInstanceOf[js.Array[Uint8Array | Null]].iterator.map(raw => Header(key, bytes(raw)))
-          else Iterator.single(Header(key, bytes(value.asInstanceOf)))
-        .toVector
-      Headers.fromVector(result)
+  /** librdkafka hands back one single-entry object per header, so duplicate names and their order both survive the round trip. */
+  private def portableHeaders(headers: js.UndefOr[js.Array[confluent.RdHeader]]): Headers =
+    Headers.fromVector(
+      headers.toOption.fold(Vector.empty[Header]): values =>
+        values.toVector.flatMap: entry =>
+          entry.iterator.map: (name, value) =>
+            Header(name, Option(value.asInstanceOf[Uint8Array]).map(raw => Chunk.array(Array.tabulate(raw.length)(index => raw(index).toByte))))
+    )
 
   private final class ConfluentKafkaProducer[K, V](
       underlying: confluent.RdProducer,
@@ -241,167 +234,132 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       headers: js.Array[confluent.RdHeader]
   )
 
-  private final class ConfluentKafkaConsumer[K, V](
-      underlying: confluent.Consumer,
-      settings: ConsumerSettings[F, K, V],
-      dispatcher: Dispatcher[F],
-      queue: Queue[F, CommittableConsumerRecord[F, K, V]],
-      failure: Deferred[F, Throwable],
-      shutdown: Deferred[F, Unit]
-  ) extends KafkaConsumer[F, K, V]:
+  private final class ConfluentKafkaConsumer[K, V](underlying: confluent.RdConsumer, settings: ConsumerSettings[F, K, V])
+      extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
         override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
           val values =
-            offsets.iterator.map:
-              case (topicPartition, offset) => confluent.Values
-                  .topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString)
+            offsets.iterator.map: (topicPartition, offset) =>
+              confluent.Values.rdTopicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toDouble)
             .toJSArray
-          await(underlying.commitOffsets(values))
+          F.delay(underlying.commit(values)).void
 
+    /** Pulls batches from librdkafka. An empty batch means the consume timeout elapsed with nothing available. */
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      Stream.fromQueueUnterminated(queue).mergeHaltBoth(Stream.eval(failure.get).flatMap(Stream.raiseError[F]))
+      Stream.repeatEval(fetch).flatMap(batch => Stream.emits(batch.toList)).evalMap(consumerRecord)
 
-    override def assignment: F[Set[TopicPartition]] = F.delay(underlying.assignment()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
+    private def fetch: F[js.Array[confluent.RdMessage]] = callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done))
+
+    override def assignment: F[Set[TopicPartition]] =
+      F.delay(underlying.assignments()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else
-        val requested = topicPartitions.iterator.map(value => confluent.Values.topicPartition(value.topic.value, value.partition.value)).toJSArray
-        await(underlying.committed(requested)).flatMap(
-          _.toList.traverse: value =>
-            (portableTopicPartition(value), optionalOffset("committed offset", value.offset)).mapN(_ -> _)
-        ).map(_.toMap)
+        val requested = topicPartitions.iterator.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
+        callback[js.Array[confluent.RdTopicPartitionOffset]](done => underlying.committed(requested, RequestTimeoutMillis, done): Unit).flatMap:
+          values =>
+            values.toList.traverse: value =>
+              (portableTopicPartition(value), optionalOffset("committed offset", value.offset)).mapN(_ -> _)
+            .map(_.toMap)
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
-      boundaryOffsets(topicPartitions, "beginning offset", _.low)
+      watermarks(topicPartitions, "beginning offset", _.lowOffset)
 
     override def endOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
-      boundaryOffsets(topicPartitions, "end offset", _.high)
+      watermarks(topicPartitions, "end offset", _.highOffset)
 
+    /** librdkafka queries the broker for both watermarks in one call per partition, so no separate admin client is needed. */
+    private def watermarks(
+        topicPartitions: Set[TopicPartition],
+        field: String,
+        select: confluent.RdWatermarks => Double
+    ): F[Map[TopicPartition, Offset]] =
+      topicPartitions.toList.traverse: topicPartition =>
+        callback[confluent.RdWatermarks] { done =>
+          underlying.queryWatermarkOffsets(topicPartition.topic.value, topicPartition.partition.value, RequestTimeoutMillis, done): Unit
+        }.flatMap(value => F.fromEither(exactOffset(field, select(value))).map(topicPartition -> _))
+      .map(_.toMap)
+
+    /** Native offset lookup, so no watermark comparison is needed to tell "past the end" from a real match. */
     override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
       if timestampsToSearch.isEmpty then F.pure(Map.empty)
       else
-        admin.use: value =>
-          timestampsToSearch.toList.groupBy(_._1.topic).toList.traverse: (topic, requested) =>
-            await(value.fetchTopicOffsets(topic.value)).flatMap: boundaries =>
-              val ends = boundaries.iterator.map(offsets => offsets.partition -> offsets.high).toMap
-              requested.groupBy(_._2).toList.traverse: (timestamp, searches) =>
-                jsTimestamp(timestamp).flatMap: instant =>
-                  await(value.fetchTopicOffsetsByTimestamp(topic.value, instant)).flatMap: returned =>
-                    val found = returned.iterator.map(offsets => offsets.partition -> offsets.offset).toMap
-                    searches.traverse: (topicPartition, _) =>
-                      (found.get(topicPartition.partition.value), ends.get(topicPartition.partition.value)) match
-                        case (Some(raw), Some(rawEnd)) => (optionalOffset("timestamp offset", raw), offset("end offset", rawEnd)).mapN:
-                            (candidate, end) => topicPartition -> candidate.filterNot(_ == end)
-                        case (None, _) => F.raiseError(missingOffset("timestamp offset", topicPartition))
-                        case (_, None) => F.raiseError(missingOffset("end offset", topicPartition))
-              .map(_.flatten)
-          .map(_.flatten.toMap)
+        val requested =
+          timestampsToSearch.iterator.map: (topicPartition, timestamp) =>
+            confluent.Values.rdTopicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, timestamp.epochMillis.toDouble)
+          .toJSArray
+        callback[js.Array[confluent.RdTopicPartitionOffset]](done => underlying.offsetsForTimes(requested, RequestTimeoutMillis, done)).flatMap:
+          values =>
+            values.toList.traverse: value =>
+              (portableTopicPartition(value), optionalOffset("timestamp offset", value.offset)).mapN(_ -> _)
+            .map(found => timestampsToSearch.keys.map(topicPartition => topicPartition -> found.toMap.getOrElse(topicPartition, None)).toMap)
 
     override def partitionsFor(topic: Topic): F[Set[Partition]] =
-      topicMetadata(Some(js.Array(topic.value))).flatMap: values =>
+      metadata(Some(topic.value)).flatMap: values =>
         values.find(_.name == topic.value) match
-          case Some(value) => value.partitions.toList.traverse(portablePartition).map(_.toSet)
+          case Some(value) => value.partitions.toList.traverse(entry => portablePartition(entry.id)).map(_.toSet)
           case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
 
     override def listTopics: F[Map[Topic, Set[Partition]]] =
-      topicMetadata(None).flatMap(
+      metadata(None).flatMap:
         _.toList.traverse: value =>
-          (topic(value.name), value.partitions.toList.traverse(portablePartition).map(_.toSet)).mapN(_ -> _)
-      ).map(_.toMap)
+          (portableTopic(value.name), value.partitions.toList.traverse(entry => portablePartition(entry.id)).map(_.toSet)).mapN(_ -> _)
+      .map(_.toMap)
+
+    private def metadata(topic: Option[String]): F[js.Array[confluent.RdTopicMetadata]] =
+      callback[confluent.RdMetadata](done => underlying.getMetadata(confluent.Values.rdMetadataOptions(topic.orUndefined), done): Unit).map(_.topics)
 
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
-      F.delay(
-        underlying.seek(confluent.Values.topicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toString))
-      )
+      F.async_ : resume =>
+        underlying.seek(
+          confluent.Values.rdTopicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toDouble),
+          RequestTimeoutMillis,
+          error =>
+            rdError(error) match
+              case Some(failure) => resume(Left(rdFailure(failure)))
+              case None          => resume(Right(()))
+        ): Unit
 
-    val run: F[Unit] =
-      await(underlying.run(confluent.Values.consumerRun(payload =>
-        dispatcher.unsafeToPromise(
-          processBatch(payload).handleErrorWith: error =>
-            failure.complete(error).void >> F.raiseError(error)
-        )
-      ))).handleErrorWith(error => failure.complete(error).void >> F.raiseError(error))
-
-    private def processBatch(payload: confluent.EachBatchPayload): F[Unit] =
-      val batch    = payload.batch
-      val messages = batch.messages.toList
-      if !payload.isRunning() || payload.isStale() then F.unit
-      else
-        (topic(batch.topic), partition(batch.partition)).tupled.flatMap:
-          case (portableTopic, portablePartition) => messages.traverse(consumerRecord(portableTopic, portablePartition, _)).flatMap: records =>
-              if !payload.isRunning() || payload.isStale() then F.unit
-              else
-                // Resolution advances Confluent's local cursor; enable.auto.commit remains disabled.
-                messages.lastOption.traverse_(message => F.delay(payload.resolveOffset(message.offset))) >>
-                  records.traverse_(record => F.race(queue.offer(record), shutdown.get).void)
-
-    private def consumerRecord(
-        portableTopic: Topic,
-        portablePartition: Partition,
-        message: confluent.KafkaMessage
-    ): F[CommittableConsumerRecord[F, K, V]] =
+    private def consumerRecord(message: confluent.RdMessage): F[CommittableConsumerRecord[F, K, V]] =
       val headers = portableHeaders(message.headers)
       for
-        portableOffset     <- offset("offset", message.offset)
-        portableNextOffset <- F.fromEither(portableOffset.next.leftMap(error => invalidBackendValue("next offset", message.offset, error)))
-        timestamp          <- Option(message.timestamp).filter(_.nonEmpty).traverse(parseLong("timestamp", _))
+        portableTopic      <- topic(message.topic)
+        partition          <- portablePartition(message.partition)
+        portableOffset     <- F.fromEither(exactOffset("offset", message.offset))
+        portableNextOffset <- F.fromEither(portableOffset.next.leftMap(error => invalidBackendValue("next offset", message.offset.toString, error)))
         key                <- settings.keyDeserializer.deserialize(portableTopic, headers, bytes(message.key))
         value              <- settings.valueDeserializer.deserialize(portableTopic, headers, bytes(message.value))
       yield
-        val topicPartition    = TopicPartition(portableTopic, portablePartition)
-        val record            = ConsumerRecord(topicPartition, portableOffset, timestamp.map(Timestamp.fromEpochMillis), key, value, headers)
+        val topicPartition = TopicPartition(portableTopic, partition)
+        val record         =
+          ConsumerRecord(
+            topicPartition,
+            portableOffset,
+            message.timestamp.toOption.filter(_ >= 0d).map(value => Timestamp.fromEpochMillis(value.toLong)),
+            key,
+            value,
+            headers
+          )
         val committableOffset =
           new CommittableOffset[F]:
-            override val topicPartition: TopicPartition = TopicPartition(portableTopic, portablePartition)
-
-            override val nextOffset: Offset = portableNextOffset
-
-            override val committer: OffsetCommitter[F] = offsetCommitter
+            override val topicPartition: TopicPartition = TopicPartition(portableTopic, partition)
+            override val nextOffset: Offset             = portableNextOffset
+            override val committer: OffsetCommitter[F]  = offsetCommitter
 
         CommittableConsumerRecord(record, committableOffset)
 
-    private def portableTopicPartition(value: confluent.TopicPartition): F[TopicPartition] =
-      (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
+    private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
+      (topic(value.topic), portablePartition(value.partition)).mapN(TopicPartition.apply)
 
-    private def portablePartition(value: confluent.PartitionMetadata): F[Partition] = partition(value.partitionId)
+    private def portableTopic(value: String): F[Topic] = topic(value)
 
-    private def optionalOffset(field: String, value: String | Null): F[Option[Offset]] =
-      Option(value).fold(F.pure(Option.empty[Offset])): raw =>
-        parseLong(field, raw).flatMap: parsed =>
-          if parsed < 0L then F.pure(None)
-          else F.fromEither(Offset.from(parsed).leftMap(error => invalidBackendValue(field, raw, error)).map(Some(_)))
+    private def portablePartition(value: Int): F[Partition] = partition(value)
 
-    private def jsTimestamp(timestamp: Timestamp): F[Double] =
-      val value = timestamp.epochMillis
-      if value >= -9007199254740991L && value <= 9007199254740991L then F.pure(value.toDouble)
-      else F.raiseError(new IllegalArgumentException(s"timestamp $value cannot be represented exactly by Confluent Kafka JavaScript"))
-
-    private def boundaryOffsets(
-        topicPartitions: Set[TopicPartition],
-        field: String,
-        select: confluent.TopicOffsets => String
-    ): F[Map[TopicPartition, Offset]] =
-      if topicPartitions.isEmpty then F.pure(Map.empty)
-      else
-        admin.use: value =>
-          topicPartitions.groupBy(_.topic).toList.traverse: (topic, requested) =>
-            await(value.fetchTopicOffsets(topic.value)).flatMap: returned =>
-              val indexed = returned.iterator.map(offsets => offsets.partition -> offsets).toMap
-              requested.toList.traverse: topicPartition =>
-                indexed.get(topicPartition.partition.value) match
-                  case Some(offsets) => offset(field, select(offsets)).map(topicPartition -> _)
-                  case None          => F.raiseError(missingOffset(field, topicPartition))
-          .map(_.flatten.toMap)
-
-    private def missingOffset(field: String, topicPartition: TopicPartition): KafkaException.InvalidBackendResponse =
-      new KafkaException.InvalidBackendResponse(s"missing $field for $topicPartition")
-
-    private def topicMetadata(topics: Option[js.Array[String]]): F[js.Array[confluent.TopicMetadata]] =
-      admin.use(value => await(value.fetchTopicMetadata(confluent.Values.topicMetadataOptions(topics.orUndefined))))
-
-    private def admin: Resource[F, confluent.Admin] =
-      Resource.eval(F.delay(underlying.dependentAdmin())).flatMap: value =>
-        Resource.make(await(value.connect()))(_ => await(value.disconnect())).as(value)
+    /** librdkafka signals "no offset" either by omitting it or with a negative sentinel. */
+    private def optionalOffset(field: String, value: js.UndefOr[Double]): F[Option[Offset]] =
+      value.toOption.filter(_ >= 0d) match
+        case Some(offset) => F.fromEither(exactOffset(field, offset)).map(Some(_))
+        case None         => F.pure(None)
