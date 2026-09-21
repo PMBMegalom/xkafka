@@ -24,7 +24,7 @@ package xkafka
 import scala.concurrent.duration.*
 
 import cats.data.NonEmptyList
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.{CatsEffectSuite, TestOptions}
@@ -39,6 +39,9 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
 
   private val backend          = PlatformKafkaClient.name
   private val bootstrapServers = PlatformKafkaClient.integrationBootstrapServers
+
+  /** Made by the fixture with more than one partition, because topics created on demand get exactly one. */
+  private val partitionedTopic = PlatformKafkaClient.environment("XKAFKA_INTEGRATION_PARTITIONED_TOPIC").getOrElse("xkafka-partitioned")
 
   private def conformance(name: String, divergent: Set[String] = Set.empty): TestOptions =
     val base = if divergent.contains(backend) then TestOptions(name).fail else TestOptions(name)
@@ -159,6 +162,46 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use(_.assignment.void).timeout(60.seconds)
           }
       yield ()
+
+  test(conformance("a second consumer in the group takes a share of the partitions")):
+    withBroker: server =>
+      val topic        = validTopic(partitionedTopic)
+      val group        = uniqueGroup("rebalance")
+      val subscription = Subscription.Topics(NonEmptyList.one(topic))
+      val both         = Set(TopicPartition(topic, validPartition(0)), TopicPartition(topic, validPartition(1)))
+
+      for
+        settings <- consumerSettings(server, group)
+        shares   <-
+          PlatformKafkaClient().consumer(settings, subscription).use: alone =>
+            assignmentOf(alone, 2) *> PlatformKafkaClient().consumer(settings, subscription).use: joined =>
+              (assignmentOf(alone, 1), assignmentOf(joined, 1)).parTupled
+          .timeout(45.seconds)
+      yield
+        val (left, right) = shares
+        assertEquals(left.size, 1)
+        assertEquals(right.size, 1)
+        assertEquals(left ++ right, both)
+
+  test(conformance("cancelling a record stream releases the consumer")):
+    withBroker: server =>
+      val topic = uniqueTopic("cancel")
+
+      for
+        _        <- produce(server, NonEmptyList.one(record(topic, Some("key"), Some("value"), validPartition(0))))
+        settings <- consumerSettings(server, uniqueGroup("cancel"))
+        started  <- Deferred[IO, Unit]
+        fiber    <-
+          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic)))
+            .use(_.records.evalTap(_ => started.complete(()).void).compile.drain).start
+        // Cancelling once a record has arrived leaves a poll in flight, which is what has to unwind.
+        _        <- started.get.timeout(90.seconds)
+        _        <- fiber.cancel.timeout(90.seconds)
+        replayed <- consume(server, topic, 1)
+      yield assertEquals(replayed.map(_.record.value), List(Some("value")))
+
+  private def assignmentOf(consumer: KafkaConsumer[IO, Option[String], Option[String]], size: Int): IO[Set[TopicPartition]] =
+    consumer.assignmentChanges.filter(_.size == size).head.compile.lastOrError
 
   private def produce(
       server: String,

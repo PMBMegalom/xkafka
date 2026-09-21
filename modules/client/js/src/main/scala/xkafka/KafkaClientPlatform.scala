@@ -27,7 +27,8 @@ import scala.scalajs.js.typedarray.Uint8Array
 
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
-import cats.effect.std.Dispatcher
+import cats.effect.implicits.*
+import cats.effect.std.{Dispatcher, Queue}
 import fs2.concurrent.SignallingRef
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -81,8 +82,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private val DeliveryPollIntervalMillis = 10
   private val ConsumeTimeoutMillis       = 500
   private val ConsumeBatchSize           = 256
-  private val RequestTimeoutMillis       = 10000
-  private val MaxExactInteger            = 9007199254740991d
+  // Records the poll loop has read but nothing has taken yet. The loop stops consuming when this fills, which is
+  // also when Kafka would consider the consumer stalled.
+  private val RecordQueueSize      = 256
+  private val RequestTimeoutMillis = 10000
+  private val MaxExactInteger      = 9007199254740991d
 
   private def ignore(value: js.Any): Unit = ()
 
@@ -150,7 +154,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
       _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(ConsumeTimeoutMillis)))
       _ <- Resource.eval(subscribe(underlying, subscription))
-    yield new ConfluentKafkaConsumer(underlying, settings, assignments)
+      polled <- Resource.eval(Queue.bounded[F, confluent.RdMessage](RecordQueueSize))
+      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled)
+      // Started after the subscription and cancelled before the disconnect that follows it.
+      _ <- consumer.pollLoop.compile.drain.background
+    yield consumer
 
   /** node-rdkafka emits the event before it applies the change, and reports only the partitions added or revoked, which differ by rebalance protocol.
     *
@@ -264,7 +272,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private final class ConfluentKafkaConsumer[K, V](
       underlying: confluent.RdConsumer,
       settings: ConsumerSettings[F, K, V],
-      assignments: SignallingRef[F, Set[TopicPartition]]
+      assignments: SignallingRef[F, Set[TopicPartition]],
+      polled: Queue[F, confluent.RdMessage]
   ) extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
@@ -277,12 +286,17 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           F.delay(underlying.commit(values)).void
 
     /** Pulls batches from librdkafka. An empty batch means the consume timeout elapsed with nothing available. */
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      Stream.repeatEval(fetch).flatMap(batch => Stream.emits(batch.toList)).evalMap(consumerRecord)
+    /** The consumer's single consume, which both its records and its rebalance events come from.
+      *
+      * The client reports a rebalance from its own consume, so nothing observes one unless this keeps running, whether or not anything is reading
+      * records.
+      */
+    val pollLoop: Stream[F, Nothing] = Stream.repeatEval(fetch).flatMap(batch => Stream.emits(batch.toList)).evalMap(polled.offer).drain
+
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = Stream.fromQueueUnterminated(polled).evalMap(consumerRecord)
 
     private def fetch: F[js.Array[confluent.RdMessage]] = callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done))
 
-    /** librdkafka reports rebalances, so nothing is polled. */
     override val assignmentChanges: Stream[F, Set[TopicPartition]] = assignments.discrete
 
     override def assignment: F[Set[TopicPartition]] =

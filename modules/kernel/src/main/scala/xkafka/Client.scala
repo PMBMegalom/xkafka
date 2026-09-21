@@ -345,11 +345,7 @@ trait KafkaConsumer[F[_], K, V]:
 
   def assignment: F[Set[TopicPartition]]
 
-  /** Polls `assignment` immediately and at the supplied interval, emitting only changes. */
-  /** Emits the current assignment and then each distinct one afterwards.
-    *
-    * A backend that cannot report rebalances of its own looks for them at `ConsumerSettings.pollInterval`.
-    */
+  /** Emits the current assignment and then each distinct one afterwards. */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
 
   /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.

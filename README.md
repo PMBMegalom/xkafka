@@ -98,14 +98,12 @@ then each distinct one afterwards. `partitionedRecords` exposes a record
 stream for each assigned topic-partition and ends that stream after the
 partition is revoked.
 
-The JVM and Scala.js backends report rebalances as the group makes them.
-Scala Native looks for one at `ConsumerSettings.pollInterval`, because
-librdkafka runs its rebalance callback only while the consumer is polled.
-
 On the JVM the partition streams come from fs2-kafka and are fed
 independently. On Scala.js and Scala Native they share one record source, so
 consume them concurrently: an unconsumed stream eventually backpressures the
-others, and `maxQueuedRecords` bounds how much each buffers first.
+others, and `maxQueuedRecords` bounds how much each buffers first. That source
+also carries the assignment, so a consumer which stops reading records for long
+enough stops seeing rebalances as well.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,

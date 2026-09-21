@@ -8,6 +8,7 @@ container_name="xkafka-integration-$$"
 host_port="${XKAFKA_INTEGRATION_PORT:-19092}"
 tls_port="${XKAFKA_INTEGRATION_TLS_PORT:-19093}"
 sasl_port="${XKAFKA_INTEGRATION_SASL_PORT:-19094}"
+partitioned_topic="xkafka-partitioned"
 username="xkafka"
 password="xkafka-secret"
 secrets_dir="$project_dir/target/kafka-secrets-$$"
@@ -111,7 +112,14 @@ docker exec "$container_name" /opt/kafka/bin/kafka-configs.sh \
   --alter --add-config "SCRAM-SHA-256=[password=$password]" \
   --entity-type users --entity-name "$username" >/dev/null
 
+# Topics are created on demand with one partition each, so a rebalance between two consumers needs
+# one that was made with more.
+docker exec "$container_name" /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:19092 \
+  --create --topic "$partitioned_topic" --partitions 2 --replication-factor 1 >/dev/null
+
 export XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS="127.0.0.1:$host_port"
+export XKAFKA_INTEGRATION_PARTITIONED_TOPIC="$partitioned_topic"
 export XKAFKA_SECURITY_TLS_BOOTSTRAP_SERVERS="127.0.0.1:$tls_port"
 export XKAFKA_SECURITY_SASL_BOOTSTRAP_SERVERS="127.0.0.1:$sasl_port"
 export XKAFKA_SECURITY_CERTIFICATE_AUTHORITY="$secrets_dir/ca.pem"
