@@ -32,6 +32,7 @@ import fs2.concurrent.SignallingRef
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import internal.confluent
+import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = fromDriver(ConfluentKafkaDriver.live)
@@ -53,8 +54,11 @@ private object ConfluentKafkaDriver:
     new ConfluentKafkaDriver:
       override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer =
         val config =
-          confluent.Values
-            .rdProducerConfig(settings.bootstrapServers.toList.toJSArray, settings.clientId.orUndefined, settings.properties ++ properties)
+          confluent.Values.rdProducerConfig(
+            settings.bootstrapServers.toList.toJSArray,
+            settings.clientId.orUndefined,
+            settings.properties ++ properties ++ SecurityProperties.librdkafka(settings.security)
+          )
         js.Dynamic.newInstance(confluent.RdKafka.Producer)(config).asInstanceOf[confluent.RdProducer]
 
       override def consumer(
@@ -69,7 +73,7 @@ private object ConfluentKafkaDriver:
             settings.clientId.orUndefined,
             groupId.value,
             autoOffsetReset,
-            settings.properties ++ properties
+            settings.properties ++ properties ++ SecurityProperties.librdkafka(settings.security)
           )
         js.Dynamic.newInstance(confluent.RdKafka.KafkaConsumer)(config).asInstanceOf[confluent.RdConsumer]
 

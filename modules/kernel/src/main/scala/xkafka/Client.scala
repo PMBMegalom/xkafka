@@ -35,13 +35,35 @@ import fs2.{Pipe, Stream}
   * Settings construction rejects them, so the portable model stays the single source for these values.
   */
 val ManagedProperties: Set[String] =
-  Set("bootstrap.servers", "client.id", "group.id", "auto.offset.reset", "enable.auto.commit", "enable.auto.offset.store")
+  Set(
+    "bootstrap.servers",
+    "client.id",
+    "group.id",
+    "auto.offset.reset",
+    "enable.auto.commit",
+    "enable.auto.offset.store",
+    "security.protocol",
+    "sasl.mechanism",
+    "sasl.mechanisms",
+    "sasl.username",
+    "sasl.password",
+    "sasl.jaas.config",
+    "ssl.ca.location",
+    "ssl.ca.pem",
+    "ssl.truststore.location",
+    "ssl.truststore.certificates",
+    "ssl.truststore.type",
+    "ssl.endpoint.identification.algorithm"
+  )
 
 enum SettingsError derives CanEqual:
   case BlankBootstrapServer(index: Int)
   case InvalidBootstrapServer(index: Int, value: String)
   case BlankPropertyName(scope: SettingsError.PropertyScope)
   case ManagedProperty(name: String, scope: SettingsError.PropertyScope)
+  case BlankCertificateAuthority
+  case BlankSaslUsername
+  case BlankSaslPassword
 
   def message: String =
     this match
@@ -49,6 +71,9 @@ enum SettingsError derives CanEqual:
       case InvalidBootstrapServer(index, value) => s"bootstrapServers[$index] must be host:port, was '$value'"
       case BlankPropertyName(scope)             => s"${scope.label} properties must not contain a blank name"
       case ManagedProperty(name, scope)         => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
+      case BlankCertificateAuthority            => "certificate authority must not be blank"
+      case BlankSaslUsername                    => "SASL username must not be blank"
+      case BlankSaslPassword                    => "SASL password must not be blank"
 
 object SettingsError:
   enum PropertyScope(val label: String) derives CanEqual:
@@ -79,30 +104,38 @@ private def bootstrapServerError(value: String, index: Int): Option[SettingsErro
 
 private def redacted(properties: Map[String, String]): Map[String, String] = properties.keysIterator.map(_ -> "<redacted>").toMap
 
-sealed abstract case class ClientSettings private (bootstrapServers: NonEmptyList[String], clientId: Option[String], properties: Map[String, String]):
+sealed abstract case class ClientSettings private (
+    bootstrapServers: NonEmptyList[String],
+    clientId: Option[String],
+    properties: Map[String, String],
+    security: SecuritySettings
+):
   def withBootstrapServers(values: NonEmptyList[String]): ValidatedNel[SettingsError, ClientSettings] =
-    ClientSettings.from(values, clientId, properties)
+    ClientSettings.from(values, clientId, properties, security)
 
-  def withClientId(value: String): ClientSettings = new ClientSettings(bootstrapServers, Some(value), properties) {}
+  def withClientId(value: String): ClientSettings = new ClientSettings(bootstrapServers, Some(value), properties, security) {}
 
-  def withoutClientId: ClientSettings = new ClientSettings(bootstrapServers, None, properties) {}
+  def withoutClientId: ClientSettings = new ClientSettings(bootstrapServers, None, properties, security) {}
+
+  def withSecurity(value: SecuritySettings): ClientSettings = new ClientSettings(bootstrapServers, clientId, properties, value) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ClientSettings] = withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ClientSettings] =
-    ClientSettings.from(bootstrapServers, clientId, values)
+    ClientSettings.from(bootstrapServers, clientId, values, security)
 
-  override def toString: String = s"ClientSettings($bootstrapServers,$clientId,${redacted(properties)})"
+  override def toString: String = s"ClientSettings($bootstrapServers,$clientId,${redacted(properties)},$security)"
 
 object ClientSettings:
   def from(
       bootstrapServers: NonEmptyList[String],
       clientId: Option[String] = None,
-      properties: Map[String, String] = Map.empty
+      properties: Map[String, String] = Map.empty,
+      security: SecuritySettings = SecuritySettings.Plaintext
   ): ValidatedNel[SettingsError, ClientSettings] =
     val bootstrapErrors = bootstrapServers.toList.zipWithIndex.flatMap((server, index) => bootstrapServerError(server, index))
     validateSettings(bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client))
-      .map(_ => new ClientSettings(bootstrapServers, clientId, properties) {})
+      .map(_ => new ClientSettings(bootstrapServers, clientId, properties, security) {})
 
 sealed abstract case class ProducerSettings[F[_], K, V] private (
     client: ClientSettings,

@@ -31,6 +31,7 @@ import cats.effect.std.{Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import internal.librdkafka.Bindings
+import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new LibrdkafkaClient[F]
@@ -79,8 +80,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       Zone.acquire: zone =>
         given Zone                        = zone
         val (error, errorCode)            = errorSlots
-        val (names, values, propertySize) = nativeProperties(settings.client.properties ++ settings.properties)
-        val producer                      =
+        val (names, values, propertySize) =
+          nativeProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security))
+        val producer =
           Bindings.xkafka_producer_new(
             toCString(settings.client.bootstrapServers.toList.mkString(",")),
             settings.client.clientId.map(toCString).orNull,
@@ -99,8 +101,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       Zone.acquire: zone =>
         given Zone                        = zone
         val (error, errorCode)            = errorSlots
-        val (names, values, propertySize) = nativeProperties(settings.client.properties ++ settings.properties)
-        val consumer                      =
+        val (names, values, propertySize) =
+          nativeProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security))
+        val consumer =
           Bindings.xkafka_consumer_new(
             toCString(settings.client.bootstrapServers.toList.mkString(",")),
             settings.client.clientId.map(toCString).orNull,

@@ -141,7 +141,7 @@ The `from` constructors return `ValidatedNel[SettingsError, *]`, accumulate
 portable configuration errors, and only construct valid settings. They reject
 blank property names and bootstrap servers that are not `host:port`. They also
 reject the names listed in `ManagedProperties`: bootstrap servers, client and
-group IDs, offset reset, and automatic commits. xkafka derives those from the
+group IDs, offset reset, automatic commits, and the TLS and SASL names. xkafka derives those from the
 typed settings, so supplying them through the map is an error. Backend-specific
 configuration remains the selected backend's responsibility.
 
@@ -158,6 +158,38 @@ a code with no portable meaning. Matching on `ErrorCode.OffsetOutOfRange`
 therefore behaves the same on all three platforms.
 `KafkaException.InvalidBackendResponse` indicates that a backend returned data
 which cannot be represented by the portable API.
+
+## Transport security
+
+TLS and SASL are part of `ClientSettings`, so the same code selects them on
+every backend:
+
+```scala
+val tls  = TlsSettings.from(CertificateAuthority.PemFile("/etc/kafka/ca.pem"))
+val sasl = SaslSettings.from(SaslMechanism.ScramSha256, "user", password)
+
+val client = (tls, sasl).mapN(SecuritySettings.SaslTls.apply).andThen: security =>
+  ClientSettings.from(NonEmptyList.one("broker:9093"), security = security)
+```
+
+`SecuritySettings` has one case per protocol: `Plaintext`, `Tls`,
+`SaslPlaintext`, and `SaslTls`. Each case carries what its protocol needs, so a
+client cannot ask for SASL without supplying credentials.
+
+A `CertificateAuthority` is `SystemDefault` for the authorities the runtime
+already trusts, `PemFile` for a path, or `Pem` for PEM text held in memory.
+Scala.js and Scala Native also accept a directory of certificates as a
+`PemFile`. `TlsSettings` verifies the broker hostname unless
+`withHostnameVerification(false)` says otherwise. `SaslSettings` accepts
+`SaslMechanism.Plain`, `ScramSha256`, and `ScramSha512`, and keeps its password
+out of `toString`.
+
+xkafka derives the backend configuration from these, so `security.protocol`,
+the `sasl.*` names, and the `ssl.ca.*` and `ssl.truststore.*` names join the
+other entries in `ManagedProperties` and are rejected in the `properties` maps.
+
+A rejected broker certificate or an incorrect password fails the call as
+`KafkaException.BackendFailure`.
 
 ## Building
 

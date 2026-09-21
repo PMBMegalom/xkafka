@@ -53,7 +53,7 @@ final class ClientSuite extends FunSuite:
       override def apply[A](value: Option[A]): SyncIO[A] = value.fold(SyncIO.raiseError(new NoSuchElementException("empty")))(SyncIO.pure)
 
   test("valid settings succeed"):
-    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> ""))
+    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.key.password" -> ""))
 
     assert(settings.isValid)
 
@@ -67,16 +67,18 @@ final class ClientSuite extends FunSuite:
     assert(typeCheckErrors("(??? : xkafka.ClientSettings).copy()").nonEmpty)
 
   test("settings retain structural case-class semantics without exposing property values"):
-    val firstClient    = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> "client-secret")).toOption.get
-    val secondClient   = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> "client-secret")).toOption.get
+    val firstClient =
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.keystore.password" -> "client-secret")).toOption.get
+    val secondClient =
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.keystore.password" -> "client-secret")).toOption.get
     val serializer     = Serializer.const[IO, String](None)
     val firstProducer  = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
     val secondProducer = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
     val deserializer   = Deserializer.utf8[IO]
     val firstConsumer  =
-      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("sasl.password" -> "consumer-secret")).toOption.get
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.key.password" -> "consumer-secret")).toOption.get
     val secondConsumer =
-      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("sasl.password" -> "consumer-secret")).toOption.get
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.key.password" -> "consumer-secret")).toOption.get
     val renderedSettings = List(firstClient.toString, firstProducer.toString, firstConsumer.toString)
 
     assertEquals(firstClient, secondClient)
@@ -148,6 +150,55 @@ final class ClientSuite extends FunSuite:
       ))
     )
     assert(ClientSettings.from(NonEmptyList.of("localhost:9092", "[::1]:9092", "10.0.0.1:1")).isValid)
+
+  test("TLS settings reject a blank certificate authority"):
+    assertEquals(TlsSettings.from(CertificateAuthority.PemFile("  ")).toEither, Left(NonEmptyList.one(SettingsError.BlankCertificateAuthority)))
+    assertEquals(TlsSettings.from(CertificateAuthority.Pem("")).toEither, Left(NonEmptyList.one(SettingsError.BlankCertificateAuthority)))
+    assert(TlsSettings.from(CertificateAuthority.SystemDefault).isValid)
+
+  test("SASL settings accumulate blank credential errors"):
+    assertEquals(
+      SaslSettings.from(SaslMechanism.ScramSha256, " ", "").toEither,
+      Left(NonEmptyList.of(SettingsError.BlankSaslUsername, SettingsError.BlankSaslPassword))
+    )
+
+  test("SASL settings keep the password out of toString"):
+    val sasl = SaslSettings.from(SaslMechanism.ScramSha256, "user", "secret").toOption.get
+    assert(sasl.toString.contains("user"))
+    assert(!sasl.toString.contains("secret"))
+
+  test("security settings carry only the parts their protocol uses"):
+    val tls  = TlsSettings.from().toOption.get
+    val sasl = SaslSettings.from(SaslMechanism.Plain, "user", "secret").toOption.get
+
+    assertEquals(SecuritySettings.Plaintext.tlsSettings, None)
+    assertEquals(SecuritySettings.Plaintext.saslSettings, None)
+    assertEquals(SecuritySettings.Tls(tls).tlsSettings, Some(tls))
+    assertEquals(SecuritySettings.Tls(tls).saslSettings, None)
+    assertEquals(SecuritySettings.SaslPlaintext(sasl).tlsSettings, None)
+    assertEquals(SecuritySettings.SaslPlaintext(sasl).saslSettings, Some(sasl))
+    assertEquals(SecuritySettings.SaslTls(tls, sasl).tlsSettings, Some(tls))
+    assertEquals(SecuritySettings.SaslTls(tls, sasl).saslSettings, Some(sasl))
+
+  test("settings reject the security properties the typed model owns"):
+    val settings =
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("sasl.password" -> "secret", "ssl.ca.location" -> "ca.pem"))
+
+    assertEquals(
+      settings.toEither,
+      Left(NonEmptyList.of(
+        SettingsError.ManagedProperty("sasl.password", SettingsError.PropertyScope.Client),
+        SettingsError.ManagedProperty("ssl.ca.location", SettingsError.PropertyScope.Client)
+      ))
+    )
+
+  test("client settings carry security through the withers"):
+    val tls    = TlsSettings.from(CertificateAuthority.PemFile("ca.pem")).toOption.get
+    val secure = clientSettings.withSecurity(SecuritySettings.Tls(tls))
+
+    assertEquals(secure.security, SecuritySettings.Tls(tls))
+    assertEquals(secure.withClientId("id").security, SecuritySettings.Tls(tls))
+    assertEquals(secure.withProperty("linger.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
 
   test("withers revalidate and preserve the remaining settings"):
     val updated = clientSettings.withClientId("probe").withProperty("linger.ms", "5")

@@ -43,6 +43,7 @@ import org.apache.kafka.common.errors.{
   SslAuthenticationException
 }
 import org.apache.kafka.common.protocol.Errors
+import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new Fs2KafkaClient[F]
@@ -94,15 +95,17 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =
       Fs2ProducerSettings(serializer(settings.keySerializer), serializer(settings.valueSerializer))
-        .withProperties(settings.client.properties ++ settings.properties).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
+        .withProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security))
+        .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
 
     settings.client.clientId.fold(base)(base.withClientId)
 
   private def consumerSettings[K, V](settings: ConsumerSettings[F, K, V]): Fs2ConsumerSettings[F, K, V] =
     val base =
       Fs2ConsumerSettings(deserializer(settings.keyDeserializer), deserializer(settings.valueDeserializer))
-        .withProperties(settings.client.properties ++ settings.properties).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
-        .withGroupId(settings.groupId.value).withProperty("enable.auto.commit", "false").withAutoOffsetReset(
+        .withProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security))
+        .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
+        .withProperty("enable.auto.commit", "false").withAutoOffsetReset(
           settings.autoOffsetReset match
             case AutoOffsetReset.Earliest => Fs2AutoOffsetReset.Earliest
             case AutoOffsetReset.Latest   => Fs2AutoOffsetReset.Latest
