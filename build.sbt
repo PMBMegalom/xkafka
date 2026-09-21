@@ -145,7 +145,7 @@ val munitCatsEffectVersion  = "2.2.0"
 val munitScalacheckVersion  = "1.3.1"
 val catsLawsVersion         = "2.13.0"
 val disciplineMunitVersion  = "2.0.0"
-val slf4jVersion            = "1.7.36"
+val slf4jVersion            = "2.0.19"
 
 val repositoryRoot    = file(".")
 val librdkafkaPrefix  = settingKey[File]("Directory containing the librdkafka include and lib directories")
