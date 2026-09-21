@@ -48,6 +48,7 @@ enum ErrorCode derives CanEqual:
   case ClusterAuthorizationFailed
   case UnsupportedVersion
   case SaslAuthenticationFailed
+  case SslAuthenticationFailed
   case Other(value: Int)
 
 object ErrorCode:
@@ -85,6 +86,7 @@ object ErrorCode:
       case -195 | -187 | -193 => NetworkException         // _TRANSPORT, _ALL_BROKERS_DOWN, _RESOLVE
       case -185 | -192        => RequestTimedOut          // _TIMED_OUT, _MSG_TIMED_OUT
       case -169               => SaslAuthenticationFailed // _AUTHENTICATION
+      case -181               => SslAuthenticationFailed  // _SSL
       case other              => fromProtocol(other)
 
 sealed abstract class KafkaException(message: String, cause: Throwable = null) extends RuntimeException(message, cause)

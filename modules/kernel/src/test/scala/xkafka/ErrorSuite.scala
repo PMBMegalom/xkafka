@@ -55,6 +55,7 @@ final class ErrorSuite extends FunSuite:
     assertEquals(ErrorCode.fromLibrdkafka(-193), ErrorCode.NetworkException)
     assertEquals(ErrorCode.fromLibrdkafka(-192), ErrorCode.RequestTimedOut)
     assertEquals(ErrorCode.fromLibrdkafka(-169), ErrorCode.SaslAuthenticationFailed)
+    assertEquals(ErrorCode.fromLibrdkafka(-181), ErrorCode.SslAuthenticationFailed)
     // _OUTDATED and _FAIL have no portable meaning, so they stay raw.
     assertEquals(ErrorCode.fromLibrdkafka(-167), ErrorCode.Other(-167))
     assertEquals(ErrorCode.fromLibrdkafka(-196), ErrorCode.Other(-196))

@@ -2,6 +2,7 @@
 
 #include <librdkafka/rdkafka.h>
 
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,38 @@ typedef struct xkafka_batch_s {
         xkafka_delivery_t *slots;
 } xkafka_batch_t;
 
+/* Per-client state reached through the librdkafka opaque.
+ *
+ * A refused certificate or a rejected credential is reported to the error
+ * callback and never reaches a delivery report, which only ever sees the
+ * retries ending. The last such failure is recorded here so the call that was
+ * waiting can report the cause. librdkafka runs the callback on its own
+ * thread, so the slot is guarded. */
+typedef struct xkafka_client_s {
+        int generation;
+        pthread_mutex_t lock;
+        int32_t security_error;
+        char security_message[512];
+} xkafka_client_t;
+
+static xkafka_client_t *xkafka_client_new(void) {
+        xkafka_client_t *state = (xkafka_client_t *)calloc(1, sizeof(xkafka_client_t));
+        if (state == NULL)
+                return NULL;
+        if (pthread_mutex_init(&state->lock, NULL) != 0) {
+                free(state);
+                return NULL;
+        }
+        return state;
+}
+
+static void xkafka_client_free(xkafka_client_t *state) {
+        if (state == NULL)
+                return;
+        pthread_mutex_destroy(&state->lock);
+        free(state);
+}
+
 const char *xkafka_version_str(void) { return rd_kafka_version_str(); }
 
 /* Failures report their librdkafka code alongside their text, both written
@@ -48,6 +81,49 @@ static void xkafka_set_error_at(char *error,
 /* RD_KAFKA_RESP_ERR_UNKNOWN, for failures the shim raises itself. */
 static void xkafka_set_error(char *error, size_t error_size, int32_t *error_code, const char *value) {
         xkafka_set_error_at(error, error_size, error_code, value, -1);
+}
+
+/* Only the two failures that a waiting call cannot otherwise explain are kept. */
+static void xkafka_error_callback(rd_kafka_t *client,
+                                  int err,
+                                  const char *reason,
+                                  void *opaque) {
+        xkafka_client_t *state = (xkafka_client_t *)opaque;
+
+        (void)client;
+        if (state == NULL)
+                return;
+        if (err != RD_KAFKA_RESP_ERR__AUTHENTICATION && err != RD_KAFKA_RESP_ERR__SSL)
+                return;
+
+        pthread_mutex_lock(&state->lock);
+        state->security_error = (int32_t)err;
+        snprintf(state->security_message, sizeof(state->security_message), "%s",
+                 reason == NULL ? rd_kafka_err2str((rd_kafka_resp_err_t)err) : reason);
+        pthread_mutex_unlock(&state->lock);
+}
+
+/* Reports the recorded failure and clears it, so a later unrelated error is
+ * never attributed to a connection that has since been repaired. */
+static int xkafka_take_security_error(rd_kafka_t *client,
+                                      char *error,
+                                      size_t error_size,
+                                      int32_t *error_code) {
+        xkafka_client_t *state = (xkafka_client_t *)rd_kafka_opaque(client);
+        int found = 0;
+
+        if (state == NULL)
+                return 0;
+
+        pthread_mutex_lock(&state->lock);
+        if (state->security_error != 0) {
+                xkafka_set_error_at(error, error_size, error_code,
+                                    state->security_message, state->security_error);
+                state->security_error = 0;
+                found = 1;
+        }
+        pthread_mutex_unlock(&state->lock);
+        return found;
 }
 
 static int xkafka_conf_set(rd_kafka_conf_t *conf,
@@ -114,32 +190,59 @@ rd_kafka_t *xkafka_producer_new(const char *brokers,
                                 int32_t *error_code) {
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *producer;
+        xkafka_client_t *state = xkafka_client_new();
+
+        if (state == NULL) {
+                rd_kafka_conf_destroy(conf);
+                xkafka_set_error(error, error_size, error_code,
+                                 "could not allocate the client state");
+                return NULL;
+        }
+
+        /* The opaque travels with the client, so the error callback and the calls
+         * that read it reach the same state. */
+        rd_kafka_conf_set_opaque(conf, state);
+        rd_kafka_conf_set_error_cb(conf, xkafka_error_callback);
+        rd_kafka_conf_set_dr_msg_cb(conf, xkafka_delivery_callback);
 
         if (xkafka_conf_set_all(conf, property_names, property_values,
                                 property_count, error, error_size, error_code) != 0 ||
             xkafka_conf_set(conf, "bootstrap.servers", brokers, error,
                             error_size, error_code) != 0) {
                 rd_kafka_conf_destroy(conf);
+                xkafka_client_free(state);
                 return NULL;
         }
         if (client_id != NULL &&
             xkafka_conf_set(conf, "client.id", client_id, error, error_size, error_code) !=
                 0) {
                 rd_kafka_conf_destroy(conf);
+                xkafka_client_free(state);
                 return NULL;
         }
 
-        rd_kafka_conf_set_dr_msg_cb(conf, xkafka_delivery_callback);
         producer =
             rd_kafka_new(RD_KAFKA_PRODUCER, conf, error, error_size);
+        if (producer == NULL) {
+                /* rd_kafka_new owns conf only on success, and the opaque with it. */
+                rd_kafka_conf_destroy(conf);
+                xkafka_client_free(state);
+                return NULL;
+        }
         return producer;
 }
 
 void xkafka_producer_destroy(rd_kafka_t *producer) {
+        xkafka_client_t *state;
+
         if (producer == NULL)
                 return;
+
+        /* Read before destroying, since the opaque is unreachable afterwards. */
+        state = (xkafka_client_t *)rd_kafka_opaque(producer);
         rd_kafka_flush(producer, 10000);
         rd_kafka_destroy(producer);
+        xkafka_client_free(state);
 }
 
 rd_kafka_headers_t *xkafka_headers_new(size_t count) {
@@ -272,7 +375,10 @@ int xkafka_batch_await(rd_kafka_t *producer,
         for (index = 0; index < batch->count; index++) {
                 if (batch->slots[index].error !=
                     RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(batch->slots[index].error), batch->slots[index].error);
+                        /* A delivery report that never reached a broker reports the
+                         * retries ending, so a recorded security failure is the cause. */
+                        if (!xkafka_take_security_error(producer, error, error_size, error_code))
+                                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(batch->slots[index].error), batch->slots[index].error);
                         return -1;
                 }
         }
@@ -316,7 +422,7 @@ static void xkafka_rebalance_callback(rd_kafka_t *client,
                                       rd_kafka_resp_err_t err,
                                       rd_kafka_topic_partition_list_t *partitions,
                                       void *opaque) {
-        int *generation = (int *)opaque;
+        xkafka_client_t *state = (xkafka_client_t *)opaque;
         int cooperative =
             strcmp(rd_kafka_rebalance_protocol(client), "COOPERATIVE") == 0;
 
@@ -339,15 +445,15 @@ static void xkafka_rebalance_callback(rd_kafka_t *client,
                 break;
         }
 
-        if (generation != NULL)
-                (*generation)++;
+        if (state != NULL)
+                state->generation++;
 }
 
 /* Bumped once per rebalance, so the consumer can notice one without comparing
  * assignments. Reading it costs nothing, so the poll loop can check every time. */
 int xkafka_consumer_generation(rd_kafka_t *consumer) {
-        int *generation = (int *)rd_kafka_opaque(consumer);
-        return generation == NULL ? 0 : *generation;
+        xkafka_client_t *state = (xkafka_client_t *)rd_kafka_opaque(consumer);
+        return state == NULL ? 0 : state->generation;
 }
 
 rd_kafka_t *xkafka_consumer_new(const char *brokers,
@@ -363,18 +469,20 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
         rd_kafka_conf_t *conf = rd_kafka_conf_new();
         rd_kafka_t *consumer;
         rd_kafka_resp_err_t result;
-        int *generation = (int *)calloc(1, sizeof(int));
+        xkafka_client_t *state = xkafka_client_new();
 
-        if (generation == NULL) {
+        if (state == NULL) {
                 rd_kafka_conf_destroy(conf);
                 xkafka_set_error(error, error_size, error_code,
-                                 "could not allocate the rebalance counter");
+                                 "could not allocate the client state");
                 return NULL;
         }
 
-        /* The opaque travels with the client, so the callback and
-         * xkafka_consumer_generation reach the same counter. */
-        rd_kafka_conf_set_opaque(conf, generation);
+        /* The opaque travels with the client, so the callbacks,
+         * xkafka_consumer_generation and the calls that report a security
+         * failure all reach the same state. */
+        rd_kafka_conf_set_opaque(conf, state);
+        rd_kafka_conf_set_error_cb(conf, xkafka_error_callback);
         rd_kafka_conf_set_rebalance_cb(conf, xkafka_rebalance_callback);
 
         if (xkafka_conf_set_all(conf, property_names, property_values,
@@ -390,13 +498,14 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
             xkafka_conf_set(conf, "enable.auto.offset.store", "false", error,
                             error_size, error_code) != 0) {
                 rd_kafka_conf_destroy(conf);
+                xkafka_client_free(state);
                 return NULL;
         }
         if (client_id != NULL &&
             xkafka_conf_set(conf, "client.id", client_id, error, error_size, error_code) !=
                 0) {
                 rd_kafka_conf_destroy(conf);
-                free(generation);
+                xkafka_client_free(state);
                 return NULL;
         }
 
@@ -404,7 +513,8 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
             rd_kafka_new(RD_KAFKA_CONSUMER, conf, error, error_size);
         if (consumer == NULL) {
                 /* rd_kafka_new owns conf only on success, and the opaque with it. */
-                free(generation);
+                rd_kafka_conf_destroy(conf);
+                xkafka_client_free(state);
                 return NULL;
         }
 
@@ -412,23 +522,23 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 rd_kafka_destroy(consumer);
-                free(generation);
+                xkafka_client_free(state);
                 return NULL;
         }
         return consumer;
 }
 
 void xkafka_consumer_destroy(rd_kafka_t *consumer) {
-        int *generation;
+        xkafka_client_t *state;
 
         if (consumer == NULL)
                 return;
 
         /* Read before destroying, since the opaque is unreachable afterwards. */
-        generation = (int *)rd_kafka_opaque(consumer);
+        state = (xkafka_client_t *)rd_kafka_opaque(consumer);
         rd_kafka_consumer_close(consumer);
         rd_kafka_destroy(consumer);
-        free(generation);
+        xkafka_client_free(state);
 }
 
 rd_kafka_topic_partition_list_t *xkafka_subscription_new(size_t count) {
@@ -479,8 +589,9 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                 return NULL;
         }
         if (message->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, error_code,
-                                 rd_kafka_message_errstr(message));
+                if (!xkafka_take_security_error(consumer, error, error_size, error_code))
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_message_errstr(message), message->err);
                 rd_kafka_message_destroy(message);
                 *status = -1;
                 return NULL;

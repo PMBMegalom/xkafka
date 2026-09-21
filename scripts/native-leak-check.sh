@@ -3,7 +3,7 @@
 # Runs the Native smoke binary against one broker under a leak checker, so the C
 # shim's allocations are exercised through a real produce, consume, and commit
 # round trip: the producer batch, its delivery slots, message headers, the
-# rebalance counter, and the consumer and producer handles themselves.
+# per-client state, and the consumer and producer handles themselves.
 #
 # A checker only reports allocations that are unreachable at exit, which is what
 # a missed free in the shim would look like.

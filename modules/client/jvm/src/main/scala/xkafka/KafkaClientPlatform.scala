@@ -38,7 +38,10 @@ import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
-import org.apache.kafka.common.errors.{InvalidPidMappingException, ProducerFencedException, RetriableException}
+import org.apache.kafka.common.errors.{
+  AuthenticationException, InvalidPidMappingException, ProducerFencedException, RetriableException, SaslAuthenticationException,
+  SslAuthenticationException
+}
 import org.apache.kafka.common.protocol.Errors
 
 private[xkafka] object KafkaClientPlatform:
@@ -76,9 +79,17 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           cause = error
         )
 
-  /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports. */
+  /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports.
+    *
+    * Authentication never reached the broker, so it has no entry in that table. `Errors.forException` answers `INVALID_CONFIG` for the whole family,
+    * which is a code the broker never sent, so those are named here.
+    */
   private def protocolCode(error: JavaKafkaException): Option[ErrorCode] =
-    Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
+    error match
+      case _: SslAuthenticationException  => Some(ErrorCode.SslAuthenticationFailed)
+      case _: SaslAuthenticationException => Some(ErrorCode.SaslAuthenticationFailed)
+      case _: AuthenticationException     => None
+      case _ => Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
 
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =
