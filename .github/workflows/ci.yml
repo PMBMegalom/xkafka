@@ -285,7 +285,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
 
-      - name: Test all three backends against Kafka
+      - name: Test all three backends against Kafka, including TLS and SASL
         run: scripts/integration-test.sh
 
   downstream:

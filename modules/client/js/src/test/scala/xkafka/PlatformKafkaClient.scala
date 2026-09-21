@@ -27,7 +27,12 @@ import cats.effect.IO
 
 private[xkafka] object PlatformKafkaClient:
   val name: String                                = "js"
-  val integrationBootstrapServers: Option[String] =
-    js.Dynamic.global.process.env.selectDynamic("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS").asInstanceOf[js.UndefOr[String]].toOption
+  val integrationBootstrapServers: Option[String] = environment("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS")
+
+  def environment(name: String): Option[String] = js.Dynamic.global.process.env.selectDynamic(name).asInstanceOf[js.UndefOr[String]].toOption
 
   def apply(): KafkaClient[IO] = KafkaClient[IO]
+
+  // A producer that can never reach the broker should report the failure itself, so the negative cases do
+  // not depend on cancelling a call that is already in flight.
+  val impatientProducerProperties: Map[String, String] = Map("message.timeout.ms" -> "10000", "socket.timeout.ms" -> "5000")

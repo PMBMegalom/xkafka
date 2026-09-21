@@ -77,7 +77,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     installNativeDependencies,
     WorkflowStep.Run(
       List("scripts/integration-test.sh"),
-      name = Some("Test all three backends against Kafka")
+      name = Some("Test all three backends against Kafka, including TLS and SASL")
     )
   ),
   oses = List("ubuntu-24.04"),
