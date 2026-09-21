@@ -135,7 +135,7 @@ ThisBuild / githubWorkflowGeneratedCI := {
 
 val catsEffectVersion       = "3.7.0"
 val catsTaglessVersion      = "0.16.5"
-val fs2Version              = "3.13.0"
+val fs2Version              = "3.14.0"
 val fs2KafkaVersion         = "4.0.0"
 val confluentKafkaJsVersion = "1.10.1"
 val librdkafkaVersion       = "2.15.1"
