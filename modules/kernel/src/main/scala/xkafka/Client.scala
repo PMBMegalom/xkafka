@@ -178,37 +178,40 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     keyDeserializer: Deserializer[F, K],
     valueDeserializer: Deserializer[F, V],
     autoOffsetReset: AutoOffsetReset,
-    pollInterval: FiniteDuration,
+    pollTimeout: FiniteDuration,
     properties: Map[String, String]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, pollInterval, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, pollTimeout, properties) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, properties) {}
+    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, properties) {}
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, properties) {}
+    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, properties) {}
 
   def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, pollInterval, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, pollTimeout, properties) {}
 
-  /** How often a backend that cannot report rebalances of its own looks for one. Backends that can report them ignore this. */
-  def withPollInterval(value: FiniteDuration): ConsumerSettings[F, K, V] =
+  /** How long one poll waits for records before it returns empty.
+    *
+    * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
+    */
+  def withPollTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
     new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, properties) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, values)
+    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, values)
 
   override def toString: String =
-    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$pollInterval,${redacted(properties)})"
+    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$pollTimeout,${redacted(properties)})"
 
 object ConsumerSettings:
-  /** Matches what fs2-kafka and node-rdkafka settle on for their own consume loops. */
-  val DefaultPollInterval: FiniteDuration = 500.millis
+  /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
+  val DefaultPollTimeout: FiniteDuration = 100.millis
 
   def from[F[_], K, V](
       client: ClientSettings,
@@ -216,11 +219,11 @@ object ConsumerSettings:
       keyDeserializer: Deserializer[F, K],
       valueDeserializer: Deserializer[F, V],
       autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
-      pollInterval: FiniteDuration = ConsumerSettings.DefaultPollInterval,
+      pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Consumer))
-      .map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollInterval, properties) {})
+      .map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, properties) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ConsumerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ConsumerSettings[F, K, V])(fk: FunctionK[F, G]): ConsumerSettings[G, K, V] = settings.mapK(fk)

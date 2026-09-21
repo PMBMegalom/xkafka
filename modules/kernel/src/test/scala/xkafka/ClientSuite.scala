@@ -22,6 +22,7 @@
 package xkafka
 
 import scala.compiletime.testing.typeCheckErrors
+import scala.concurrent.duration.*
 
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
@@ -199,6 +200,15 @@ final class ClientSuite extends FunSuite:
     assertEquals(secure.security, SecuritySettings.Tls(tls))
     assertEquals(secure.withClientId("id").security, SecuritySettings.Tls(tls))
     assertEquals(secure.withProperty("linger.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
+
+  test("the consumer poll timeout defaults and is carried by its wither"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.pollTimeout, ConsumerSettings.DefaultPollTimeout)
+    assertEquals(settings.withPollTimeout(25.millis).pollTimeout, 25.millis)
+    assertEquals(settings.withPollTimeout(25.millis).withGroupId(group).pollTimeout, 25.millis)
+    assertEquals(settings.withPollTimeout(25.millis).withProperty("fetch.min.bytes", "1").toOption.get.pollTimeout, 25.millis)
 
   test("withers revalidate and preserve the remaining settings"):
     val updated = clientSettings.withClientId("probe").withProperty("linger.ms", "5")

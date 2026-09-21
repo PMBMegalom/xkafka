@@ -44,7 +44,6 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   // Records the poll loop has read but nothing has taken yet. The loop stops polling when this fills, which is
   // also when Kafka would consider the consumer stalled.
   private val RecordQueueSize     = 256
-  private val PollTimeoutMillis   = 100
   private val ErrorBufferSize     = 512
   private val UnassignedPartition = -1
 
@@ -357,7 +356,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         val status             = stackalloc[CInt]()
         val (error, errorCode) = errorSlots
         val message            =
-          Bindings.xkafka_consumer_poll(client.handle, PollTimeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
+          Bindings.xkafka_consumer_poll(client.handle, settings.pollTimeout.toMillis.toInt, status, error, ErrorBufferSize.toUSize, errorCode)
 
         if !status < 0 then throw nativeError(error, errorCode)
         else if !status == 0 then None

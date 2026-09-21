@@ -177,8 +177,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   test("consumer decodes a pulled batch, keeps header order, and commits the exact next offset"):
     for
-      committed <- IO(js.Array[js.Dynamic]())
-      delivered <- IO(js.Array[confluent.RdMessage]())
+      committed    <- IO(js.Array[js.Dynamic]())
+      delivered    <- IO(js.Array[confluent.RdMessage]())
+      pollTimeouts <- IO(js.Array[Int]())
       message =
         js.Dynamic.literal(
           topic = "events",
@@ -203,7 +204,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               js.Function2[confluent.RdError | Null, js.Any, Unit],
               Unit
             ],
-          setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+          setDefaultConsumeTimeout = ((value: Int) => pollTimeouts.push(value): Unit): js.Function1[Int, Unit],
           on =
             ((_: String, _: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) => ()): js.Function2[
               String,
@@ -246,6 +247,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       assertEquals(committed(0).topic.asInstanceOf[String], "events")
       assertEquals(committed(0).partition.asInstanceOf[Int], 2)
       assertEquals(committed(0).offset.asInstanceOf[Double], 42d)
+
+      // The consumer poll timeout has to reach the client, which is the only place it takes effect.
+      assertEquals(pollTimeouts.toList, List(ConsumerSettings.DefaultPollTimeout.toMillis.toInt))
 
   private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 

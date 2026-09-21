@@ -105,7 +105,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       Fs2ConsumerSettings(deserializer(settings.keyDeserializer), deserializer(settings.valueDeserializer))
         .withProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security))
         .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
-        .withProperty("enable.auto.commit", "false").withAutoOffsetReset(
+        .withPollTimeout(settings.pollTimeout).withProperty("enable.auto.commit", "false").withAutoOffsetReset(
           settings.autoOffsetReset match
             case AutoOffsetReset.Earliest => Fs2AutoOffsetReset.Earliest
             case AutoOffsetReset.Latest   => Fs2AutoOffsetReset.Latest

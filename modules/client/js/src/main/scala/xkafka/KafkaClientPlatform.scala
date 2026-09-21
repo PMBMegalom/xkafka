@@ -80,7 +80,6 @@ private object ConfluentKafkaDriver:
 
 private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(using F: Async[F]) extends KafkaClient[F]:
   private val DeliveryPollIntervalMillis = 10
-  private val ConsumeTimeoutMillis       = 500
   private val ConsumeBatchSize           = 256
   // Records the poll loop has read but nothing has taken yet. The loop stops consuming when this fills, which is
   // also when Kafka would consider the consumer stalled.
@@ -152,7 +151,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
       _           <- Resource.eval(F.delay(underlying.on("rebalance", rebalanced(underlying, dispatcher, assignments))))
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
-      _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(ConsumeTimeoutMillis)))
+      _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
       _ <- Resource.eval(subscribe(underlying, subscription))
       polled <- Resource.eval(Queue.bounded[F, confluent.RdMessage](RecordQueueSize))
       consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled)
