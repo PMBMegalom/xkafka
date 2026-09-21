@@ -134,6 +134,28 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             assertEquals(consumed.map(_.record.value), List("a", "b", "c", "d").map(Some(_)))
         .timeout(60.seconds)
 
+  test(conformance("enqueueing does not wait for an outstanding acknowledgement")):
+    withBroker: server =>
+      val topic     = uniqueTopic("inflight")
+      val partition = validPartition(0)
+      val first     = NonEmptyList.one(record(topic, Some("k"), Some("first"), partition))
+      val second    = NonEmptyList.one(record(topic, Some("k"), Some("second"), partition))
+
+      // Lingering holds the first batch long enough that its acknowledgement is still outstanding when the
+      // second is enqueued, which is the whole point of separating the two stages.
+      validated(ClientSettings.from(NonEmptyList.one(server))).flatMap: client =>
+        validated(ProducerSettings.from(client, optionalSerializer, optionalSerializer, Map("linger.ms" -> "5000")))
+      .flatMap: settings =>
+        PlatformKafkaClient().producer(settings).use: producer =>
+          for
+            firstAck  <- producer.produce(first)
+            _         <- IO.sleep(250.millis)
+            secondAck <- producer.produce(second).timeout(2.seconds)
+            _         <- firstAck
+            _         <- secondAck
+          yield ()
+        .timeout(60.seconds)
+
   test(conformance("an unreachable broker fails with the same portable classification")):
     val unreachable = "127.0.0.1:1"
     val settings    =

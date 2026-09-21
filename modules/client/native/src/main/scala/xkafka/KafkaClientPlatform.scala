@@ -43,9 +43,11 @@ private[xkafka] object LibrdkafkaPlatform:
 private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClient[F]:
   // Records the poll loop has read but nothing has taken yet. The loop stops polling when this fills, which is
   // also when Kafka would consider the consumer stalled.
-  private val RecordQueueSize     = 256
-  private val ErrorBufferSize     = 512
-  private val UnassignedPartition = -1
+  private val RecordQueueSize = 256
+  // How long one poll waits for delivery reports before the batch waiting on them checks whether it is done.
+  private val DeliveryPollTimeoutMillis = 100
+  private val ErrorBufferSize           = 512
+  private val UnassignedPartition       = -1
 
   /** A librdkafka client.handle, and the gate that keeps calls from reaching it once it has been destroyed.
     *
@@ -242,10 +244,22 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         // is owned by a supervised fiber. Dropping the acknowledgement therefore cannot leak it.
         awaiting <-
           supervisor.supervise(
-            batches.permit.use(_ => client(awaitBatch(batch, records)))
+            (awaitDelivery(batch) *> batches.permit.use(_ => client(awaitBatch(batch, records))))
               .guarantee(batches.permit.use(_ => client(Bindings.xkafka_batch_destroy(client.handle, batch))))
           )
       yield awaiting.joinWithNever
+
+    /** Serves delivery reports until this batch has all of its own.
+      *
+      * The lock is taken for one poll at a time, so the reports a poll delivers still reach their slots one thread at a time, and a batch waiting
+      * here does not hold up the next enqueue.
+      */
+    private def awaitDelivery(batch: CVoidPtr): F[Unit] =
+      batches.permit.use { _ =>
+        client:
+          Bindings.xkafka_producer_poll(client.handle, DeliveryPollTimeoutMillis)
+          Bindings.xkafka_batch_pending(batch).toInt
+      }.flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
       (

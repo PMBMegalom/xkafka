@@ -357,6 +357,17 @@ int xkafka_batch_add(rd_kafka_t *producer,
 }
 
 /* Serves delivery reports until every enqueued message has one. */
+/* Serves whatever delivery reports are ready. The caller decides how long to keep asking, so one
+ * batch waiting for its reports does not stop another from being enqueued. */
+void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms) {
+        rd_kafka_poll(producer, timeout_ms);
+}
+
+size_t xkafka_batch_pending(const xkafka_batch_t *batch) {
+        return batch == NULL ? 0 : batch->pending;
+}
+
+/* Reads the outcome of a batch whose reports have all arrived. */
 int xkafka_batch_await(rd_kafka_t *producer,
                        xkafka_batch_t *batch,
                        char *error,
@@ -368,9 +379,6 @@ int xkafka_batch_await(rd_kafka_t *producer,
                 xkafka_set_error(error, error_size, error_code, "batch is not allocated");
                 return -1;
         }
-
-        while (batch->pending > 0)
-                rd_kafka_poll(producer, 100);
 
         for (index = 0; index < batch->count; index++) {
                 if (batch->slots[index].error !=
