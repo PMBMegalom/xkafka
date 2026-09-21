@@ -25,7 +25,7 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import cats.data.NonEmptyList
-import cats.effect.{Async, Ref, Resource}
+import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Queue, Semaphore, Supervisor}
 import cats.syntax.all.*
@@ -52,25 +52,55 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     * Destroying takes the permit, so whatever call is already running finishes first, and sets the flag, so a call that arrives afterwards is refused
     * while the pointer it would have passed to librdkafka is already freed.
     */
-  private final class NativeClient(val handle: CVoidPtr, semaphore: Semaphore[F], closed: Ref[F, Boolean]):
+  private sealed trait Gate
+  private final case class Open(calls: Int)                                 extends Gate
+  private final case class Draining(calls: Int, drained: Deferred[F, Unit]) extends Gate
+  private case object Shut                                                  extends Gate
+
+  /** Keeps a handle alive for as long as calls are inside it, and refuses calls once it has been destroyed.
+    *
+    * librdkafka is thread-safe, so calls do not exclude one another. Only the destroy waits, which it does by refusing new calls and then letting the
+    * ones already inside leave.
+    */
+  private final class NativeClient(val handle: CVoidPtr, gate: Ref[F, Gate]):
     def apply[A](operation: => A): F[A] =
-      semaphore.permit.use: _ =>
-        closed.get.flatMap: isClosed =>
-          if isClosed then F.raiseError(new IllegalStateException("the client is closed")) else F.blocking(operation)
+      F.bracket(enter)(entered => if entered then F.blocking(operation) else F.raiseError(new IllegalStateException("the client is closed")))(
+        entered => leave.whenA(entered)
+      )
+
+    /** Refuses further calls and waits for the ones already inside to finish. */
+    val close: F[Unit] =
+      Deferred[F, Unit].flatMap: drained =>
+        gate.modify:
+          case Open(0)     => (Shut, F.unit)
+          case Open(calls) => (Draining(calls, drained), drained.get)
+          case other       => (other, F.unit)
+        .flatten
+
+    private val enter: F[Boolean] =
+      gate.modify:
+        case Open(calls) => (Open(calls + 1), true)
+        case other       => (other, false)
+
+    private val leave: F[Unit] =
+      gate.modify:
+        case Open(calls)              => (Open(calls - 1), F.unit)
+        case Draining(1, drained)     => (Shut, drained.complete(()).void)
+        case Draining(calls, drained) => (Draining(calls - 1, drained), F.unit)
+        case Shut                     => (Shut, F.unit)
+      .flatten
 
   private def nativeClient(acquire: F[CVoidPtr], destroy: CVoidPtr => Unit): Resource[F, NativeClient] =
-    for
-      semaphore <- Resource.eval(Semaphore[F](1))
-      closed    <- Resource.eval(Ref.of[F, Boolean](false))
-      handle    <- Resource.make(acquire)(value => semaphore.permit.use(_ => closed.set(true) >> F.blocking(destroy(value))))
-    yield new NativeClient(handle, semaphore, closed)
+    Resource.eval(Ref.of[F, Gate](Open(0))).flatMap: gate =>
+      Resource.make(acquire.map(handle => new NativeClient(handle, gate)))(client => client.close >> F.blocking(destroy(client.handle)))
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     for
       client <- nativeClient(createProducer(settings), Bindings.xkafka_producer_destroy)
       // Outstanding acknowledgements finish before the client.handle they poll is destroyed.
       supervisor <- Supervisor[F](await = true)
-    yield new LibrdkafkaProducer(client, supervisor, settings)
+      batches    <- Resource.eval(Semaphore[F](1))
+    yield new LibrdkafkaProducer(client, supervisor, batches, settings)
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
     for
@@ -194,17 +224,27 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     val bytes = pointer.asInstanceOf[Ptr[Byte]]
     Chunk.array(Array.tabulate(size.toInt)(bytes(_)))
 
-  private final class LibrdkafkaProducer[K, V](client: NativeClient, supervisor: Supervisor[F], settings: ProducerSettings[F, K, V])
-      extends KafkaProducer[F, K, V]:
+  private final class LibrdkafkaProducer[K, V](
+      client: NativeClient,
+      supervisor: Supervisor[F],
+      batches: Semaphore[F],
+      settings: ProducerSettings[F, K, V]
+  ) extends KafkaProducer[F, K, V]:
 
     /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip. */
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
       for
         encoded <- records.traverse(encodeRecord)
-        batch   <- client(enqueue(encoded))
+        // Delivery reports are served from whichever batch is being awaited, so the slots they write into are
+        // only ever touched by one call at a time.
+        batch <- batches.permit.use(_ => client(enqueue(encoded)))
         // The batch is heap allocated and librdkafka writes into it after the enqueue returns, so releasing it
         // is owned by a supervised fiber. Dropping the acknowledgement therefore cannot leak it.
-        awaiting <- supervisor.supervise(client(awaitBatch(batch, records)).guarantee(client(Bindings.xkafka_batch_destroy(client.handle, batch))))
+        awaiting <-
+          supervisor.supervise(
+            batches.permit.use(_ => client(awaitBatch(batch, records)))
+              .guarantee(batches.permit.use(_ => client(Bindings.xkafka_batch_destroy(client.handle, batch))))
+          )
       yield awaiting.joinWithNever
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =

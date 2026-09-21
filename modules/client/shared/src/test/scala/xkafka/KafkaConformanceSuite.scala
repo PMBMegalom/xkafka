@@ -183,6 +183,25 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(right.size, 1)
         assertEquals(left ++ right, both)
 
+  test(conformance("a consumer answers queries while its records are being consumed")):
+    withBroker: server =>
+      val topic     = uniqueTopic("concurrent")
+      val partition = validPartition(0)
+      val values    = List("one", "two", "three")
+      val records   = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), partition)))
+
+      for
+        _        <- produce(server, records)
+        settings <- consumerSettings(server, uniqueGroup("concurrent"))
+        result   <-
+          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+            (consumer.records.take(values.size.toLong).compile.toList, List.range(0, 20).traverse(_ => consumer.assignment)).parTupled
+          .timeout(60.seconds)
+      yield
+        val (consumed, assignments) = result
+        assertEquals(consumed.map(_.record.value), values.map(Some(_)))
+        assertEquals(assignments.size, 20)
+
   test(conformance("cancelling a record stream releases the consumer")):
     withBroker: server =>
       val topic = uniqueTopic("cancel")
