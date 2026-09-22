@@ -101,9 +101,8 @@ partition is revoked.
 On the JVM the partition streams come from fs2-kafka and are fed
 independently. On Scala.js and Scala Native they share one record source, so
 consume them concurrently: an unconsumed stream eventually backpressures the
-others, and `maxQueuedRecords` bounds how much each buffers first. That source
-also carries the assignment, so a consumer which stops reading records for long
-enough stops seeing rebalances as well.
+others, and `maxQueuedRecords` bounds how much each buffers first. A consumer
+which stops reading records for long enough stops seeing rebalances too.
 
 With `F` fixed, `Serializer[F, A]` has a Cats `Contravariant` instance and
 `Deserializer[F, A]` has a Cats `Functor` instance. Serializers,
@@ -182,10 +181,6 @@ Scala.js and Scala Native also accept a directory of certificates as a
 `SaslMechanism.Plain`, `ScramSha256`, and `ScramSha512`, and keeps its password
 out of `toString`.
 
-xkafka derives the backend configuration from these, so `security.protocol`,
-the `sasl.*` names, and the `ssl.ca.*` and `ssl.truststore.*` names join the
-other entries in `ManagedProperties` and are rejected in the `properties` maps.
-
 A rejected broker certificate or an incorrect password fails the call as
 `KafkaException.BackendFailure`.
 
@@ -238,6 +233,19 @@ nativeConfig := nativeConfig.value
   .withCompileOptions(_ :+ "-I/path/to/librdkafka/include")
   .withLinkingOptions(_ :+ "-L/path/to/librdkafka/lib")
 ```
+
+Linking the static `librdkafka.a` also needs the libraries it was built
+against, named in this order:
+
+```scala
+nativeConfig := nativeConfig.value
+  .withCompileOptions(_ :+ "-I/path/to/librdkafka/include")
+  .withLinkingOptions(_ ++ Seq(
+    "-L/path/to/librdkafka/lib", "-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd"
+  ))
+```
+
+On macOS add a `-L` for the OpenSSL installation as well.
 
 ## Integration tests
 

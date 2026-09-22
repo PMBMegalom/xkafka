@@ -24,9 +24,17 @@ lazy val smoke = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .jvmSettings(Compile / run / fork := true)
   .nativeSettings(
     nativeConfig := {
-      val config = nativeConfig.value
-      sys.env.get("XKAFKA_LIBRDKAFKA_PREFIX").fold(config)(prefix =>
+      val config   = nativeConfig.value
+      val prefixed = sys.env.get("XKAFKA_LIBRDKAFKA_PREFIX").fold(config)(prefix =>
         config.withCompileOptions(_ :+ s"-I$prefix/include").withLinkingOptions(_ :+ s"-L$prefix/lib")
       )
+
+      // A static librdkafka leaves the libraries it was built against undefined, so an application linking the
+      // archive asks for them itself. This is the recipe the README documents, executed rather than asserted.
+      if (!sys.env.contains("XKAFKA_LIBRDKAFKA_STATIC")) prefixed
+      else {
+        val searchPaths = sys.env.getOrElse("XKAFKA_LIBRDKAFKA_SEARCH_PATHS", "").split(' ').toList.filter(_.nonEmpty)
+        prefixed.withLinkingOptions(_ ++ searchPaths ++ Seq("-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd"))
+      }
     }
   )

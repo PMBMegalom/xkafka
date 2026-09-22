@@ -11,8 +11,14 @@ if [[ "${1:-}" == "--run" ]]; then
   sbt smokeJVM/run
   echo "Testing the published Scala.js artifact"
   sbt smokeJS/run
-  echo "Testing the published Scala Native artifact"
-  sbt smokeNative/run
+
+  # The two ways a Native application reaches librdkafka: the one the README promises needs no xkafka
+  # settings, and the one that links the archive and names the libraries it was built against.
+  echo "Testing the published Scala Native artifact against an installed librdkafka"
+  (unset XKAFKA_LIBRDKAFKA_PREFIX XKAFKA_LIBRDKAFKA_STATIC; sbt smokeNative/run)
+
+  echo "Testing the published Scala Native artifact against a static librdkafka"
+  XKAFKA_LIBRDKAFKA_PREFIX="$XKAFKA_LIBRDKAFKA_STATIC_PREFIX" XKAFKA_LIBRDKAFKA_STATIC=1 sbt smokeNative/run
   exit
 fi
 
@@ -30,17 +36,36 @@ for attempt in $(seq 1 30); do
   sleep 10
 done
 
-if [[ -z "${XKAFKA_LIBRDKAFKA_PREFIX:-}" ]]; then
-  (cd "$project_dir" && sbt clientNative/prepareLibrdkafka)
-  while IFS= read -r candidate; do
-    if [[ -f "$candidate/include/librdkafka/rdkafka.h" && -f "$candidate/lib/librdkafka.a" ]]; then
-      XKAFKA_LIBRDKAFKA_PREFIX="$candidate"
-      break
-    fi
-  done < <(find "$project_dir/modules/client/native/target" -maxdepth 1 -type d -name 'librdkafka-*' | sort)
-fi
+prepared=""
+(cd "$project_dir" && sbt clientNative/prepareLibrdkafka)
+while IFS= read -r candidate; do
+  if [[ -f "$candidate/include/librdkafka/rdkafka.h" && -f "$candidate/lib/librdkafka.a" ]]; then
+    prepared="$candidate"
+    break
+  fi
+done < <(find "$project_dir/modules/client/native/target" -maxdepth 1 -type d -name 'librdkafka-*' | sort)
 
-: "${XKAFKA_LIBRDKAFKA_PREFIX:?could not locate the prepared librdkafka installation}"
-export XKAFKA_LIBRDKAFKA_PREFIX
+: "${prepared:?could not locate the prepared librdkafka installation}"
+
+# The prepared prefix carries the shared library beside the archive, and a linker offered both takes the
+# shared one. Staging the archive on its own is what makes the static case actually static.
+staged="$project_dir/target/downstream-librdkafka-static"
+rm -rf "$staged"
+mkdir -p "$staged/lib"
+ln -s "$prepared/include" "$staged/include"
+cp "$prepared/lib/librdkafka.a" "$staged/lib/librdkafka.a"
+export XKAFKA_LIBRDKAFKA_STATIC_PREFIX="$staged"
+
+# Homebrew keeps OpenSSL keg-only, so a static link on macOS has to be told where it lives.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  search_paths=""
+  for formula in openssl@3 zstd zlib; do
+    prefix="$(brew --prefix "$formula" 2>/dev/null || true)"
+    if [[ -n "$prefix" && -d "$prefix/lib" ]]; then
+      search_paths="$search_paths -L$prefix/lib"
+    fi
+  done
+  export XKAFKA_LIBRDKAFKA_SEARCH_PATHS="${search_paths# }"
+fi
 
 exec "$script_dir/with-kafka.sh" --directory "$downstream_dir" "$script_dir/downstream-test.sh" --run

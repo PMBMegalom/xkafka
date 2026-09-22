@@ -334,6 +334,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
 
+      - name: Install librdkafka
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes librdkafka-dev
+
       - name: Select published version
         run: echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV
 

@@ -85,12 +85,21 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   javas = List(JavaSpec.temurin("17")),
   timeoutMinutes = Some(45)
 )
+// One of the downstream Native builds links against an installed librdkafka, which is the arrangement the
+// README promises needs no xkafka settings of its own.
+val installLibrdkafka = WorkflowStep.Run(
+  List("sudo apt-get update", "sudo apt-get install --yes librdkafka-dev"),
+  name = Some("Install librdkafka"),
+  cond = Some("startsWith(matrix.os, 'ubuntu')")
+)
+
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "downstream",
   name = "Published artifact smoke tests",
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
     installNativeDependencies,
+    installLibrdkafka,
     WorkflowStep.Run(
       List("""echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV"""),
       name = Some("Select published version")
