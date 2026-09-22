@@ -201,6 +201,24 @@ final class ClientSuite extends FunSuite:
     assertEquals(secure.withClientId("id").security, SecuritySettings.Tls(tls))
     assertEquals(secure.withProperty("linger.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
 
+  test("the consumer request timeout defaults and is carried by its wither"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.requestTimeout, ConsumerSettings.DefaultRequestTimeout)
+    assertEquals(settings.withRequestTimeout(5.seconds).requestTimeout, 5.seconds)
+    assertEquals(settings.withRequestTimeout(5.seconds).withPollTimeout(25.millis).requestTimeout, 5.seconds)
+    assertEquals(settings.withRequestTimeout(5.seconds).withProperty("fetch.min.bytes", "1").toOption.get.requestTimeout, 5.seconds)
+
+  test("settings reject the api timeout the request timeout owns"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer, properties = Map("default.api.timeout.ms" -> "1000"))
+
+    assertEquals(
+      settings.toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("default.api.timeout.ms", SettingsError.PropertyScope.Consumer)))
+    )
+
   test("the consumer poll timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get

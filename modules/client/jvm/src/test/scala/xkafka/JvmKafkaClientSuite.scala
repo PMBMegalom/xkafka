@@ -121,6 +121,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           assertEquals(settings.properties.get("auto.offset.reset"), Some("earliest"))
           // The consumer poll timeout has to reach fs2-kafka, which is the only place it takes effect.
           assertEquals(settings.pollTimeout, ConsumerSettings.DefaultPollTimeout)
+          // The request timeout has to reach fs2-kafka, which reads it as default.api.timeout.ms.
+          assertEquals(settings.properties.get("default.api.timeout.ms"), Some(ConsumerSettings.DefaultRequestTimeout.toMillis.toString))
           mock
 
     val keyDeserializer =

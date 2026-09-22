@@ -730,13 +730,14 @@ int xkafka_consumer_committed(rd_kafka_t *consumer,
                               const int32_t *partitions,
                               size_t count,
                               int64_t *offset_values,
+                          int timeout_ms,
                               char *error,
                               size_t error_size,
                               int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, NULL, count);
         rd_kafka_resp_err_t result =
-            rd_kafka_committed(consumer, native_offsets, -1);
+            rd_kafka_committed(consumer, native_offsets, timeout_ms);
         size_t index;
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
@@ -763,11 +764,12 @@ int xkafka_consumer_watermark_offsets(rd_kafka_t *consumer,
                                       int32_t partition,
                                       int64_t *low,
                                       int64_t *high,
+                                  int timeout_ms,
                                       char *error,
                                       size_t error_size,
                                       int32_t *error_code) {
         rd_kafka_resp_err_t result = rd_kafka_query_watermark_offsets(
-            consumer, topic, partition, low, high, -1);
+            consumer, topic, partition, low, high, timeout_ms);
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
@@ -782,13 +784,14 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
                                       const int64_t *timestamps,
                                       size_t count,
                                       int64_t *offset_values,
+                                  int timeout_ms,
                                       char *error,
                                       size_t error_size,
                                       int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, timestamps, count);
         rd_kafka_resp_err_t result =
-            rd_kafka_offsets_for_times(consumer, native_offsets, -1);
+            rd_kafka_offsets_for_times(consumer, native_offsets, timeout_ms);
         size_t index;
 
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
@@ -812,6 +815,7 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
 
 void *xkafka_consumer_metadata(rd_kafka_t *consumer,
                                const char *topic,
+                               int timeout_ms,
                                char *error,
                                size_t error_size,
                                int32_t *error_code) {
@@ -830,7 +834,7 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
         }
 
         result = rd_kafka_metadata(consumer, topic == NULL, native_topic,
-                                   &metadata, -1);
+                                   &metadata, timeout_ms);
         if (native_topic != NULL)
                 rd_kafka_topic_destroy(native_topic);
         if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
@@ -901,6 +905,7 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
                          const char *topic,
                          int32_t partition,
                          int64_t offset,
+                     int timeout_ms,
                          char *error,
                          size_t error_size,
                          int32_t *error_code) {
@@ -910,7 +915,7 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, offsets, 1);
         rd_kafka_error_t *result =
-            rd_kafka_seek_partitions(consumer, native_offsets, -1);
+            rd_kafka_seek_partitions(consumer, native_offsets, timeout_ms);
 
         if (result != NULL) {
                 xkafka_set_error(error, error_size, error_code,

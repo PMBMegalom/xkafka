@@ -161,6 +161,7 @@ private[xkafka] object Bindings:
       partitions: Ptr[CInt],
       count: CSize,
       offsets: Ptr[CLongLong],
+      timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]
@@ -172,6 +173,7 @@ private[xkafka] object Bindings:
       partition: CInt,
       low: Ptr[CLongLong],
       high: Ptr[CLongLong],
+      timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]
@@ -184,12 +186,20 @@ private[xkafka] object Bindings:
       timestamps: Ptr[CLongLong],
       count: CSize,
       offsets: Ptr[CLongLong],
+      timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_consumer_metadata(consumer: CVoidPtr, topic: CString, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
+  def xkafka_consumer_metadata(
+      consumer: CVoidPtr,
+      topic: CString,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
 
   def xkafka_metadata_destroy(metadata: CVoidPtr): Unit = extern
 
@@ -206,6 +216,7 @@ private[xkafka] object Bindings:
       topic: CString,
       partition: CInt,
       offset: CLongLong,
+      timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]

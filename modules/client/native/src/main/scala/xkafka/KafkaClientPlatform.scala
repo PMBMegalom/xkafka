@@ -365,6 +365,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       assignments: SignallingRef[F, Set[TopicPartition]]
   ) extends KafkaConsumer[F, K, V]:
 
+    private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
+
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
         override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
@@ -529,6 +531,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             partitions,
             entries.size.toUSize,
             committedOffsets,
+            requestTimeoutMillis,
             error,
             ErrorBufferSize.toUSize,
             errorCode
@@ -560,6 +563,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               topicPartition.partition.value,
               low,
               high,
+              requestTimeoutMillis,
               error,
               ErrorBufferSize.toUSize,
               errorCode
@@ -592,6 +596,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             timestamps,
             entries.size.toUSize,
             timestampOffsets,
+            requestTimeoutMillis,
             error,
             ErrorBufferSize.toUSize,
             errorCode
@@ -613,6 +618,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           Bindings.xkafka_consumer_metadata(
             client.handle,
             requestedTopic.map(topic => toCString(topic.value)).orNull,
+            requestTimeoutMillis,
             error,
             ErrorBufferSize.toUSize,
             errorCode
@@ -644,6 +650,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             toCString(topicPartition.topic.value),
             topicPartition.partition.value,
             offset.value,
+            requestTimeoutMillis,
             error,
             ErrorBufferSize.toUSize,
             errorCode

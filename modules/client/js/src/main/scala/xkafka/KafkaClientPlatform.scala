@@ -83,9 +83,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private val ConsumeBatchSize           = 256
   // Records the poll loop has read but nothing has taken yet. The loop stops consuming when this fills, which is
   // also when Kafka would consider the consumer stalled.
-  private val RecordQueueSize      = 256
-  private val RequestTimeoutMillis = 10000
-  private val MaxExactInteger      = 9007199254740991d
+  private val RecordQueueSize = 256
+  private val MaxExactInteger = 9007199254740991d
 
   private def ignore(value: js.Any): Unit = ()
 
@@ -275,6 +274,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       polled: Queue[F, confluent.RdMessage]
   ) extends KafkaConsumer[F, K, V]:
 
+    private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
+
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
         override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
@@ -305,7 +306,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else
         val requested = topicPartitions.iterator.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
-        callback[js.Array[confluent.RdTopicPartitionOffset]](done => underlying.committed(requested, RequestTimeoutMillis, done): Unit).flatMap:
+        callback[js.Array[confluent.RdTopicPartitionOffset]](done => underlying.committed(requested, requestTimeoutMillis, done): Unit).flatMap:
           values =>
             values.toList.traverse: value =>
               (portableTopicPartition(value), optionalOffset("committed offset", value.offset)).mapN(_ -> _)
@@ -325,7 +326,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     ): F[Map[TopicPartition, Offset]] =
       topicPartitions.toList.traverse: topicPartition =>
         callback[confluent.RdWatermarks] { done =>
-          underlying.queryWatermarkOffsets(topicPartition.topic.value, topicPartition.partition.value, RequestTimeoutMillis, done): Unit
+          underlying.queryWatermarkOffsets(topicPartition.topic.value, topicPartition.partition.value, requestTimeoutMillis, done): Unit
         }.flatMap(value => F.fromEither(exactOffset(field, select(value))).map(topicPartition -> _))
       .map(_.toMap)
 
@@ -337,7 +338,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           timestampsToSearch.iterator.map: (topicPartition, timestamp) =>
             confluent.Values.rdTopicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, timestamp.epochMillis.toDouble)
           .toJSArray
-        callback[js.Array[confluent.RdTopicPartitionOffset]](done => underlying.offsetsForTimes(requested, RequestTimeoutMillis, done)).flatMap:
+        callback[js.Array[confluent.RdTopicPartitionOffset]](done => underlying.offsetsForTimes(requested, requestTimeoutMillis, done)).flatMap:
           values =>
             values.toList.traverse: value =>
               (portableTopicPartition(value), optionalOffset("timestamp offset", value.offset)).mapN(_ -> _)
@@ -362,7 +363,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       F.async_ : resume =>
         underlying.seek(
           confluent.Values.rdTopicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toDouble),
-          RequestTimeoutMillis,
+          requestTimeoutMillis,
           error =>
             rdError(error) match
               case Some(failure) => resume(Left(rdFailure(failure)))

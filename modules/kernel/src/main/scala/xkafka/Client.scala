@@ -42,6 +42,7 @@ val ManagedProperties: Set[String] =
     "auto.offset.reset",
     "enable.auto.commit",
     "enable.auto.offset.store",
+    "default.api.timeout.ms",
     "security.protocol",
     "sasl.mechanism",
     "sasl.mechanisms",
@@ -179,39 +180,59 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     valueDeserializer: Deserializer[F, V],
     autoOffsetReset: AutoOffsetReset,
     pollTimeout: FiniteDuration,
+    requestTimeout: FiniteDuration,
     properties: Map[String, String]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer.mapK(fk), valueDeserializer.mapK(fk), autoOffsetReset, pollTimeout, properties) {}
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer.mapK(fk),
+      valueDeserializer.mapK(fk),
+      autoOffsetReset,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, properties) {}
+    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, properties) {}
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, properties) {}
+    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, properties) {}
 
   def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, pollTimeout, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, pollTimeout, requestTimeout, properties) {}
 
   /** How long one poll waits for records before it returns empty.
     *
     * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
     */
   def withPollTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, requestTimeout, properties) {}
+
+  /** How long a call that asks the broker something waits for its answer.
+    *
+    * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
+    */
+  def withRequestTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, value, properties) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, values)
+    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, values)
 
   override def toString: String =
-    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$pollTimeout,${redacted(properties)})"
+    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$pollTimeout,$requestTimeout,${redacted(properties)})"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
   val DefaultPollTimeout: FiniteDuration = 100.millis
+
+  /** What Kafka's own clients wait for the same answers, through `default.api.timeout.ms`. */
+  val DefaultRequestTimeout: FiniteDuration = 60.seconds
 
   def from[F[_], K, V](
       client: ClientSettings,
@@ -220,10 +241,12 @@ object ConsumerSettings:
       valueDeserializer: Deserializer[F, V],
       autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
+      requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Consumer))
-      .map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, properties) {})
+    validateSettings(
+      propertyErrors(properties, SettingsError.PropertyScope.Consumer)
+    ).map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, properties) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ConsumerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ConsumerSettings[F, K, V])(fk: FunctionK[F, G]): ConsumerSettings[G, K, V] = settings.mapK(fk)
