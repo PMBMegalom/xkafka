@@ -21,6 +21,7 @@
 
 package xkafka
 
+import scala.scalanative.libc.string.memcpy
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
@@ -215,16 +216,20 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private def invalidBackendValue(field: String, value: Any, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error")
 
+  /** Records carry their payload through here, so both directions move the bytes in one block. */
   private def cBytes(value: Option[Chunk[Byte]])(using Zone): (CVoidPtr, CSize) =
     value.fold[(CVoidPtr, CSize)]((null, 0.toUSize)): bytes =>
       val pointer = alloc[CChar](math.max(1, bytes.size))
-      bytes.iterator.zipWithIndex.foreach:
-        case (byte, index) => pointer(index) = byte
+      if bytes.nonEmpty then
+        val slice = bytes.toArraySlice
+        memcpy(pointer, slice.values.at(slice.offset), bytes.size.toUSize): Unit
       (pointer, bytes.size.toUSize)
 
   private def chunk(pointer: CVoidPtr, size: CSize): Chunk[Byte] =
-    val bytes = pointer.asInstanceOf[Ptr[Byte]]
-    Chunk.array(Array.tabulate(size.toInt)(bytes(_)))
+    val count = size.toInt
+    val bytes = new Array[Byte](count)
+    if count > 0 then memcpy(bytes.at(0), pointer, size): Unit
+    Chunk.array(bytes)
 
   private final class LibrdkafkaProducer[K, V](
       client: NativeClient,

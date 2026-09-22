@@ -23,7 +23,7 @@ package xkafka
 
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
-import scala.scalajs.js.typedarray.Uint8Array
+import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array, Uint8Array}
 
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
@@ -192,17 +192,16 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private def partition(value: Int): F[Partition] =
     F.fromEither(Partition.from(value).leftMap(error => invalidBackendValue("partition", value.toString, error)))
 
-  private def bytes(value: Uint8Array | Null): Option[Chunk[Byte]] =
-    Option(value).map: raw =>
-      val array = raw.asInstanceOf[Uint8Array]
-      Chunk.array(Array.tabulate(array.length)(index => array(index).toByte))
+  /** Records carry their payload through here, so both directions move the bytes as one typed array. */
+  private def bytes(value: Uint8Array | Null): Option[Chunk[Byte]] = Option(value).map(raw => portableBytes(raw.asInstanceOf[Uint8Array]))
+
+  private def portableBytes(value: Uint8Array): Chunk[Byte] =
+    Chunk.array(int8Array2ByteArray(new Int8Array(value.buffer, value.byteOffset, value.length)))
 
   private def nodeBuffer(value: Option[Chunk[Byte]]): Uint8Array | Null =
     value.map: chunk =>
-      val array = new Uint8Array(chunk.size)
-      chunk.iterator.zipWithIndex.foreach:
-        case (byte, index) => array(index) = byte.toShort
-      confluent.Buffer.from(array)
+      val signed = byteArray2Int8Array(chunk.toArray)
+      confluent.Buffer.from(new Uint8Array(signed.buffer, signed.byteOffset, signed.length))
     .orNull
 
   /** librdkafka hands back one single-entry object per header, so duplicate names and their order both survive the round trip. */
@@ -211,7 +210,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       headers.toOption.fold(Vector.empty[Header]): values =>
         values.toVector.flatMap: entry =>
           entry.iterator.map: (name, value) =>
-            Header(name, Option(value.asInstanceOf[Uint8Array]).map(raw => Chunk.array(Array.tabulate(raw.length)(index => raw(index).toByte))))
+            Header(name, Option(value.asInstanceOf[Uint8Array]).map(portableBytes))
     )
 
   private final class ConfluentKafkaProducer[K, V](
