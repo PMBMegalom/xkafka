@@ -341,7 +341,9 @@ jobs:
           sudo apt-get install --yes librdkafka-dev
 
       - name: Select published version
-        run: echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV
+        run: |
+          version="$(sbt --batch --no-colors -Dsbt.supershell=false --error 'print clientJVM/version' | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | tail -n 1)"
+          echo "XKAFKA_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Test published JVM, JavaScript, and Native artifacts
         run: scripts/downstream-test.sh

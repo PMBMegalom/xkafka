@@ -101,7 +101,13 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     installNativeDependencies,
     installLibrdkafka,
     WorkflowStep.Run(
-      List("""echo "XKAFKA_VERSION=$(sbt --error 'print clientJVM/version')" >> $GITHUB_ENV"""),
+      // sbt draws its progress display with terminal escapes on the runner, and one of them reaches the
+      // captured output, which GITHUB_ENV rejects. The display is turned off and anything left is stripped.
+      List(
+        """version="$(sbt --batch --no-colors -Dsbt.supershell=false --error 'print clientJVM/version' |""" +
+          """ tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' | tail -n 1)"""",
+        """echo "XKAFKA_VERSION=$version" >> "$GITHUB_ENV""""
+      ),
       name = Some("Select published version")
     ),
     WorkflowStep.Run(
