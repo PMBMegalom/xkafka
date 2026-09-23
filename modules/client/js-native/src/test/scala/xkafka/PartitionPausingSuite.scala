@@ -40,23 +40,24 @@ final class PartitionPausingSuite extends CatsEffectSuite:
 
   test(pausing("a paused partition stops arriving and resumes where the reader got to")):
     bootstrapServers.fold(IO.unit): server =>
-      val suffix    = s"${PlatformKafkaClient.name}-${System.nanoTime()}"
-      val topic     = Topic.from(s"xkafka-pausing-$suffix").toOption.get
-      val group     = ConsumerGroup.from(s"xkafka-pausing-$suffix").toOption.get
-      val partition = Partition.from(0).toOption.get
-      val utf8In    = Serializer.utf8[IO]
-      val utf8Out   = Deserializer.utf8[IO]
-      val client    = ClientSettings.from(NonEmptyList.one(server)).toOption.get
-      val producer  = ProducerSettings.from(client, utf8In, utf8In).toOption.get
-      val consumer  = ConsumerSettings.from(client, group, utf8Out, utf8Out, AutoOffsetReset.Earliest).toOption.get
-      val early     = List("e0", "e1")
-      val late      = List("l0", "l1", "l2", "l3")
-
-      def send(values: List[String]) =
-        PlatformKafkaClient().producer(producer)
-          .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(values.map(value => ProducerRecord(topic, "k", value, partition = Some(partition))))))
+      val suffix  = s"${PlatformKafkaClient.name}-${System.nanoTime()}"
+      val utf8In  = Serializer.utf8[IO]
+      val utf8Out = Deserializer.utf8[IO]
+      val early   = List("e0", "e1")
+      val late    = List("l0", "l1", "l2", "l3")
 
       for
+        topic     <- Topic.from(s"xkafka-pausing-$suffix").liftTo[IO]
+        group     <- ConsumerGroup.from(s"xkafka-pausing-$suffix").liftTo[IO]
+        partition <- Partition.from(0).liftTo[IO]
+        client    <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        producer  <- ProducerSettings.from(client, utf8In, utf8In).liftTo[IO]
+        consumer  <- ConsumerSettings.from(client, group, utf8Out, utf8Out, AutoOffsetReset.Earliest).liftTo[IO]
+        send =
+          (values: List[String]) =>
+            PlatformKafkaClient().producer(producer).use(_.produceAndAwait(
+              NonEmptyList.fromListUnsafe(values.map(value => ProducerRecord(topic, "k", value, partition = Some(partition))))
+            ))
         _      <- send(early)
         result <-
           PlatformKafkaClient().consumer(consumer, Subscription.Topics(NonEmptyList.one(topic))).use: value =>

@@ -22,11 +22,28 @@
 package xkafka
 
 import cats.data.NonEmptyList
+import cats.effect.IO
 import cats.syntax.all.*
 import munit.FunSuite
 
-/** The README shows this construction, so it is compiled here. */
-final class ReadmeSecurityExampleSuite extends FunSuite:
+/** The README is not run through mdoc as the site is, so what it shows is compiled here. */
+final class DocumentedExampleSuite extends FunSuite:
+  test("the documented producer lifts its validated parts into the effect"):
+    val utf8 = Serializer.utf8[IO]
+
+    val settings =
+      ClientSettings.from(NonEmptyList.one("localhost:9092")).andThen: client =>
+        ProducerSettings.from(client, utf8, utf8)
+
+    val program =
+      for
+        topic    <- Topic.from("events").liftTo[IO]
+        producer <- settings.liftTo[IO]
+        _        <- KafkaClient[IO].producer(producer).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
+      yield ()
+
+    assert(program ne null)
+
   test("the documented secure client is constructed from validated parts"):
     val password = "secret"
 

@@ -143,8 +143,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
 
       // Lingering holds the first batch long enough that its acknowledgement is still outstanding when the
       // second is enqueued, which is the whole point of separating the two stages.
-      validated(ClientSettings.from(NonEmptyList.one(server))).flatMap: client =>
-        validated(ProducerSettings.from(client, optionalSerializer, optionalSerializer, Map("linger.ms" -> "5000")))
+      ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+        ProducerSettings.from(client, optionalSerializer, optionalSerializer, Map("linger.ms" -> "5000")).liftTo[IO]
       .flatMap: settings =>
         PlatformKafkaClient().producer(settings).use: producer =>
           for
@@ -162,7 +162,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       ClientSettings.from(NonEmptyList.one(unreachable), properties = Map("socket.timeout.ms" -> "1000", "message.timeout.ms" -> "2000"))
         .andThen(client => ProducerSettings.from(client, optionalSerializer, optionalSerializer))
 
-    validated(settings).flatMap: producerSettings =>
+    settings.liftTo[IO].flatMap: producerSettings =>
       PlatformKafkaClient().producer(producerSettings)
         .use(_.produceAndAwait(NonEmptyList.one(record(uniqueTopic("unreachable"), Some("k"), Some("v"), validPartition(0))))).attempt.map:
           case Left(failure: KafkaException.BackendFailure) =>
@@ -257,18 +257,15 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         .timeout(60.seconds)
 
   private def producerSettings(server: String): IO[ProducerSettings[IO, Option[String], Option[String]]] =
-    validated(ClientSettings.from(NonEmptyList.one(server))).flatMap: client =>
-      validated(ProducerSettings.from(client, optionalSerializer, optionalSerializer))
+    ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+      ProducerSettings.from(client, optionalSerializer, optionalSerializer).liftTo[IO]
 
   private def consumerSettings(server: String, group: ConsumerGroup): IO[ConsumerSettings[IO, Option[String], Option[String]]] =
-    validated(ClientSettings.from(NonEmptyList.one(server))).flatMap: client =>
-      validated(ConsumerSettings.from(client, group, optionalDeserializer, optionalDeserializer, AutoOffsetReset.Earliest))
+    ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+      ConsumerSettings.from(client, group, optionalDeserializer, optionalDeserializer, AutoOffsetReset.Earliest).liftTo[IO]
 
   private val optionalSerializer   = Serializer.utf8[IO].option
   private val optionalDeserializer = Deserializer.utf8[IO].option
-
-  private def validated[A](result: cats.data.ValidatedNel[SettingsError, A]): IO[A] =
-    IO.fromEither(result.toEither.leftMap(errors => new IllegalArgumentException(errors.toList.map(_.message).mkString("; "))))
 
   private def record(
       topic: Topic,

@@ -101,40 +101,40 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(consumedSecond.record, observedSecond.record)
 
   private def batchRoundTrip(bootstrapServer: String): IO[Unit] =
-    val suffix           = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topicPrefix      = s"xkafka-batch-integration-$suffix"
-    val firstTopic       = validTopic(s"$topicPrefix-first")
-    val secondTopic      = validTopic(s"$topicPrefix-second")
-    val subscription     = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
-    val group            = validConsumerGroup(s"xkafka-batch-integration-$suffix")
-    val clientSettings   = ClientSettings.from(NonEmptyList.one(bootstrapServer)).toOption.get
-    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
-    val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
-    val firstRecords     = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-1"), ProducerRecord(secondTopic, "second-key", "second-1"))
-    val secondRecords    = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-2"), ProducerRecord(secondTopic, "second-key", "second-2"))
+    val suffix        = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
+    val topicPrefix   = s"xkafka-batch-integration-$suffix"
+    val firstTopic    = validTopic(s"$topicPrefix-first")
+    val secondTopic   = validTopic(s"$topicPrefix-second")
+    val subscription  = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
+    val group         = validConsumerGroup(s"xkafka-batch-integration-$suffix")
+    val firstRecords  = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-1"), ProducerRecord(secondTopic, "second-key", "second-1"))
+    val secondRecords = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-2"), ProducerRecord(secondTopic, "second-key", "second-2"))
 
     for
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(firstRecords)).timeout(45.seconds)
-      consumed <- consumeAndCommitBatch(consumerSettings, subscription, 2)
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(secondRecords)).timeout(45.seconds)
-      resumed  <- consume(consumerSettings, subscription, 2)
+      clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer)).liftTo[IO]
+      producerSettings <- ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).liftTo[IO]
+      consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
+      _                <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(firstRecords)).timeout(45.seconds)
+      consumed         <- consumeAndCommitBatch(consumerSettings, subscription, 2)
+      _                <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(secondRecords)).timeout(45.seconds)
+      resumed          <- consume(consumerSettings, subscription, 2)
     yield
       assertEquals(consumed.map(record => record.record.topicPartition.topic).toSet, Set(firstTopic, secondTopic))
       assertEquals(resumed.map(record => record.record.value).toSet, Set("first-2", "second-2"))
       assert(resumed.forall(record => record.record.offset.value == 1L))
 
   private def controlRoundTrip(bootstrapServer: String): IO[Unit] =
-    val suffix           = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topic            = validTopic(s"xkafka-control-integration-$suffix")
-    val partition        = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
-    val topicPartition   = TopicPartition(topic, partition)
-    val group            = validConsumerGroup(s"xkafka-control-integration-$suffix")
-    val clientSettings   = ClientSettings.from(NonEmptyList.one(bootstrapServer)).toOption.get
-    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
-    val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
+    val suffix         = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
+    val topic          = validTopic(s"xkafka-control-integration-$suffix")
+    val partition      = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
+    val topicPartition = TopicPartition(topic, partition)
+    val group          = validConsumerGroup(s"xkafka-control-integration-$suffix")
 
     for
-      timestamp <- IO.realTime.map(value => Timestamp.fromEpochMillis(value.toMillis))
+      clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer)).liftTo[IO]
+      producerSettings <- ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).liftTo[IO]
+      consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
+      timestamp        <- IO.realTime.map(value => Timestamp.fromEpochMillis(value.toMillis))
       record = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition), timestamp = Some(timestamp))
       _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).timeout(45.seconds)
       consumed <-
@@ -174,20 +174,20 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(replayed._1.record.value, "control-value")
 
   private def partitionedRoundTrip(bootstrapServer: String): IO[Unit] =
-    val suffix           = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topicPrefix      = s"xkafka-partitioned-integration-$suffix"
-    val firstTopic       = validTopic(s"$topicPrefix-first")
-    val secondTopic      = validTopic(s"$topicPrefix-second")
-    val subscription     = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
-    val group            = validConsumerGroup(s"xkafka-partitioned-integration-$suffix")
-    val clientSettings   = ClientSettings.from(NonEmptyList.one(bootstrapServer)).toOption.get
-    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
-    val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
-    val records          = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
+    val suffix       = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
+    val topicPrefix  = s"xkafka-partitioned-integration-$suffix"
+    val firstTopic   = validTopic(s"$topicPrefix-first")
+    val secondTopic  = validTopic(s"$topicPrefix-second")
+    val subscription = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
+    val group        = validConsumerGroup(s"xkafka-partitioned-integration-$suffix")
+    val records      = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
 
     for
-      _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(records)).timeout(45.seconds)
-      consumed <-
+      clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer)).liftTo[IO]
+      producerSettings <- ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).liftTo[IO]
+      consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
+      _                <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(records)).timeout(45.seconds)
+      consumed         <-
         PlatformKafkaClient().consumer(consumerSettings, subscription).use: consumer =>
           consumer.partitionedRecords(16).map: partition =>
             partition.records.take(1).map(partition.topicPartition -> _)
