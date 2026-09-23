@@ -61,7 +61,7 @@ val utf8 = Serializer.utf8[IO]
 val settings =
   ClientSettings.from(
     bootstrapServers = NonEmptyList.one("localhost:9092"),
-    properties = Map("metadata.max.age.ms" -> "30000")
+    properties = Map("client.rack" -> "eu-west-1a")
   ).andThen: client =>
     ProducerSettings.from(client, utf8, utf8, properties = Map("linger.ms" -> "5"))
 ```
@@ -74,8 +74,9 @@ properties supported with the same meaning by each one.
 
 `ManagedProperties` lists the names xkafka derives from the typed settings:
 bootstrap servers, client and group IDs, offset reset, automatic commits, the
-default API timeout, and the TLS and SASL names. Supplying one through the map
-is a `SettingsError`, so the typed settings and the map cannot disagree.
+default API timeout, the metadata refresh names, and the TLS and SASL names.
+Supplying one through the map is a `SettingsError`, so the typed settings and the
+map cannot disagree.
 
 ## Withers
 
@@ -95,3 +96,14 @@ can invalidate the result, such as `withProperty`, return
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default
 matches what Kafka's own clients use.
+
+`ClientSettings` carries one more, because it applies to producers and consumers
+alike.
+
+| setting | default | what it bounds |
+| --- | --- | --- |
+| `metadataRefreshInterval` | 5m | how long a new topic, partition, or leader can go unnoticed |
+
+Each backend spells it differently, so the typed setting is what keeps the two
+the same: the Java client takes it as `metadata.max.age.ms`, and librdkafka takes
+it as `topic.metadata.refresh.interval.ms` and derives its own cache age from it.

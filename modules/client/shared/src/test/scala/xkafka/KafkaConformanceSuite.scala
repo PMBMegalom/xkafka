@@ -241,6 +241,29 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         replayed <- consume(server, topic, 1)
       yield assertEquals(replayed.map(_.record.value), List(Some("value")))
 
+  test(conformance("a topic created after a consumer subscribed arrives within the metadata refresh interval")):
+    withBroker: server =>
+      val topic   = uniqueTopic("late")
+      val refresh = 5.seconds
+      val bound   = 60.seconds
+      // No partition is named, because librdkafka cannot place a record on a partition of a topic it has never seen.
+      val late = ProducerRecord[Option[String], Option[String]](topic, Some("key"), Some("value"))
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].map(_.withMetadataRefreshInterval(refresh))
+        settings <-
+          ConsumerSettings.from(client, uniqueGroup("late"), optionalDeserializer, optionalDeserializer, AutoOffsetReset.Earliest).liftTo[IO]
+        outcome <-
+          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+            // Nothing has created the topic at subscription time, so the record can only arrive once metadata is refreshed. A
+            // backend left on the five minute default outlasts the bound below.
+            IO.both(consumer.records.head.compile.lastOrError, IO.sleep(2.seconds) *> produce(server, NonEmptyList.one(late))).timed
+              .timeout(bound + 30.seconds)
+        (elapsed, arrivals) = outcome
+      yield
+        assertEquals(arrivals._1.record.value, Some("value"))
+        assert(elapsed < bound, s"$backend took $elapsed to see a topic created after subscribing, with a $refresh refresh interval")
+
   private def assignmentOf(consumer: KafkaConsumer[IO, Option[String], Option[String]], size: Int): IO[Set[TopicPartition]] =
     consumer.assignmentChanges.filter(_.size == size).head.compile.lastOrError
 

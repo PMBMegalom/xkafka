@@ -32,7 +32,7 @@ import cats.effect.std.{Dispatcher, Queue}
 import fs2.concurrent.SignallingRef
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
-import internal.confluent
+import internal.{confluent, ClientProperties}
 import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
@@ -58,7 +58,7 @@ private object ConfluentKafkaDriver:
           confluent.Values.rdProducerConfig(
             settings.bootstrapServers.toList.toJSArray,
             settings.clientId.orUndefined,
-            settings.properties ++ properties ++ SecurityProperties.librdkafka(settings.security)
+            settings.properties ++ properties ++ SecurityProperties.librdkafka(settings.security) ++ ClientProperties(settings)
           )
         js.Dynamic.newInstance(confluent.RdKafka.Producer)(config).asInstanceOf[confluent.RdProducer]
 
@@ -74,7 +74,7 @@ private object ConfluentKafkaDriver:
             settings.clientId.orUndefined,
             groupId.value,
             autoOffsetReset,
-            settings.properties ++ properties ++ SecurityProperties.librdkafka(settings.security)
+            settings.properties ++ properties ++ SecurityProperties.librdkafka(settings.security) ++ ClientProperties(settings)
           )
         js.Dynamic.newInstance(confluent.RdKafka.KafkaConsumer)(config).asInstanceOf[confluent.RdConsumer]
 
@@ -153,9 +153,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
       _ <- Resource.eval(subscribe(underlying, subscription))
       polled <- Resource.eval(Queue.bounded[F, confluent.RdMessage](RecordQueueSize))
-      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled)
+      // A consume that fails takes the rebalance reporting down with it, so the failure is kept and reported to whoever
+      // reads the records instead of leaving a consumer that never receives anything.
+      pollFailure <- Resource.eval(Deferred[F, Throwable])
+      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, pollFailure)
       // Started after the subscription and cancelled before the disconnect that follows it.
-      _ <- consumer.pollLoop.compile.drain.background
+      _ <- consumer.pollLoop.compile.drain.onError(pollFailure.complete(_).void).background
     yield consumer
 
   /** node-rdkafka emits the event before it applies the change, and reports only the partitions added or revoked, which differ by rebalance protocol.
@@ -270,7 +273,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       underlying: confluent.RdConsumer,
       settings: ConsumerSettings[F, K, V],
       assignments: SignallingRef[F, Set[TopicPartition]],
-      polled: Queue[F, confluent.RdMessage]
+      polled: Queue[F, confluent.RdMessage],
+      pollFailure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
@@ -303,9 +307,14 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       */
     val pollLoop: Stream[F, Nothing] = Stream.repeatEval(fetch).flatMap(batch => Stream.emits(batch.toList)).evalMap(polled.offer).drain
 
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = Stream.fromQueueUnterminated(polled).evalMap(consumerRecord)
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
+      Stream.fromQueueUnterminated(polled).evalMap(consumerRecord).concurrently(Stream.exec(pollFailure.get.flatMap(F.raiseError[Unit])))
 
-    private def fetch: F[js.Array[confluent.RdMessage]] = callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done))
+    private def fetch: F[js.Array[confluent.RdMessage]] =
+      callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done)).recover:
+        // librdkafka reports a subscribed topic that does not exist yet through the consume, and the topic can still be
+        // created afterwards, so this keeps consuming for it.
+        case failure: KafkaException.BackendFailure if failure.code.contains(ErrorCode.UnknownTopicOrPartition) => js.Array()
 
     override val assignmentChanges: Stream[F, Set[TopicPartition]] = assignments.discrete
 

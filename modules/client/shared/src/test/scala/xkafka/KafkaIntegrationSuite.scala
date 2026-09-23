@@ -55,7 +55,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val topic          = validTopic(s"$topicPrefix-events")
     val topicPattern   = validTopicPattern(s"$topicPrefix-.*")
     val group          = validConsumerGroup(s"xkafka-integration-$suffix")
-    val clientSettings = ClientSettings.from(NonEmptyList.one(bootstrapServer), properties = Map("metadata.max.age.ms" -> "30000")).toOption.get
+    val clientSettings = ClientSettings.from(NonEmptyList.one(bootstrapServer), metadataRefreshInterval = 30.seconds).toOption.get
     val headers        = Headers(Header("x-xkafka-integration", Some(Chunk.array(Array[Byte](1, 2, 3)))))
     val partition      = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
     val first          =

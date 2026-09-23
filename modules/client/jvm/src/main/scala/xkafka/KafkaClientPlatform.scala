@@ -43,6 +43,7 @@ import org.apache.kafka.common.errors.{
   SslAuthenticationException
 }
 import org.apache.kafka.common.protocol.Errors
+import internal.ClientProperties
 import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
@@ -94,17 +95,19 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =
-      Fs2ProducerSettings(serializer(settings.keySerializer), serializer(settings.valueSerializer))
-        .withProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security))
-        .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
+      Fs2ProducerSettings(serializer(settings.keySerializer), serializer(settings.valueSerializer)).withProperties(
+        settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
+          ClientProperties(settings.client)
+      ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
 
     settings.client.clientId.fold(base)(base.withClientId)
 
   private def consumerSettings[K, V](settings: ConsumerSettings[F, K, V]): Fs2ConsumerSettings[F, K, V] =
     val base =
-      Fs2ConsumerSettings(deserializer(settings.keyDeserializer), deserializer(settings.valueDeserializer))
-        .withProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security))
-        .withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
+      Fs2ConsumerSettings(deserializer(settings.keyDeserializer), deserializer(settings.valueDeserializer)).withProperties(
+        settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
+          ClientProperties(settings.client)
+      ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
         .withPollTimeout(settings.pollTimeout).withDefaultApiTimeout(settings.requestTimeout).withProperty("enable.auto.commit", "false")
         .withAutoOffsetReset(
           settings.autoOffsetReset match

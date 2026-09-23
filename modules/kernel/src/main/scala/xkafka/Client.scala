@@ -43,6 +43,8 @@ val ManagedProperties: Set[String] =
     "enable.auto.commit",
     "enable.auto.offset.store",
     "default.api.timeout.ms",
+    "metadata.max.age.ms",
+    "topic.metadata.refresh.interval.ms",
     "security.protocol",
     "sasl.mechanism",
     "sasl.mechanisms",
@@ -109,34 +111,45 @@ sealed abstract case class ClientSettings private (
     bootstrapServers: NonEmptyList[String],
     clientId: Option[String],
     properties: Map[String, String],
-    security: SecuritySettings
+    security: SecuritySettings,
+    metadataRefreshInterval: FiniteDuration
 ):
   def withBootstrapServers(values: NonEmptyList[String]): ValidatedNel[SettingsError, ClientSettings] =
-    ClientSettings.from(values, clientId, properties, security)
+    ClientSettings.from(values, clientId, properties, security, metadataRefreshInterval)
 
-  def withClientId(value: String): ClientSettings = new ClientSettings(bootstrapServers, Some(value), properties, security) {}
+  def withClientId(value: String): ClientSettings =
+    new ClientSettings(bootstrapServers, Some(value), properties, security, metadataRefreshInterval) {}
 
-  def withoutClientId: ClientSettings = new ClientSettings(bootstrapServers, None, properties, security) {}
+  def withoutClientId: ClientSettings = new ClientSettings(bootstrapServers, None, properties, security, metadataRefreshInterval) {}
 
-  def withSecurity(value: SecuritySettings): ClientSettings = new ClientSettings(bootstrapServers, clientId, properties, value) {}
+  def withSecurity(value: SecuritySettings): ClientSettings =
+    new ClientSettings(bootstrapServers, clientId, properties, value, metadataRefreshInterval) {}
+
+  /** How long a topic created after a client started can stay unseen. */
+  def withMetadataRefreshInterval(value: FiniteDuration): ClientSettings =
+    new ClientSettings(bootstrapServers, clientId, properties, security, value) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ClientSettings] = withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ClientSettings] =
-    ClientSettings.from(bootstrapServers, clientId, values, security)
+    ClientSettings.from(bootstrapServers, clientId, values, security, metadataRefreshInterval)
 
-  override def toString: String = s"ClientSettings($bootstrapServers,$clientId,${redacted(properties)},$security)"
+  override def toString: String = s"ClientSettings($bootstrapServers,$clientId,${redacted(properties)},$security,$metadataRefreshInterval)"
 
 object ClientSettings:
+  /** Both backends refresh metadata every five minutes by default. */
+  val DefaultMetadataRefreshInterval: FiniteDuration = 5.minutes
+
   def from(
       bootstrapServers: NonEmptyList[String],
       clientId: Option[String] = None,
       properties: Map[String, String] = Map.empty,
-      security: SecuritySettings = SecuritySettings.Plaintext
+      security: SecuritySettings = SecuritySettings.Plaintext,
+      metadataRefreshInterval: FiniteDuration = ClientSettings.DefaultMetadataRefreshInterval
   ): ValidatedNel[SettingsError, ClientSettings] =
     val bootstrapErrors = bootstrapServers.toList.zipWithIndex.flatMap((server, index) => bootstrapServerError(server, index))
     validateSettings(bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client))
-      .map(_ => new ClientSettings(bootstrapServers, clientId, properties, security) {})
+      .map(_ => new ClientSettings(bootstrapServers, clientId, properties, security, metadataRefreshInterval) {})
 
 sealed abstract case class ProducerSettings[F[_], K, V] private (
     client: ClientSettings,

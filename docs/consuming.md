@@ -57,7 +57,8 @@ Every emitted stream must be consumed concurrently. `maxQueuedRecords` bounds
 how far ahead each partition buffers before it is held back.
 
 @:callout(warning)
-A consumer that subscribes to a topic before that topic exists will not see it
-until the backend refreshes its metadata, which defaults to five minutes. Lower
-`metadata.max.age.ms` if a consumer must discover a topic promptly.
+A consumer that subscribes to a topic before that topic exists sees it once the
+backend refreshes its metadata. `metadataRefreshInterval` sets how long that takes
+and defaults to five minutes, so lower it if a consumer must discover a topic
+promptly.
 @:@

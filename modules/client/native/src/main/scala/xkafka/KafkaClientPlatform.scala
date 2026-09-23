@@ -32,6 +32,7 @@ import cats.effect.std.{Queue, Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.concurrent.SignallingRef
+import internal.ClientProperties
 import internal.librdkafka.Bindings
 import internal.security.SecurityProperties
 
@@ -111,9 +112,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       _           <- Resource.eval(client(subscribe(client.handle, subscription)))
       polled      <- Resource.eval(Queue.bounded[F, NativeRecord](RecordQueueSize))
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
-      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments)
+      // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
+      // reads the records instead of leaving a consumer that never receives anything.
+      pollFailure <- Resource.eval(Deferred[F, Throwable])
+      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, pollFailure)
       // Started after the client and cancelled before it, so no poll is in flight when the handle is destroyed.
-      _ <- consumer.pollLoop.compile.drain.background
+      _ <- consumer.pollLoop.compile.drain.onError(pollFailure.complete(_).void).background
     yield consumer
 
   private def createProducer[K, V](settings: ProducerSettings[F, K, V]): F[CVoidPtr] =
@@ -122,7 +126,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         given Zone                        = zone
         val (error, errorCode)            = errorSlots
         val (names, values, propertySize) =
-          nativeProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security))
+          nativeProperties(
+            settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security) ++
+              ClientProperties(settings.client)
+          )
         val producer =
           Bindings.xkafka_producer_new(
             toCString(settings.client.bootstrapServers.toList.mkString(",")),
@@ -143,7 +150,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         given Zone                        = zone
         val (error, errorCode)            = errorSlots
         val (names, values, propertySize) =
-          nativeProperties(settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security))
+          nativeProperties(
+            settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security) ++
+              ClientProperties(settings.client)
+          )
         val consumer =
           Bindings.xkafka_consumer_new(
             toCString(settings.client.bootstrapServers.toList.mkString(",")),
@@ -367,7 +377,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       client: NativeClient,
       settings: ConsumerSettings[F, K, V],
       polled: Queue[F, NativeRecord],
-      assignments: SignallingRef[F, Set[TopicPartition]]
+      assignments: SignallingRef[F, Set[TopicPartition]],
+      pollFailure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
@@ -387,7 +398,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         .evalMap((record, generation) => record.traverse_(polled.offer).as(generation)).changes
         .evalMap(_ => client(readAssignment()).flatMap(assignments.set)).drain
 
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = Stream.fromQueueUnterminated(polled).evalMap(decode)
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
+      Stream.fromQueueUnterminated(polled).evalMap(decode).concurrently(Stream.exec(pollFailure.get.flatMap(F.raiseError[Unit])))
 
     override def assignment: F[Set[TopicPartition]] = client(readAssignment())
 
@@ -419,7 +431,11 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         val message            =
           Bindings.xkafka_consumer_poll(client.handle, settings.pollTimeout.toMillis.toInt, status, error, ErrorBufferSize.toUSize, errorCode)
 
-        if !status < 0 then throw nativeError(error, errorCode)
+        if !status < 0 then
+          val failure = nativeError(error, errorCode)
+          // librdkafka reports a subscribed topic that does not exist yet through the poll, and the topic can still be
+          // created afterwards, so this keeps polling for it.
+          if failure.code.contains(ErrorCode.UnknownTopicOrPartition) then None else throw failure
         else if !status == 0 then None
         else
           try Some(copyMessage(message))
