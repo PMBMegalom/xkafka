@@ -4,6 +4,8 @@ import java.security.MessageDigest
 import scala.sys.process.Process
 import scala.sys.process.ProcessLogger
 
+import laika.helium.config.{HeliumIcon, IconLink}
+
 ThisBuild / scalaVersion     := "3.3.8"
 ThisBuild / tlBaseVersion    := "0.1"
 ThisBuild / organization     := "io.github.pmbmegalom"
@@ -123,11 +125,11 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   timeoutMinutes = Some(45)
 )
 
-// sbt-typelevel builds its dependency submission job with the plugin's own default runner, which stays on
-// ubuntu-22.04. The job earns its keep through the security alerts, so only its runner is corrected.
+// sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
+// stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (job.id == "dependency-submission") job.withOses(List("ubuntu-24.04")) else job
+    if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04")) else job
   }
 }
 
@@ -319,6 +321,16 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     libraryDependencies ++= Seq(
       "org.typelevel" %% "fs2-kafka" % fs2KafkaVersion,
       "org.slf4j"      % "slf4j-nop" % slf4jVersion % Test
+    )
+  )
+
+lazy val docs = project
+  .in(file("site"))
+  .enablePlugins(TypelevelSitePlugin)
+  .dependsOn(client.jvm)
+  .settings(
+    tlSiteHelium := tlSiteHelium.value.site.topNavigationBar(
+      homeLink = IconLink.external("https://github.com/PMBMegalom/xkafka", HeliumIcon.home)
     )
   )
 
