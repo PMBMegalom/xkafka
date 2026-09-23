@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Contributing</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="helium/site/laika-helium.css" />
+  <script src="helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="index.html">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
+    <li class="level1 active nav-leaf"><a href="#">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Contributing</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#running-the-tests">Running the tests</a></li>
+    <li class="level1 nav-leaf"><a href="#broker-backed-tests">Broker-backed tests</a></li>
+    <li class="level1 nav-leaf"><a href="#librdkafka-for-the-native-build">librdkafka for the Native build</a></li>
+    <li class="level1 nav-leaf"><a href="#the-c-shim">The C shim</a></li>
+    <li class="level1 nav-leaf"><a href="#published-artifacts">Published artifacts</a></li>
+    <li class="level1 nav-leaf"><a href="#formatting">Formatting</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="contributing" class="title">Contributing</h1>
+        
+        <h2 id="running-the-tests" class="section"><a class="anchor-link left" href="#running-the-tests"><i class="icofont-laika link">&#xef71;</i></a>Running the tests</h2>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt test</span></code></pre>
+        <p>That runs the ordinary JVM, Scala.js, and Scala Native suites. Tests which need
+        a broker are skipped unless one is configured.</p>
+        
+        <h2 id="broker-backed-tests" class="section"><a class="anchor-link left" href="#broker-backed-tests"><i class="icofont-laika link">&#xef71;</i></a>Broker-backed tests</h2>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh</span></code></pre>
+        <p>The script starts one pinned Kafka broker with plaintext, TLS, and SASL_SSL
+        listeners, runs the same suites against all three backends, then removes the
+        broker and its volume.</p>
+        <p>Three suites need it:</p>
+        <ul>
+          <li><code>KafkaIntegrationSuite</code> covers produce, consume, and commit round trips.</li>
+          <li><code>KafkaConformanceSuite</code> asserts behaviour every backend is expected to share,
+          identically on each one.</li>
+          <li><code>KafkaSecuritySuite</code> covers TLS and SASL.</li>
+        </ul>
+        <p>A case listed as divergent in the conformance suite is marked as expected to
+        fail on the named backends. Fixing the backend makes the marked case fail, so a
+        marker cannot outlive the divergence it records.</p>
+        
+        <h2 id="librdkafka-for-the-native-build" class="section"><a class="anchor-link left" href="#librdkafka-for-the-native-build"><i class="icofont-laika link">&#xef71;</i></a>librdkafka for the Native build</h2>
+        <p>The build downloads librdkafka, verifies its SHA-256 checksum, builds it, and
+        links it statically for the Native tests. To prepare it explicitly:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt clientNative/prepareLibrdkafka</span></code></pre>
+        <p>A prebuilt static installation can be supplied instead:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>XKAFKA_LIBRDKAFKA_PREFIX=/path/to/librdkafka-prefix sbt test</span></code></pre>
+        <p>The prefix must contain <code>include/librdkafka/rdkafka.h</code> and <code>lib/librdkafka.a</code>.</p>
+        
+        <h2 id="the-c-shim" class="section"><a class="anchor-link left" href="#the-c-shim"><i class="icofont-laika link">&#xef71;</i></a>The C shim</h2>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/native-leak-check.sh</span></code></pre>
+        <p>Runs the Native smoke binary against a broker under <code>leaks</code> on macOS or
+        <code>valgrind</code> on Linux, so the shim&#39;s allocations are exercised through a real
+        round trip.</p>
+        
+        <h2 id="published-artifacts" class="section"><a class="anchor-link left" href="#published-artifacts"><i class="icofont-laika link">&#xef71;</i></a>Published artifacts</h2>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/downstream-test.sh</span></code></pre>
+        <p>Builds a separate application against the published artifacts and runs it
+        against a broker, including both ways a Native application reaches librdkafka.</p>
+        
+        <h2 id="formatting" class="section"><a class="anchor-link left" href="#formatting"><i class="icofont-laika link">&#xef71;</i></a>Formatting</h2>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt scalafmtAll scalafmtSbt</span></code></pre>
+        <p>Verify without mutating using <code>scalafmtCheckAll</code> and <code>scalafmtSbtCheck</code>.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Platform notes</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="helium/site/laika-helium.css" />
+  <script src="helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="index.html">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 active nav-leaf"><a href="#">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Platform notes</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#record-delivery">Record delivery</a></li>
+    <li class="level1 nav-node"><a href="#scala-native">Scala Native</a></li>
+    <li class="level2 nav-leaf"><a href="#linking-an-application">Linking an application</a></li>
+    <li class="level1 nav-leaf"><a href="#scala-js">Scala.js</a></li>
+    <li class="level1 nav-leaf"><a href="#transformations">Transformations</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="platform-notes" class="title">Platform notes</h1>
+        <p>The API is the same everywhere. These are the places the runtimes differ.</p>
+        
+        <h2 id="record-delivery" class="section"><a class="anchor-link left" href="#record-delivery"><i class="icofont-laika link">&#xef71;</i></a>Record delivery</h2>
+        <p>On the JVM the partition streams come from fs2-kafka and are fed independently.
+        On Scala.js and Scala Native they share one record source: a single poll owned
+        by the consumer, feeding both the record stream and the assignment. A partition
+        whose buffer fills is paused at the broker until its reader catches up, so a
+        slow partition does not hold up the others.</p>
+        <p>A consumer which stops reading records for long enough stops seeing rebalances
+        too, because both come from that one poll.</p>
+        
+        <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
+        <p>The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
+        OAUTHBEARER, and gzip and zstd compression enabled, so it can reach
+        authenticated brokers and read compressed topics.</p>
+        <p>librdkafka links these against system libraries, so any application linking the
+        Native backend needs OpenSSL, zlib, and zstd available:
+        <code>libssl-dev</code>, <code>zlib1g-dev</code>, and <code>libzstd-dev</code> on Debian and Ubuntu, or
+        <code>brew install openssl@3 zstd zlib</code> on macOS. Homebrew keeps them keg-only, so
+        on macOS their locations have to be named when linking.</p>
+        
+        <h3 id="linking-an-application" class="section"><a class="anchor-link left" href="#linking-an-application"><i class="icofont-laika link">&#xef71;</i></a>Linking an application</h3>
+        <p>Published Native artifacts contain the C glue code and request <code>-lrdkafka</code>.
+        Applications with librdkafka installed in standard compiler and linker locations
+        need no additional xkafka settings. For a nonstandard installation:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
+  .</span><span class="identifier">withCompileOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-I/path/to/librdkafka/include&quot;</span><span>)
+  .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>)</span></code></pre>
+        <p>Linking the static <code>librdkafka.a</code> also needs the libraries it was built
+        against, named in this order:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
+  .</span><span class="identifier">withCompileOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-I/path/to/librdkafka/include&quot;</span><span>)
+  .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> ++ </span><span class="type-name">Seq</span><span>(
+    </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>, </span><span class="string-literal">&quot;-lrdkafka&quot;</span><span>, </span><span class="string-literal">&quot;-lssl&quot;</span><span>, </span><span class="string-literal">&quot;-lcrypto&quot;</span><span>, </span><span class="string-literal">&quot;-lz&quot;</span><span>, </span><span class="string-literal">&quot;-lzstd&quot;</span><span>
+  ))</span></code></pre>
+        <p>On macOS add a <code>-L</code> for the OpenSSL installation as well.</p>
+        
+        <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
+        <p>The backend is <code>@confluentinc/kafka-javascript</code>, reached through its librdkafka
+        configuration keys. It targets Node.js rather than browsers.</p>
+        
+        <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
+        <p>Serializers, deserializers, producer and consumer settings, committable offsets
+        and records, partition record streams, and consumers have cats-tagless
+        <code>FunctorK</code> instances. <code>KafkaProducer</code> has <code>mapK</code> but no <code>FunctorK</code> instance,
+        because translating the acknowledgement nested inside the enqueue needs a
+        <code>Functor</code> for the target effect. <code>KafkaClient.imapK</code> transforms a complete
+        client between effects in both directions while preserving <code>Resource</code>
+        cancellation semantics.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>
