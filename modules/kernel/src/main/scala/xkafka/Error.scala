@@ -91,7 +91,10 @@ object ErrorCode:
       case -185 | -192        => RequestTimedOut          // _TIMED_OUT, _MSG_TIMED_OUT
       case -169               => SaslAuthenticationFailed // _AUTHENTICATION
       case -181               => SslAuthenticationFailed  // _SSL
-      case other              => fromProtocol(other)
+      // librdkafka normalizes _UNKNOWN_TOPIC to the protocol code before a consumer sees it, and these carry the same
+      // meaning wherever it does not.
+      case -188 | -190 => UnknownTopicOrPartition // _UNKNOWN_TOPIC, _UNKNOWN_PARTITION
+      case other       => fromProtocol(other)
 
 sealed abstract class KafkaException(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
 
