@@ -40,20 +40,27 @@ object PartitionRecords:
   private[xkafka] def fromConsumer[F[_]: Async, K, V](
       consumer: KafkaConsumer[F, K, V],
       assignments: Stream[F, Set[TopicPartition]],
-      maxQueuedRecords: Int
+      maxQueuedRecords: Int,
+      pausing: PartitionPausing[F]
   ): Stream[F, PartitionRecords[F, K, V]] =
     if maxQueuedRecords <= 0 then Stream.raiseError(new IllegalArgumentException("maxQueuedRecords must be positive"))
     else
-      Stream.eval(Runtime.create(consumer, assignments, maxQueuedRecords)).flatMap: runtime =>
+      Stream.eval(Runtime.create(consumer, assignments, maxQueuedRecords, pausing)).flatMap: runtime =>
         runtime.stream.onFinalize(runtime.close)
 
-  private final case class PartitionState[F[_], K, V](topicPartition: TopicPartition, channel: Channel[F, CommittableConsumerRecord[F, K, V]]):
-    def public: PartitionRecords[F, K, V] = PartitionRecords(topicPartition, channel.stream)
+  /** `queued` counts what has been routed and not yet read, which is what decides whether the partition is paused. */
+  private final case class PartitionState[F[_], K, V](
+      topicPartition: TopicPartition,
+      channel: Channel[F, CommittableConsumerRecord[F, K, V]],
+      queued: Ref[F, Int],
+      paused: Ref[F, Boolean]
+  )
 
   private final class Runtime[F[_], K, V](
       consumer: KafkaConsumer[F, K, V],
       assignments: Stream[F, Set[TopicPartition]],
       maxQueuedRecords: Int,
+      pausing: PartitionPausing[F],
       output: Channel[F, PartitionRecords[F, K, V]],
       states: Ref[F, Map[TopicPartition, PartitionState[F, K, V]]],
       mutex: Mutex[F]
@@ -77,7 +84,27 @@ object PartitionRecords:
       * A record is itself proof that its partition is assigned, so routing never waits for confirmation and never discards one for want of it.
       */
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
-      stateFor(record.record.topicPartition).flatMap(state => state.channel.send(record).void)
+      stateFor(record.record.topicPartition).flatMap: state =>
+        state.channel.send(record) >> state.queued.updateAndGet(_ + 1).flatMap(queued => pauseWhenFull(state, queued))
+
+    /** A partition nobody is reading stops being fetched, so the records beside it keep arriving.
+      *
+      * Records already in flight when the pause is issued still arrive, which is why the channel is unbounded. Kafka holds the paused partition's
+      * position, so resuming continues from where the reader got to.
+      */
+    private def pauseWhenFull(state: PartitionState[F, K, V], queued: Int): F[Unit] =
+      F.whenA(queued >= maxQueuedRecords):
+        state.paused.getAndSet(true).flatMap(wasPaused => F.unlessA(wasPaused)(pausing.pause(Set(state.topicPartition))))
+
+    private def resumeWhenDrained(state: PartitionState[F, K, V], queued: Int): F[Unit] =
+      F.whenA(queued < maxQueuedRecords):
+        state.paused.getAndSet(false).flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition))))
+
+    private def readable(state: PartitionState[F, K, V]): PartitionRecords[F, K, V] =
+      PartitionRecords(
+        state.topicPartition,
+        state.channel.stream.evalTap(_ => state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued)))
+      )
 
     private def stateFor(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
       mutex.lock.surround:
@@ -86,10 +113,13 @@ object PartitionRecords:
             case Some(state) => F.pure(state)
             case None        =>
               for
-                channel <- Channel.bounded[F, CommittableConsumerRecord[F, K, V]](maxQueuedRecords)
-                state = PartitionState(topicPartition, channel)
+                // Pausing is what bounds this, so a record already in flight when the pause was issued still lands.
+                channel <- Channel.unbounded[F, CommittableConsumerRecord[F, K, V]]
+                queued  <- Ref.of[F, Int](0)
+                paused  <- Ref.of[F, Boolean](false)
+                state = PartitionState(topicPartition, channel, queued, paused)
                 _ <- states.set(current.updated(topicPartition, state))
-                _ <- output.send(state.public).void
+                _ <- output.send(readable(state)).void
               yield state
 
     private def revokeMissing(assignment: Set[TopicPartition]): F[Unit] =
@@ -103,10 +133,11 @@ object PartitionRecords:
     def create[F[_]: Async, K, V](
         consumer: KafkaConsumer[F, K, V],
         assignments: Stream[F, Set[TopicPartition]],
-        maxQueuedRecords: Int
+        maxQueuedRecords: Int,
+        pausing: PartitionPausing[F]
     ): F[Runtime[F, K, V]] =
       for
         output <- Channel.unbounded[F, PartitionRecords[F, K, V]]
         states <- Ref.of[F, Map[TopicPartition, PartitionState[F, K, V]]](Map.empty)
         mutex  <- Mutex[F]
-      yield Runtime(consumer, assignments, maxQueuedRecords, output, states, mutex)
+      yield Runtime(consumer, assignments, maxQueuedRecords, pausing, output, states, mutex)

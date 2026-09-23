@@ -371,6 +371,13 @@ trait KafkaConsumer[F[_], K, V]:
 
   def assignment: F[Set[TopicPartition]]
 
+  /** How this backend stops and restarts delivery for individual partitions.
+    *
+    * A backend whose records all arrive from one source overrides this, so that a partition nobody is reading stops being fetched and the partitions
+    * beside it keep flowing. One that feeds each partition on its own has nothing to hold back and keeps the default.
+    */
+  private[xkafka] def pausing(using Applicative[F]): PartitionPausing[F] = PartitionPausing.noop
+
   /** Emits the current assignment and then each distinct one afterwards. */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
 
@@ -382,7 +389,7 @@ trait KafkaConsumer[F[_], K, V]:
     *   positive queue bound for each partition stream
     */
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
-    PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords)
+    PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords, pausing)
 
   /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
   def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]

@@ -25,6 +25,7 @@ import scala.scalanative.libc.string.memcpy
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
+import cats.Applicative
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
@@ -516,6 +517,31 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             TopicPartition(topic, partition)
           .toSet
         finally Bindings.xkafka_assignment_destroy(assignment)
+
+    override def pausing(using Applicative[F]): PartitionPausing[F] =
+      new PartitionPausing[F]:
+        override def pause(topicPartitions: Set[TopicPartition]): F[Unit] =
+          if topicPartitions.isEmpty then F.unit else client(setPaused(topicPartitions, paused = true))
+
+        override def resume(topicPartitions: Set[TopicPartition]): F[Unit] =
+          if topicPartitions.isEmpty then F.unit else client(setPaused(topicPartitions, paused = false))
+
+    private def setPaused(topicPartitions: Set[TopicPartition], paused: Boolean): Unit =
+      Zone.acquire: zone =>
+        given Zone     = zone
+        val entries    = topicPartitions.toVector
+        val topics     = alloc[CString](entries.size)
+        val partitions = alloc[CInt](entries.size)
+        entries.iterator.zipWithIndex.foreach:
+          case (topicPartition, index) =>
+            topics(index) = toCString(topicPartition.topic.value)
+            partitions(index) = topicPartition.partition.value
+        val (error, errorCode) = errorSlots
+        val result             =
+          if paused then
+            Bindings.xkafka_consumer_pause(client.handle, topics, partitions, entries.size.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+          else Bindings.xkafka_consumer_resume(client.handle, topics, partitions, entries.size.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+        if result != 0 then throw nativeError(error, errorCode)
 
     private def readCommitted(topicPartitions: Set[TopicPartition]): Map[TopicPartition, Option[Offset]] =
       Zone.acquire: zone =>

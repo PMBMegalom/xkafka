@@ -78,6 +78,10 @@ private[xkafka] trait RdConsumer extends js.Object:
 
   def assignments(): js.Array[RdTopicPartition] = js.native
 
+  def pause(topicPartitions: js.Array[RdTopicPartition]): this.type = js.native
+
+  def resume(topicPartitions: js.Array[RdTopicPartition]): this.type = js.native
+
   def committed(
       topicPartitions: js.Array[RdTopicPartition],
       timeout: Int,

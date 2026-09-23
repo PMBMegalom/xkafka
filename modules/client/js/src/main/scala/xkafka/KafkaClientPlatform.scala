@@ -25,6 +25,7 @@ import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array, Uint8Array}
 
+import cats.Applicative
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
@@ -274,6 +275,17 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
+
+    override def pausing(using Applicative[F]): PartitionPausing[F] =
+      new PartitionPausing[F]:
+        override def pause(topicPartitions: Set[TopicPartition]): F[Unit] =
+          F.whenA(topicPartitions.nonEmpty)(F.delay(underlying.pause(requested(topicPartitions))))
+
+        override def resume(topicPartitions: Set[TopicPartition]): F[Unit] =
+          F.whenA(topicPartitions.nonEmpty)(F.delay(underlying.resume(requested(topicPartitions))))
+
+    private def requested(topicPartitions: Set[TopicPartition]): js.Array[confluent.RdTopicPartition] =
+      topicPartitions.iterator.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
 
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
