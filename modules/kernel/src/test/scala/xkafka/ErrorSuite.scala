@@ -21,6 +21,7 @@
 
 package xkafka
 
+import cats.data.NonEmptyList
 import munit.FunSuite
 
 final class ErrorSuite extends FunSuite:
@@ -62,6 +63,20 @@ final class ErrorSuite extends FunSuite:
     // Positive librdkafka codes are protocol codes, so they classify identically.
     assertEquals(ErrorCode.fromLibrdkafka(3), ErrorCode.UnknownTopicOrPartition)
     assertEquals(ErrorCode.fromLibrdkafka(-1), ErrorCode.Other(-1))
+
+  test("a rejected value carries its reason into the effect"):
+    val raised = Topic.from("").liftTo[Either[Throwable, *]].swap.toOption
+
+    assertEquals(raised.map(_.getMessage), Some(ValidationError.EmptyTopic.message))
+    assertEquals(raised.collect { case error: KafkaException.InvalidValue => error.error }, Some(ValidationError.EmptyTopic))
+    assertEquals(Topic.from("events").liftTo[Either[Throwable, *]].map(_.value), Right("events"))
+
+  test("rejected settings carry every reason into the effect"):
+    val raised = ClientSettings.from(NonEmptyList.of("", " ")).liftTo[Either[Throwable, *]].swap.toOption
+    val errors = raised.collect { case error: KafkaException.InvalidSettings => error.errors.toList }
+
+    assertEquals(errors.map(_.size), Some(2))
+    assert(raised.exists(_.getMessage.contains("must not be blank")), raised.map(_.getMessage))
 
   test("invalid backend responses retain their detail"):
     val error = new KafkaException.InvalidBackendResponse("negative offset")

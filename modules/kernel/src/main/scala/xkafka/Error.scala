@@ -21,6 +21,10 @@
 
 package xkafka
 
+import cats.ApplicativeThrow
+import cats.data.{NonEmptyList, ValidatedNel}
+import cats.syntax.all.*
+
 /** A portable classification of a backend failure.
   *
   * The named cases are Kafka protocol errors, which every broker reports with the same code, plus the client-side conditions all three backends can
@@ -107,6 +111,20 @@ object KafkaException:
   object BackendFailure:
     private def message(detail: String, code: Option[ErrorCode]): String = s"Kafka backend failure${code.fold("")(value => s" [$value]")}: $detail"
 
+  /** A value that does not meet the rules of the type it was to become. */
+  final class InvalidValue(val error: ValidationError) extends KafkaException(error.message)
+
+  /** Settings that could not be constructed, carrying every reason they could not. */
+  final class InvalidSettings(val errors: NonEmptyList[SettingsError]) extends KafkaException(errors.toList.map(_.message).mkString("; "))
+
   /** A backend response that cannot be represented by the portable API. */
   final class InvalidBackendResponse(val detail: String, cause: Throwable = null)
       extends KafkaException(s"Kafka backend returned an invalid response: $detail", cause)
+
+/** Carries the reason a value was rejected into `F`, so a validated value composes with the effects around it. */
+extension [A](result: Either[ValidationError, A])
+  def liftTo[F[_]](using F: ApplicativeThrow[F]): F[A] = F.fromEither(result.leftMap(KafkaException.InvalidValue(_)))
+
+/** Carries every reason settings were rejected into `F`. */
+extension [A](result: ValidatedNel[SettingsError, A])
+  def liftTo[F[_]](using F: ApplicativeThrow[F]): F[A] = F.fromEither(result.toEither.leftMap(KafkaException.InvalidSettings(_)))
