@@ -114,10 +114,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
       // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
       // reads the records instead of leaving a consumer that never receives anything.
-      pollFailure <- Resource.eval(Deferred[F, Throwable])
-      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, pollFailure)
+      failure <- Resource.eval(Deferred[F, Throwable])
+      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, failure)
       // Started after the client and cancelled before it, so no poll is in flight when the handle is destroyed.
-      _ <- consumer.pollLoop.compile.drain.onError(pollFailure.complete(_).void).background
+      _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
 
   private def createProducer[K, V](settings: ProducerSettings[F, K, V]): F[CVoidPtr] =
@@ -378,7 +378,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       settings: ConsumerSettings[F, K, V],
       polled: Queue[F, NativeRecord],
       assignments: SignallingRef[F, Set[TopicPartition]],
-      pollFailure: Deferred[F, Throwable]
+      failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
@@ -399,11 +399,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         .evalMap(_ => client(readAssignment()).flatMap(assignments.set)).drain
 
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      Stream.fromQueueUnterminated(polled).evalMap(decode).concurrently(Stream.exec(pollFailure.get.flatMap(F.raiseError[Unit])))
+      Stream.fromQueueUnterminated(polled).evalMap(decode).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def assignment: F[Set[TopicPartition]] = client(readAssignment())
 
-    override val assignmentChanges: Stream[F, Set[TopicPartition]] = assignments.discrete
+    override val assignmentChanges: Stream[F, Set[TopicPartition]] =
+      assignments.discrete.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty) else client(readCommitted(topicPartitions))

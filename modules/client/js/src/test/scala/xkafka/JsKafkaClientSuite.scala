@@ -21,6 +21,7 @@
 
 package xkafka
 
+import scala.concurrent.duration.*
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.Uint8Array
@@ -250,6 +251,51 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
       // The consumer poll timeout has to reach the client, which is the only place it takes effect.
       assertEquals(pollTimeouts.toList, List(ConsumerSettings.DefaultPollTimeout.toMillis.toInt))
+
+  test("a rebalance the client cannot read fails the consumer rather than stopping its assignment tracking"):
+    for
+      handlers <- IO(js.Array[js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]]())
+      consumer =
+        js.Dynamic.literal(
+          connect =
+            ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+              js.Any,
+              js.Function2[confluent.RdError | Null, js.Any, Unit],
+              Unit
+            ],
+          disconnect =
+            ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+              js.Function2[confluent.RdError | Null, js.Any, Unit],
+              Unit
+            ],
+          setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+          on =
+            (
+                (_: String, handler: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) =>
+                  handlers.push(handler): Unit
+            ): js.Function2[String, js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit], Unit],
+          subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
+          consume =
+            ((_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) => done(null, js.Array())): js.Function2[
+              Int,
+              js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit],
+              Unit
+            ],
+          // A partition this client rejects, so reading the assignment the rebalance reports raises.
+          assignments =
+            (() => js.Array(js.Dynamic.literal(topic = "events", partition = -1).asInstanceOf[confluent.RdTopicPartition])): js.Function0[
+              js.Array[confluent.RdTopicPartition]
+            ]
+        ).asInstanceOf[confluent.RdConsumer]
+      settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer))
+          .consumer(settings, Subscription.Topics(NonEmptyList.one(topic("events")))).use: value =>
+            IO(handlers.foreach(_(null, js.Array()))) *> value.records.compile.drain.timeout(5.seconds).attempt
+    yield assert(
+      outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]),
+      s"the unreadable assignment should reach whoever reads the consumer, got $outcome"
+    )
 
   private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 
