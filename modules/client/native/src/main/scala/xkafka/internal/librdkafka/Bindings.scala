@@ -167,6 +167,17 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  def xkafka_consumer_position(
+      consumer: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      offsets: Ptr[CLongLong],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_consumer_watermark_offsets(
       consumer: CVoidPtr,
       topic: CString,

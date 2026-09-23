@@ -99,6 +99,8 @@ private[xkafka] trait RdConsumer extends js.Object:
 
   def seek(topicPartition: RdTopicPartitionOffset, timeout: js.Any, callback: js.Function1[RdError | Null, Unit]): this.type = js.native
 
+  def position(topicPartitions: js.Array[RdTopicPartition]): js.Array[RdTopicPartitionOffset] = js.native
+
   def getMetadata(options: js.Any, callback: js.Function2[RdError | Null, RdMetadata, Unit]): js.Any = js.native
 
   def setDefaultConsumeTimeout(timeoutMs: Int): Unit = js.native

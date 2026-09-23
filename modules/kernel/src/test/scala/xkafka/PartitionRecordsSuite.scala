@@ -98,6 +98,9 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       override def partitionsFor(topic: Topic): IO[Set[Partition]]                                                              = IO.pure(Set.empty)
       override def listTopics: IO[Map[Topic, Set[Partition]]]                                                                   = IO.pure(Map.empty)
       override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]                                               = IO.unit
+      override def seekToBeginning(topicPartitions: Set[TopicPartition]): IO[Unit]                                              = IO.unit
+      override def seekToEnd(topicPartitions: Set[TopicPartition]): IO[Unit]                                                    = IO.unit
+      override def position(topicPartition: TopicPartition): IO[Option[Offset]]                                                 = IO.pure(None)
 
   private def record(topicPartition: TopicPartition, offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
     val partition       = topicPartition

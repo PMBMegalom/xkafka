@@ -424,6 +424,19 @@ trait KafkaConsumer[F[_], K, V]:
 
   def seek(topicPartition: TopicPartition, offset: Offset): F[Unit]
 
+  /** Moves the next fetch for each requested topic-partition to the earliest record the broker still holds. */
+  def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit]
+
+  /** Moves the next fetch for each requested topic-partition past the latest record the broker holds. */
+  def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit]
+
+  /** Returns the offset this consumer reads next, or `None` where it has not consumed from the partition yet.
+    *
+    * A backend may settle on a position earlier than that, such as when a seek names an offset, so the value every backend agrees on is the one after
+    * records have been consumed.
+    */
+  def position(topicPartition: TopicPartition): F[Option[Offset]]
+
   final def mapK[G[_]](fk: FunctionK[F, G]): KafkaConsumer[G, K, V] =
     new KafkaConsumer[G, K, V]:
       override val records: Stream[G, CommittableConsumerRecord[G, K, V]] = self.records.map(_.mapK(fk)).translate(fk)
@@ -446,6 +459,12 @@ trait KafkaConsumer[F[_], K, V]:
       override def listTopics: G[Map[Topic, Set[Partition]]] = fk(self.listTopics)
 
       override def seek(topicPartition: TopicPartition, offset: Offset): G[Unit] = fk(self.seek(topicPartition, offset))
+
+      override def seekToBeginning(topicPartitions: Set[TopicPartition]): G[Unit] = fk(self.seekToBeginning(topicPartitions))
+
+      override def seekToEnd(topicPartitions: Set[TopicPartition]): G[Unit] = fk(self.seekToEnd(topicPartitions))
+
+      override def position(topicPartition: TopicPartition): G[Option[Offset]] = fk(self.position(topicPartition))
 
       override private[xkafka] def pausing: PartitionPausing[G] = self.pausing.mapK(fk)
 

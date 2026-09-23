@@ -326,9 +326,12 @@ final class ClientSuite extends FunSuite:
           Some(topicPartitions.map(_ -> nextOffset).toMap)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(timestampsToSearch.keys.map(_ -> Some(offset)).toMap)
-        override def partitionsFor(topic: Topic): Option[Set[Partition]]                = Some(Set(partition))
-        override def listTopics: Option[Map[Topic, Set[Partition]]]                     = Some(Map(topic -> Set(partition)))
-        override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit] = Some(())
+        override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
+        override def listTopics: Option[Map[Topic, Set[Partition]]]                      = Some(Map(topic -> Set(partition)))
+        override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit]  = Some(())
+        override def seekToBeginning(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
+        override def seekToEnd(topicPartitions: Set[TopicPartition]): Option[Unit]       = Some(())
+        override def position(topicPartition: TopicPartition): Option[Option[Offset]]    = Some(Some(nextOffset))
     val mapped = FunctorK[[F[_]] =>> KafkaConsumer[F, String, String]].mapK(source)(optionToSyncIO)
 
     val result =
@@ -357,6 +360,9 @@ final class ClientSuite extends FunSuite:
     )
     assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), Set(partition))
     assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> Set(partition)))
+    assertEquals(mapped.position(consumerRecord.topicPartition).unsafeRunSync(), Some(nextOffset))
+    assertEquals(mapped.seekToBeginning(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
+    assertEquals(mapped.seekToEnd(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
 
   test("KafkaConsumer keeps backend pausing after mapK"):
     val pausedPartitions = scala.collection.mutable.ListBuffer.empty[Set[TopicPartition]]
@@ -370,10 +376,13 @@ final class ClientSuite extends FunSuite:
         override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]        = Some(Map.empty)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(Map.empty)
-        override def partitionsFor(topic: Topic): Option[Set[Partition]]                = Some(Set(partition))
-        override def listTopics: Option[Map[Topic, Set[Partition]]]                     = Some(Map.empty)
-        override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit] = Some(())
-        override val pausing: PartitionPausing[Option]                                  =
+        override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
+        override def listTopics: Option[Map[Topic, Set[Partition]]]                      = Some(Map.empty)
+        override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit]  = Some(())
+        override def seekToBeginning(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
+        override def seekToEnd(topicPartitions: Set[TopicPartition]): Option[Unit]       = Some(())
+        override def position(topicPartition: TopicPartition): Option[Option[Offset]]    = Some(Some(nextOffset))
+        override val pausing: PartitionPausing[Option]                                   =
           new PartitionPausing.Backend[Option]:
             override def pause(topicPartitions: Set[TopicPartition]): Option[Unit] =
               pausedPartitions += topicPartitions

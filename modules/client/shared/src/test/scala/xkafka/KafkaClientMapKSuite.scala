@@ -81,6 +81,9 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]       = IO.pure(Map.empty)
             override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] =
               IO.pure(Map.empty)
-            override def partitionsFor(topic: Topic): IO[Set[Partition]]                = IO.pure(Set.empty)
-            override def listTopics: IO[Map[Topic, Set[Partition]]]                     = IO.pure(Map.empty)
-            override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit] = IO.unit
+            override def partitionsFor(topic: Topic): IO[Set[Partition]]                 = IO.pure(Set.empty)
+            override def listTopics: IO[Map[Topic, Set[Partition]]]                      = IO.pure(Map.empty)
+            override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]  = IO.unit
+            override def seekToBeginning(topicPartitions: Set[TopicPartition]): IO[Unit] = IO.unit
+            override def seekToEnd(topicPartitions: Set[TopicPartition]): IO[Unit]       = IO.unit
+            override def position(topicPartition: TopicPartition): IO[Option[Offset]]    = IO.pure(None)

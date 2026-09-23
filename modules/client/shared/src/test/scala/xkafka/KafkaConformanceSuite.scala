@@ -264,6 +264,36 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(arrivals._1.record.value, Some("value"))
         assert(elapsed < bound, s"$backend took $elapsed to see a topic created after subscribing, with a $refresh refresh interval")
 
+  test(conformance("seeking to the beginning replays a partition a consumer would otherwise skip")):
+    withBroker: server =>
+      val topic     = uniqueTopic("ends")
+      val partition = validPartition(0)
+      val values    = List("one", "two", "three")
+      val records   = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), partition)))
+
+      for
+        _      <- produce(server, records)
+        client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        // Starting at the latest offset leaves nothing waiting to be read, so whatever arrives arrives because of the seek.
+        settings <- ConsumerSettings.from(client, uniqueGroup("ends"), optionalDeserializer, optionalDeserializer, AutoOffsetReset.Latest).liftTo[IO]
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+            val topicPartition = TopicPartition(topic, partition)
+            for
+              // A seek can only name a partition this consumer already owns.
+              _        <- assignmentOf(consumer, 1)
+              _        <- consumer.seekToEnd(Set(topicPartition))
+              _        <- consumer.seekToBeginning(Set(topicPartition))
+              consumed <- consumer.records.take(values.size.toLong).compile.toList
+              settled  <- consumer.position(topicPartition)
+            yield (consumed.map(_.record.value), consumed.map(_.record.offset.value), settled)
+          .timeout(90.seconds)
+      yield
+        val (consumed, offsets, settled) = outcome
+        assertEquals(consumed, values.map(Some(_)), "seeking to the beginning should replay every record")
+        assertEquals(offsets, List.range(0L, values.size.toLong))
+        assertEquals(settled.map(_.value), Some(values.size.toLong), "the position should follow what this consumer consumed")
+
   private def assignmentOf(consumer: KafkaConsumer[IO, Option[String], Option[String]], size: Int): IO[Set[TopicPartition]] =
     consumer.assignmentChanges.filter(_.size == size).head.compile.lastOrError
 

@@ -251,6 +251,17 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
       backend(underlying.seek(javaTopicPartition(topicPartition), offset.value))
 
+    override def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit] =
+      backend(underlying.seekToBeginning(topicPartitions.toList.map(javaTopicPartition)))
+
+    override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] =
+      backend(underlying.seekToEnd(topicPartitions.toList.map(javaTopicPartition)))
+
+    /** The Java client settles on a position before answering, so it has one whenever the partition is assigned. */
+    override def position(topicPartition: TopicPartition): F[Option[Offset]] =
+      backend(underlying.position(javaTopicPartition(topicPartition))).flatMap: value =>
+        F.fromEither(Offset.from(value).map(_.some).leftMap(error => invalidBackendValue("position", error)))
+
     private def portableOffsets(
         field: String,
         requested: Set[TopicPartition],

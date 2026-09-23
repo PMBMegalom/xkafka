@@ -41,6 +41,14 @@ Within the consumer resource:
 - `offsetsForTimes` finds the earliest available offsets at or after timestamps.
 - `partitionsFor` and `listTopics` expose visible topic metadata.
 - `seek` changes the next offset fetched for an assigned topic-partition.
+- `seekToBeginning` and `seekToEnd` move to either end of an assigned topic-partition.
+- `position` reports the offset a topic-partition reads next.
+
+@:callout(info)
+`position` answers `None` until this consumer has consumed from the partition. A backend may
+settle on a position sooner, such as when a seek names an offset, so the value every backend
+agrees on is the one after records have been consumed.
+@:@
 
 ## Partition streams
 

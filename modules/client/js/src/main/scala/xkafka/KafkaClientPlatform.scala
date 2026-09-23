@@ -85,6 +85,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   // also when Kafka would consider the consumer stalled.
   private val RecordQueueSize = 256
   private val MaxExactInteger = 9007199254740991d
+  // librdkafka's sentinels for the ends of a partition's log.
+  private val BeginningOffset = -2d
+  private val EndOffset       = -1d
 
   private def ignore(value: js.Any): Unit = ()
 
@@ -393,6 +396,29 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
               case Some(failure) => resume(Left(rdFailure(failure)))
               case None          => resume(Right(()))
         ): Unit
+
+    override def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit] = seekAll(topicPartitions, BeginningOffset)
+
+    override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] = seekAll(topicPartitions, EndOffset)
+
+    /** librdkafka reads these two offsets as the ends of the log, and the seek carries them through untouched. */
+    private def seekAll(topicPartitions: Set[TopicPartition], offset: Double): F[Unit] =
+      topicPartitions.toList.traverse_ : value =>
+        F.async_ : resume =>
+          underlying.seek(
+            confluent.Values.rdTopicPartitionOffset(value.topic.value, value.partition.value, offset),
+            requestTimeoutMillis,
+            error =>
+              rdError(error) match
+                case Some(failure) => resume(Left(rdFailure(failure)))
+                case None          => resume(Right(()))
+          ): Unit
+
+    override def position(topicPartition: TopicPartition): F[Option[Offset]] =
+      F.delay(underlying.position(js.Array(requested(Set(topicPartition)).head))).flatMap: values =>
+        values.headOption.flatMap(_.offset.toOption).filter(_ >= 0d) match
+          case None        => F.pure(None)
+          case Some(value) => F.fromEither(exactOffset("position", value)).map(_.some)
 
     private def consumerRecord(message: confluent.RdMessage): F[CommittableConsumerRecord[F, K, V]] =
       val headers = portableHeaders(message.headers)

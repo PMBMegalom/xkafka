@@ -50,6 +50,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private val DeliveryPollTimeoutMillis = 100
   private val ErrorBufferSize           = 512
   private val UnassignedPartition       = -1
+  // librdkafka's sentinels for the ends of a partition's log.
+  private val BeginningOffset = -2L
+  private val EndOffset       = -1L
 
   /** A librdkafka client.handle, and the gate that keeps calls from reaching it once it has been destroyed.
     *
@@ -422,7 +425,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
     override def listTopics: F[Map[Topic, Set[Partition]]] = client(readTopicMetadata(None))
 
-    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = client(seekTo(topicPartition, offset))
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = client(seekTo(topicPartition, offset.value))
+
+    override def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit] = client(topicPartitions.foreach(seekTo(_, BeginningOffset)))
+
+    override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] = client(topicPartitions.foreach(seekTo(_, EndOffset)))
+
+    override def position(topicPartition: TopicPartition): F[Option[Offset]] = client(readPosition(topicPartition))
 
     private def poll(): Option[NativeRecord] =
       Zone.acquire: zone =>
@@ -687,7 +696,21 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     private def readPartitionsFor(topic: Topic): Set[Partition] =
       readTopicMetadata(Some(topic)).getOrElse(topic, throw new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
 
-    private def seekTo(topicPartition: TopicPartition, offset: Offset): Unit =
+    private def readPosition(topicPartition: TopicPartition): Option[Offset] =
+      Zone.acquire: zone =>
+        given Zone     = zone
+        val topics     = alloc[CString](1)
+        val partitions = alloc[CInt](1)
+        val positions  = alloc[CLongLong](1)
+        topics(0) = toCString(topicPartition.topic.value)
+        partitions(0) = topicPartition.partition.value
+        val (error, errorCode) = errorSlots
+        val result             =
+          Bindings.xkafka_consumer_position(client.handle, topics, partitions, 1.toUSize, positions, error, ErrorBufferSize.toUSize, errorCode)
+        if result != 0 then throw nativeError(error, errorCode)
+        Option.when(positions(0) >= 0L)(Offset.from(positions(0)).fold(error => throw invalidBackendValue("position", positions(0), error), identity))
+
+    private def seekTo(topicPartition: TopicPartition, offset: Long): Unit =
       Zone.acquire: zone =>
         given Zone             = zone
         val (error, errorCode) = errorSlots
@@ -696,7 +719,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             client.handle,
             toCString(topicPartition.topic.value),
             topicPartition.partition.value,
-            offset.value,
+            offset,
             requestTimeoutMillis,
             error,
             ErrorBufferSize.toUSize,
