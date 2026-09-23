@@ -25,7 +25,6 @@ import scala.scalanative.libc.string.memcpy
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-import cats.Applicative
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
@@ -518,8 +517,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           .toSet
         finally Bindings.xkafka_assignment_destroy(assignment)
 
-    override def pausing(using Applicative[F]): PartitionPausing[F] =
-      new PartitionPausing[F]:
+    override val pausing: PartitionPausing[F] =
+      new PartitionPausing.Backend[F]:
         override def pause(topicPartitions: Set[TopicPartition]): F[Unit] =
           if topicPartitions.isEmpty then F.unit else client(setPaused(topicPartitions, paused = true))
 

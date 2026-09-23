@@ -62,7 +62,7 @@ final class PartitionPausingSuite extends CatsEffectSuite:
         result <-
           PlatformKafkaClient().consumer(consumer, Subscription.Topics(NonEmptyList.one(topic))).use: value =>
             // A backend that kept the no-op default would fail the assertions below.
-            val capability = value.pausing
+            val capability = value.pausing.orNoop
             for
               first <- value.records.take(early.size.toLong).compile.toList.timeout(60.seconds)
               _     <- capability.pause(Set(TopicPartition(topic, partition)))

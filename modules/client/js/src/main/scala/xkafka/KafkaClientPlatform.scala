@@ -25,7 +25,6 @@ import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array, Uint8Array}
 
-import cats.Applicative
 import cats.data.NonEmptyList
 import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
@@ -276,8 +275,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
 
-    override def pausing(using Applicative[F]): PartitionPausing[F] =
-      new PartitionPausing[F]:
+    override val pausing: PartitionPausing[F] =
+      new PartitionPausing.Backend[F]:
         override def pause(topicPartitions: Set[TopicPartition]): F[Unit] =
           F.whenA(topicPartitions.nonEmpty)(F.delay(underlying.pause(requested(topicPartitions))))
 

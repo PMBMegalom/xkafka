@@ -358,6 +358,34 @@ final class ClientSuite extends FunSuite:
     assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), Set(partition))
     assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> Set(partition)))
 
+  test("KafkaConsumer keeps backend pausing after mapK"):
+    val pausedPartitions = scala.collection.mutable.ListBuffer.empty[Set[TopicPartition]]
+    val source           =
+      new KafkaConsumer[Option, String, String]:
+        override val records: Stream[Option, CommittableConsumerRecord[Option, String, String]] = Stream.empty
+        override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
+        override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
+        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] = Some(Map.empty)
+        override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]  = Some(Map.empty)
+        override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]        = Some(Map.empty)
+        override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
+          Some(Map.empty)
+        override def partitionsFor(topic: Topic): Option[Set[Partition]]                = Some(Set(partition))
+        override def listTopics: Option[Map[Topic, Set[Partition]]]                     = Some(Map.empty)
+        override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit] = Some(())
+        override val pausing: PartitionPausing[Option]                                  =
+          new PartitionPausing.Backend[Option]:
+            override def pause(topicPartitions: Set[TopicPartition]): Option[Unit] =
+              pausedPartitions += topicPartitions
+              Some(())
+
+            override def resume(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
+
+    val mapped = FunctorK[[F[_]] =>> KafkaConsumer[F, String, String]].mapK(source)(optionToSyncIO)
+    mapped.pausing.orNoop.pause(Set(consumerRecord.topicPartition)).unsafeRunSync()
+
+    assertEquals(pausedPartitions.toList, List(Set(consumerRecord.topicPartition)))
+
   private def committableOffset: CommittableOffset[Option] = offsetAt(partition, nextOffset)
 
   private val optionCommitter: OffsetCommitter[Option] =

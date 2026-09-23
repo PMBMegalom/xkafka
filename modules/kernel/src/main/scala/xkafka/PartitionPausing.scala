@@ -22,21 +22,47 @@
 package xkafka
 
 import cats.Applicative
+import cats.arrow.FunctionK
 
-/** Stops and restarts delivery for individual partitions.
+/** Whether a backend stops and restarts delivery for individual partitions.
   *
   * Kafka holds the position a paused partition had reached, so resuming continues from the record after the last one handed over, and nothing is lost
   * by pausing.
+  *
+  * A backend with nothing to hold back carries that as a value, so transforming a consumer's effect keeps the answer without an instance for the new
+  * effect.
   */
-private[xkafka] trait PartitionPausing[F[_]]:
-  def pause(topicPartitions: Set[TopicPartition]): F[Unit]
+private[xkafka] sealed trait PartitionPausing[F[_]]:
+  /** The capability itself, where a backend with nothing to hold back does nothing. */
+  def orNoop(using Applicative[F]): PartitionPausing.Backend[F]
 
-  def resume(topicPartitions: Set[TopicPartition]): F[Unit]
+  def mapK[G[_]](fk: FunctionK[F, G]): PartitionPausing[G]
 
 private[xkafka] object PartitionPausing:
-  /** For a backend that feeds each partition on its own, where there is nothing to hold back. */
-  def noop[F[_]](using F: Applicative[F]): PartitionPausing[F] =
-    new PartitionPausing[F]:
+  /** For a backend that feeds each partition on its own. */
+  final case class Absent[F[_]]() extends PartitionPausing[F]:
+    override def orNoop(using Applicative[F]): Backend[F] = noop
+
+    override def mapK[G[_]](fk: FunctionK[F, G]): PartitionPausing[G] = Absent()
+
+  /** For a backend that delivers every partition through one source. */
+  trait Backend[F[_]] extends PartitionPausing[F]:
+    self =>
+
+    def pause(topicPartitions: Set[TopicPartition]): F[Unit]
+
+    def resume(topicPartitions: Set[TopicPartition]): F[Unit]
+
+    override final def orNoop(using Applicative[F]): Backend[F] = self
+
+    override final def mapK[G[_]](fk: FunctionK[F, G]): PartitionPausing[G] =
+      new Backend[G]:
+        override def pause(topicPartitions: Set[TopicPartition]): G[Unit] = fk(self.pause(topicPartitions))
+
+        override def resume(topicPartitions: Set[TopicPartition]): G[Unit] = fk(self.resume(topicPartitions))
+
+  private def noop[F[_]](using F: Applicative[F]): Backend[F] =
+    new Backend[F]:
       override def pause(topicPartitions: Set[TopicPartition]): F[Unit] = F.unit
 
       override def resume(topicPartitions: Set[TopicPartition]): F[Unit] = F.unit

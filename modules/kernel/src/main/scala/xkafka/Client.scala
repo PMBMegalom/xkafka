@@ -376,7 +376,7 @@ trait KafkaConsumer[F[_], K, V]:
     * A backend whose records all arrive from one source overrides this, so that a partition nobody is reading stops being fetched and the partitions
     * beside it keep flowing. One that feeds each partition on its own has nothing to hold back and keeps the default.
     */
-  private[xkafka] def pausing(using Applicative[F]): PartitionPausing[F] = PartitionPausing.noop
+  private[xkafka] def pausing: PartitionPausing[F] = PartitionPausing.Absent()
 
   /** Emits the current assignment and then each distinct one afterwards. */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
@@ -433,6 +433,8 @@ trait KafkaConsumer[F[_], K, V]:
       override def listTopics: G[Map[Topic, Set[Partition]]] = fk(self.listTopics)
 
       override def seek(topicPartition: TopicPartition, offset: Offset): G[Unit] = fk(self.seek(topicPartition, offset))
+
+      override private[xkafka] def pausing: PartitionPausing[G] = self.pausing.mapK(fk)
 
 object KafkaConsumer:
   given [K, V]: FunctorK[[F[_]] =>> KafkaConsumer[F, K, V]] with

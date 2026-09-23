@@ -60,7 +60,7 @@ object PartitionRecords:
       consumer: KafkaConsumer[F, K, V],
       assignments: Stream[F, Set[TopicPartition]],
       maxQueuedRecords: Int,
-      pausing: PartitionPausing[F],
+      pausing: PartitionPausing.Backend[F],
       output: Channel[F, PartitionRecords[F, K, V]],
       states: Ref[F, Map[TopicPartition, PartitionState[F, K, V]]],
       mutex: Mutex[F]
@@ -140,4 +140,4 @@ object PartitionRecords:
         output <- Channel.unbounded[F, PartitionRecords[F, K, V]]
         states <- Ref.of[F, Map[TopicPartition, PartitionState[F, K, V]]](Map.empty)
         mutex  <- Mutex[F]
-      yield Runtime(consumer, assignments, maxQueuedRecords, pausing, output, states, mutex)
+      yield Runtime(consumer, assignments, maxQueuedRecords, pausing.orNoop, output, states, mutex)
