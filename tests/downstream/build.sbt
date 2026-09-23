@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "3.3.8"
+ThisBuild / scalaVersion := "3.9.0"
 
 val xkafkaVersion = sys.env.getOrElse("XKAFKA_VERSION", sys.error("XKAFKA_VERSION must name the xkafka version to test"))
 
@@ -8,14 +8,14 @@ lazy val smoke = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .crossType(CrossType.Pure)
   .in(file("."))
   .settings(
-    name                := "xkafka-downstream-smoke",
-    publish / skip      := true,
-    Compile / mainClass := Some("xkafka.downstream.DownstreamSmoke"),
+    name                                           := "xkafka-downstream-smoke",
+    publish / skip                                 := true,
+    Compile / mainClass                            := Some("xkafka.downstream.DownstreamSmoke"),
     libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % xkafkaVersion
   )
   .jsConfigure(_.enablePlugins(ScalaJSBundlerPlugin))
   .jsSettings(
-    scalaJSUseMainModuleInitializer := true,
+    scalaJSUseMainModuleInitializer                 := true,
     Compile / additionalNpmConfig += "license"      -> scalajsbundler.util.JSON.str("MIT"),
     Compile / additionalNpmConfig += "allowScripts" -> scalajsbundler.util.JSON.obj(
       "@confluentinc/kafka-javascript@1.10.1" -> scalajsbundler.util.JSON.bool(true)
