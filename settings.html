@@ -151,7 +151,7 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">settings</span><span> =
   </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(
     </span><span class="identifier">bootstrapServers</span><span> = </span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>),
-    </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;metadata.max.age.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;30000&quot;</span><span>)
+    </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;client.rack&quot;</span><span> -&gt; </span><span class="string-literal">&quot;eu-west-1a&quot;</span><span>)
   ).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
     </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;linger.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;5&quot;</span><span>))</span></code></pre>
         <p>Producer or consumer properties override client properties. Names and values are
@@ -161,8 +161,9 @@
         <h2 id="managed-properties" class="section"><a class="anchor-link left" href="#managed-properties"><i class="icofont-laika link">&#xef71;</i></a>Managed properties</h2>
         <p><code>ManagedProperties</code> lists the names xkafka derives from the typed settings:
         bootstrap servers, client and group IDs, offset reset, automatic commits, the
-        default API timeout, and the TLS and SASL names. Supplying one through the map
-        is a <code>SettingsError</code>, so the typed settings and the map cannot disagree.</p>
+        default API timeout, the metadata refresh names, and the TLS and SASL names.
+        Supplying one through the map is a <code>SettingsError</code>, so the typed settings and the
+        map cannot disagree.</p>
         
         <h2 id="withers" class="section"><a class="anchor-link left" href="#withers"><i class="icofont-laika link">&#xef71;</i></a>Withers</h2>
         <p>Each type has <code>with*</code> methods for deriving one value from another. Those that
@@ -195,6 +196,27 @@
         <p><code>requestTimeout</code> bounds <code>committed</code>, <code>beginningOffsets</code>, <code>endOffsets</code>,
         <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, and <code>seek</code>. Its default
         matches what Kafka&#39;s own clients use.</p>
+        <p><code>ClientSettings</code> carries one more, because it applies to producers and consumers
+        alike.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>setting</th>
+              <th>default</th>
+              <th>what it bounds</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>metadataRefreshInterval</code></td>
+              <td>5m</td>
+              <td>how long a new topic, partition, or leader can go unnoticed</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Each backend spells it differently, so the typed setting is what keeps the two
+        the same: the Java client takes it as <code>metadata.max.age.ms</code>, and librdkafka takes
+        it as <code>topic.metadata.refresh.interval.ms</code> and derives its own cache age from it.</p>
 
         
 <hr class="footer-rule"/>

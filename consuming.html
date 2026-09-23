@@ -149,9 +149,10 @@
         how far ahead each partition buffers before it is held back.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>A consumer that subscribes to a topic before that topic exists will not see it
-          until the backend refreshes its metadata, which defaults to five minutes. Lower
-          <code>metadata.max.age.ms</code> if a consumer must discover a topic promptly.</p>
+          <p>A consumer that subscribes to a topic before that topic exists sees it once the
+          backend refreshes its metadata. <code>metadataRefreshInterval</code> sets how long that takes
+          and defaults to five minutes, so lower it if a consumer must discover a topic
+          promptly.</p>
         </div>
 
         
