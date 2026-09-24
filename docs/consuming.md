@@ -50,6 +50,13 @@ settle on a position sooner, such as when a seek names an offset, so the value e
 agrees on is the one after records have been consumed.
 @:@
 
+@:callout(warning)
+A consumer joins its group at a different moment on each backend. The Java client joins when the
+application polls, so a consumer nobody reads holds nothing. The JavaScript and Native backends
+join when the consumer resource is allocated, so one nobody reads still takes a share of the
+partitions and does not hand them back. Release a consumer you are not reading.
+@:@
+
 ## Partition streams
 
 `partitionedRecords` exposes a record stream for each assigned topic-partition

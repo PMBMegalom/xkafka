@@ -294,6 +294,30 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(offsets, List.range(0L, values.size.toLong))
         assertEquals(settled.map(_.value), Some(values.size.toLong), "the position should follow what this consumer consumed")
 
+  /** The Java client joins a group from its poll, and librdkafka joins from its subscribe, so a consumer nobody reads holds partitions on one and not
+    * the other. Neither protocol version changes this, and librdkafka never starts its own idle timer for such a consumer, so the partitions it holds
+    * are not handed back.
+    */
+  test(conformance("a consumer that is never read leaves the whole topic to one that is", divergent = Set("js", "native"))):
+    withBroker: server =>
+      val topic        = validTopic(partitionedTopic)
+      val group        = uniqueGroup("idle")
+      val subscription = Subscription.Topics(NonEmptyList.one(topic))
+
+      for
+        settings <- consumerSettings(server, group)
+        settled  <-
+          PlatformKafkaClient().consumer(settings, subscription).use: _ =>
+            PlatformKafkaClient().consumer(settings, subscription).use: reading =>
+              for
+                _ <- reading.assignmentChanges.filter(_.nonEmpty).head.compile.lastOrError
+                // A member that joined without being read would take its share through a rebalance, so this settles first.
+                _      <- IO.sleep(8.seconds)
+                latest <- reading.assignment
+              yield latest
+          .timeout(90.seconds)
+      yield assertEquals(settled.size, 2, s"$backend gave the consumer that is read ${settled.size} of 2 partitions")
+
   private def assignmentOf(consumer: KafkaConsumer[IO, Option[String], Option[String]], size: Int): IO[Set[TopicPartition]] =
     consumer.assignmentChanges.filter(_.size == size).head.compile.lastOrError
 
