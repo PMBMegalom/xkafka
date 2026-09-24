@@ -25,6 +25,7 @@ import scala.concurrent.duration.*
 
 import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Queue
+import cats.syntax.all.*
 import fs2.Stream
 import munit.CatsEffectSuite
 
@@ -83,6 +84,30 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       case Left(error)                           => fail(s"unexpected error: $error")
       case Right(())                             => fail("expected an invalid queue bound to fail")
 
+  test("consumeChunk hands over every record and commits what it processed"):
+    val expected = List(firstPartition -> "a", firstPartition -> "b", secondPartition -> "c")
+
+    for
+      assignment <- Ref[IO].of(Set(firstPartition, secondPartition))
+      input      <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      processed  <- Ref[IO].of(Vector.empty[String])
+      committed  <- Ref[IO].of(Vector.empty[(TopicPartition, Offset)])
+      complete   <- Deferred[IO, Unit]
+      _          <- expected.zipWithIndex.traverse_((entry, index) => input.offer(recorded(entry._1, index.toLong, entry._2, committed)))
+      consumer = testConsumer(assignment, input)
+      _ <-
+        consumer.consumeChunk: chunk =>
+          processed.updateAndGet(_ ++ chunk.toList.map(_.value)).flatMap(all => complete.complete(()).void.whenA(all.size == expected.size))
+            .as(CommitNow)
+        .race(complete.get).timeout(30.seconds)
+      handled    <- processed.get
+      committals <- committed.get
+    yield
+      assertEquals(handled.toList.sorted, expected.map(_._2).sorted)
+      // A batch keeps the highest offset per partition, so how the records were chunked does not change what is committed.
+      val highest = committals.groupBy(_._1).view.mapValues(_.map(_._2.value).max).toMap
+      assertEquals(highest, Map(firstPartition -> 2L, secondPartition -> 3L))
+
   private def testConsumer(
       currentAssignment: Ref[IO, Set[TopicPartition]],
       input: Queue[IO, CommittableConsumerRecord[IO, String, String]]
@@ -113,4 +138,22 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
         override val committer: OffsetCommitter[IO] =
           new OffsetCommitter[IO]:
             override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+    CommittableConsumerRecord(ConsumerRecord(topicPartition, offset, None, "key", value, Headers.empty), committable)
+
+  private def recorded(
+      topicPartition: TopicPartition,
+      offsetValue: Long,
+      value: String,
+      committed: Ref[IO, Vector[(TopicPartition, Offset)]]
+  ): CommittableConsumerRecord[IO, String, String] =
+    val partition       = topicPartition
+    val offset          = Offset.from(offsetValue).toOption.get
+    val followingOffset = offset.next.toOption.get
+    val committable     =
+      new CommittableOffset[IO]:
+        override val topicPartition: TopicPartition = partition
+        override val nextOffset: Offset             = followingOffset
+        override val committer: OffsetCommitter[IO] =
+          new OffsetCommitter[IO]:
+            override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = committed.update(_ ++ offsets.toVector)
     CommittableConsumerRecord(ConsumerRecord(topicPartition, offset, None, "key", value, Headers.empty), committable)

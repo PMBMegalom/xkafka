@@ -50,6 +50,20 @@ settle on a position sooner, such as when a seek names an offset, so the value e
 agrees on is the one after records have been consumed.
 @:@
 
+## Processing every record
+
+`consumeChunk` takes a function over a chunk of records and commits that chunk once the function
+returns, so the common case needs no stream plumbing.
+
+```scala
+consumer.consumeChunk: records =>
+  records.traverse_(handle).as(CommitNow)
+```
+
+Partitions are processed alongside one another, so a slow chunk holds back only the partition it
+came from. The result never produces a value, because the work ends only by cancellation or failure.
+Returning `CommitNow` is what makes the commit visible where the records are handled.
+
 @:callout(warning)
 A consumer joins its group at a different moment on each backend. The Java client joins when the
 application polls, so a consumer nobody reads holds nothing. The JavaScript and Native backends

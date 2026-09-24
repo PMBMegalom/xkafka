@@ -28,7 +28,7 @@ import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, Validated, ValidatedNel}
 import cats.effect.{Async, Temporal}
 import cats.tagless.FunctorK
-import fs2.{Pipe, Stream}
+import fs2.{Chunk, Pipe, Stream}
 
 /** Backend property names xkafka derives from the typed settings.
   *
@@ -377,6 +377,10 @@ trait KafkaProducer[F[_], K, V]:
     new KafkaProducer[G, K, V]:
       override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[ProducerResult[K, V]]] = G.map(fk(self.produce(records)))(fk.apply)
 
+/** Says a processed chunk can have its offsets committed, so the commit that follows is visible where the records are handled. */
+case object CommitNow
+type CommitNow = CommitNow.type
+
 trait KafkaConsumer[F[_], K, V]:
   self =>
 
@@ -393,6 +397,22 @@ trait KafkaConsumer[F[_], K, V]:
 
   /** Emits the current assignment and then each distinct one afterwards. */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
+
+  /** Hands every record to `process` a chunk at a time and commits each chunk once it returns.
+    *
+    * Partitions are processed alongside one another, so a slow chunk holds back only the partition it came from. The result never produces a value,
+    * because the work ends only by cancellation or failure.
+    *
+    * @param maxQueuedRecords
+    *   positive queue bound for each partition stream
+    */
+  final def consumeChunk(process: Chunk[ConsumerRecord[K, V]] => F[CommitNow], maxQueuedRecords: Int = 256)(using F: Async[F]): F[Nothing] =
+    partitionedRecords(maxQueuedRecords).map(
+      _.records.chunks.evalMap: chunk =>
+        val (offsets, records) =
+          chunk.mapAccumulate(CommittableOffsetBatch.empty[F])((batch, committable) => (batch.updated(committable.offset), committable.record))
+        F.productR(process(records))(offsets.commit)
+    ).parJoinUnbounded.drain.compile.onlyOrError
 
   /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.
     *
