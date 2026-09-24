@@ -146,7 +146,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           case Some(failure) => resume(Left(rdFailure(failure)))
           case None          => resume(Right(value))
 
-  override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
+  override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
       underlying  <- Resource.eval(F.delay(driver.consumer(settings.client, settings.groupId, settings.autoOffsetReset, settings.properties)))
       dispatcher  <- Dispatcher.sequential[F]
@@ -157,10 +157,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       _       <- Resource.eval(F.delay(underlying.on("rebalance", rebalanced(underlying, dispatcher, assignments, failure))))
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
       _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
-      _ <- Resource.eval(subscribe(underlying, subscription))
+      _ <- Resource.eval(select(underlying, selection))
       polled <- Resource.eval(Queue.bounded[F, confluent.RdMessage](RecordQueueSize))
       consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, failure)
-      // Started after the subscription and cancelled before the disconnect that follows it.
+      // Started after the selection and cancelled before the disconnect that follows it.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
 
@@ -186,13 +186,15 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
     (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
 
-  private def subscribe(consumer: confluent.RdConsumer, subscription: Subscription): F[Unit] =
-    val topics =
-      subscription match
-        case Subscription.Topics(values) => values.toList.map[confluent.SubscriptionTopic](_.value).toJSArray
-        // librdkafka reads a topic beginning with "^" as a regular expression, which is what anchoring already produces.
-        case Subscription.Pattern(pattern) => js.Array[confluent.SubscriptionTopic](pattern.anchored)
-    F.delay(consumer.subscribe(topics)).void
+  private def select(consumer: confluent.RdConsumer, selection: Selection): F[Unit] =
+    selection match
+      case Selection.Topics(values) => F.delay(consumer.subscribe(values.toSortedSet.toList.map[confluent.SubscriptionTopic](_.value).toJSArray)).void
+      // librdkafka reads a topic beginning with "^" as a regular expression, which is what anchoring already produces.
+      case Selection.Pattern(pattern)            => F.delay(consumer.subscribe(js.Array[confluent.SubscriptionTopic](pattern.anchored))).void
+      case Selection.Partitions(topicPartitions) =>
+        val assigned =
+          topicPartitions.toSortedSet.toList.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
+        F.delay(consumer.assign(assigned)).void
 
   private def invalidBackendValue(field: String, value: String, error: Any, cause: Throwable = null): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error", cause)

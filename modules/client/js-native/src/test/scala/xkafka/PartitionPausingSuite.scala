@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import munit.CatsEffectSuite
 
@@ -60,7 +60,7 @@ final class PartitionPausingSuite extends CatsEffectSuite:
             ))
         _      <- send(early)
         result <-
-          PlatformKafkaClient().consumer(consumer, Subscription.Topics(NonEmptyList.one(topic))).use: value =>
+          PlatformKafkaClient().consumer(consumer, Selection.Topics(NonEmptySet.one(topic))).use: value =>
             // A backend that kept the no-op default would fail the assertions below.
             val capability = value.pausing.orNoop
             for

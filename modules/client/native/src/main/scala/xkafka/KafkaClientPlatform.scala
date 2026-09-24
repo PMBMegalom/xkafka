@@ -25,7 +25,7 @@ import scala.scalanative.libc.string.memcpy
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Queue, Semaphore, Supervisor}
@@ -109,10 +109,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       batches    <- Resource.eval(Semaphore[F](1))
     yield new LibrdkafkaProducer(client, supervisor, batches, settings)
 
-  override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
+  override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
       client      <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
-      _           <- Resource.eval(client(subscribe(client.handle, subscription)))
+      _           <- Resource.eval(client(select(client.handle, selection)))
       polled      <- Resource.eval(Queue.bounded[F, NativeRecord](RecordQueueSize))
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
       // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
@@ -189,13 +189,33 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           values(index) = toCString(value)
       (names, values, entries.size.toUSize)
 
-  private def subscribe(consumer: CVoidPtr, subscription: Subscription): Unit =
+  private def select(consumer: CVoidPtr, selection: Selection): Unit =
+    selection match
+      case Selection.Partitions(topicPartitions) => assignPartitions(consumer, topicPartitions)
+      case subscription: Selection.Subscription  => subscribeTopics(consumer, subscription)
+
+  /** Names the partitions to read directly, so the consumer joins no group and its assignment never changes. */
+  private def assignPartitions(consumer: CVoidPtr, topicPartitions: NonEmptySet[TopicPartition]): Unit =
+    Zone.acquire: zone =>
+      given Zone     = zone
+      val entries    = topicPartitions.toSortedSet.toVector
+      val topics     = alloc[CString](entries.size)
+      val partitions = alloc[CInt](entries.size)
+      entries.iterator.zipWithIndex.foreach:
+        case (topicPartition, index) =>
+          topics(index) = toCString(topicPartition.topic.value)
+          partitions(index) = topicPartition.partition.value
+      val (error, errorCode) = errorSlots
+      val result = Bindings.xkafka_consumer_assign(consumer, topics, partitions, entries.size.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+      if result != 0 then throw nativeError(error, errorCode)
+
+  private def subscribeTopics(consumer: CVoidPtr, subscription: Selection.Subscription): Unit =
     Zone.acquire: zone =>
       given Zone = zone
       val topics =
         subscription match
-          case Subscription.Topics(values)   => values.map(_.value)
-          case Subscription.Pattern(pattern) => NonEmptyList.one(pattern.anchored)
+          case Selection.Topics(values)   => values.toNonEmptyList.map(_.value)
+          case Selection.Pattern(pattern) => NonEmptyList.one(pattern.anchored)
       val nativeSubscription = Bindings.xkafka_subscription_new(topics.length.toUSize)
       if nativeSubscription == null then throw backendFailure("could not allocate a subscription")
 

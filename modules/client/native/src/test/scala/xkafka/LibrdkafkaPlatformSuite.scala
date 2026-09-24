@@ -21,7 +21,7 @@
 
 package xkafka
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import fs2.Chunk
 import munit.CatsEffectSuite
@@ -45,7 +45,7 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
     val topic        = Topic.from("events").toOption.get
 
     // Leaking the consumer past its resource used to reach a destroyed handle.
-    KafkaClient[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use(IO.pure).flatMap: escaped =>
+    KafkaClient[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(IO.pure).flatMap: escaped =>
       interceptIO[IllegalStateException](escaped.assignment)
 
   test("a producer refuses work once its resource has closed"):

@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import fs2.Chunk
@@ -181,22 +181,22 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         _ <-
           List.range(0, 3).traverse_ { _ =>
             consumerSettings(server, uniqueGroup("lifecycle")).flatMap: settings =>
-              PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use(_.assignment.void).timeout(60.seconds)
+              PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.assignment.void).timeout(60.seconds)
           }
       yield ()
 
   test(conformance("a second consumer in the group takes a share of the partitions")):
     withBroker: server =>
-      val topic        = validTopic(partitionedTopic)
-      val group        = uniqueGroup("rebalance")
-      val subscription = Subscription.Topics(NonEmptyList.one(topic))
-      val both         = Set(TopicPartition(topic, validPartition(0)), TopicPartition(topic, validPartition(1)))
+      val topic     = validTopic(partitionedTopic)
+      val group     = uniqueGroup("rebalance")
+      val selection = Selection.Topics(NonEmptySet.one(topic))
+      val both      = Set(TopicPartition(topic, validPartition(0)), TopicPartition(topic, validPartition(1)))
 
       for
         settings <- consumerSettings(server, group)
         shares   <-
-          PlatformKafkaClient().consumer(settings, subscription).use: alone =>
-            assignmentOf(alone, 2) *> PlatformKafkaClient().consumer(settings, subscription).use: joined =>
+          PlatformKafkaClient().consumer(settings, selection).use: alone =>
+            assignmentOf(alone, 2) *> PlatformKafkaClient().consumer(settings, selection).use: joined =>
               (assignmentOf(alone, 1), assignmentOf(joined, 1)).parTupled
           .timeout(45.seconds)
       yield
@@ -216,7 +216,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         _        <- produce(server, records)
         settings <- consumerSettings(server, uniqueGroup("concurrent"))
         result   <-
-          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
             (consumer.records.take(values.size.toLong).compile.toList, List.range(0, 20).traverse(_ => consumer.assignment)).parTupled
           .timeout(60.seconds)
       yield
@@ -233,7 +233,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         settings <- consumerSettings(server, uniqueGroup("cancel"))
         started  <- Deferred[IO, Unit]
         fiber    <-
-          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic)))
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
             .use(_.records.evalTap(_ => started.complete(()).void).compile.drain).start
         // Cancelling once a record has arrived leaves a poll in flight, which is what has to unwind.
         _        <- started.get.timeout(90.seconds)
@@ -254,8 +254,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         settings <-
           ConsumerSettings.from(client, uniqueGroup("late"), optionalDeserializer, optionalDeserializer, AutoOffsetReset.Earliest).liftTo[IO]
         outcome <-
-          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
-            // Nothing has created the topic at subscription time, so the record can only arrive once metadata is refreshed. A
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            // Nothing has created the topic at selection time, so the record can only arrive once metadata is refreshed. A
             // backend left on the five minute default outlasts the bound below.
             IO.both(consumer.records.head.compile.lastOrError, IO.sleep(2.seconds) *> produce(server, NonEmptyList.one(late))).timed
               .timeout(bound + 30.seconds)
@@ -277,13 +277,13 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         // Starting at the latest offset leaves nothing waiting to be read, so whatever arrives arrives because of the seek.
         settings <- ConsumerSettings.from(client, uniqueGroup("ends"), optionalDeserializer, optionalDeserializer, AutoOffsetReset.Latest).liftTo[IO]
         outcome  <-
-          PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
             val topicPartition = TopicPartition(topic, partition)
             for
               // A seek can only name a partition this consumer already owns.
               _        <- assignmentOf(consumer, 1)
-              _        <- consumer.seekToEnd(Set(topicPartition))
-              _        <- consumer.seekToBeginning(Set(topicPartition))
+              _        <- whenSeekable(consumer.seekToEnd(Set(topicPartition)))
+              _        <- whenSeekable(consumer.seekToBeginning(Set(topicPartition)))
               consumed <- consumer.records.take(values.size.toLong).compile.toList
               settled  <- consumer.position(topicPartition)
             yield (consumed.map(_.record.value), consumed.map(_.record.offset.value), settled)
@@ -300,15 +300,15 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     */
   test(conformance("a consumer that is never read leaves the whole topic to one that is", divergent = Set("js", "native"))):
     withBroker: server =>
-      val topic        = validTopic(partitionedTopic)
-      val group        = uniqueGroup("idle")
-      val subscription = Subscription.Topics(NonEmptyList.one(topic))
+      val topic     = validTopic(partitionedTopic)
+      val group     = uniqueGroup("idle")
+      val selection = Selection.Topics(NonEmptySet.one(topic))
 
       for
         settings <- consumerSettings(server, group)
         settled  <-
-          PlatformKafkaClient().consumer(settings, subscription).use: _ =>
-            PlatformKafkaClient().consumer(settings, subscription).use: reading =>
+          PlatformKafkaClient().consumer(settings, selection).use: _ =>
+            PlatformKafkaClient().consumer(settings, selection).use: reading =>
               for
                 _ <- reading.assignmentChanges.filter(_.nonEmpty).head.compile.lastOrError
                 // A member that joined without being read would take its share through a rebalance, so this settles first.
@@ -317,6 +317,71 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               yield latest
           .timeout(90.seconds)
       yield assertEquals(settled.size, 2, s"$backend gave the consumer that is read ${settled.size} of 2 partitions")
+
+  test(conformance("naming partitions directly keeps the assignment whole and fixed")):
+    withBroker: server =>
+      val topic     = validTopic(partitionedTopic)
+      val partition = validPartition(0)
+      val named     = TopicPartition(topic, partition)
+      val value     = s"assigned-${System.nanoTime()}"
+
+      for
+        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some(value), partition)))
+        settings <- consumerSettings(server, uniqueGroup("assigned"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(named))).use: first =>
+            // A second consumer naming the same partition takes no share of it, because neither joined a group.
+            PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(named))).use: second =>
+              for
+                held       <- first.assignment
+                also       <- second.assignment
+                fromFirst  <- first.records.head.compile.lastOrError
+                fromSecond <- second.records.head.compile.lastOrError
+              yield (held, also, fromFirst.record, fromSecond.record)
+          .timeout(90.seconds)
+      yield
+        val (held, also, fromFirst, fromSecond) = outcome
+        assertEquals(held, Set(named), "a named partition should be assigned outright")
+        assertEquals(also, Set(named), "a second consumer naming it should hold it too, since no group divides it")
+        assertEquals(fromFirst.topicPartition, named)
+        // Both share a consumer group, and both still read the same record, because naming partitions joins no group.
+        assertEquals(fromSecond.topicPartition, named)
+        assertEquals(fromSecond.offset, fromFirst.offset, "both consumers should read the same record, not a share of the partition")
+
+  /** librdkafka refuses a seek until the partition it names is being fetched, which holding the assignment does not yet mean. */
+  private def whenSeekable(seek: IO[Unit]): IO[Unit] =
+    def attempt: IO[Unit] = seek.handleErrorWith(_ => IO.sleep(250.millis) *> attempt)
+    attempt.timeout(30.seconds)
+
+  test(conformance("a later commit replaces an earlier one, even where its offset is lower")):
+    withBroker: server =>
+      val topic     = validTopic(partitionedTopic)
+      val partition = validPartition(0)
+      val named     = TopicPartition(topic, partition)
+      val values    = List("a", "b", "c")
+      val records   = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), partition)))
+
+      for
+        _        <- produce(server, records)
+        settings <- consumerSettings(server, uniqueGroup("race"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(named))).use: ahead =>
+            PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(named))).use: behind =>
+              for
+                // Both read before either commits, so neither starts from the other's committed offset.
+                third       <- ahead.records.take(3).compile.toList
+                firstOnly   <- behind.records.take(1).compile.toList
+                _           <- third.last.offset.commit
+                afterAhead  <- ahead.committed(Set(named))
+                _           <- firstOnly.head.offset.commit
+                afterBehind <- behind.committed(Set(named))
+              yield (third.last.offset.nextOffset, firstOnly.head.offset.nextOffset, afterAhead.get(named).flatten, afterBehind.get(named).flatten)
+          .timeout(90.seconds)
+      yield
+        val (higher, lower, afterAhead, afterBehind) = outcome
+        assertEquals(afterAhead, Some(higher), "committing the third record should store the offset after it")
+        // Kafka stores whatever was committed last, so a commit can move a group's position backwards and replay records.
+        assertEquals(afterBehind, Some(lower), "a later commit should replace the stored offset even where it is lower")
 
   private def assignmentOf(consumer: KafkaConsumer[IO, Option[String], Option[String]], size: Int): IO[Set[TopicPartition]] =
     consumer.assignmentChanges.filter(_.size == size).head.compile.lastOrError
@@ -330,7 +395,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
 
   private def consume(server: String, topic: Topic, count: Int): IO[List[CommittableConsumerRecord[IO, Option[String], Option[String]]]] =
     consumerSettings(server, uniqueGroup("conformance")).flatMap: settings =>
-      PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use(_.records.take(count.toLong).compile.toList)
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(count.toLong).compile.toList)
         .timeout(60.seconds)
 
   private def producerSettings(server: String): IO[ProducerSettings[IO, Option[String], Option[String]]] =

@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import fs2.{Chunk, Stream}
 import munit.CatsEffectSuite
@@ -86,7 +86,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
           .timeoutTo(45.seconds, IO.raiseError(new RuntimeException("Kafka producer timed out")))
       consumed <- consumeTwoAndCommitFirst(consumerSettings, topic)
       (consumedFirst, observedSecond) = consumed
-      consumedSecond <- consumeOne(consumerSettings, Subscription.Pattern(topicPattern))
+      consumedSecond <- consumeOne(consumerSettings, Selection.Pattern(topicPattern))
     yield
       assertEquals(produced.records.size, 2)
       assertEquals(consumedFirst.record.topicPartition, TopicPartition(topic, partition))
@@ -105,7 +105,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val topicPrefix   = s"xkafka-batch-integration-$suffix"
     val firstTopic    = validTopic(s"$topicPrefix-first")
     val secondTopic   = validTopic(s"$topicPrefix-second")
-    val subscription  = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
+    val selection     = Selection.Pattern(validTopicPattern(s"$topicPrefix-.*"))
     val group         = validConsumerGroup(s"xkafka-batch-integration-$suffix")
     val firstRecords  = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-1"), ProducerRecord(secondTopic, "second-key", "second-1"))
     val secondRecords = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first-2"), ProducerRecord(secondTopic, "second-key", "second-2"))
@@ -115,9 +115,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       producerSettings <- ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).liftTo[IO]
       consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
       _                <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(firstRecords)).timeout(45.seconds)
-      consumed         <- consumeAndCommitBatch(consumerSettings, subscription, 2)
+      consumed         <- consumeAndCommitBatch(consumerSettings, selection, 2)
       _                <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(secondRecords)).timeout(45.seconds)
-      resumed          <- consume(consumerSettings, subscription, 2)
+      resumed          <- consume(consumerSettings, selection, 2)
     yield
       assertEquals(consumed.map(record => record.record.topicPartition.topic).toSet, Set(firstTopic, secondTopic))
       assertEquals(resumed.map(record => record.record.value).toSet, Set("first-2", "second-2"))
@@ -138,7 +138,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       record = ProducerRecord(topic, "control-key", "control-value", partition = Some(partition), timestamp = Some(timestamp))
       _        <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).timeout(45.seconds)
       consumed <-
-        PlatformKafkaClient().consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+        PlatformKafkaClient().consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
           consumer.records.zipWithIndex.evalMap:
             case (value, 0L) =>
               for
@@ -174,13 +174,13 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(replayed._1.record.value, "control-value")
 
   private def partitionedRoundTrip(bootstrapServer: String): IO[Unit] =
-    val suffix       = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topicPrefix  = s"xkafka-partitioned-integration-$suffix"
-    val firstTopic   = validTopic(s"$topicPrefix-first")
-    val secondTopic  = validTopic(s"$topicPrefix-second")
-    val subscription = Subscription.Pattern(validTopicPattern(s"$topicPrefix-.*"))
-    val group        = validConsumerGroup(s"xkafka-partitioned-integration-$suffix")
-    val records      = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
+    val suffix      = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
+    val topicPrefix = s"xkafka-partitioned-integration-$suffix"
+    val firstTopic  = validTopic(s"$topicPrefix-first")
+    val secondTopic = validTopic(s"$topicPrefix-second")
+    val selection   = Selection.Pattern(validTopicPattern(s"$topicPrefix-.*"))
+    val group       = validConsumerGroup(s"xkafka-partitioned-integration-$suffix")
+    val records     = NonEmptyList.of(ProducerRecord(firstTopic, "first-key", "first"), ProducerRecord(secondTopic, "second-key", "second"))
 
     for
       clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer)).liftTo[IO]
@@ -188,7 +188,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
       _                <- PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(records)).timeout(45.seconds)
       consumed         <-
-        PlatformKafkaClient().consumer(consumerSettings, subscription).use: consumer =>
+        PlatformKafkaClient().consumer(consumerSettings, selection).use: consumer =>
           consumer.partitionedRecords(16).map: partition =>
             partition.records.take(1).map(partition.topicPartition -> _)
           .parJoinUnbounded.take(2).compile.toList
@@ -201,33 +201,30 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       settings: ConsumerSettings[IO, String, String],
       topic: Topic
   ): IO[(CommittableConsumerRecord[IO, String, String], CommittableConsumerRecord[IO, String, String])] =
-    PlatformKafkaClient().consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+    PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
       consumer.records.take(2).compile.toList.flatMap:
         case first :: second :: Nil => first.offset.commit.as((first, second))
         case records                => IO.raiseError(new AssertionError(s"expected two records, got ${records.size}"))
     .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
-  private def consumeOne(
-      settings: ConsumerSettings[IO, String, String],
-      subscription: Subscription
-  ): IO[CommittableConsumerRecord[IO, String, String]] =
-    PlatformKafkaClient().consumer(settings, subscription).use(_.records.take(1).compile.lastOrError)
+  private def consumeOne(settings: ConsumerSettings[IO, String, String], selection: Selection): IO[CommittableConsumerRecord[IO, String, String]] =
+    PlatformKafkaClient().consumer(settings, selection).use(_.records.take(1).compile.lastOrError)
       .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
   private def consume(
       settings: ConsumerSettings[IO, String, String],
-      subscription: Subscription,
+      selection: Selection,
       count: Long
   ): IO[List[CommittableConsumerRecord[IO, String, String]]] =
-    PlatformKafkaClient().consumer(settings, subscription).use(_.records.take(count).compile.toList)
+    PlatformKafkaClient().consumer(settings, selection).use(_.records.take(count).compile.toList)
       .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))
 
   private def consumeAndCommitBatch(
       settings: ConsumerSettings[IO, String, String],
-      subscription: Subscription,
+      selection: Selection,
       count: Int
   ): IO[List[CommittableConsumerRecord[IO, String, String]]] =
-    PlatformKafkaClient().consumer(settings, subscription).use: consumer =>
+    PlatformKafkaClient().consumer(settings, selection).use: consumer =>
       consumer.records.take(count.toLong).compile.toList.flatMap: records =>
         Stream.emits(records.map(_.offset)).covary[IO].through(commitBatchWithin(count, 1.minute)).compile.drain.as(records)
     .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("Kafka consumer timed out")))

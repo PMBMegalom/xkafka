@@ -24,7 +24,7 @@ package downstream
 
 import scala.concurrent.duration.*
 
-import cats.data.{NonEmptyList, ValidatedNel}
+import cats.data.{NonEmptyList, ValidatedNel, NonEmptySet}
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
@@ -50,7 +50,7 @@ object DownstreamSmoke extends IOApp.Simple:
       consumerSettings <- validated(ConsumerSettings.from(client, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest))
       produced <- KafkaClient[IO].producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(expected))).timeout(45.seconds)
       consumed <- KafkaClient[IO]
-        .consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic)))
+        .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic)))
         .use(_.records.take(1).evalTap(_.offset.commit).compile.lastOrError)
         .timeout(60.seconds)
       _ <- IO.raiseUnless(produced.records.size == 1)(new AssertionError("producer did not acknowledge the record"))

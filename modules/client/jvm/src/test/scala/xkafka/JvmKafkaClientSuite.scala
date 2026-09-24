@@ -26,7 +26,7 @@ import java.util.{List as JavaList, Map as JavaMap}
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import fs2.Chunk
 import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, KafkaByteProducer, ProducerSettings as Fs2ProducerSettings}
@@ -136,7 +136,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "2"))
         .toOption.get
 
-    KafkaClientPlatform.fromFs2[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic))).use: consumer =>
+    KafkaClientPlatform.fromFs2[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
       for
         consumed   <- consumer.records.take(1).compile.lastOrError
         assignment <- consumer.assignment

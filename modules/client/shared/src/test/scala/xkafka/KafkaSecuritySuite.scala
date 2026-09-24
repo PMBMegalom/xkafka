@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import munit.{CatsEffectSuite, TestOptions}
 
@@ -92,7 +92,7 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
         PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record)))
           .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("secure Kafka producer timed out")))
       consumed <-
-        PlatformKafkaClient().consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use(_.records.take(1).compile.lastOrError)
+        PlatformKafkaClient().consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.lastOrError)
           .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("secure Kafka consumer timed out")))
     yield
       assertEquals(consumed.record.topicPartition.topic, topic)

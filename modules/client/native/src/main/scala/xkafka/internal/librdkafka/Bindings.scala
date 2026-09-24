@@ -222,6 +222,16 @@ private[xkafka] object Bindings:
 
   def xkafka_metadata_partition_at(metadata: CVoidPtr, topicIndex: CSize, partitionIndex: CSize): CInt = extern
 
+  def xkafka_consumer_assign(
+      consumer: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_consumer_pause(
       consumer: CVoidPtr,
       topics: Ptr[CString],

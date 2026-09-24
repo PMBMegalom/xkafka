@@ -72,6 +72,8 @@ private[xkafka] trait RdConsumer extends js.Object:
 
   def subscribe(topics: js.Array[SubscriptionTopic]): this.type = js.native
 
+  def assign(topicPartitions: js.Array[RdTopicPartition]): this.type = js.native
+
   def consume(count: Int, callback: js.Function2[RdError | Null, js.Array[RdMessage], Unit]): Unit = js.native
 
   def commit(offsets: js.Array[RdTopicPartitionOffset]): this.type = js.native

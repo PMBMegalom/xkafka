@@ -25,7 +25,7 @@ import scala.concurrent.duration.{FiniteDuration, *}
 
 import cats.{Applicative, FlatMap, Foldable, Functor, Show}
 import cats.arrow.FunctionK
-import cats.data.{NonEmptyList, Validated, ValidatedNel}
+import cats.data.{NonEmptyList, NonEmptySet, Validated, ValidatedNel}
 import cats.effect.{Async, Temporal}
 import cats.tagless.FunctorK
 import fs2.{Chunk, Pipe, Stream}
@@ -264,9 +264,19 @@ object ConsumerSettings:
   given [K, V]: FunctorK[[F[_]] =>> ConsumerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ConsumerSettings[F, K, V])(fk: FunctionK[F, G]): ConsumerSettings[G, K, V] = settings.mapK(fk)
 
-enum Subscription:
-  case Topics(topics: NonEmptyList[Topic])
-  case Pattern(pattern: TopicPattern)
+/** What a consumer reads. */
+sealed trait Selection
+
+object Selection:
+  /** Joins a consumer group, so the partitions a consumer holds follow the group's rebalances. */
+  enum Subscription extends Selection:
+    case Topics(topics: NonEmptySet[Topic])
+    case Pattern(pattern: TopicPattern)
+
+  export Subscription.{Pattern, Topics}
+
+  /** Names the partitions to read and joins no group, so the assignment never changes and nothing rebalances it away. */
+  final case class Partitions(topicPartitions: NonEmptySet[TopicPartition]) extends Selection
 
 trait OffsetCommitter[F[_]]:
   self =>
@@ -395,7 +405,10 @@ trait KafkaConsumer[F[_], K, V]:
     */
   private[xkafka] def pausing: PartitionPausing[F] = PartitionPausing.Absent()
 
-  /** Emits the current assignment and then each distinct one afterwards. */
+  /** Emits the current assignment and then each distinct one afterwards.
+    *
+    * A consumer reading `Selection.Partitions` joins no group, so its assignment is fixed and only the first value arrives.
+    */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
 
   /** Hands every record to `process` a chunk at a time and commits each chunk once it returns.

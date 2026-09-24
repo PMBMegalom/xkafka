@@ -935,6 +935,32 @@ int32_t xkafka_metadata_partition_at(const void *metadata,
 
 /* Stops and restarts fetching for the listed partitions. Kafka keeps each paused partition's
  * position, so resuming continues from the record after the last one handed to the application. */
+/* Names the partitions to read directly, joining no consumer group. */
+int xkafka_consumer_assign(rd_kafka_t *consumer,
+                           const char *const *topics,
+                           const int32_t *partitions,
+                           size_t count,
+                           char *error,
+                           size_t error_size,
+                           int32_t *error_code) {
+        rd_kafka_topic_partition_list_t *list;
+        rd_kafka_resp_err_t result;
+        size_t index;
+
+        list = rd_kafka_topic_partition_list_new((int)count);
+        for (index = 0; index < count; index++)
+                rd_kafka_topic_partition_list_add(list, topics[index], partitions[index]);
+
+        result = rd_kafka_assign(consumer, list);
+        rd_kafka_topic_partition_list_destroy(list);
+
+        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
+                return -1;
+        }
+        return 0;
+}
+
 static int xkafka_consumer_pause_resume(rd_kafka_t *consumer,
                                         const char *const *topics,
                                         const int32_t *partitions,

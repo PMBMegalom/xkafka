@@ -34,6 +34,7 @@ import fs2.kafka.{
   ProducerRecord as Fs2ProducerRecord, ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
 }
 import fs2.kafka.consumer.MkConsumer
+import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
@@ -56,16 +57,18 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     Fs2KafkaProducer.resource(producerSettings(settings)).mapK(handleBackendErrors).map(new Fs2KafkaProducerAdapter(_))
 
-  override def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]] =
+  override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
       consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings)).mapK(handleBackendErrors)
-      _        <- Resource.eval(subscribe(consumer, subscription))
+      _        <- Resource.eval(select(consumer, selection))
     yield new Fs2KafkaConsumerAdapter(consumer)
 
-  private def subscribe[K, V](consumer: Fs2KafkaConsumer[F, K, V], subscription: Subscription): F[Unit] =
-    subscription match
-      case Subscription.Topics(topics)   => backend(consumer.subscribe(topics.map(_.value)))
-      case Subscription.Pattern(pattern) => F.delay(pattern.anchored.r).flatMap(value => backend(consumer.subscribe(value)))
+  private def select[K, V](consumer: Fs2KafkaConsumer[F, K, V], selection: Selection): F[Unit] =
+    selection match
+      case Selection.Topics(topics)              => backend(consumer.subscribe(topics.toNonEmptyList.map(_.value)))
+      case Selection.Pattern(pattern)            => F.delay(pattern.anchored.r).flatMap(value => backend(consumer.subscribe(value)))
+      case Selection.Partitions(topicPartitions) =>
+        backend(consumer.assign(topicPartitions.map(value => new JavaTopicPartition(value.topic.value, value.partition.value))))
 
   private val handleBackendErrors: FunctionK[F, F] =
     new FunctionK[F, F]:

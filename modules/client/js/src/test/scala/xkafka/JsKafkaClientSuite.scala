@@ -26,7 +26,7 @@ import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.Uint8Array
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Dispatcher
 import fs2.Chunk
@@ -230,7 +230,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           .toOption.get
       record <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10")))
-          .consumer(settings, Subscription.Topics(NonEmptyList.one(topic("events")))).use(_.records.take(1).compile.lastOrError)
+          .consumer(settings, Selection.Topics(NonEmptySet.one(topic("events")))).use(_.records.take(1).compile.lastOrError)
       _ <- record.offset.commit
     yield
       assertEquals(record.record.topicPartition, TopicPartition(topic("events"), partition(2)))
@@ -289,8 +289,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         ).asInstanceOf[confluent.RdConsumer]
       settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
       outcome <-
-        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer))
-          .consumer(settings, Subscription.Topics(NonEmptyList.one(topic("events")))).use: value =>
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          .use: value =>
             IO(handlers.foreach(_(null, js.Array()))) *> value.records.compile.drain.timeout(5.seconds).attempt
     yield assert(
       outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]),

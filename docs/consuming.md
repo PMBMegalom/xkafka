@@ -4,7 +4,7 @@ A consumer is a `Resource` and exposes an FS2 stream of
 `CommittableConsumerRecord`.
 
 ```scala mdoc:compile-only
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
 import xkafka.*
@@ -18,17 +18,41 @@ val program =
     settings <- ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
     records  <-
-      KafkaClient[IO].consumer(settings, Subscription.Topics(NonEmptyList.one(topic)))
+      KafkaClient[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
         .use(_.records.take(10).compile.toList)
   yield records
 ```
 
-## Subscriptions
+## What a consumer reads
 
-`Subscription.Topics` takes a non-empty list of topics.
-`Subscription.Pattern` takes a non-empty `TopicPattern`, which matches complete
-topic names. Portable patterns should use regular-expression syntax shared by
-Java, ECMAScript, and POSIX extended regular expressions.
+`Selection` says where a consumer's records come from.
+
+`Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a non-empty
+`TopicPattern`, which matches complete topic names. Portable patterns should use
+regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
+Both join a consumer group, so the partitions a consumer holds follow the group's rebalances.
+
+`Selection.Partitions` takes a non-empty set of topic-partitions and reads exactly those. No group
+is joined, so the assignment never changes and nothing rebalances it away. Two consumers naming the
+same partition each read all of it, even where they share a consumer group, because there is no
+group membership to divide it between them.
+
+The consumer group is still the key that committed offsets are stored under, so consumers naming the
+same partitions under one group do share those offsets, and a consumer resuming from a commit reads
+from wherever the other left off.
+
+@:callout(warning)
+Kafka stores whatever was committed last for a partition, with no comparison against what is already
+there. Two consumers committing the same partition therefore race, and the later commit wins even
+where its offset is lower, which moves the group backwards and replays records. A batch keeps the
+highest offset per partition, but only among the offsets in that batch. Give consumers their own
+group unless they are meant to share a position.
+@:@
+
+@:callout(info)
+A seek is refused until the partition it names is being fetched, which holding the assignment does
+not yet mean. Retry briefly if you seek immediately after a consumer starts.
+@:@
 
 ## Inspecting the consumer
 

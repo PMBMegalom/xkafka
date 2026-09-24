@@ -29,15 +29,15 @@ trait KafkaClient[F[_]]:
 
   def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]]
 
-  def consumer[K, V](settings: ConsumerSettings[F, K, V], subscription: Subscription): Resource[F, KafkaConsumer[F, K, V]]
+  def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]]
 
   final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F])(using MonadCancelThrow[F], MonadCancelThrow[G]): KafkaClient[G] =
     new KafkaClient[G]:
       override def producer[K, V](settings: ProducerSettings[G, K, V]): Resource[G, KafkaProducer[G, K, V]] =
         self.producer(settings.mapK(gk)).map(_.mapK(fk)).mapK(fk)
 
-      override def consumer[K, V](settings: ConsumerSettings[G, K, V], subscription: Subscription): Resource[G, KafkaConsumer[G, K, V]] =
-        self.consumer(settings.mapK(gk), subscription).map(_.mapK(fk)).mapK(fk)
+      override def consumer[K, V](settings: ConsumerSettings[G, K, V], selection: Selection): Resource[G, KafkaConsumer[G, K, V]] =
+        self.consumer(settings.mapK(gk), selection).map(_.mapK(fk)).mapK(fk)
 
 object KafkaClient:
   def apply[F[_]: Async]: KafkaClient[F] = KafkaClientPlatform[F]

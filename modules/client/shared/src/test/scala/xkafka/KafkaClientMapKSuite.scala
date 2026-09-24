@@ -22,7 +22,7 @@
 package xkafka
 
 import cats.arrow.FunctionK
-import cats.data.{EitherT, NonEmptyList}
+import cats.data.{EitherT, NonEmptyList, NonEmptySet}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -52,7 +52,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
     for
       produced <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
-      consumed <- client.consumer(consumerSettings, Subscription.Topics(NonEmptyList.one(topic))).use(_.records.compile.drain).value
+      consumed <- client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.compile.drain).value
     yield
       assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record -> None))))
       assertEquals(consumed, Right(()))
@@ -69,7 +69,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
                 settings.valueSerializer.serialize(first.topic, first.headers, first.value)
               ).tupled.as(IO.pure(ProducerResult(records.map(_ -> None))))
 
-      override def consumer[K, V](settings: ConsumerSettings[IO, K, V], subscription: Subscription): Resource[IO, KafkaConsumer[IO, K, V]] =
+      override def consumer[K, V](settings: ConsumerSettings[IO, K, V], selection: Selection): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:
           new KafkaConsumer[IO, K, V]:
             override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                 = Stream.empty
