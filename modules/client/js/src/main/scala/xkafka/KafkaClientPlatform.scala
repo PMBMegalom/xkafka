@@ -25,7 +25,7 @@ import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array, Uint8Array}
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Dispatcher, Queue}
@@ -85,6 +85,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   // also when Kafka would consider the consumer stalled.
   private val RecordQueueSize = 256
   private val MaxExactInteger = 9007199254740991d
+  // Admin calls are metadata round trips, so they are bounded well below the metadata refresh interval.
+  private val AdminTimeoutMillis = 30000
   // librdkafka's sentinels for the ends of a partition's log.
   private val BeginningOffset = -2d
   private val EndOffset       = -1d
@@ -185,6 +187,65 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
   private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
     (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
+
+  override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
+    val config =
+      confluent.Values.rdAdminConfig(
+        settings.bootstrapServers.toList.toJSArray,
+        settings.clientId.orUndefined,
+        settings.properties ++ SecurityProperties.librdkafka(settings.security) ++ ClientProperties(settings)
+      )
+    Resource.make(F.delay(confluent.RdAdminClient.create(config)))(value => F.delay(value.disconnect()))
+      .map(new ConfluentKafkaAdminClient(_, settings))
+
+  private final class ConfluentKafkaAdminClient(underlying: confluent.RdAdmin, settings: ClientSettings) extends KafkaAdminClient[F]:
+    private val requestTimeoutMillis = settings.metadataRefreshInterval.toMillis.toInt.min(AdminTimeoutMillis)
+
+    /** The client creates one topic per call, so each topic's outcome arrives on its own. */
+    override def createTopics(topics: NonEmptySet[NewTopic]): F[Unit] =
+      topics.traverse_ : value =>
+        outcome(done =>
+          underlying.createTopic(
+            confluent.Values.rdNewTopic(value.topic.value, value.partitions, value.replicationFactor, value.configuration),
+            requestTimeoutMillis,
+            done
+          )
+        )
+
+    override def deleteTopics(topics: NonEmptySet[Topic]): F[Unit] =
+      topics.traverse_(value => outcome(done => underlying.deleteTopic(value.value, requestTimeoutMillis, done)))
+
+    override def createPartitions(topic: Topic, count: Int): F[Unit] =
+      outcome(done => underlying.createPartitions(topic.value, count, requestTimeoutMillis, done))
+
+    override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
+      F.async_[js.Array[confluent.RdTopicDescription]]: resume =>
+        underlying.describeTopics(
+          topics.toSortedSet.toList.map(_.value).toJSArray,
+          js.Dictionary("timeout" -> requestTimeoutMillis),
+          (error, described) =>
+            rdError(error) match
+              case Some(failure) => resume(Left(rdFailure(failure)))
+              case None          => resume(Right(described))
+        )
+      .flatMap: described =>
+        described.toList.traverse: value =>
+          value.error.toOption match
+            // The client reports a topic it could not describe in the description itself, rather than failing the call.
+            case Some(failure) => F.raiseError[(Topic, Set[Partition])](rdFailure(failure))
+            case None          =>
+              for
+                portableTopic <- topic(value.name)
+                partitions    <- value.partitions.toList.traverse(info => partition(info.partition))
+              yield portableTopic -> partitions.toSet
+        .map(_.toMap)
+
+    private def outcome(register: js.Function1[confluent.RdError | Null, Unit] => Unit): F[Unit] =
+      F.async_ : resume =>
+        register: error =>
+          rdError(error) match
+            case Some(failure) => resume(Left(rdFailure(failure)))
+            case None          => resume(Right(()))
 
   private def select(consumer: confluent.RdConsumer, selection: Selection): F[Unit] =
     selection match

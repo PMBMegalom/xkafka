@@ -69,6 +69,14 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
                 settings.valueSerializer.serialize(first.topic, first.headers, first.value)
               ).tupled.as(IO.pure(ProducerResult(records.map(_ -> None))))
 
+      override def admin(settings: ClientSettings): Resource[IO, KafkaAdminClient[IO]] =
+        Resource.pure:
+          new KafkaAdminClient[IO]:
+            override def createTopics(topics: NonEmptySet[NewTopic]): IO[Unit]                      = IO.unit
+            override def deleteTopics(topics: NonEmptySet[Topic]): IO[Unit]                         = IO.unit
+            override def createPartitions(topic: Topic, count: Int): IO[Unit]                       = IO.unit
+            override def describeTopics(topics: NonEmptySet[Topic]): IO[Map[Topic, Set[Partition]]] = IO.pure(Map.empty)
+
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], selection: Selection): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:
           new KafkaConsumer[IO, K, V]:

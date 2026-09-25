@@ -50,6 +50,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private val DeliveryPollTimeoutMillis = 100
   private val ErrorBufferSize           = 512
   private val UnassignedPartition       = -1
+  // Admin calls are metadata round trips against the controller, so they are bounded on their own.
+  private val AdminTimeoutMillis = 30000
   // librdkafka's sentinels for the ends of a partition's log.
   private val BeginningOffset = -2L
   private val EndOffset       = -1L
@@ -189,6 +191,137 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           values(index) = toCString(value)
       (names, values, entries.size.toUSize)
 
+  override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
+    nativeClient(createAdmin(settings), Bindings.xkafka_admin_destroy).map(new LibrdkafkaAdminClient(_))
+
+  private def createAdmin(settings: ClientSettings): F[CVoidPtr] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone                        = zone
+        val (error, errorCode)            = errorSlots
+        val (names, values, propertySize) =
+          nativeProperties(settings.properties ++ SecurityProperties.librdkafka(settings.security) ++ ClientProperties(settings))
+        val client =
+          Bindings.xkafka_admin_new(
+            toCString(settings.bootstrapServers.toList.mkString(",")),
+            settings.clientId.map(toCString).orNull,
+            names,
+            values,
+            propertySize,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if client == null then throw nativeError(error, errorCode)
+        client
+
+  private final class LibrdkafkaAdminClient(client: NativeClient) extends KafkaAdminClient[F]:
+    override def createTopics(topics: NonEmptySet[NewTopic]): F[Unit] = client(create(topics.toSortedSet.toVector))
+
+    override def deleteTopics(topics: NonEmptySet[Topic]): F[Unit] = client(delete(topics.toSortedSet.toVector))
+
+    override def createPartitions(topic: Topic, count: Int): F[Unit] = client(addPartitions(topic, count))
+
+    /** Topic metadata already reports what the cluster holds, so this asks for that rather than a second admin call. */
+    override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
+      client(readMetadata).map(_.view.filterKeys(topics.contains).toMap).flatMap: described =>
+        topics.find(topic => !described.contains(topic)) match
+          case Some(missing) => F.raiseError(unknownTopic(missing))
+          case None          => F.pure(described)
+
+    private def unknownTopic(topic: Topic): KafkaException.BackendFailure =
+      new KafkaException.BackendFailure(
+        s"the cluster has no topic '${topic.value}'",
+        Some(ErrorCode.UnknownTopicOrPartition),
+        retriable = Some(false),
+        fatal = Some(false)
+      )
+
+    private def create(topics: Vector[NewTopic]): Unit =
+      Zone.acquire: zone =>
+        given Zone       = zone
+        val names        = alloc[CString](topics.size)
+        val partitions   = alloc[CInt](topics.size)
+        val replication  = alloc[CInt](topics.size)
+        val configCounts = alloc[CSize](topics.size)
+        val configured   = topics.flatMap(_.configuration.toVector)
+        val configNames  = if configured.isEmpty then null else alloc[CString](configured.size)
+        val configValues = if configured.isEmpty then null else alloc[CString](configured.size)
+        topics.iterator.zipWithIndex.foreach:
+          case (value, index) =>
+            names(index) = toCString(value.topic.value)
+            partitions(index) = value.partitions
+            replication(index) = value.replicationFactor.toInt
+            configCounts(index) = value.configuration.size.toUSize
+        configured.iterator.zipWithIndex.foreach:
+          case ((name, value), index) =>
+            configNames(index) = toCString(name)
+            configValues(index) = toCString(value)
+        val (error, errorCode) = errorSlots
+        val result             =
+          Bindings.xkafka_admin_create_topics(
+            client.handle,
+            names,
+            partitions,
+            replication,
+            configNames,
+            configValues,
+            configCounts,
+            topics.size.toUSize,
+            requestTimeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if result != 0 then throw nativeError(error, errorCode)
+
+    private def delete(topics: Vector[Topic]): Unit =
+      Zone.acquire: zone =>
+        given Zone = zone
+        val names  = alloc[CString](topics.size)
+        topics.iterator.zipWithIndex.foreach((value, index) => names(index) = toCString(value.value))
+        val (error, errorCode) = errorSlots
+        val result             =
+          Bindings
+            .xkafka_admin_delete_topics(client.handle, names, topics.size.toUSize, requestTimeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
+        if result != 0 then throw nativeError(error, errorCode)
+
+    private def addPartitions(topic: Topic, count: Int): Unit =
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val result             =
+          Bindings.xkafka_admin_create_partitions(
+            client.handle,
+            toCString(topic.value),
+            count,
+            requestTimeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if result != 0 then throw nativeError(error, errorCode)
+
+    private def readMetadata: Map[Topic, Set[Partition]] =
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val metadata = Bindings.xkafka_consumer_metadata(client.handle, null, requestTimeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
+        if metadata == null then throw nativeError(error, errorCode)
+
+        try Vector.tabulate(Bindings.xkafka_metadata_topic_count(metadata).toInt): topicIndex =>
+            val topicValue = fromCString(Bindings.xkafka_metadata_topic_at(metadata, topicIndex.toUSize))
+            val topic      = Topic.from(topicValue).fold(error => throw invalidBackendValue("metadata topic", topicValue, error), identity)
+            val partitions =
+              Vector.tabulate(Bindings.xkafka_metadata_partition_count_at(metadata, topicIndex.toUSize).toInt): partitionIndex =>
+                val partitionValue = Bindings.xkafka_metadata_partition_at(metadata, topicIndex.toUSize, partitionIndex.toUSize)
+                Partition.from(partitionValue).fold(error => throw invalidBackendValue("metadata partition", partitionValue, error), identity)
+              .toSet
+            topic -> partitions
+          .toMap
+        finally Bindings.xkafka_metadata_destroy(metadata)
+
+    private val requestTimeoutMillis = AdminTimeoutMillis
   private def select(consumer: CVoidPtr, selection: Selection): Unit =
     selection match
       case Selection.Partitions(topicPartitions) => assignPartitions(consumer, topicPartitions)

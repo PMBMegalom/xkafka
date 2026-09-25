@@ -935,6 +935,201 @@ int32_t xkafka_metadata_partition_at(const void *metadata,
 
 /* Stops and restarts fetching for the listed partitions. Kafka keeps each paused partition's
  * position, so resuming continues from the record after the last one handed to the application. */
+/* librdkafka's admin calls are asynchronous: the request goes on a queue and the outcome arrives as
+ * an event. Each helper below submits, waits for its event, and reports the first failure it finds,
+ * because the portable API reports one failure rather than an outcome for each topic. */
+static int xkafka_admin_await(rd_kafka_queue_t *queue,
+                              rd_kafka_event_type_t expected,
+                              int timeout_ms,
+                              char *error,
+                              size_t error_size,
+                              int32_t *error_code) {
+        rd_kafka_event_t *event = rd_kafka_queue_poll(queue, timeout_ms);
+        const rd_kafka_topic_result_t **results = NULL;
+        size_t count = 0, index;
+        int outcome = 0;
+
+        if (event == NULL) {
+                xkafka_set_error_at(error, error_size, error_code,
+                                    "timed out waiting for the admin result",
+                                    RD_KAFKA_RESP_ERR__TIMED_OUT);
+                return -1;
+        }
+        if (rd_kafka_event_error(event) != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error_at(error, error_size, error_code,
+                                    rd_kafka_event_error_string(event),
+                                    rd_kafka_event_error(event));
+                rd_kafka_event_destroy(event);
+                return -1;
+        }
+
+        if (expected == RD_KAFKA_EVENT_CREATETOPICS_RESULT)
+                results = rd_kafka_CreateTopics_result_topics(rd_kafka_event_CreateTopics_result(event), &count);
+        else if (expected == RD_KAFKA_EVENT_DELETETOPICS_RESULT)
+                results = rd_kafka_DeleteTopics_result_topics(rd_kafka_event_DeleteTopics_result(event), &count);
+
+        for (index = 0; results != NULL && index < count; index++) {
+                if (rd_kafka_topic_result_error(results[index]) != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_topic_result_error_string(results[index]),
+                                            rd_kafka_topic_result_error(results[index]));
+                        outcome = -1;
+                        break;
+                }
+        }
+
+        rd_kafka_event_destroy(event);
+        return outcome;
+}
+
+rd_kafka_t *xkafka_admin_new(const char *brokers,
+                             const char *client_id,
+                             const char *const *property_names,
+                             const char *const *property_values,
+                             size_t property_count,
+                             char *error,
+                             size_t error_size,
+                             int32_t *error_code) {
+        rd_kafka_conf_t *conf = rd_kafka_conf_new();
+        rd_kafka_t *client;
+
+        if (xkafka_conf_set_all(conf, property_names, property_values, property_count, error, error_size, error_code) != 0 ||
+            xkafka_conf_set(conf, "bootstrap.servers", brokers, error, error_size, error_code) != 0) {
+                rd_kafka_conf_destroy(conf);
+                return NULL;
+        }
+        if (client_id != NULL && xkafka_conf_set(conf, "client.id", client_id, error, error_size, error_code) != 0) {
+                rd_kafka_conf_destroy(conf);
+                return NULL;
+        }
+
+        client = rd_kafka_new(RD_KAFKA_PRODUCER, conf, error, error_size);
+        if (client == NULL) {
+                xkafka_set_error(error, error_size, error_code, error);
+                return NULL;
+        }
+        return client;
+}
+
+void xkafka_admin_destroy(rd_kafka_t *client) {
+        if (client != NULL)
+                rd_kafka_destroy(client);
+}
+
+int xkafka_admin_create_topics(rd_kafka_t *client,
+                               const char *const *names,
+                               const int32_t *partitions,
+                               const int32_t *replication,
+                               const char *const *config_names,
+                               const char *const *config_values,
+                               const size_t *config_counts,
+                               size_t count,
+                               int timeout_ms,
+                               char *error,
+                               size_t error_size,
+                               int32_t *error_code) {
+        rd_kafka_NewTopic_t **topics = (rd_kafka_NewTopic_t **)calloc(count, sizeof(rd_kafka_NewTopic_t *));
+        rd_kafka_queue_t *queue = rd_kafka_queue_new(client);
+        rd_kafka_AdminOptions_t *options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_CREATETOPICS);
+        size_t index, configured = 0;
+        int outcome = 0;
+
+        if (topics == NULL) {
+                xkafka_set_error(error, error_size, error_code, "could not allocate the topics to create");
+                rd_kafka_AdminOptions_destroy(options);
+                rd_kafka_queue_destroy(queue);
+                return -1;
+        }
+
+        for (index = 0; index < count; index++) {
+                size_t entry;
+                topics[index] = rd_kafka_NewTopic_new(names[index], (int)partitions[index], (int)replication[index], error, error_size);
+                if (topics[index] == NULL) {
+                        xkafka_set_error(error, error_size, error_code, error);
+                        outcome = -1;
+                        break;
+                }
+                for (entry = 0; entry < config_counts[index]; entry++, configured++)
+                        rd_kafka_NewTopic_set_config(topics[index], config_names[configured], config_values[configured]);
+        }
+
+        if (outcome == 0) {
+                rd_kafka_CreateTopics(client, topics, count, options, queue);
+                outcome = xkafka_admin_await(queue, RD_KAFKA_EVENT_CREATETOPICS_RESULT, timeout_ms, error, error_size, error_code);
+        }
+
+        for (index = 0; index < count; index++)
+                if (topics[index] != NULL)
+                        rd_kafka_NewTopic_destroy(topics[index]);
+        free(topics);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(queue);
+        return outcome;
+}
+
+int xkafka_admin_delete_topics(rd_kafka_t *client,
+                               const char *const *names,
+                               size_t count,
+                               int timeout_ms,
+                               char *error,
+                               size_t error_size,
+                               int32_t *error_code) {
+        rd_kafka_DeleteTopic_t **topics = (rd_kafka_DeleteTopic_t **)calloc(count, sizeof(rd_kafka_DeleteTopic_t *));
+        rd_kafka_queue_t *queue = rd_kafka_queue_new(client);
+        rd_kafka_AdminOptions_t *options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_DELETETOPICS);
+        size_t index;
+        int outcome;
+
+        if (topics == NULL) {
+                xkafka_set_error(error, error_size, error_code, "could not allocate the topics to delete");
+                rd_kafka_AdminOptions_destroy(options);
+                rd_kafka_queue_destroy(queue);
+                return -1;
+        }
+
+        for (index = 0; index < count; index++)
+                topics[index] = rd_kafka_DeleteTopic_new(names[index]);
+
+        rd_kafka_DeleteTopics(client, topics, count, options, queue);
+        outcome = xkafka_admin_await(queue, RD_KAFKA_EVENT_DELETETOPICS_RESULT, timeout_ms, error, error_size, error_code);
+
+        for (index = 0; index < count; index++)
+                if (topics[index] != NULL)
+                        rd_kafka_DeleteTopic_destroy(topics[index]);
+        free(topics);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(queue);
+        return outcome;
+}
+
+int xkafka_admin_create_partitions(rd_kafka_t *client,
+                                   const char *topic,
+                                   int32_t count,
+                                   int timeout_ms,
+                                   char *error,
+                                   size_t error_size,
+                                   int32_t *error_code) {
+        rd_kafka_NewPartitions_t *request = rd_kafka_NewPartitions_new(topic, (size_t)count, error, error_size);
+        rd_kafka_queue_t *queue;
+        rd_kafka_AdminOptions_t *options;
+        int outcome;
+
+        if (request == NULL) {
+                xkafka_set_error(error, error_size, error_code, error);
+                return -1;
+        }
+
+        queue = rd_kafka_queue_new(client);
+        options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_CREATEPARTITIONS);
+        rd_kafka_CreatePartitions(client, &request, 1, options, queue);
+        outcome = xkafka_admin_await(queue, RD_KAFKA_EVENT_CREATEPARTITIONS_RESULT, timeout_ms, error, error_size, error_code);
+
+        rd_kafka_NewPartitions_destroy(request);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(queue);
+        return outcome;
+}
+
 /* Names the partitions to read directly, joining no consumer group. */
 int xkafka_consumer_assign(rd_kafka_t *consumer,
                            const char *const *topics,

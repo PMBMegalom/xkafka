@@ -21,21 +21,25 @@
 
 package xkafka
 
+import scala.jdk.CollectionConverters.*
+
 import cats.Parallel
 import cats.arrow.FunctionK
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.kafka.{
-  AutoOffsetReset as Fs2AutoOffsetReset, CommittableConsumerRecord as Fs2CommittableConsumerRecord, ConsumerSettings as Fs2ConsumerSettings,
-  Deserializer as Fs2Deserializer, Header as Fs2Header, Headers as Fs2Headers, KafkaConsumer as Fs2KafkaConsumer, KafkaProducer as Fs2KafkaProducer,
-  ProducerRecord as Fs2ProducerRecord, ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
+  AdminClientSettings as Fs2AdminClientSettings, AutoOffsetReset as Fs2AutoOffsetReset, CommittableConsumerRecord as Fs2CommittableConsumerRecord,
+  ConsumerSettings as Fs2ConsumerSettings, Deserializer as Fs2Deserializer, Header as Fs2Header, Headers as Fs2Headers,
+  KafkaAdminClient as Fs2KafkaAdminClient, KafkaConsumer as Fs2KafkaConsumer, KafkaProducer as Fs2KafkaProducer, ProducerRecord as Fs2ProducerRecord,
+  ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
 }
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
+import org.apache.kafka.clients.admin.{NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic}
 import org.apache.kafka.clients.consumer.OffsetAndMetadata
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
@@ -62,6 +66,38 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings)).mapK(handleBackendErrors)
       _        <- Resource.eval(select(consumer, selection))
     yield new Fs2KafkaConsumerAdapter(consumer)
+
+  override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
+    Fs2KafkaAdminClient.resource(adminSettings(settings)).mapK(handleBackendErrors).map(new Fs2KafkaAdminClientAdapter(_))
+
+  private def adminSettings(settings: ClientSettings): Fs2AdminClientSettings =
+    val base =
+      Fs2AdminClientSettings(settings.bootstrapServers.toList.mkString(","))
+        .withProperties(settings.properties ++ SecurityProperties.javaClient(settings.security) ++ ClientProperties(settings))
+
+    settings.clientId.fold(base)(base.withClientId)
+
+  private final class Fs2KafkaAdminClientAdapter(underlying: Fs2KafkaAdminClient[F]) extends KafkaAdminClient[F]:
+    override def createTopics(topics: NonEmptySet[NewTopic]): F[Unit] = backend(underlying.createTopics(topics.toSortedSet.toList.map(javaNewTopic)))
+
+    override def deleteTopics(topics: NonEmptySet[Topic]): F[Unit] = backend(underlying.deleteTopics(topics.map(_.value)))
+
+    override def createPartitions(topic: Topic, count: Int): F[Unit] =
+      backend(underlying.createPartitions(Map(topic.value -> JavaNewPartitions.increaseTo(count))))
+
+    override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
+      backend(underlying.describeTopics(topics.map(_.value))).flatMap: described =>
+        described.toList.traverse: (name, description) =>
+          for
+            topic      <- F.fromEither(validTopic(name))
+            partitions <-
+              description.partitions.asScala.toList
+                .traverse(value => F.fromEither(Partition.from(value.partition).leftMap(error => invalidBackendValue("partition", error))))
+          yield topic -> partitions.toSet
+        .map(_.toMap)
+
+    private def javaNewTopic(value: NewTopic): JavaNewTopic =
+      new JavaNewTopic(value.topic.value, value.partitions, value.replicationFactor).configs(value.configuration.asJava)
 
   private def select[K, V](consumer: Fs2KafkaConsumer[F, K, V], selection: Selection): F[Unit] =
     selection match

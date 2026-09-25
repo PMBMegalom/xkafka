@@ -383,6 +383,56 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         // Kafka stores whatever was committed last, so a commit can move a group's position backwards and replay records.
         assertEquals(afterBehind, Some(lower), "a later commit should replace the stored offset even where it is lower")
 
+  test(conformance("topics can be created, grown, described, and deleted")):
+    withBroker: server =>
+      val topic = uniqueTopic("admin")
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+        outcome  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            for
+              _ <- admin.createTopics(NonEmptySet.one(newTopic))
+              // Creating and growing a topic propagates through the cluster, so each is polled for.
+              created <- described(admin, topic, 1)
+              _       <- admin.createPartitions(topic, 2)
+              grown   <- described(admin, topic, 2)
+              _       <- admin.deleteTopics(NonEmptySet.one(topic))
+              // Deletion is asynchronous on the broker, so the topic is polled until it has gone.
+              gone <- absent(admin, topic)
+
+            yield (created, grown, gone)
+          .timeout(90.seconds)
+      yield
+        val (created, grown, gone) = outcome
+        assertEquals(created, 1, "a created topic should report the partitions it was made with")
+        assertEquals(grown, 2, "growing a topic should report the added partition")
+        assert(gone, "a deleted topic should stop being described")
+
+  test(conformance("creating a topic that already exists fails")):
+    withBroker: server =>
+      val topic = uniqueTopic("admin-twice")
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+        outcome  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            admin.createTopics(NonEmptySet.one(newTopic)) *> admin.createTopics(NonEmptySet.one(newTopic)).attempt <*
+              admin.deleteTopics(NonEmptySet.one(topic)).attempt
+          .timeout(90.seconds)
+      yield assert(outcome.isLeft, s"creating an existing topic should fail, got $outcome")
+
+  /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
+  private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
+    admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)
+      .timeout(60.seconds)
+
+  /** Deletion reaches the cluster in its own time, and describing a topic it no longer has is a failure. */
+  private def absent(admin: KafkaAdminClient[IO], topic: Topic): IO[Boolean] =
+    admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.isLeft).iterateUntil(identity).timeout(60.seconds)
+
   private def assignmentOf(consumer: KafkaConsumer[IO, Option[String], Option[String]], size: Int): IO[Set[TopicPartition]] =
     consumer.assignmentChanges.filter(_.size == size).head.compile.lastOrError
 

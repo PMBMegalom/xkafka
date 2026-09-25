@@ -110,6 +110,38 @@ private[xkafka] trait RdConsumer extends js.Object:
   def on(event: String, listener: js.Function2[RdError | Null, js.Array[RdTopicPartition], Unit]): this.type = js.native
 
 @js.native
+@JSImport("@confluentinc/kafka-javascript", "AdminClient")
+private[xkafka] object RdAdminClient extends js.Object:
+  def create(config: js.Dictionary[js.Any]): RdAdmin = js.native
+
+@js.native
+private[xkafka] trait RdAdmin extends js.Object:
+  def createTopic(topic: RdNewTopic, timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def deleteTopic(topic: String, timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def createPartitions(topic: String, desiredPartitions: Int, timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def describeTopics(topics: js.Array[String], options: js.Any, callback: js.Function2[RdError | Null, js.Array[RdTopicDescription], Unit]): Unit =
+    js.native
+
+  def disconnect(): Unit = js.native
+
+private[xkafka] type RdNewTopic = js.Dictionary[js.Any]
+
+@js.native
+private[xkafka] trait RdTopicDescription extends js.Object:
+  val name: String                               = js.native
+  val partitions: js.Array[RdTopicPartitionInfo] = js.native
+
+  /** Present where the cluster could not describe this topic, such as when it does not exist. */
+  val error: js.UndefOr[RdError] = js.native
+
+@js.native
+private[xkafka] trait RdTopicPartitionInfo extends js.Object:
+  val partition: Int = js.native
+
+@js.native
 private[xkafka] trait RdTopicPartition extends js.Object:
   val topic: String  = js.native
   val partition: Int = js.native
@@ -198,6 +230,25 @@ private[xkafka] object Values:
         case AutoOffsetReset.Earliest => "earliest"
         case AutoOffsetReset.Latest   => "latest"
     )
+    result
+
+  /** The admin client rejects the producer's delivery report flag, so its configuration is built on its own. */
+  def rdAdminConfig(brokers: js.Array[String], clientId: js.UndefOr[String], properties: Map[String, String]): js.Dictionary[js.Any] =
+    val result = js.Dictionary.empty[js.Any]
+    properties.foreach((name, value) => result(name) = value)
+    result("bootstrap.servers") = brokers.mkString(",")
+    clientId.foreach(value => result("client.id") = value)
+    result
+
+  def rdNewTopic(topic: String, partitions: Int, replicationFactor: Short, configuration: Map[String, String]): RdNewTopic =
+    val result = js.Dictionary.empty[js.Any]
+    result("topic") = topic
+    result("num_partitions") = partitions
+    result("replication_factor") = replicationFactor.toInt
+    if configuration.nonEmpty then
+      val config = js.Dictionary.empty[js.Any]
+      configuration.foreach((name, value) => config(name) = value)
+      result("config") = config
     result
 
   def rdTopicPartition(topic: String, partition: Int): RdTopicPartition =

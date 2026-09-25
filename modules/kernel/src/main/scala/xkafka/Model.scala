@@ -35,18 +35,22 @@ enum ValidationError derives CanEqual:
   case NegativeOffset(value: Long)
   case OffsetOverflow
   case EmptyConsumerGroup
+  case NonPositivePartitionCount(value: Int)
+  case NonPositiveReplicationFactor(value: Short)
 
   def message: String =
     this match
-      case EmptyTopic                    => "topic must not be empty"
-      case TopicTooLong(length)          => s"topic must be at most ${Topic.MaxLength} characters, was $length"
-      case InvalidTopicCharacters(value) => s"topic '$value' must contain only [a-zA-Z0-9._-]"
-      case ReservedTopicName(value)      => s"topic must not be '$value'"
-      case EmptyTopicPattern             => "topic pattern must not be empty"
-      case NegativePartition(value)      => s"partition must not be negative, was $value"
-      case NegativeOffset(value)         => s"offset must not be negative, was $value"
-      case OffsetOverflow                => "offset cannot be advanced past Long.MaxValue"
-      case EmptyConsumerGroup            => "consumer group must not be empty"
+      case EmptyTopic                          => "topic must not be empty"
+      case TopicTooLong(length)                => s"topic must be at most ${Topic.MaxLength} characters, was $length"
+      case InvalidTopicCharacters(value)       => s"topic '$value' must contain only [a-zA-Z0-9._-]"
+      case ReservedTopicName(value)            => s"topic must not be '$value'"
+      case EmptyTopicPattern                   => "topic pattern must not be empty"
+      case NegativePartition(value)            => s"partition must not be negative, was $value"
+      case NegativeOffset(value)               => s"offset must not be negative, was $value"
+      case OffsetOverflow                      => "offset cannot be advanced past Long.MaxValue"
+      case EmptyConsumerGroup                  => "consumer group must not be empty"
+      case NonPositivePartitionCount(value)    => s"partition count must be positive, was $value"
+      case NonPositiveReplicationFactor(value) => s"replication factor must be positive, was $value"
 
 object ValidationError:
   given Show[ValidationError] = Show.show(_.message)

@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.{FiniteDuration, *}
 
-import cats.{Applicative, FlatMap, Foldable, Functor, Show}
+import cats.{Applicative, FlatMap, Foldable, Functor, Order, Show}
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptySet, Validated, ValidatedNel}
 import cats.effect.{Async, Temporal}
@@ -277,6 +277,59 @@ object Selection:
 
   /** Names the partitions to read and joins no group, so the assignment never changes and nothing rebalances it away. */
   final case class Partitions(topicPartitions: NonEmptySet[TopicPartition]) extends Selection
+
+/** A topic to create, with the partition count and replication factor the broker will give it. */
+sealed abstract case class NewTopic private (topic: Topic, partitions: Int, replicationFactor: Short, configuration: Map[String, String]):
+  def withConfiguration(values: Map[String, String]): NewTopic = new NewTopic(topic, partitions, replicationFactor, values) {}
+
+object NewTopic:
+  def from(
+      topic: Topic,
+      partitions: Int,
+      replicationFactor: Short,
+      configuration: Map[String, String] = Map.empty
+  ): Either[ValidationError, NewTopic] =
+    if partitions <= 0 then Left(ValidationError.NonPositivePartitionCount(partitions))
+    else if replicationFactor <= 0 then Left(ValidationError.NonPositiveReplicationFactor(replicationFactor))
+    else Right(new NewTopic(topic, partitions, replicationFactor, configuration) {})
+
+  /** A topic can only be created once, so its name is what distinguishes one of these from another. */
+  given Order[NewTopic] = Order.by(_.topic)
+  given Show[NewTopic]  = Show.show(value => s"${value.topic.value}(partitions=${value.partitions}, replication=${value.replicationFactor})")
+
+/** Topic administration.
+  *
+  * Kafka reports an outcome for each topic, and the backends do not agree on whether that detail survives, so these report the first failure and
+  * nothing more.
+  */
+trait KafkaAdminClient[F[_]]:
+  self =>
+
+  /** Creates each topic, failing if any of them cannot be created, including where it already exists. */
+  def createTopics(topics: NonEmptySet[NewTopic]): F[Unit]
+
+  /** Deletes each topic, failing if any of them cannot be deleted, including where it does not exist. */
+  def deleteTopics(topics: NonEmptySet[Topic]): F[Unit]
+
+  /** Adds partitions to a topic, which Kafka allows only as an increase. */
+  def createPartitions(topic: Topic, count: Int): F[Unit]
+
+  /** Reports the partitions of each requested topic, failing where the cluster does not have one of them. */
+  def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]]
+
+  final def mapK[G[_]](fk: FunctionK[F, G]): KafkaAdminClient[G] =
+    new KafkaAdminClient[G]:
+      override def createTopics(topics: NonEmptySet[NewTopic]): G[Unit] = fk(self.createTopics(topics))
+
+      override def deleteTopics(topics: NonEmptySet[Topic]): G[Unit] = fk(self.deleteTopics(topics))
+
+      override def createPartitions(topic: Topic, count: Int): G[Unit] = fk(self.createPartitions(topic, count))
+
+      override def describeTopics(topics: NonEmptySet[Topic]): G[Map[Topic, Set[Partition]]] = fk(self.describeTopics(topics))
+
+object KafkaAdminClient:
+  given FunctorK[KafkaAdminClient] with
+    override def mapK[F[_], G[_]](client: KafkaAdminClient[F])(fk: FunctionK[F, G]): KafkaAdminClient[G] = client.mapK(fk)
 
 trait OffsetCommitter[F[_]]:
   self =>

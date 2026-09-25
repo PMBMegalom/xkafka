@@ -222,6 +222,54 @@ private[xkafka] object Bindings:
 
   def xkafka_metadata_partition_at(metadata: CVoidPtr, topicIndex: CSize, partitionIndex: CSize): CInt = extern
 
+  def xkafka_admin_new(
+      brokers: CString,
+      clientId: CString,
+      propertyNames: Ptr[CString],
+      propertyValues: Ptr[CString],
+      propertyCount: CSize,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_admin_destroy(client: CVoidPtr): Unit = extern
+
+  def xkafka_admin_create_topics(
+      client: CVoidPtr,
+      names: Ptr[CString],
+      partitions: Ptr[CInt],
+      replication: Ptr[CInt],
+      configNames: Ptr[CString],
+      configValues: Ptr[CString],
+      configCounts: Ptr[CSize],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_admin_delete_topics(
+      client: CVoidPtr,
+      names: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_admin_create_partitions(
+      client: CVoidPtr,
+      topic: CString,
+      count: CInt,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_consumer_assign(
       consumer: CVoidPtr,
       topics: Ptr[CString],
