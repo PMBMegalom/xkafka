@@ -73,6 +73,7 @@
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 active nav-leaf"><a href="#">Consuming</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
@@ -89,8 +90,9 @@
   <p class="header"><a href="#">Consuming</a></p>
 
   <ul class="nav-list">
-    <li class="level1 nav-leaf"><a href="#subscriptions">Subscriptions</a></li>
+    <li class="level1 nav-leaf"><a href="#what-a-consumer-reads">What a consumer reads</a></li>
     <li class="level1 nav-leaf"><a href="#inspecting-the-consumer">Inspecting the consumer</a></li>
+    <li class="level1 nav-leaf"><a href="#processing-every-record">Processing every record</a></li>
     <li class="level1 nav-leaf"><a href="#partition-streams">Partition streams</a></li>
   </ul>
 
@@ -103,7 +105,7 @@
         <h1 id="consuming" class="title">Consuming</h1>
         <p>A consumer is a <code>Resource</code> and exposes an FS2 stream of
         <code>CommittableConsumerRecord</code>.</p>
-        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -117,15 +119,36 @@
     </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">ConsumerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">group</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="type-name">AutoOffsetReset</span><span>.</span><span class="type-name">Earliest</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">records</span><span>  &lt;-
-      </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">consumer</span><span>(</span><span class="identifier">settings</span><span>, </span><span class="type-name">Subscription</span><span>.</span><span class="type-name">Topics</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))
+      </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">consumer</span><span>(</span><span class="identifier">settings</span><span>, </span><span class="type-name">Selection</span><span>.</span><span class="type-name">Topics</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))
         .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">take</span><span>(</span><span class="number-literal">10</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>)
   </span><span class="keyword">yield</span><span> </span><span class="identifier">records</span></code></pre>
         
-        <h2 id="subscriptions" class="section"><a class="anchor-link left" href="#subscriptions"><i class="icofont-laika link">&#xef71;</i></a>Subscriptions</h2>
-        <p><code>Subscription.Topics</code> takes a non-empty list of topics.
-        <code>Subscription.Pattern</code> takes a non-empty <code>TopicPattern</code>, which matches complete
-        topic names. Portable patterns should use regular-expression syntax shared by
-        Java, ECMAScript, and POSIX extended regular expressions.</p>
+        <h2 id="what-a-consumer-reads" class="section"><a class="anchor-link left" href="#what-a-consumer-reads"><i class="icofont-laika link">&#xef71;</i></a>What a consumer reads</h2>
+        <p><code>Selection</code> says where a consumer&#39;s records come from.</p>
+        <p><code>Selection.Topics</code> takes a non-empty set of topics. <code>Selection.Pattern</code> takes a non-empty
+        <code>TopicPattern</code>, which matches complete topic names. Portable patterns should use
+        regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
+        Both join a consumer group, so the partitions a consumer holds follow the group&#39;s rebalances.</p>
+        <p><code>Selection.Partitions</code> takes a non-empty set of topic-partitions and reads exactly those. No group
+        is joined, so the assignment never changes and nothing rebalances it away. Two consumers naming the
+        same partition each read all of it, even where they share a consumer group, because there is no
+        group membership to divide it between them.</p>
+        <p>The consumer group is still the key that committed offsets are stored under, so consumers naming the
+        same partitions under one group do share those offsets, and a consumer resuming from a commit reads
+        from wherever the other left off.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>Kafka stores whatever was committed last for a partition, with no comparison against what is already
+          there. Two consumers committing the same partition therefore race, and the later commit wins even
+          where its offset is lower, which moves the group backwards and replays records. A batch keeps the
+          highest offset per partition, but only among the offsets in that batch. Give consumers their own
+          group unless they are meant to share a position.</p>
+        </div>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p>A seek is refused until the partition it names is being fetched, which holding the assignment does
+          not yet mean. Retry briefly if you seek immediately after a consumer starts.</p>
+        </div>
         
         <h2 id="inspecting-the-consumer" class="section"><a class="anchor-link left" href="#inspecting-the-consumer"><i class="icofont-laika link">&#xef71;</i></a>Inspecting the consumer</h2>
         <p>Within the consumer resource:</p>
@@ -137,7 +160,31 @@
           <li><code>offsetsForTimes</code> finds the earliest available offsets at or after timestamps.</li>
           <li><code>partitionsFor</code> and <code>listTopics</code> expose visible topic metadata.</li>
           <li><code>seek</code> changes the next offset fetched for an assigned topic-partition.</li>
+          <li><code>seekToBeginning</code> and <code>seekToEnd</code> move to either end of an assigned topic-partition.</li>
+          <li><code>position</code> reports the offset a topic-partition reads next.</li>
         </ul>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p><code>position</code> answers <code>None</code> until this consumer has consumed from the partition. A backend may
+          settle on a position sooner, such as when a seek names an offset, so the value every backend
+          agrees on is the one after records have been consumed.</p>
+        </div>
+        
+        <h2 id="processing-every-record" class="section"><a class="anchor-link left" href="#processing-every-record"><i class="icofont-laika link">&#xef71;</i></a>Processing every record</h2>
+        <p><code>consumeChunk</code> takes a function over a chunk of records and commits that chunk once the function
+        returns, so the common case needs no stream plumbing.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">consumeChunk</span><span>: </span><span class="identifier">records</span><span> =&gt;
+  </span><span class="identifier">records</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">handle</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">CommitNow</span><span>)</span></code></pre>
+        <p>Partitions are processed alongside one another, so a slow chunk holds back only the partition it
+        came from. The result never produces a value, because the work ends only by cancellation or failure.
+        Returning <code>CommitNow</code> is what makes the commit visible where the records are handled.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>A consumer joins its group at a different moment on each backend. The Java client joins when the
+          application polls, so a consumer nobody reads holds nothing. The JavaScript and Native backends
+          join when the consumer resource is allocated, so one nobody reads still takes a share of the
+          partitions and does not hand them back. Release a consumer you are not reading.</p>
+        </div>
         
         <h2 id="partition-streams" class="section"><a class="anchor-link left" href="#partition-streams"><i class="icofont-laika link">&#xef71;</i></a>Partition streams</h2>
         <p><code>partitionedRecords</code> exposes a record stream for each assigned topic-partition

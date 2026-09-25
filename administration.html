@@ -6,7 +6,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="Typelevel Laika + Helium Theme" />
-  <title>xkafka</title>
+  <title>Administration</title>
   
   <meta name="author" content="Piermatteo Barambani Megalom"/>
   
@@ -67,13 +67,13 @@
   </div>
 
   <ul class="nav-list">
-    <li class="level1 active nav-leaf"><a href="#">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="index.html">xkafka</a></li>
     <li class="level1 nav-leaf"><a href="getting-started.html">Getting started</a></li>
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
-    <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
+    <li class="level1 active nav-leaf"><a href="#">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
@@ -87,9 +87,11 @@
 
       
 <nav id="page-nav">
-  <p class="header"><a href="#">xkafka</a></p>
+  <p class="header"><a href="#">Administration</a></p>
 
   <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#what-it-does">What it does</a></li>
+    <li class="level1 nav-leaf"><a href="#what-it-does-not-do">What it does not do</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -98,57 +100,49 @@
 
       <main class="content">
 
-        <h1 id="xkafka" class="title">xkafka</h1>
-        <p>xkafka is a functional Kafka client for Scala 3, Cats Effect, and FS2. It
-        provides the same producer and consumer API on the JVM, Scala.js, and Scala
-        Native while using the established Kafka client for each runtime.</p>
-        <table>
-          <thead>
-            <tr>
-              <th>Platform</th>
-              <th>Backend</th>
-              <th>Runtime</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>JVM</td>
-              <td><a href="https://github.com/typelevel/fs2-kafka">fs2-kafka</a></td>
-              <td>Java 17 or newer</td>
-            </tr>
-            <tr>
-              <td>Scala.js</td>
-              <td><a href="https://github.com/confluentinc/confluent-kafka-javascript">Confluent Kafka JavaScript</a></td>
-              <td>Node.js 24</td>
-            </tr>
-            <tr>
-              <td>Scala Native</td>
-              <td><a href="https://github.com/confluentinc/librdkafka">librdkafka</a></td>
-              <td>Scala Native 0.5 or newer</td>
-            </tr>
-          </tbody>
-        </table>
-        <p>The API uses <code>Resource</code> for producer and consumer lifecycles, <code>Stream</code> for
-        consumer records, effectful serializers and deserializers, and explicit offset
-        commits. Scala.js targets Node.js rather than browsers.</p>
-        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
-</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.{</span><span class="type-name">IO</span><span>, </span><span class="type-name">IOApp</span><span>}
+        <h1 id="administration" class="title">Administration</h1>
+        <p><code>KafkaClient[F].admin</code> is a <code>Resource</code> over the topic operations. It reads and changes cluster
+        metadata only, so it neither produces nor consumes.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 
-</span><span class="keyword">object</span><span> </span><span class="type-name">ProduceExample</span><span> </span><span class="keyword">extends</span><span> </span><span class="type-name">IOApp</span><span>.</span><span class="type-name">Simple</span><span>:
-  </span><span class="keyword">private</span><span> </span><span class="keyword">val</span><span> </span><span class="identifier">utf8</span><span> = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
-
-  </span><span class="keyword">private</span><span> </span><span class="keyword">val</span><span> </span><span class="identifier">settings</span><span> =
-    </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
-      </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>)
-
-  </span><span class="keyword">override</span><span> </span><span class="keyword">def</span><span> </span><span class="declaration-name">run</span><span>: </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
-    </span><span class="keyword">for</span><span>
-      </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-      </span><span class="identifier">producer</span><span> &lt;- </span><span class="identifier">settings</span><span>.</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-      </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">producer</span><span>(</span><span class="identifier">producer</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">produceAndAwait</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">ProducerRecord</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="string-literal">&quot;key&quot;</span><span>, </span><span class="string-literal">&quot;value&quot;</span><span>))))
-    </span><span class="keyword">yield</span><span> ()</span></code></pre>
+</span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">newTopic</span><span> &lt;- </span><span class="type-name">NewTopic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">partitions</span><span> = </span><span class="number-literal">6</span><span>, </span><span class="identifier">replicationFactor</span><span> = </span><span class="number-literal">3</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">createTopics</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">newTopic</span><span>)))
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        
+        <h2 id="what-it-does" class="section"><a class="anchor-link left" href="#what-it-does"><i class="icofont-laika link">&#xef71;</i></a>What it does</h2>
+        <ul>
+          <li><code>createTopics</code> creates each topic with the partitions, replication factor, and configuration given.</li>
+          <li><code>deleteTopics</code> deletes each topic.</li>
+          <li><code>createPartitions</code> adds partitions to a topic, which Kafka allows only as an increase.</li>
+          <li><code>describeTopics</code> reports the partitions of each requested topic.</li>
+        </ul>
+        <p><code>NewTopic.from</code> rejects a partition count or replication factor that is not positive, so a request
+        the broker would refuse cannot be built.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>Kafka reports an outcome for each topic, and the backends do not agree on whether that detail
+          survives the trip. These operations therefore report the first failure and nothing more, which is
+          what every backend can deliver. A request covering several topics may have changed the cluster
+          before the failure it reports.</p>
+        </div>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p><code>describeTopics</code> fails where the cluster does not have one of the requested topics. Creating,
+          growing, and deleting all propagate through the cluster in their own time, so a description taken
+          immediately afterwards may not agree with the request that preceded it.</p>
+        </div>
+        
+        <h2 id="what-it-does-not-do" class="section"><a class="anchor-link left" href="#what-it-does-not-do"><i class="icofont-laika link">&#xef71;</i></a>What it does not do</h2>
+        <p>Access control, quotas, configuration, consumer group administration, delegation tokens, and log
+        directories are absent. The topic operations above are the ones every backend supports with the
+        same meaning.</p>
 
         
 <hr class="footer-rule"/>
