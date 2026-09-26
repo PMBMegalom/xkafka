@@ -607,21 +607,31 @@ trait KafkaConsumer[F[_], K, V]:
     */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
 
+  /** Stops fetching, so the record streams end once the records already fetched have been handed over.
+    *
+    * This is how a consumer stops gracefully: nothing already fetched is dropped, and offsets stay committable afterwards. It returns as soon as
+    * fetching has been told to stop, without waiting for the streams to drain. A stream started afterwards is empty, and calling it again does
+    * nothing further.
+    *
+    * Releasing the consumer, or cancelling whatever reads it, stops it abruptly instead, and records that were fetched but not handed over are lost.
+    */
+  def stopConsuming: F[Unit]
+
   /** Hands every record to `process` a chunk at a time and commits each chunk once it returns.
     *
-    * Partitions are processed alongside one another, so a slow chunk holds back only the partition it came from. The result never produces a value,
-    * because the work ends only by cancellation or failure.
+    * Partitions are processed alongside one another, so a slow chunk holds back only the partition it came from. It returns once `stopConsuming` has
+    * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails.
     *
     * @param maxQueuedRecords
     *   positive queue bound for each partition stream
     */
-  final def consumeChunk(process: Chunk[ConsumerRecord[K, V]] => F[CommitNow], maxQueuedRecords: Int = 256)(using F: Async[F]): F[Nothing] =
+  final def consumeChunk(process: Chunk[ConsumerRecord[K, V]] => F[CommitNow], maxQueuedRecords: Int = 256)(using F: Async[F]): F[Unit] =
     partitionedRecords(maxQueuedRecords).map(
       _.records.chunks.evalMap: chunk =>
         val (offsets, records) =
           chunk.mapAccumulate(CommittableOffsetBatch.empty[F])((batch, committable) => (batch.updated(committable.offset), committable.record))
         F.productR(process(records))(offsets.commit)
-    ).parJoinUnbounded.drain.compile.onlyOrError
+    ).parJoinUnbounded.compile.drain
 
   /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.
     *
@@ -694,6 +704,8 @@ trait KafkaConsumer[F[_], K, V]:
       override def seekToEnd(topicPartitions: Set[TopicPartition]): G[Unit] = fk(self.seekToEnd(topicPartitions))
 
       override def position(topicPartition: TopicPartition): G[Option[Offset]] = fk(self.position(topicPartition))
+
+      override def stopConsuming: G[Unit] = fk(self.stopConsuming)
 
       override private[xkafka] def pausing: PartitionPausing[G] = self.pausing.mapK(fk)
 

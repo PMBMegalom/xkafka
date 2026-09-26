@@ -28,10 +28,10 @@ import scala.scalanative.unsigned.*
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Mutex, Queue, Semaphore, Supervisor}
+import cats.effect.std.{Mutex, Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
-import fs2.concurrent.SignallingRef
+import fs2.concurrent.{Channel, SignallingRef}
 import internal.ClientProperties
 import internal.librdkafka.Bindings
 import internal.security.SecurityProperties
@@ -127,12 +127,14 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     for
       client      <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
       _           <- Resource.eval(client(select(client.handle, selection)))
-      polled      <- Resource.eval(Queue.bounded[F, NativeRecord](RecordQueueSize))
+      polled      <- Resource.eval(Channel.bounded[F, NativeRecord](RecordQueueSize))
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
+      // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
+      stopping <- Resource.eval(Deferred[F, Unit])
       // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
       // reads the records instead of leaving a consumer that never receives anything.
       failure <- Resource.eval(Deferred[F, Throwable])
-      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, failure)
+      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, stopping, failure)
       // Started after the client and cancelled before it, so no poll is in flight when the handle is destroyed.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
@@ -639,8 +641,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private final class LibrdkafkaConsumer[K, V](
       client: NativeClient,
       settings: ConsumerSettings[F, K, V],
-      polled: Queue[F, NativeRecord],
+      polled: Channel[F, NativeRecord],
       assignments: SignallingRef[F, Set[TopicPartition]],
+      stopping: Deferred[F, Unit],
       failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
@@ -663,13 +666,15 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       * generation counter the rebalance callback bumps says when the assignment is worth reading again.
       */
     val pollLoop: Stream[F, Nothing] =
-      Stream.repeatEval(client((poll(), Bindings.xkafka_consumer_generation(client.handle))))
-        // Offering outside the permit keeps a full queue from holding the handle that a close is waiting for.
-        .evalMap((record, generation) => record.traverse_(polled.offer).as(generation)).changes
-        .evalMap(_ => client(readAssignment()).flatMap(assignments.set)).drain
+      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => client((poll(), Bindings.xkafka_consumer_generation(client.handle))))
+        // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
+        .evalMap((record, generation) => record.traverse_(polled.send(_).void).as(generation)).changes
+        .evalMap(_ => client(readAssignment()).flatMap(assignments.set)).drain.onFinalize(polled.close.void)
+
+    override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      Stream.fromQueueUnterminated(polled).evalMap(decode).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+      polled.stream.evalMap(decode).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def assignment: F[Set[TopicPartition]] = client(readAssignment())
 

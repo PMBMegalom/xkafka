@@ -24,9 +24,9 @@ package xkafka
 import scala.concurrent.duration.*
 
 import cats.effect.{Deferred, IO, Ref}
-import cats.effect.std.Queue
 import cats.syntax.all.*
 import fs2.Stream
+import fs2.concurrent.Channel
 import munit.CatsEffectSuite
 
 final class PartitionRecordsSuite extends CatsEffectSuite:
@@ -37,7 +37,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
   test("partitionedRecords preserves records across assignment changes and closes revoked streams"):
     for
       assignment    <- Ref[IO].of(Set(firstPartition))
-      input         <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      input         <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       firstOpened   <- Deferred[IO, Unit]
       firstConsumed <- Deferred[IO, Unit]
       consumer = testConsumer(assignment, input)
@@ -52,10 +52,10 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _ <- firstOpened.get
       first  = record(firstPartition, 0L, "first")
       second = record(secondPartition, 0L, "second")
-      _      <- input.offer(first)
+      _      <- input.send(first).void
       _      <- firstConsumed.get
       _      <- assignment.set(Set(secondPartition))
-      _      <- input.offer(second)
+      _      <- input.send(second).void
       result <- observed.joinWithNever.timeout(5.seconds)
     yield
       assertEquals(result.map(_._1), List(firstPartition, secondPartition))
@@ -65,19 +65,50 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
     for
       // The assignment never reports the partition, so the old routing waited a poll for it and then discarded the record.
       assignment <- Ref[IO].of(Set.empty[TopicPartition])
-      input      <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       early = record(firstPartition, 0L, "early")
-      _        <- input.offer(early)
+      _        <- input.send(early).void
       observed <-
         testConsumer(assignment, input).partitionedRecords(2)
           .evalMap(partition => partition.records.take(1).compile.toList.map(partition.topicPartition -> _)).take(1).compile.toList
           .timeout(10.seconds)
     yield assertEquals(observed, List(firstPartition -> List(early)))
 
+  test("partition streams end once a stopped record source has drained"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition, secondPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      first  = record(firstPartition, 0L, "first")
+      second = record(secondPartition, 0L, "second")
+      _ <- input.send(first).void
+      _ <- input.send(second).void
+      consumer = testConsumer(assignment, input)
+      // Stopping after the records are queued, so ending depends on the source finishing rather than on a count.
+      _        <- consumer.stopConsuming
+      observed <-
+        consumer.partitionedRecords(4).evalMap(partition => partition.records.compile.toList.map(partition.topicPartition -> _)).compile.toList
+          .timeout(10.seconds)
+    yield
+      assertEquals(observed.map(_._1).sortBy(_.partition.value), List(firstPartition, secondPartition))
+      assertEquals(observed.toMap, Map(firstPartition -> List(first), secondPartition -> List(second)))
+
+  test("consumeChunk returns once a stopped record source has drained"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      processed  <- Ref[IO].of(Vector.empty[String])
+      _          <- input.send(record(firstPartition, 0L, "only")).void
+      consumer = testConsumer(assignment, input)
+      _ <- consumer.stopConsuming
+      // No race and no cancellation: a graceful stop is the only thing that can make this return.
+      _        <- consumer.consumeChunk(chunk => processed.update(_ ++ chunk.toList.map(_.value)).as(CommitNow)).timeout(10.seconds)
+      observed <- processed.get
+    yield assertEquals(observed.toList, List("only"))
+
   test("partitionedRecords rejects a non-positive queue bound"):
     for
       assignment <- Ref[IO].of(Set.empty[TopicPartition])
-      input      <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       result     <- testConsumer(assignment, input).partitionedRecords(0).compile.drain.attempt
     yield result match
       case Left(error: IllegalArgumentException) => assertEquals(error.getMessage, "maxQueuedRecords must be positive")
@@ -89,11 +120,11 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
 
     for
       assignment <- Ref[IO].of(Set(firstPartition, secondPartition))
-      input      <- Queue.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       processed  <- Ref[IO].of(Vector.empty[String])
       committed  <- Ref[IO].of(Vector.empty[(TopicPartition, Offset)])
       complete   <- Deferred[IO, Unit]
-      _          <- expected.zipWithIndex.traverse_((entry, index) => input.offer(recorded(entry._1, index.toLong, entry._2, committed)))
+      _          <- expected.zipWithIndex.traverse_((entry, index) => input.send(recorded(entry._1, index.toLong, entry._2, committed)).void)
       consumer = testConsumer(assignment, input)
       _ <-
         consumer.consumeChunk: chunk =>
@@ -110,12 +141,14 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
 
   private def testConsumer(
       currentAssignment: Ref[IO, Set[TopicPartition]],
-      input: Queue[IO, CommittableConsumerRecord[IO, String, String]]
+      input: Channel[IO, CommittableConsumerRecord[IO, String, String]]
   ): KafkaConsumer[IO, String, String] =
     new KafkaConsumer[IO, String, String]:
-      override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = Stream.fromQueueUnterminated(input)
+      override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = input.stream
       override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
       override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes
+      // A backend stops fetching and lets what it has already fetched drain, which is what closing does here.
+      override def stopConsuming: IO[Unit]                                                                                      = input.close.void
       override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]]                     = IO.pure(Map.empty)
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                      = IO.pure(Map.empty)
       override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                            = IO.pure(Map.empty)

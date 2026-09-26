@@ -70,6 +70,7 @@ Within the consumer resource:
 - `seek` changes the next offset fetched for an assigned topic-partition.
 - `seekToBeginning` and `seekToEnd` move to either end of an assigned topic-partition.
 - `position` reports the offset a topic-partition reads next.
+- `stopConsuming` stops fetching and lets the streams drain.
 
 @:callout(info)
 `position` answers `None` until this consumer has consumed from the partition. A backend may
@@ -88,8 +89,9 @@ consumer.consumeChunk: records =>
 ```
 
 Partitions are processed alongside one another, so a slow chunk holds back only the partition it
-came from. The result never produces a value, because the work ends only by cancellation or failure.
-Returning `CommitNow` is what makes the commit visible where the records are handled.
+came from. It returns once `stopConsuming` has been called and everything already fetched has been
+processed, and otherwise runs until it is cancelled or something fails. Returning `CommitNow` is what
+makes the commit visible where the records are handled.
 
 @:callout(warning)
 A consumer joins its group at a different moment on each backend. The Java client joins when the
@@ -97,6 +99,32 @@ application polls, so a consumer nobody reads holds nothing. The JavaScript and 
 join when the consumer resource is allocated, so one nobody reads still takes a share of the
 partitions and does not hand them back. Release a consumer you are not reading.
 @:@
+
+## Stopping
+
+`stopConsuming` stops fetching. The record streams end once the records already fetched have been
+handed over, so nothing that was read from the broker is dropped, and offsets stay committable
+afterwards.
+
+```scala
+consumer.records
+  .evalTap(record => handle(record) *> record.offset.commit)
+  .interruptWhen(shutdownRequested)
+```
+
+That interrupts mid-record and loses whatever was fetched. This does not:
+
+```scala
+shutdownRequested.get *> consumer.stopConsuming
+```
+
+run alongside the stream, which then completes on its own once it has drained. It returns as soon as
+fetching has been told to stop, without waiting for that draining. Calling it again does nothing
+further, and a stream started afterwards is empty.
+
+Releasing the consumer resource, or cancelling whatever reads it, stops it abruptly instead. Neither
+waits for what has been fetched to be handed over, so whoever resumes the group reads those offsets
+again.
 
 ## Partition streams
 

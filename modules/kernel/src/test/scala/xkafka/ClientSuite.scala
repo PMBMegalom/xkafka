@@ -318,6 +318,7 @@ final class ClientSuite extends FunSuite:
         override val records: Stream[Option, CommittableConsumerRecord[Option, String, String]] = Stream.emit(sourceRecord).covary[Option]
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
         override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
+        override def stopConsuming: Option[Unit]                                                = Some(())
         override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(topicPartitions.map(_ -> Some(nextOffset)).toMap)
         override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =
@@ -363,6 +364,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(mapped.position(consumerRecord.topicPartition).unsafeRunSync(), Some(nextOffset))
     assertEquals(mapped.seekToBeginning(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
     assertEquals(mapped.seekToEnd(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
+    assertEquals(mapped.stopConsuming.unsafeRunSync(), ())
 
   test("KafkaConsumer keeps backend pausing after mapK"):
     val pausedPartitions = scala.collection.mutable.ListBuffer.empty[Set[TopicPartition]]
@@ -371,6 +373,7 @@ final class ClientSuite extends FunSuite:
         override val records: Stream[Option, CommittableConsumerRecord[Option, String, String]] = Stream.empty
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
         override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
+        override def stopConsuming: Option[Unit]                                                = Some(())
         override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] = Some(Map.empty)
         override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]  = Some(Map.empty)
         override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]        = Some(Map.empty)

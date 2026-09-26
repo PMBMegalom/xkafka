@@ -65,8 +65,9 @@ object PartitionRecords:
       states: Ref[F, Map[TopicPartition, PartitionState[F, K, V]]],
       mutex: Mutex[F]
   )(using F: Async[F]):
+    /** A record source that ends carries the partition streams with it, so a graceful stop reaches whoever is reading partitions. */
     def stream: Stream[F, PartitionRecords[F, K, V]] =
-      output.stream.concurrently(followAssignments).concurrently(consumer.records.evalMap(route).drain)
+      output.stream.concurrently(followAssignments).concurrently(consumer.records.evalMap(route).onFinalize(close).drain)
 
     def close: F[Unit] =
       mutex.lock.surround:

@@ -28,8 +28,8 @@ import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, In
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Dispatcher, Mutex, Queue}
-import fs2.concurrent.SignallingRef
+import cats.effect.std.{Dispatcher, Mutex}
+import fs2.concurrent.{Channel, SignallingRef}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import internal.{confluent, ClientProperties}
@@ -239,8 +239,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
       _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
       _ <- Resource.eval(select(underlying, selection))
-      polled <- Resource.eval(Queue.bounded[F, confluent.RdMessage](RecordQueueSize))
-      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, failure)
+      polled <- Resource.eval(Channel.bounded[F, confluent.RdMessage](RecordQueueSize))
+      // Set by `stopConsuming`, and read before each consume so that no batch already in flight is dropped.
+      stopping <- Resource.eval(Deferred[F, Unit])
+      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, stopping, failure)
       // Started after the selection and cancelled before the disconnect that follows it.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
@@ -420,7 +422,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       underlying: confluent.RdConsumer,
       settings: ConsumerSettings[F, K, V],
       assignments: SignallingRef[F, Set[TopicPartition]],
-      polled: Queue[F, confluent.RdMessage],
+      polled: Channel[F, confluent.RdMessage],
+      stopping: Deferred[F, Unit],
       failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
@@ -450,10 +453,14 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       * The client reports a rebalance from its own consume, so nothing observes one unless this keeps running, whether or not anything is reading
       * records.
       */
-    val pollLoop: Stream[F, Nothing] = Stream.repeatEval(fetch).flatMap(batch => Stream.emits(batch.toList)).evalMap(polled.offer).drain
+    val pollLoop: Stream[F, Nothing] =
+      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => fetch).flatMap(batch => Stream.emits(batch.toList))
+        .evalMap(polled.send(_).void).drain.onFinalize(polled.close.void)
+
+    override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      Stream.fromQueueUnterminated(polled).evalMap(consumerRecord).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+      polled.stream.evalMap(consumerRecord).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     private def fetch: F[js.Array[confluent.RdMessage]] =
       callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done)).recover:

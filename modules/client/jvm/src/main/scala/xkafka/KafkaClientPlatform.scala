@@ -274,6 +274,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     override def assignment: F[Set[TopicPartition]] = backend(underlying.assignment).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
+    override def stopConsuming: F[Unit] = backend(underlying.stopConsuming)
+
     /** fs2-kafka reports assignments as the group rebalances, so nothing is polled. */
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
       underlying.assignmentStream.translate(handleBackendErrors).evalMap(_.toList.traverse(portableTopicPartition).map(_.toSet))

@@ -383,6 +383,42 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         // Kafka stores whatever was committed last, so a commit can move a group's position backwards and replay records.
         assertEquals(afterBehind, Some(lower), "a later commit should replace the stored offset even where it is lower")
 
+  test(conformance("stopping a consumer ends its streams and leaves the rest of the topic behind")):
+    withBroker: server =>
+      val topic     = uniqueTopic("stop")
+      val partition = validPartition(0)
+      val group     = uniqueGroup("stop")
+      val values    = List.range(0, 10).map(_.toString)
+      val produced  = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), partition)))
+
+      for
+        _        <- produce(server, produced)
+        settings <- consumerSettings(server, group)
+        taken    <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            // Stopping from inside the stream is the graceful shutdown this is for. Committing after it proves offsets
+            // still reach the broker, and the stream ending on its own proves nothing is left waiting.
+            consumer.records.evalTap(_ => consumer.stopConsuming).evalTap(_.offset.commit).compile.toList
+          .timeout(60.seconds)
+        stored <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.committed(Set(TopicPartition(topic, partition))))
+            .timeout(60.seconds)
+        rest <-
+          if taken.sizeIs >= values.size then IO.pure(List.empty[String])
+          else
+            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
+              .use(_.records.take((values.size - taken.size).toLong).compile.toList).timeout(60.seconds).map(_.flatMap(_.record.value))
+      yield
+        val read = taken.flatMap(_.record.value)
+        assert(read.nonEmpty, "a consumer stopped after its first record should still deliver that record")
+        assertEquals(read, values.take(read.size), "the records delivered should be the ones from the start of the partition")
+        assertEquals(
+          stored.get(TopicPartition(topic, partition)).flatten.map(_.value),
+          Some(read.size.toLong),
+          "committing after the stop should still reach the broker"
+        )
+        assertEquals(read ++ rest, values, "a consumer resuming the group should read exactly what the stopped one left")
+
   test(conformance("topics can be created, grown, described, and deleted")):
     withBroker: server =>
       val topic = uniqueTopic("admin")
@@ -423,6 +459,38 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               admin.deleteTopics(NonEmptySet.one(topic)).attempt
           .timeout(90.seconds)
       yield assert(outcome.isLeft, s"creating an existing topic should fail, got $outcome")
+
+  test(conformance("stopping a consumer returns before its streams drain, and stays stopped")):
+    withBroker: server =>
+      val topic     = uniqueTopic("stop-return")
+      val partition = validPartition(0)
+      val produced  = NonEmptyList.of("a", "b", "c").map(value => record(topic, Some("k"), Some(value), partition))
+
+      for
+        _        <- produce(server, produced)
+        settings <- consumerSettings(server, uniqueGroup("stop-return"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            for
+              reached <- Deferred[IO, Unit]
+              release <- Deferred[IO, Unit]
+              // Every record waits, so the streams cannot drain until this test lets them.
+              reading <- consumer.records.evalTap(_ => reached.complete(()).attempt.void).evalTap(_ => release.get).compile.toList.start
+              _       <- reached.get
+              // If this waited for the draining it could not return, because the draining waits on `release`.
+              _ <- consumer.stopConsuming.timeout(15.seconds)
+              // A second call has nothing left to do.
+              _     <- consumer.stopConsuming.timeout(15.seconds)
+              _     <- release.complete(())
+              taken <- reading.joinWithNever.timeout(30.seconds)
+              // A stream read after the stop has nothing to give.
+              afterwards <- consumer.records.compile.toList.timeout(30.seconds)
+            yield (taken, afterwards)
+          .timeout(90.seconds)
+      yield
+        val (taken, afterwards) = outcome
+        assert(taken.nonEmpty, "the records already fetched should still be delivered")
+        assertEquals(afterwards, List.empty, "a stream read after the stop should be empty")
 
   test(conformance("records of a committed transaction are delivered")):
     withBroker: server =>

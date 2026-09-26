@@ -135,6 +135,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                 = Stream.empty
             override def assignment: IO[Set[TopicPartition]]                                                      = IO.pure(Set.empty)
             override val assignmentChanges: Stream[IO, Set[TopicPartition]]                                       = Stream.empty
+            override def stopConsuming: IO[Unit]                                                                  = IO.unit
             override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] =
               IO.pure(topicPartitions.map(_ -> None).toMap)
             override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]] = IO.pure(Map.empty)
