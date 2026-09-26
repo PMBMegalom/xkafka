@@ -33,8 +33,8 @@ another one on the same producer waits for a transaction that cannot finish unti
 Use one transaction per unit of work, and a producer of its own where two must overlap.
 @:@
 
-Kafka refuses a plain produce from a producer carrying a transactional id, which is why
-`transactionalProducer` is separate from `producer` rather than a mode of it.
+A transactional producer writes only inside transactions, which is why `transactionalProducer` is a
+constructor of its own rather than a mode of `producer`.
 
 ## Reading what a transaction wrote
 
@@ -81,9 +81,10 @@ transaction cannot commit records that have not been acknowledged. It therefore 
 
 | setting | default | what it means |
 | --- | --- | --- |
-| `transactionalId` | required | the name Kafka fences an earlier instance of this producer by |
-| `transactionTimeout` | 60s | how long the broker waits before it aborts the transaction itself |
+| `transactionalId` | required | Kafka's `transactional.id` |
+| `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms`, defaulting to what its own producers use |
 
-Give each producer instance that must run alongside another its own `transactionalId`. Two
-producers sharing one id fence each other, which is what the id is for when a replacement takes over
-from an instance that has gone, and a failure when both are meant to run.
+Give each producer instance that must run alongside another its own `transactionalId`. Allocating a
+second producer under an id already in use fences the first, so its open transaction can no longer
+commit. That is what the id is for when a replacement takes over from an instance that has gone, and
+a failure when both were meant to run.

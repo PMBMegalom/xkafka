@@ -522,6 +522,80 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         consumed <- consumeCommitted(server, topic, 1)
       yield assertEquals(consumed.map(_.record.value), List(Some("committed")))
 
+  test(conformance("a consumer reading uncommitted records sees the records of a transaction that aborted")):
+    withBroker: server =>
+      val topic     = uniqueTopic("transaction-uncommitted")
+      val partition = validPartition(0)
+
+      for
+        settings <- transactionalSettings(server, uniqueTransactionalId("uncommitted"))
+        _        <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            producer.transactionally(transaction =>
+              transaction.produce(NonEmptyList.one(record(topic, Some("k"), Some("aborted"), partition))) *>
+                IO.raiseError[Unit](new RuntimeException("rolled back"))
+            ).attempt.void
+          .timeout(90.seconds)
+        // The default isolation level, which is Kafka's own, holds nothing back.
+        consumed <- consume(server, topic, 1)
+      yield assertEquals(consumed.map(_.record.value), List(Some("aborted")))
+
+  test(conformance("transactions on one producer run one at a time")):
+    withBroker: server =>
+      val topic     = uniqueTopic("transaction-serial")
+      val partition = validPartition(0)
+      val values    = List("first", "second")
+
+      for
+        settings <- transactionalSettings(server, uniqueTransactionalId("serial"))
+        _        <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            // Kafka refuses a second transaction while one is open, so both succeeding is what shows they were serialised.
+            values.parTraverse_(value => producer.transactionally(_.produce(NonEmptyList.one(record(topic, Some("k"), Some(value), partition)))))
+          .timeout(90.seconds)
+        consumed <- consumeCommitted(server, topic, values.size)
+      yield assertEquals(consumed.flatMap(_.record.value).sorted, values.sorted)
+
+  test(conformance("a second producer under one transactional id fences the first")):
+    withBroker: server =>
+      val topic           = uniqueTopic("transaction-fenced")
+      val partition       = validPartition(0)
+      val transactionalId = uniqueTransactionalId("fenced")
+      val produced        = NonEmptyList.one(record(topic, Some("k"), Some("fenced"), partition))
+
+      for
+        settings <- transactionalSettings(server, transactionalId)
+        outcome  <-
+          PlatformKafkaClient().transactionalProducer(settings).use: first =>
+            for
+              opened  <- Deferred[IO, Unit]
+              release <- Deferred[IO, Unit]
+              // Held open so the second producer arrives while this transaction still has work to commit.
+              running <-
+                first.transactionally(transaction => transaction.produce(produced) *> opened.complete(()).attempt *> release.get).attempt.start
+              _ <- opened.get
+              // Allocating under the same id is what takes the id over.
+              _      <- PlatformKafkaClient().transactionalProducer(settings).use_.timeout(60.seconds)
+              _      <- release.complete(())
+              result <- running.joinWithNever.timeout(60.seconds)
+            yield result
+          .timeout(120.seconds)
+      yield assert(outcome.isLeft, s"a fenced producer should not be able to commit, got $outcome")
+
+  test(conformance("a transaction opened inside another one cannot proceed")):
+    withBroker: server =>
+      val topic     = uniqueTopic("transaction-nested")
+      val partition = validPartition(0)
+      val produced  = NonEmptyList.one(record(topic, Some("k"), Some("nested"), partition))
+
+      for
+        settings <- transactionalSettings(server, uniqueTransactionalId("nested"))
+        outcome  <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            producer.transactionally(_ => producer.transactionally(_.produce(produced)).as("inner")).timeoutTo(10.seconds, IO.pure("blocked"))
+          .timeout(90.seconds)
+      yield assertEquals(outcome, "blocked", "the inner transaction should wait for the outer one, which cannot finish")
+
   test(conformance("offsets recorded in a transaction move the group only where it commits")):
     withBroker: server =>
       val input          = uniqueTopic("transaction-input")

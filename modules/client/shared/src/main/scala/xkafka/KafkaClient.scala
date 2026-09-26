@@ -33,7 +33,7 @@ trait KafkaClient[F[_]]:
 
   /** Produces records and records consumer offsets atomically.
     *
-    * Kafka refuses a plain produce from a producer that carries a transactional id, so this is separate from `producer`.
+    * A transactional producer writes only inside transactions, so this is separate from `producer`.
     */
   def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]]
 

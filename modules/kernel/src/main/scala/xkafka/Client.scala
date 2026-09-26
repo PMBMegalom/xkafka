@@ -186,10 +186,7 @@ object ProducerSettings:
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
 
-/** A producer that writes inside transactions.
-  *
-  * Kafka refuses a plain produce from a producer that carries a transactional id, so these settings build a producer of their own.
-  */
+/** A producer that writes inside transactions, which is all it writes, so these settings build a producer of their own. */
 sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     producer: ProducerSettings[F, K, V],
     transactionalId: TransactionalId,
@@ -201,7 +198,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withClient(value: ClientSettings): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withClient(value), transactionalId, transactionTimeout) {}
 
-  /** How long the broker waits for a transaction to finish before it aborts the transaction itself. */
+  /** Kafka's `transaction.timeout.ms`. */
   def withTransactionTimeout(value: FiniteDuration): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer, transactionalId, value) {}
 
@@ -212,7 +209,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     producer.withProperties(values).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
 
 object TransactionalProducerSettings:
-  /** What Kafka's own producers wait, through `transaction.timeout.ms`. */
+  /** What Kafka's own producers use for `transaction.timeout.ms`. */
   val DefaultTransactionTimeout: FiniteDuration = 60.seconds
 
   def from[F[_], K, V](

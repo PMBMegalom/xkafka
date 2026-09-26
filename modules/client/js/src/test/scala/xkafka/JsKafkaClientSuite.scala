@@ -304,6 +304,42 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
     client.consumer(settings.withIsolationLevel(IsolationLevel.ReadCommitted), Selection.Topics(NonEmptySet.one(topic("events")))).use_.attempt.void
 
+  test("the transactional settings reach the backend as the properties Kafka reads"):
+    val serializer      = Serializer.const[IO, String](None)
+    val transactionalId = TransactionalId.from("writer").toOption.get
+    val settings        =
+      TransactionalProducerSettings.from(clientSettings, transactionalId, serializer, serializer, transactionTimeout = 30.seconds).toOption.get
+    val producer =
+      js.Dynamic.literal(
+        connect =
+          ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+            js.Any,
+            js.Function2[confluent.RdError | Null, js.Any, Unit],
+            Unit
+          ],
+        disconnect =
+          ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+            js.Function2[confluent.RdError | Null, js.Any, Unit],
+            Unit
+          ],
+        setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
+        on =
+          ((_: String, _: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) => ()): js.Function2[
+            String,
+            js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit],
+            Unit
+          ],
+        initTransactions =
+          ((_: Int, done: js.Function1[confluent.RdError | Null, Unit]) => done(null)): js.Function2[
+            Int,
+            js.Function1[confluent.RdError | Null, Unit],
+            Unit
+          ]
+      ).asInstanceOf[confluent.RdProducer]
+    val expected = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "30000")
+
+    KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = expected)).transactionalProducer(settings).use_
+
   /** Every consumer carries one, so a driver that is not given an expectation is given this. */
   private val DefaultIsolationLevel = "isolation.level" -> "read_uncommitted"
 
