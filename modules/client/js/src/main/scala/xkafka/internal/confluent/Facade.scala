@@ -61,6 +61,21 @@ private[xkafka] trait RdProducer extends js.Object:
 
   def on(event: String, listener: js.Function2[RdError | Null, RdDeliveryReport, Unit]): this.type = js.native
 
+  def initTransactions(timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def beginTransaction(callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def commitTransaction(timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def abortTransaction(timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
+
+  def sendOffsetsToTransaction(
+      offsets: js.Array[RdTopicPartitionOffset],
+      consumer: RdConsumer,
+      timeout: Int,
+      callback: js.Function1[RdError | Null, Unit]
+  ): Unit = js.native
+
 /** One header. librdkafka keeps these in an array, so duplicate names and their order both survive. */
 private[xkafka] type RdHeader = js.Dictionary[Uint8Array | String]
 

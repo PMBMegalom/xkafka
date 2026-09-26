@@ -395,6 +395,61 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(pausedPartitions.toList, List(Set(consumerRecord.topicPartition)))
 
+  test("a committer transformed between effects keeps the group its offsets belong to"):
+    val source =
+      new OffsetCommitter[Option]:
+        override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+
+        override private[xkafka] val membership: GroupMembership[Option] = GroupMembership.Backend(Some(TestGroupHandle("workers")))
+
+    assertEquals(source.mapK(optionToSyncIO).membership.handle.map(_.unsafeRunSync()), Some(TestGroupHandle("workers")))
+
+  test("a committer that did not come from a consumer names no group"):
+    val source =
+      new OffsetCommitter[Option]:
+        override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+
+    assertEquals(source.membership.handle, None)
+    assertEquals(source.mapK(optionToSyncIO).membership.handle, None)
+
+  test("transactional producer settings carry the producer they wrap"):
+    val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
+    val settings   = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer).toOption.get
+
+    assertEquals(settings.transactionalId, id)
+    assertEquals(settings.transactionTimeout, TransactionalProducerSettings.DefaultTransactionTimeout)
+    assertEquals(settings.withTransactionTimeout(5.seconds).transactionTimeout, 5.seconds)
+    assertEquals(settings.withTransactionTimeout(5.seconds).withProperty("linger.ms", "5").toOption.get.transactionTimeout, 5.seconds)
+    assertEquals(settings.withProperty("linger.ms", "5").toOption.get.producer.properties, Map("linger.ms" -> "5"))
+
+  test("settings reject the transaction properties the typed model owns"):
+    val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
+
+    assertEquals(
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, properties = Map("transactional.id" -> "other")).toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("transactional.id", SettingsError.PropertyScope.Producer)))
+    )
+
+  test("the consumer isolation level defaults and is carried by its wither"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.isolationLevel, IsolationLevel.ReadUncommitted)
+    assertEquals(settings.withIsolationLevel(IsolationLevel.ReadCommitted).isolationLevel, IsolationLevel.ReadCommitted)
+    assertEquals(
+      settings.withIsolationLevel(IsolationLevel.ReadCommitted).withProperty("fetch.min.bytes", "1").toOption.get.isolationLevel,
+      IsolationLevel.ReadCommitted
+    )
+
+  test("a transactional id must not be blank"):
+    assertEquals(TransactionalId.from("  "), Left(ValidationError.EmptyTransactionalId))
+    assertEquals(TransactionalId.from("writer").map(_.value), Right("writer"))
+
+  /** Stands in for a backend's own handle, which only that backend can name. */
+  private final case class TestGroupHandle(group: String) extends GroupHandle
+
   private def committableOffset: CommittableOffset[Option] = offsetAt(partition, nextOffset)
 
   private val optionCommitter: OffsetCommitter[Option] =

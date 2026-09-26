@@ -1236,6 +1236,98 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
         return 0;
 }
 
+/* The transaction calls report through rd_kafka_error_t, which carries both the
+ * code and its text, and which the caller owns. */
+static int xkafka_take_error(rd_kafka_error_t *result,
+                             char *error,
+                             size_t error_size,
+                             int32_t *error_code) {
+        if (result == NULL)
+                return 0;
+        xkafka_set_error_at(error, error_size, error_code,
+                            rd_kafka_error_string(result),
+                            rd_kafka_error_code(result));
+        rd_kafka_error_destroy(result);
+        return -1;
+}
+
+int xkafka_producer_init_transactions(rd_kafka_t *producer,
+                                      int timeout_ms,
+                                      char *error,
+                                      size_t error_size,
+                                      int32_t *error_code) {
+        return xkafka_take_error(rd_kafka_init_transactions(producer, timeout_ms),
+                                 error, error_size, error_code);
+}
+
+int xkafka_producer_begin_transaction(rd_kafka_t *producer,
+                                      char *error,
+                                      size_t error_size,
+                                      int32_t *error_code) {
+        return xkafka_take_error(rd_kafka_begin_transaction(producer), error,
+                                 error_size, error_code);
+}
+
+int xkafka_producer_commit_transaction(rd_kafka_t *producer,
+                                       int timeout_ms,
+                                       char *error,
+                                       size_t error_size,
+                                       int32_t *error_code) {
+        return xkafka_take_error(rd_kafka_commit_transaction(producer, timeout_ms),
+                                 error, error_size, error_code);
+}
+
+int xkafka_producer_abort_transaction(rd_kafka_t *producer,
+                                      int timeout_ms,
+                                      char *error,
+                                      size_t error_size,
+                                      int32_t *error_code) {
+        return xkafka_take_error(rd_kafka_abort_transaction(producer, timeout_ms),
+                                 error, error_size, error_code);
+}
+
+/* The metadata outlives the consumer it came from, so a transaction records
+ * offsets against the group without holding the consumer open. */
+void *xkafka_consumer_group_metadata(rd_kafka_t *consumer) {
+        return rd_kafka_consumer_group_metadata(consumer);
+}
+
+void xkafka_consumer_group_metadata_destroy(void *metadata) {
+        if (metadata == NULL)
+                return;
+        rd_kafka_consumer_group_metadata_destroy(
+            (rd_kafka_consumer_group_metadata_t *)metadata);
+}
+
+int xkafka_producer_send_offsets(rd_kafka_t *producer,
+                                 void *metadata,
+                                 const char *const *topics,
+                                 const int32_t *partitions,
+                                 const int64_t *offset_values,
+                                 size_t count,
+                                 int timeout_ms,
+                                 char *error,
+                                 size_t error_size,
+                                 int32_t *error_code) {
+        rd_kafka_topic_partition_list_t *native_offsets;
+        int status;
+
+        if (metadata == NULL) {
+                xkafka_set_error(error, error_size, error_code,
+                                 "the consumer reported no group metadata");
+                return -1;
+        }
+        native_offsets =
+            xkafka_topic_partition_list(topics, partitions, offset_values, count);
+        status = xkafka_take_error(
+            rd_kafka_send_offsets_to_transaction(
+                producer, native_offsets,
+                (const rd_kafka_consumer_group_metadata_t *)metadata, timeout_ms),
+            error, error_size, error_code);
+        rd_kafka_topic_partition_list_destroy(native_offsets);
+        return status;
+}
+
 int xkafka_consumer_commit(rd_kafka_t *consumer,
                            const char *const *topics,
                            const int32_t *partitions,

@@ -36,6 +36,9 @@ yield ()
 
 `produceAndAwait` combines both stages when that pipelining is not wanted.
 
+A producer that must write records and consumer offsets as one unit is a
+different type. See [Transactions](transactions.md).
+
 ## Results
 
 A `ProducerResult` pairs every record with the metadata its backend reported for

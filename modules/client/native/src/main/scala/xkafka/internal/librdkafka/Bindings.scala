@@ -311,6 +311,31 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  def xkafka_producer_init_transactions(producer: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+
+  def xkafka_producer_begin_transaction(producer: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+
+  def xkafka_producer_commit_transaction(producer: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+
+  def xkafka_producer_abort_transaction(producer: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+
+  def xkafka_consumer_group_metadata(consumer: CVoidPtr): CVoidPtr = extern
+
+  def xkafka_consumer_group_metadata_destroy(metadata: CVoidPtr): Unit = extern
+
+  def xkafka_producer_send_offsets(
+      producer: CVoidPtr,
+      metadata: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      offsets: Ptr[CLongLong],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_consumer_commit(
       consumer: CVoidPtr,
       topics: Ptr[CString],

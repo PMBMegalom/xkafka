@@ -40,7 +40,7 @@ import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.admin.{NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic}
-import org.apache.kafka.clients.consumer.OffsetAndMetadata
+import org.apache.kafka.clients.consumer.{ConsumerGroupMetadata as JavaConsumerGroupMetadata, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.{
@@ -56,6 +56,11 @@ private[xkafka] object KafkaClientPlatform:
 
   private[xkafka] def fromFs2[F[_]](using Async[F], Parallel[F], MkProducer[F], MkConsumer[F]): KafkaClient[F] = new Fs2KafkaClient[F]
 
+/** What a transaction on this backend needs to record a consumer's offsets. The Java client names a group by the metadata its consumer carries, which
+  * also fences a member the group has already replaced.
+  */
+private final case class Fs2GroupHandle(metadata: JavaConsumerGroupMetadata) extends GroupHandle
+
 private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkProducer: MkProducer[F], mkConsumer: MkConsumer[F])
     extends KafkaClient[F]:
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
@@ -66,6 +71,33 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings)).mapK(handleBackendErrors)
       _        <- Resource.eval(select(consumer, selection))
     yield new Fs2KafkaConsumerAdapter(consumer)
+
+  override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
+    Fs2KafkaProducer.transactional(
+      producerSettings(settings.producer).withTransactionalId(settings.transactionalId.value).withTransactionTimeout(settings.transactionTimeout)
+    ).mapK(handleBackendErrors).map(new Fs2TransactionalProducerAdapter(_))
+
+  private final class Fs2TransactionalProducerAdapter[K, V](underlying: Fs2KafkaProducer[F, K, V]) extends KafkaTransactionalProducer[F, K, V]:
+    /** fs2-kafka begins the transaction on acquire, commits it where the body succeeds, and aborts it where the body fails or is cancelled. */
+    override def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A] = backend(underlying.transaction.surround(use(transaction)))
+
+    private val records: KafkaProducer[F, K, V] = new Fs2KafkaProducerAdapter(underlying)
+
+    private val transaction: Transaction[F, K, V] =
+      new Transaction[F, K, V]:
+        /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
+        override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
+
+        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
+          GroupMembership.resolve(batch).flatMap(_.traverse_ {
+            case (Fs2GroupHandle(metadata), offsets) => backend(underlying.sendOffsetsToTransaction(
+                offsets.map((topicPartition, offset) =>
+                  new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) -> new OffsetAndMetadata(offset.value)
+                ),
+                metadata
+              ))
+            case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
+          })
 
   override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
     Fs2KafkaAdminClient.resource(adminSettings(settings)).mapK(handleBackendErrors).map(new Fs2KafkaAdminClientAdapter(_))
@@ -148,7 +180,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           ClientProperties(settings.client)
       ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
         .withPollTimeout(settings.pollTimeout).withDefaultApiTimeout(settings.requestTimeout).withProperty("enable.auto.commit", "false")
-        .withAutoOffsetReset(
+        .withProperty("isolation.level", isolationLevel(settings.isolationLevel)).withAutoOffsetReset(
           settings.autoOffsetReset match
             case AutoOffsetReset.Earliest => Fs2AutoOffsetReset.Earliest
             case AutoOffsetReset.Latest   => Fs2AutoOffsetReset.Latest
@@ -177,6 +209,11 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private def invalidBackendValue(field: String, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field: $error")
+
+  private def isolationLevel(value: IsolationLevel): String =
+    value match
+      case IsolationLevel.ReadUncommitted => "read_uncommitted"
+      case IsolationLevel.ReadCommitted   => "read_committed"
 
   private final class Fs2KafkaProducerAdapter[K, V](underlying: Fs2KafkaProducer[F, K, V]) extends KafkaProducer[F, K, V]:
 
@@ -228,6 +265,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
               case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
                   new OffsetAndMetadata(offset.value)
           ))
+
+        override private[xkafka] val membership: GroupMembership[F] =
+          GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)))
 
     override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] =
       underlying.records.translate(handleBackendErrors).evalMap(consumerRecord)

@@ -120,6 +120,9 @@ object KafkaException:
   /** Settings that could not be constructed, carrying every reason they could not. */
   final class InvalidSettings(val errors: NonEmptyList[SettingsError]) extends KafkaException(errors.toList.map(_.message).mkString("; "))
 
+  /** An operation the portable API cannot carry out with what it was given. */
+  final class Unsupported(val detail: String) extends KafkaException(detail)
+
   /** A backend response that cannot be represented by the portable API. */
   final class InvalidBackendResponse(val detail: String, cause: Throwable = null)
       extends KafkaException(s"Kafka backend returned an invalid response: $detail", cause)

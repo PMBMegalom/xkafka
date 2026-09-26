@@ -26,9 +26,9 @@ import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
-import cats.effect.{Async, Deferred, Ref, Resource}
+import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Queue, Semaphore, Supervisor}
+import cats.effect.std.{Mutex, Queue, Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.concurrent.SignallingRef
@@ -38,6 +38,18 @@ import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new LibrdkafkaClient[F]
+
+/** What a transaction on this backend needs to record a consumer's offsets.
+  *
+  * librdkafka hands out group metadata that outlives the consumer it came from, so a transaction records offsets against the group without holding
+  * that consumer open, and a pointer is not something a pattern can test for on its own, so the handle wraps it.
+  */
+private final case class LibrdkafkaGroupHandle(metadata: CVoidPtr) extends GroupHandle
+
+private def isolationLevel(value: IsolationLevel): String =
+  value match
+    case IsolationLevel.ReadUncommitted => "read_uncommitted"
+    case IsolationLevel.ReadCommitted   => "read_committed"
 
 private[xkafka] object LibrdkafkaPlatform:
   def version: String = fromCString(Bindings.xkafka_version_str())
@@ -105,7 +117,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     for
-      client <- nativeClient(createProducer(settings), Bindings.xkafka_producer_destroy)
+      client <- nativeClient(createProducer(settings.client, settings.properties), Bindings.xkafka_producer_destroy)
       // Outstanding acknowledgements finish before the client.handle they poll is destroyed.
       supervisor <- Supervisor[F](await = true)
       batches    <- Resource.eval(Semaphore[F](1))
@@ -125,20 +137,17 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
 
-  private def createProducer[K, V](settings: ProducerSettings[F, K, V]): F[CVoidPtr] =
+  private def createProducer(client: ClientSettings, properties: Map[String, String]): F[CVoidPtr] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone                        = zone
         val (error, errorCode)            = errorSlots
         val (names, values, propertySize) =
-          nativeProperties(
-            settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security) ++
-              ClientProperties(settings.client)
-          )
+          nativeProperties(client.properties ++ properties ++ SecurityProperties.librdkafka(client.security) ++ ClientProperties(client))
         val producer =
           Bindings.xkafka_producer_new(
-            toCString(settings.client.bootstrapServers.toList.mkString(",")),
-            settings.client.clientId.map(toCString).orNull,
+            toCString(client.bootstrapServers.toList.mkString(",")),
+            client.clientId.map(toCString).orNull,
             names,
             values,
             propertySize,
@@ -156,8 +165,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         val (error, errorCode)            = errorSlots
         val (names, values, propertySize) =
           nativeProperties(
-            settings.client.properties ++ settings.properties ++ SecurityProperties.librdkafka(settings.client.security) ++
-              ClientProperties(settings.client)
+            settings.client.properties ++ settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel)) ++
+              SecurityProperties.librdkafka(settings.client.security) ++ ClientProperties(settings.client)
           )
         val consumer =
           Bindings.xkafka_consumer_new(
@@ -190,6 +199,104 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           names(index) = toCString(name)
           values(index) = toCString(value)
       (names, values, entries.size.toUSize)
+
+  override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
+    val timeoutMillis = settings.transactionTimeout.toMillis.toInt
+    for
+      client <-
+        nativeClient(
+          createProducer(
+            settings.producer.client,
+            settings.producer.properties ++
+              Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString)
+          ),
+          Bindings.xkafka_producer_destroy
+        )
+      supervisor <- Supervisor[F](await = true)
+      batches    <- Resource.eval(Semaphore[F](1))
+      _          <- Resource.eval(client(initTransactions(client.handle, timeoutMillis)))
+      // One transactional id carries one transaction at a time, so this keeps concurrent callers out of each other's.
+      lock <- Resource.eval(Mutex[F])
+    yield new LibrdkafkaTransactionalProducer(client, new LibrdkafkaProducer(client, supervisor, batches, settings.producer), lock, timeoutMillis)
+
+  private def initTransactions(producer: CVoidPtr, timeoutMillis: Int): Unit =
+    Zone.acquire: zone =>
+      given Zone             = zone
+      val (error, errorCode) = errorSlots
+      if Bindings.xkafka_producer_init_transactions(producer, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode) != 0 then
+        throw nativeError(error, errorCode)
+
+  private final class LibrdkafkaTransactionalProducer[K, V](client: NativeClient, records: KafkaProducer[F, K, V], lock: Mutex[F], timeoutMillis: Int)
+      extends KafkaTransactionalProducer[F, K, V]:
+
+    override def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A] =
+      lock.lock.surround(client(begin()) *> use(transaction).guaranteeCase:
+        case Outcome.Succeeded(_) => client(commit())
+        case Outcome.Canceled()   => client(abort())
+        // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
+        case Outcome.Errored(error) => client(abort()).handleErrorWith(failure => F.delay(error.addSuppressed(failure))))
+
+    private val transaction: Transaction[F, K, V] =
+      new Transaction[F, K, V]:
+        /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
+        override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
+
+        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
+          GroupMembership.resolve(batch).flatMap(_.traverse_ {
+            case (LibrdkafkaGroupHandle(metadata), offsets) => client(sendOffsets(metadata, offsets))
+                .guarantee(F.blocking(Bindings.xkafka_consumer_group_metadata_destroy(metadata)))
+            case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
+          })
+
+    private def begin(): Unit =
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        if Bindings.xkafka_producer_begin_transaction(client.handle, error, ErrorBufferSize.toUSize, errorCode) != 0 then
+          throw nativeError(error, errorCode)
+
+    private def commit(): Unit =
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        if Bindings.xkafka_producer_commit_transaction(client.handle, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode) != 0 then
+          throw nativeError(error, errorCode)
+
+    private def abort(): Unit =
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        if Bindings.xkafka_producer_abort_transaction(client.handle, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode) != 0 then
+          throw nativeError(error, errorCode)
+
+    private def sendOffsets(metadata: CVoidPtr, offsets: Map[TopicPartition, Offset]): Unit =
+      if offsets.nonEmpty then
+        Zone.acquire: zone =>
+          given Zone        = zone
+          val entries       = offsets.toVector
+          val topics        = alloc[CString](entries.size)
+          val partitions    = alloc[CInt](entries.size)
+          val nativeOffsets = alloc[CLongLong](entries.size)
+          entries.iterator.zipWithIndex.foreach:
+            case ((topicPartition, offset), index) =>
+              topics(index) = toCString(topicPartition.topic.value)
+              partitions(index) = topicPartition.partition.value
+              nativeOffsets(index) = offset.value
+          val (error, errorCode) = errorSlots
+          val result             =
+            Bindings.xkafka_producer_send_offsets(
+              client.handle,
+              metadata,
+              topics,
+              partitions,
+              nativeOffsets,
+              entries.size.toUSize,
+              timeoutMillis,
+              error,
+              ErrorBufferSize.toUSize,
+              errorCode
+            )
+          if result != 0 then throw nativeError(error, errorCode)
 
   override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
     nativeClient(createAdmin(settings), Bindings.xkafka_admin_destroy).map(new LibrdkafkaAdminClient(_))
@@ -542,6 +649,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
         override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
+
+        /** librdkafka names a group by the metadata its consumer carries, which also fences a member the group has already replaced.
+          *
+          * The metadata is freshly allocated here and owned by whoever reads it.
+          */
+        override private[xkafka] val membership: GroupMembership[F] =
+          GroupMembership.Backend(client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))))
 
     /** The consumer's single poll, which both its records and its assignment come from.
       *

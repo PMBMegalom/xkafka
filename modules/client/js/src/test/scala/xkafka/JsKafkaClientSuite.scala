@@ -229,7 +229,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.wait.max.ms" -> "10"))
           .toOption.get
       record <-
-        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10")))
+        KafkaClientPlatform
+          .fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10", DefaultIsolationLevel)))
           .consumer(settings, Selection.Topics(NonEmptySet.one(topic("events")))).use(_.records.take(1).compile.lastOrError)
       _ <- record.offset.commit
     yield
@@ -297,6 +298,15 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       s"the unreadable assignment should reach whoever reads the consumer, got $outcome"
     )
 
+  test("the isolation level reaches the backend as the property it spells"):
+    val settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
+    val client   = KafkaClientPlatform.fromDriver[IO](driver(expectedConsumerProperties = Map("isolation.level" -> "read_committed")))
+
+    client.consumer(settings.withIsolationLevel(IsolationLevel.ReadCommitted), Selection.Topics(NonEmptySet.one(topic("events")))).use_.attempt.void
+
+  /** Every consumer carries one, so a driver that is not given an expectation is given this. */
+  private val DefaultIsolationLevel = "isolation.level" -> "read_uncommitted"
+
   private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 
   private val utf8Serializer: Serializer[IO, String] = Serializer.instance((_, _, value) => IO.pure(Some(Chunk.array(value.getBytes("UTF-8")))))
@@ -308,7 +318,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       producerValue: confluent.RdProducer = null,
       consumerValue: confluent.RdConsumer = null,
       expectedProducerProperties: Map[String, String] = Map.empty,
-      expectedConsumerProperties: Map[String, String] = Map.empty
+      expectedConsumerProperties: Map[String, String] = Map(DefaultIsolationLevel)
   ): ConfluentKafkaDriver =
     new ConfluentKafkaDriver:
       override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer =

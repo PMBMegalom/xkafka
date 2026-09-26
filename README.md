@@ -52,8 +52,8 @@ object ProduceExample extends IOApp.Simple:
 The full documentation lives at
 [pmbmegalom.github.io/xkafka](https://pmbmegalom.github.io/xkafka/), covering
 settings and validation, producing and consuming, offsets and commits,
-transport security, the error model, serialization, and the subtle differences
-between the three runtimes.
+transactions, topic administration, transport security, the error model,
+serialization, and the subtle differences between the three runtimes.
 
 ## Building
 

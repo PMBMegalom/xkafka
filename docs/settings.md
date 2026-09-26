@@ -1,7 +1,8 @@
 # Settings
 
 Three settings types describe a client. `ClientSettings` covers the connection,
-and the producer and consumer settings build on it.
+and the producer and consumer settings build on it. `TransactionalProducerSettings`
+wraps the producer settings, and [Transactions](transactions.md) covers what it adds.
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList
@@ -74,7 +75,8 @@ properties supported with the same meaning by each one.
 
 `ManagedProperties` lists the names xkafka derives from the typed settings:
 bootstrap servers, client and group IDs, offset reset, automatic commits, the
-default API timeout, the metadata refresh names, and the TLS and SASL names.
+default API timeout, the metadata refresh names, the isolation level, the
+transaction names, and the TLS and SASL names.
 Supplying one through the map is a `SettingsError`, so the typed settings and the
 map cannot disagree.
 
@@ -83,6 +85,13 @@ map cannot disagree.
 Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full.
+
+## Isolation
+
+`ConsumerSettings` carries `isolationLevel`, which says whether records of a
+transaction that has not committed are delivered. It defaults to
+`ReadUncommitted`, which is Kafka's own default. See
+[Transactions](transactions.md).
 
 ## Timeouts
 

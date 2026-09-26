@@ -424,6 +424,69 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           .timeout(90.seconds)
       yield assert(outcome.isLeft, s"creating an existing topic should fail, got $outcome")
 
+  test(conformance("records of a committed transaction are delivered")):
+    withBroker: server =>
+      val topic     = uniqueTopic("transaction-commit")
+      val partition = validPartition(0)
+      val records   = NonEmptyList.of("a", "b").map(value => record(topic, Some("k"), Some(value), partition))
+
+      for
+        settings <- transactionalSettings(server, uniqueTransactionalId("commit"))
+        _        <- PlatformKafkaClient().transactionalProducer(settings).use(_.transactionally(_.produce(records))).timeout(90.seconds)
+        consumed <- consumeCommitted(server, topic, records.size)
+      yield assertEquals(consumed.map(_.record.value), List(Some("a"), Some("b")))
+
+  test(conformance("a transaction whose body fails delivers none of its records")):
+    withBroker: server =>
+      val topic     = uniqueTopic("transaction-abort")
+      val partition = validPartition(0)
+
+      for
+        settings <- transactionalSettings(server, uniqueTransactionalId("abort"))
+        _        <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            producer.transactionally(transaction =>
+              transaction.produce(NonEmptyList.one(record(topic, Some("k"), Some("aborted"), partition))) *>
+                IO.raiseError[Unit](new RuntimeException("rolled back"))
+            ).attempt *> producer.transactionally(_.produce(NonEmptyList.one(record(topic, Some("k"), Some("committed"), partition))))
+          .timeout(90.seconds)
+        // The aborted record sits before the committed one in the log, so reading one record proves it was skipped.
+        consumed <- consumeCommitted(server, topic, 1)
+      yield assertEquals(consumed.map(_.record.value), List(Some("committed")))
+
+  test(conformance("offsets recorded in a transaction move the group only where it commits")):
+    withBroker: server =>
+      val input          = uniqueTopic("transaction-input")
+      val output         = uniqueTopic("transaction-output")
+      val partition      = validPartition(0)
+      val topicPartition = TopicPartition(input, partition)
+      val produced       = record(output, Some("k"), Some("out"), partition)
+
+      for
+        _        <- produce(server, NonEmptyList.one(record(input, Some("k"), Some("value"), partition)))
+        settings <- transactionalSettings(server, uniqueTransactionalId("offsets"))
+        reading  <- committedConsumerSettings(server, uniqueGroup("transaction"))
+        outcome  <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: consumer =>
+              for
+                taken <- consumer.records.take(1).compile.toList
+                batch = CommittableOffsetBatch.fromFoldable(taken.map(_.offset))
+                _ <-
+                  producer.transactionally(transaction =>
+                    transaction.produce(NonEmptyList.one(produced)) *> transaction.commitOffsets(batch) *>
+                      IO.raiseError[Unit](new RuntimeException("rolled back"))
+                  ).attempt
+                afterAbort <- consumer.committed(Set(topicPartition))
+                _ <- producer.transactionally(transaction => transaction.produce(NonEmptyList.one(produced)) *> transaction.commitOffsets(batch))
+                afterCommit <- consumer.committed(Set(topicPartition))
+              yield (afterAbort.get(topicPartition).flatten, afterCommit.get(topicPartition).flatten)
+          .timeout(90.seconds)
+      yield
+        val (afterAbort, afterCommit) = outcome
+        assertEquals(afterAbort, None, "an aborted transaction should leave the group where it was")
+        assertEquals(afterCommit.map(_.value), Some(1L), "a committed transaction should store the offset it recorded")
+
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)
@@ -448,6 +511,21 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(count.toLong).compile.toList)
         .timeout(60.seconds)
 
+  private def consumeCommitted(server: String, topic: Topic, count: Int): IO[List[CommittableConsumerRecord[IO, Option[String], Option[String]]]] =
+    committedConsumerSettings(server, uniqueGroup("conformance")).flatMap: settings =>
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(count.toLong).compile.toList)
+        .timeout(60.seconds)
+
+  private def committedConsumerSettings(server: String, group: ConsumerGroup): IO[ConsumerSettings[IO, Option[String], Option[String]]] =
+    consumerSettings(server, group).map(_.withIsolationLevel(IsolationLevel.ReadCommitted))
+
+  private def transactionalSettings(
+      server: String,
+      transactionalId: TransactionalId
+  ): IO[TransactionalProducerSettings[IO, Option[String], Option[String]]] =
+    ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+      TransactionalProducerSettings.from(client, transactionalId, optionalSerializer, optionalSerializer).liftTo[IO]
+
   private def producerSettings(server: String): IO[ProducerSettings[IO, Option[String], Option[String]]] =
     ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
       ProducerSettings.from(client, optionalSerializer, optionalSerializer).liftTo[IO]
@@ -470,6 +548,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def byteHeader(value: Byte): Option[Chunk[Byte]] = Some(Chunk.array(Array(value)))
 
   private def uniqueTopic(label: String): Topic = validTopic(s"xkafka-conformance-$label-$backend-${System.nanoTime()}")
+
+  private def uniqueTransactionalId(label: String): TransactionalId =
+    TransactionalId.from(s"xkafka-conformance-$label-$backend-${System.nanoTime()}")
+      .fold(error => fail(s"invalid test transactional id: ${error.message}"), identity)
 
   private def uniqueGroup(label: String): ConsumerGroup = validGroup(s"xkafka-conformance-$label-$backend-${System.nanoTime()}")
 

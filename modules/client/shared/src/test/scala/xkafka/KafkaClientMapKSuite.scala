@@ -39,6 +39,40 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     new FunctionK[ErrorIO, IO]:
       override def apply[A](value: ErrorIO[A]): IO[A] = value.value.flatMap(_.leftMap(new RuntimeException(_)).liftTo[IO])
 
+  test("a transaction transformed between effects records offsets against the group they came from"):
+    val topic           = Topic.from("events").toOption.get
+    val clientSettings  = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
+    val transactionalId = TransactionalId.from("writer").toOption.get
+    val serializer      = Serializer.const[ErrorIO, String](Some(Chunk.array(Array[Byte](1))))
+    val settings        = TransactionalProducerSettings.from(clientSettings, transactionalId, serializer, serializer).toOption.get
+    val record          = ProducerRecord(topic, "key", "value")
+
+    val committer =
+      new OffsetCommitter[ErrorIO]:
+        override def commit(offsets: Map[TopicPartition, Offset]): ErrorIO[Unit] = EitherT.pure(())
+
+        override private[xkafka] val membership: GroupMembership[ErrorIO] = GroupMembership.Backend(EitherT.pure(TestGroupHandle("workers")))
+
+    IO.ref(List.empty[GroupHandle]).flatMap: seen =>
+      val client = sourceRecording(value => seen.update(_ :+ value)).imapK(ioToErrorIO)(errorIOToIO)
+      val batch  = CommittableOffsetBatch.empty[ErrorIO].updated(committableOffset(topic, committer))
+
+      client.transactionalProducer(settings)
+        .use(producer => producer.transactionally(transaction => transaction.produce(NonEmptyList.one(record)) *> transaction.commitOffsets(batch)))
+        .value.flatMap(result => seen.get.map(result -> _))
+    .map: (result, recorded) =>
+      assertEquals(result, Right(()))
+      assertEquals(recorded, List(TestGroupHandle("workers")))
+
+  /** Stands in for a backend's own handle, which only that backend can name. */
+  private final case class TestGroupHandle(group: String) extends GroupHandle
+
+  private def committableOffset(topic: Topic, from: OffsetCommitter[ErrorIO]): CommittableOffset[ErrorIO] =
+    new CommittableOffset[ErrorIO]:
+      override val topicPartition: TopicPartition      = TopicPartition(topic, Partition.from(0).toOption.get)
+      override val nextOffset: Offset                  = Offset.from(1L).toOption.get
+      override val committer: OffsetCommitter[ErrorIO] = from
+
   test("KafkaClient transforms settings, resources, and returned algebras between effects"):
     val topic            = Topic.from("events").toOption.get
     val group            = ConsumerGroup.from("workers").toOption.get
@@ -57,8 +91,26 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record -> None))))
       assertEquals(consumed, Right(()))
 
-  private val source: KafkaClient[IO] =
+  private val source: KafkaClient[IO] = sourceRecording(_ => IO.unit)
+
+  private def sourceRecording(record: GroupHandle => IO[Unit]): KafkaClient[IO] =
     new KafkaClient[IO]:
+      override def transactionalProducer[K, V](
+          settings: TransactionalProducerSettings[IO, K, V]
+      ): Resource[IO, KafkaTransactionalProducer[IO, K, V]] =
+        Resource.pure:
+          new KafkaTransactionalProducer[IO, K, V]:
+            override def transactionally[A](use: Transaction[IO, K, V] => IO[A]): IO[A] =
+              use:
+                new Transaction[IO, K, V]:
+                  override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[ProducerResult[K, V]] =
+                    IO.pure(ProducerResult(records.map(_ -> None)))
+
+                  override def commitOffsets(batch: CommittableOffsetBatch[IO]): IO[Unit] =
+                    batch.offsets.toList.traverse_ { (committer, _) =>
+                      committer.membership.handle.fold(IO.raiseError[Unit](new IllegalStateException("no membership")))(_.flatMap(record))
+                    }
+
       override def producer[K, V](settings: ProducerSettings[IO, K, V]): Resource[IO, KafkaProducer[IO, K, V]] =
         Resource.pure:
           new KafkaProducer[IO, K, V]:

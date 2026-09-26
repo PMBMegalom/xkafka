@@ -43,19 +43,36 @@ object DownstreamSmoke extends IOApp.Simple:
     val topic            = Topic.from(s"xkafka-downstream-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
     val group            = ConsumerGroup.from(s"xkafka-downstream-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
     val expected         = ProducerRecord(topic, "downstream-key", "downstream-value")
+    val output           = Topic.from(s"xkafka-downstream-out-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
+    val transactionalId  = TransactionalId.from(s"xkafka-downstream-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
 
     for
       client           <- validated(ClientSettings.from(NonEmptyList.one(bootstrapServer)))
       producerSettings <- validated(ProducerSettings.from(client, utf8Serializer, utf8Serializer))
       consumerSettings <- validated(ConsumerSettings.from(client, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest))
       produced <- KafkaClient[IO].producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(expected))).timeout(45.seconds)
+      transactionalSettings <- validated(TransactionalProducerSettings.from(client, transactionalId, utf8Serializer, utf8Serializer))
       consumed <- KafkaClient[IO]
         .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic)))
-        .use(_.records.take(1).evalTap(_.offset.commit).compile.lastOrError)
-        .timeout(60.seconds)
+        .use: consumer =>
+          KafkaClient[IO].transactionalProducer(transactionalSettings).use: producer =>
+            for
+              taken <- consumer.records.take(1).compile.lastOrError
+              // The offsets a transaction records carry the committer they came from, so the group they belong to
+              // needs no naming here.
+              _ <- producer.transactionally: transaction =>
+                transaction.produce(NonEmptyList.one(ProducerRecord(output, taken.record.key, taken.record.value))) *>
+                  transaction.commitOffsets(CommittableOffsetBatch.empty[IO].updated(taken.offset))
+            yield taken
+        .timeout(90.seconds)
       _ <- IO.raiseUnless(produced.records.size == 1)(new AssertionError("producer did not acknowledge the record"))
       _ <- IO.raiseUnless(consumed.record.key == expected.key)(new AssertionError(s"unexpected key: ${consumed.record.key}"))
       _ <- IO.raiseUnless(consumed.record.value == expected.value)(new AssertionError(s"unexpected value: ${consumed.record.value}"))
+      transacted <- KafkaClient[IO]
+        .consumer(consumerSettings.withIsolationLevel(IsolationLevel.ReadCommitted), Selection.Topics(NonEmptySet.one(output)))
+        .use(_.records.take(1).compile.lastOrError)
+        .timeout(60.seconds)
+      _ <- IO.raiseUnless(transacted.record.value == expected.value)(new AssertionError(s"unexpected transacted value: ${transacted.record.value}"))
       _ <- IO.println("xkafka downstream smoke test passed")
     yield ()
 

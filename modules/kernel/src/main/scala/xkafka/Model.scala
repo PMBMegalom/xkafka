@@ -35,6 +35,7 @@ enum ValidationError derives CanEqual:
   case NegativeOffset(value: Long)
   case OffsetOverflow
   case EmptyConsumerGroup
+  case EmptyTransactionalId
   case NonPositivePartitionCount(value: Int)
   case NonPositiveReplicationFactor(value: Short)
 
@@ -49,6 +50,7 @@ enum ValidationError derives CanEqual:
       case NegativeOffset(value)               => s"offset must not be negative, was $value"
       case OffsetOverflow                      => "offset cannot be advanced past Long.MaxValue"
       case EmptyConsumerGroup                  => "consumer group must not be empty"
+      case EmptyTransactionalId                => "transactional id must not be empty"
       case NonPositivePartitionCount(value)    => s"partition count must be positive, was $value"
       case NonPositiveReplicationFactor(value) => s"replication factor must be positive, was $value"
 
@@ -131,6 +133,18 @@ object ConsumerGroup:
 
   given Order[ConsumerGroup] = Order.from((x, y) => x.value.compareTo(y.value))
   given Show[ConsumerGroup]  = Show.show(_.value)
+
+/** Names a transactional producer, so Kafka can fence an earlier instance of it when a new one starts. */
+opaque type TransactionalId = String
+
+object TransactionalId:
+  /** Rejects blank ids. Kafka fences a producer by this name, so a blank one leaves nothing to fence. */
+  def from(value: String): Either[ValidationError, TransactionalId] = Either.cond(value.trim.nonEmpty, value, ValidationError.EmptyTransactionalId)
+
+  extension (id: TransactionalId) def value: String = id
+
+  given Order[TransactionalId] = Order.from((x, y) => x.value.compareTo(y.value))
+  given Show[TransactionalId]  = Show.show(_.value)
 
 opaque type Timestamp = Long
 

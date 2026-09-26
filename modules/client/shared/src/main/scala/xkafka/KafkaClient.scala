@@ -31,6 +31,12 @@ trait KafkaClient[F[_]]:
 
   def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]]
 
+  /** Produces records and records consumer offsets atomically.
+    *
+    * Kafka refuses a plain produce from a producer that carries a transactional id, so this is separate from `producer`.
+    */
+  def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]]
+
   /** Administers topics. It reads and changes cluster metadata only, so it neither produces nor consumes. */
   def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]]
 
@@ -41,6 +47,9 @@ trait KafkaClient[F[_]]:
 
       override def consumer[K, V](settings: ConsumerSettings[G, K, V], selection: Selection): Resource[G, KafkaConsumer[G, K, V]] =
         self.consumer(settings.mapK(gk), selection).map(_.mapK(fk)).mapK(fk)
+
+      override def transactionalProducer[K, V](settings: TransactionalProducerSettings[G, K, V]): Resource[G, KafkaTransactionalProducer[G, K, V]] =
+        self.transactionalProducer(settings.mapK(gk)).map(_.imapK(fk)(gk)).mapK(fk)
 
       override def admin(settings: ClientSettings): Resource[G, KafkaAdminClient[G]] = self.admin(settings).map(_.mapK(fk)).mapK(fk)
 

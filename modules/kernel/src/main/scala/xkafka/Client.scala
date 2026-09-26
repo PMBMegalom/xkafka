@@ -42,6 +42,9 @@ val ManagedProperties: Set[String] =
     "auto.offset.reset",
     "enable.auto.commit",
     "enable.auto.offset.store",
+    "isolation.level",
+    "transactional.id",
+    "transaction.timeout.ms",
     "default.api.timeout.ms",
     "metadata.max.age.ms",
     "topic.metadata.refresh.interval.ms",
@@ -183,8 +186,60 @@ object ProducerSettings:
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
 
+/** A producer that writes inside transactions.
+  *
+  * Kafka refuses a plain produce from a producer that carries a transactional id, so these settings build a producer of their own.
+  */
+sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
+    producer: ProducerSettings[F, K, V],
+    transactionalId: TransactionalId,
+    transactionTimeout: FiniteDuration
+):
+  def mapK[G[_]](fk: FunctionK[F, G]): TransactionalProducerSettings[G, K, V] =
+    new TransactionalProducerSettings(producer.mapK(fk), transactionalId, transactionTimeout) {}
+
+  def withClient(value: ClientSettings): TransactionalProducerSettings[F, K, V] =
+    new TransactionalProducerSettings(producer.withClient(value), transactionalId, transactionTimeout) {}
+
+  /** How long the broker waits for a transaction to finish before it aborts the transaction itself. */
+  def withTransactionTimeout(value: FiniteDuration): TransactionalProducerSettings[F, K, V] =
+    new TransactionalProducerSettings(producer, transactionalId, value) {}
+
+  def withProperty(name: String, value: String): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    withProperties(producer.properties.updated(name, value))
+
+  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withProperties(values).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
+object TransactionalProducerSettings:
+  /** What Kafka's own producers wait, through `transaction.timeout.ms`. */
+  val DefaultTransactionTimeout: FiniteDuration = 60.seconds
+
+  def from[F[_], K, V](
+      client: ClientSettings,
+      transactionalId: TransactionalId,
+      keySerializer: Serializer[F, K],
+      valueSerializer: Serializer[F, V],
+      transactionTimeout: FiniteDuration = TransactionalProducerSettings.DefaultTransactionTimeout,
+      properties: Map[String, String] = Map.empty
+  ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties)
+      .map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
+  given [K, V]: FunctorK[[F[_]] =>> TransactionalProducerSettings[F, K, V]] with
+    override def mapK[F[_], G[_]](settings: TransactionalProducerSettings[F, K, V])(fk: FunctionK[F, G]): TransactionalProducerSettings[G, K, V] =
+      settings.mapK(fk)
+
 enum AutoOffsetReset:
   case Earliest, Latest
+
+/** Whether a consumer reads records written by transactions that have not committed. */
+enum IsolationLevel:
+  /** Every record is delivered as soon as it is written, including records of a transaction that later aborts. */
+  case ReadUncommitted
+
+  /** A record written by a transaction is delivered once that transaction commits, and never where it aborts. */
+  case ReadCommitted
 
 sealed abstract case class ConsumerSettings[F[_], K, V] private (
     client: ClientSettings,
@@ -192,6 +247,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     keyDeserializer: Deserializer[F, K],
     valueDeserializer: Deserializer[F, V],
     autoOffsetReset: AutoOffsetReset,
+    isolationLevel: IsolationLevel,
     pollTimeout: FiniteDuration,
     requestTimeout: FiniteDuration,
     properties: Map[String, String]
@@ -203,42 +259,69 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       keyDeserializer.mapK(fk),
       valueDeserializer.mapK(fk),
       autoOffsetReset,
+      isolationLevel,
       pollTimeout,
       requestTimeout,
       properties
     ) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(value, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, properties) {}
+    new ConsumerSettings(
+      value,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, value, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, properties) {}
+    new ConsumerSettings(
+      client,
+      value,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
 
   def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, pollTimeout, requestTimeout, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, isolationLevel, pollTimeout, requestTimeout, properties) {}
+
+  /** Whether records of a transaction that has not committed are delivered. */
+  def withIsolationLevel(value: IsolationLevel): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, pollTimeout, requestTimeout, properties) {}
 
   /** How long one poll waits for records before it returns empty.
     *
     * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
     */
   def withPollTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, requestTimeout, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, value, requestTimeout, properties) {}
 
   /** How long a call that asks the broker something waits for its answer.
     *
     * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
     */
   def withRequestTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, value, properties) {}
+    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, pollTimeout, value, properties) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, values)
+    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, pollTimeout, requestTimeout, values)
 
   override def toString: String =
-    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$pollTimeout,$requestTimeout,${redacted(properties)})"
+    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$pollTimeout,$requestTimeout,${redacted(
+        properties
+      )})"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -253,13 +336,24 @@ object ConsumerSettings:
       keyDeserializer: Deserializer[F, K],
       valueDeserializer: Deserializer[F, V],
       autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
+      isolationLevel: IsolationLevel = IsolationLevel.ReadUncommitted,
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    validateSettings(
-      propertyErrors(properties, SettingsError.PropertyScope.Consumer)
-    ).map(_ => new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, pollTimeout, requestTimeout, properties) {})
+    validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Consumer)).map(_ =>
+      new ConsumerSettings(
+        client,
+        groupId,
+        keyDeserializer,
+        valueDeserializer,
+        autoOffsetReset,
+        isolationLevel,
+        pollTimeout,
+        requestTimeout,
+        properties
+      ) {}
+    )
 
   given [K, V]: FunctorK[[F[_]] =>> ConsumerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ConsumerSettings[F, K, V])(fk: FunctionK[F, G]): ConsumerSettings[G, K, V] = settings.mapK(fk)
@@ -336,6 +430,13 @@ trait OffsetCommitter[F[_]]:
 
   def commit(offsets: Map[TopicPartition, Offset]): F[Unit]
 
+  /** How a transaction names the consumer group these offsets belong to.
+    *
+    * A committer that came from a consumer carries what its own backend needs, so a transaction records offsets against the group that read them
+    * without being handed the consumer again.
+    */
+  private[xkafka] def membership: GroupMembership[F] = GroupMembership.Absent()
+
   final def mapK[G[_]](fk: FunctionK[F, G]): OffsetCommitter[G] = OffsetCommitter.transformed(self, fk)
 
 object OffsetCommitter:
@@ -347,6 +448,8 @@ object OffsetCommitter:
 
   private final case class TransformedOffsetCommitter[F[_], G[_]](underlying: OffsetCommitter[F], fk: FunctionK[F, G]) extends OffsetCommitter[G]:
     override def commit(offsets: Map[TopicPartition, Offset]): G[Unit] = fk(underlying.commit(offsets))
+
+    override private[xkafka] def membership: GroupMembership[G] = underlying.membership.mapK(fk)
 
 trait CommittableOffset[F[_]]:
   self =>
@@ -439,6 +542,46 @@ trait KafkaProducer[F[_], K, V]:
   final def mapK[G[_]](fk: FunctionK[F, G])(using G: Functor[G]): KafkaProducer[G, K, V] =
     new KafkaProducer[G, K, V]:
       override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[ProducerResult[K, V]]] = G.map(fk(self.produce(records)))(fk.apply)
+
+/** Produces records and records consumer offsets as one unit.
+  *
+  * Everything written through a transaction becomes visible together once it commits. A consumer reading `IsolationLevel.ReadCommitted` sees none of
+  * it before then, and none of it at all where the transaction aborts.
+  */
+trait Transaction[F[_], K, V]:
+  self =>
+
+  /** Enqueues `records` and waits for the broker to acknowledge them, which a transaction must do before it can commit. */
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]]
+
+  /** Records `batch` against the group that read it, so those offsets land only where this transaction commits.
+    *
+    * The offsets carry the committer they came from, and that committer knows its consumer, so nothing here can name the wrong group.
+    */
+  def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit]
+
+  /** Transforms the effect. Carrying a batch back to the underlying transaction needs the reverse direction, so this is not a lawful `FunctorK`. */
+  final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Transaction[G, K, V] =
+    new Transaction[G, K, V]:
+      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[ProducerResult[K, V]] = fk(self.produce(records))
+
+      override def commitOffsets(batch: CommittableOffsetBatch[G]): G[Unit] = fk(self.commitOffsets(batch.mapK(gk)))
+
+trait KafkaTransactionalProducer[F[_], K, V]:
+  self =>
+
+  /** Runs `use` inside a transaction, committing it where `use` succeeds and aborting it where `use` fails or is cancelled.
+    *
+    * A producer carries one transactional id, so its transactions run one after another.
+    */
+  def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A]
+
+  /** Transforms the effect. Running the caller's function in the underlying effect needs the reverse direction, so this is not a lawful `FunctorK`.
+    */
+  final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): KafkaTransactionalProducer[G, K, V] =
+    new KafkaTransactionalProducer[G, K, V]:
+      override def transactionally[A](use: Transaction[G, K, V] => G[A]): G[A] =
+        fk(self.transactionally(transaction => gk(use(transaction.imapK(fk)(gk)))))
 
 /** Says a processed chunk can have its offsets committed, so the commit that follows is visible where the records are handled. */
 case object CommitNow

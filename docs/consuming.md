@@ -54,6 +54,9 @@ A seek is refused until the partition it names is being fetched, which holding t
 not yet mean. Retry briefly if you seek immediately after a consumer starts.
 @:@
 
+A consumer delivers records of a transaction that has not committed unless `isolationLevel` says
+otherwise. See [Transactions](transactions.md).
+
 ## Inspecting the consumer
 
 Within the consumer resource:
