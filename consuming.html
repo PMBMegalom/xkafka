@@ -94,6 +94,7 @@
     <li class="level1 nav-leaf"><a href="#what-a-consumer-reads">What a consumer reads</a></li>
     <li class="level1 nav-leaf"><a href="#inspecting-the-consumer">Inspecting the consumer</a></li>
     <li class="level1 nav-leaf"><a href="#processing-every-record">Processing every record</a></li>
+    <li class="level1 nav-leaf"><a href="#stopping">Stopping</a></li>
     <li class="level1 nav-leaf"><a href="#partition-streams">Partition streams</a></li>
   </ul>
 
@@ -165,6 +166,7 @@
           <li><code>seek</code> changes the next offset fetched for an assigned topic-partition.</li>
           <li><code>seekToBeginning</code> and <code>seekToEnd</code> move to either end of an assigned topic-partition.</li>
           <li><code>position</code> reports the offset a topic-partition reads next.</li>
+          <li><code>stopConsuming</code> stops fetching and lets the streams drain.</li>
         </ul>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
@@ -179,8 +181,9 @@
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">consumeChunk</span><span>: </span><span class="identifier">records</span><span> =&gt;
   </span><span class="identifier">records</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">handle</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">CommitNow</span><span>)</span></code></pre>
         <p>Partitions are processed alongside one another, so a slow chunk holds back only the partition it
-        came from. The result never produces a value, because the work ends only by cancellation or failure.
-        Returning <code>CommitNow</code> is what makes the commit visible where the records are handled.</p>
+        came from. It returns once <code>stopConsuming</code> has been called and everything already fetched has been
+        processed, and otherwise runs until it is cancelled or something fails. Returning <code>CommitNow</code> is what
+        makes the commit visible where the records are handled.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
           <p>A consumer joins its group at a different moment on each backend. The Java client joins when the
@@ -188,6 +191,22 @@
           join when the consumer resource is allocated, so one nobody reads still takes a share of the
           partitions and does not hand them back. Release a consumer you are not reading.</p>
         </div>
+        
+        <h2 id="stopping" class="section"><a class="anchor-link left" href="#stopping"><i class="icofont-laika link">&#xef71;</i></a>Stopping</h2>
+        <p><code>stopConsuming</code> stops fetching. The record streams end once the records already fetched have been
+        handed over, so nothing that was read from the broker is dropped, and offsets stay committable
+        afterwards.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>
+  .</span><span class="identifier">evalTap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>)
+  .</span><span class="identifier">interruptWhen</span><span>(</span><span class="identifier">shutdownRequested</span><span>)</span></code></pre>
+        <p>That interrupts mid-record and loses whatever was fetched. This does not:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">shutdownRequested</span><span>.</span><span class="identifier">get</span><span> *&gt; </span><span class="identifier">consumer</span><span>.</span><span class="identifier">stopConsuming</span></code></pre>
+        <p>run alongside the stream, which then completes on its own once it has drained. It returns as soon as
+        fetching has been told to stop, without waiting for that draining. Calling it again does nothing
+        further, and a stream started afterwards is empty.</p>
+        <p>Releasing the consumer resource, or cancelling whatever reads it, stops it abruptly instead. Neither
+        waits for what has been fetched to be handed over, so whoever resumes the group reads those offsets
+        again.</p>
         
         <h2 id="partition-streams" class="section"><a class="anchor-link left" href="#partition-streams"><i class="icofont-laika link">&#xef71;</i></a>Partition streams</h2>
         <p><code>partitionedRecords</code> exposes a record stream for each assigned topic-partition

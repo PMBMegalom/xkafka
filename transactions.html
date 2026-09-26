@@ -131,8 +131,8 @@
           another one on the same producer waits for a transaction that cannot finish until the body returns.
           Use one transaction per unit of work, and a producer of its own where two must overlap.</p>
         </div>
-        <p>Kafka refuses a plain produce from a producer carrying a transactional id, which is why
-        <code>transactionalProducer</code> is separate from <code>producer</code> rather than a mode of it.</p>
+        <p>A transactional producer writes only inside transactions, which is why <code>transactionalProducer</code> is a
+        constructor of its own rather than a mode of <code>producer</code>.</p>
         
         <h2 id="reading-what-a-transaction-wrote" class="section"><a class="anchor-link left" href="#reading-what-a-transaction-wrote"><i class="icofont-laika link">&#xef71;</i></a>Reading what a transaction wrote</h2>
         <p>Records of an open transaction are already in the log. A consumer reads them unless it is told not
@@ -177,18 +177,19 @@
             <tr>
               <td><code>transactionalId</code></td>
               <td>required</td>
-              <td>the name Kafka fences an earlier instance of this producer by</td>
+              <td>Kafka&#39;s <code>transactional.id</code></td>
             </tr>
             <tr>
               <td><code>transactionTimeout</code></td>
               <td>60s</td>
-              <td>how long the broker waits before it aborts the transaction itself</td>
+              <td>Kafka&#39;s <code>transaction.timeout.ms</code>, defaulting to what its own producers use</td>
             </tr>
           </tbody>
         </table>
-        <p>Give each producer instance that must run alongside another its own <code>transactionalId</code>. Two
-        producers sharing one id fence each other, which is what the id is for when a replacement takes over
-        from an instance that has gone, and a failure when both are meant to run.</p>
+        <p>Give each producer instance that must run alongside another its own <code>transactionalId</code>. Allocating a
+        second producer under an id already in use fences the first, so its open transaction can no longer
+        commit. That is what the id is for when a replacement takes over from an instance that has gone, and
+        a failure when both were meant to run.</p>
 
         
 <hr class="footer-rule"/>
