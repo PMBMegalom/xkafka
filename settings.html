@@ -73,6 +73,7 @@
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -94,6 +95,7 @@
     <li class="level1 nav-leaf"><a href="#properties">Properties</a></li>
     <li class="level1 nav-leaf"><a href="#managed-properties">Managed properties</a></li>
     <li class="level1 nav-leaf"><a href="#withers">Withers</a></li>
+    <li class="level1 nav-leaf"><a href="#isolation">Isolation</a></li>
     <li class="level1 nav-leaf"><a href="#timeouts">Timeouts</a></li>
   </ul>
 
@@ -105,7 +107,8 @@
 
         <h1 id="settings" class="title">Settings</h1>
         <p>Three settings types describe a client. <code>ClientSettings</code> covers the connection,
-        and the producer and consumer settings build on it.</p>
+        and the producer and consumer settings build on it. <code>TransactionalProducerSettings</code>
+        wraps the producer settings, and <a href="transactions.html">Transactions</a> covers what it adds.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -162,7 +165,8 @@
         <h2 id="managed-properties" class="section"><a class="anchor-link left" href="#managed-properties"><i class="icofont-laika link">&#xef71;</i></a>Managed properties</h2>
         <p><code>ManagedProperties</code> lists the names xkafka derives from the typed settings:
         bootstrap servers, client and group IDs, offset reset, automatic commits, the
-        default API timeout, the metadata refresh names, and the TLS and SASL names.
+        default API timeout, the metadata refresh names, the isolation level, the
+        transaction names, and the TLS and SASL names.
         Supplying one through the map is a <code>SettingsError</code>, so the typed settings and the
         map cannot disagree.</p>
         
@@ -170,6 +174,12 @@
         <p>Each type has <code>with*</code> methods for deriving one value from another. Those that
         can invalidate the result, such as <code>withProperty</code>, return
         <code>ValidatedNel[SettingsError, *]</code> and revalidate in full.</p>
+        
+        <h2 id="isolation" class="section"><a class="anchor-link left" href="#isolation"><i class="icofont-laika link">&#xef71;</i></a>Isolation</h2>
+        <p><code>ConsumerSettings</code> carries <code>isolationLevel</code>, which says whether records of a
+        transaction that has not committed are delivered. It defaults to
+        <code>ReadUncommitted</code>, which is Kafka&#39;s own default. See
+        <a href="transactions.html">Transactions</a>.</p>
         
         <h2 id="timeouts" class="section"><a class="anchor-link left" href="#timeouts"><i class="icofont-laika link">&#xef71;</i></a>Timeouts</h2>
         <p><code>ConsumerSettings</code> carries two, and both mean the same thing on every backend.</p>

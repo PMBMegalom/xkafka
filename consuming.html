@@ -73,6 +73,7 @@
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 active nav-leaf"><a href="#">Consuming</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -149,6 +150,8 @@
           <p>A seek is refused until the partition it names is being fetched, which holding the assignment does
           not yet mean. Retry briefly if you seek immediately after a consumer starts.</p>
         </div>
+        <p>A consumer delivers records of a transaction that has not committed unless <code>isolationLevel</code> says
+        otherwise. See <a href="transactions.html">Transactions</a>.</p>
         
         <h2 id="inspecting-the-consumer" class="section"><a class="anchor-link left" href="#inspecting-the-consumer"><i class="icofont-laika link">&#xef71;</i></a>Inspecting the consumer</h2>
         <p>Within the consumer resource:</p>
