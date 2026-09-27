@@ -242,6 +242,8 @@ private[xkafka] object Values:
     // node-rdkafka only wires the rebalance event when this is set, and the boolean form keeps its own
     // assign and unassign, including the cooperative protocol split.
     result("rebalance_cb") = true
+    // Likewise the only report a commit's outcome ever reaches, since the commit call itself takes no callback.
+    result("offset_commit_cb") = true
     result("auto.offset.reset") = (
       autoOffsetReset match
         case AutoOffsetReset.Earliest => "earliest"

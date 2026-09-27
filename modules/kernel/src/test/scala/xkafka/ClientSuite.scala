@@ -449,6 +449,15 @@ final class ClientSuite extends FunSuite:
       IsolationLevel.ReadCommitted
     )
 
+  test("the commit timeout defaults and is carried by its wither"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.commitTimeout, ConsumerSettings.DefaultCommitTimeout)
+    assertEquals(settings.withCommitTimeout(2.seconds).commitTimeout, 2.seconds)
+    assertEquals(settings.withCommitTimeout(2.seconds).withCommitRecovery(CommitRecovery.none).commitTimeout, 2.seconds)
+    assertEquals(settings.withCommitTimeout(2.seconds).withProperty("fetch.min.bytes", "1").toOption.get.commitTimeout, 2.seconds)
+
   test("the commit recovery defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get

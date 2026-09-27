@@ -342,6 +342,7 @@ private[xkafka] object Bindings:
       partitions: Ptr[CInt],
       offsets: Ptr[CLongLong],
       count: CSize,
+      timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]

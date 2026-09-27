@@ -106,6 +106,7 @@ transaction that has not committed are delivered. It defaults to
 | --- | --- | --- |
 | `pollTimeout` | 100ms | how long one poll waits for records before returning empty |
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for its answer |
+| `commitTimeout` | 15s | how long a commit waits before it fails as a timed out request |
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default

@@ -1328,27 +1328,57 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
         return status;
 }
 
+/* The commit is posted to a queue of its own rather than waited on inside
+ * librdkafka, so the caller's timeout is what bounds it. A commit that runs out
+ * of time may still be applied afterwards; the broker was already asked. */
 int xkafka_consumer_commit(rd_kafka_t *consumer,
                            const char *const *topics,
                            const int32_t *partitions,
                            const int64_t *offset_values,
                            size_t count,
+                           int timeout_ms,
                            char *error,
                            size_t error_size,
                            int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, offset_values,
                                         count);
-        rd_kafka_resp_err_t result;
+        rd_kafka_queue_t *queue = rd_kafka_queue_new(consumer);
+        rd_kafka_resp_err_t enqueued;
+        rd_kafka_event_t *event;
+        int outcome = 0;
 
-        result = rd_kafka_commit(consumer, native_offsets, 0);
+        enqueued =
+            rd_kafka_commit_queue(consumer, native_offsets, queue, NULL, NULL);
         rd_kafka_topic_partition_list_destroy(native_offsets);
 
-        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
+        if (enqueued != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error_at(error, error_size, error_code,
+                                    rd_kafka_err2str(enqueued), enqueued);
+                rd_kafka_queue_destroy(queue);
                 return -1;
         }
-        return 0;
+
+        event = rd_kafka_queue_poll(queue, timeout_ms);
+        if (event == NULL) {
+                /* Reported as the broker would report a request that ran out of
+                 * time, so the portable classification is the same either way. */
+                xkafka_set_error_at(error, error_size, error_code,
+                                    "the commit did not complete within its timeout",
+                                    RD_KAFKA_RESP_ERR_REQUEST_TIMED_OUT);
+                outcome = -1;
+        } else {
+                rd_kafka_resp_err_t failure = rd_kafka_event_error(event);
+                if (failure != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(failure), failure);
+                        outcome = -1;
+                }
+                rd_kafka_event_destroy(event);
+        }
+
+        rd_kafka_queue_destroy(queue);
+        return outcome;
 }
 
 #endif

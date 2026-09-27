@@ -33,7 +33,7 @@ import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.kafka.{
   AdminClientSettings as Fs2AdminClientSettings, AutoOffsetReset as Fs2AutoOffsetReset, CommittableConsumerRecord as Fs2CommittableConsumerRecord,
-  ConsumerSettings as Fs2ConsumerSettings, Deserializer as Fs2Deserializer, Header as Fs2Header, Headers as Fs2Headers,
+  CommitTimeoutException, ConsumerSettings as Fs2ConsumerSettings, Deserializer as Fs2Deserializer, Header as Fs2Header, Headers as Fs2Headers,
   KafkaAdminClient as Fs2KafkaAdminClient, KafkaConsumer as Fs2KafkaConsumer, KafkaProducer as Fs2KafkaProducer, ProducerRecord as Fs2ProducerRecord,
   ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
 }
@@ -146,6 +146,15 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private def backend[A](value: F[A]): F[A] =
     value.adaptError:
+      // Classified the way the broker would classify a request that ran out of time, so every backend agrees and the
+      // recovery policy retries it.
+      case error: CommitTimeoutException => new KafkaException.BackendFailure(
+          "the commit did not complete within its timeout",
+          code = Some(ErrorCode.RequestTimedOut),
+          retriable = Some(true),
+          fatal = Some(false),
+          cause = error
+        )
       case error: JavaKafkaException =>
         val code = protocolCode(error)
         new KafkaException.BackendFailure(
@@ -185,7 +194,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           ClientProperties(settings.client)
       ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
         .withPollTimeout(settings.pollTimeout).withDefaultApiTimeout(settings.requestTimeout).withProperty("enable.auto.commit", "false")
-        .withProperty("isolation.level", isolationLevel(settings.isolationLevel)).withAutoOffsetReset(
+        .withProperty("isolation.level", isolationLevel(settings.isolationLevel)).withCommitTimeout(settings.commitTimeout).withAutoOffsetReset(
           settings.autoOffsetReset match
             case AutoOffsetReset.Earliest => Fs2AutoOffsetReset.Earliest
             case AutoOffsetReset.Latest   => Fs2AutoOffsetReset.Latest

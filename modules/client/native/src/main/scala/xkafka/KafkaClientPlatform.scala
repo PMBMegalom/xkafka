@@ -681,6 +681,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
+    private val commitTimeoutMillis  = settings.commitTimeout.toMillis.toInt
 
     private val offsetCommitter: OffsetCommitter[F] =
       CommitRecovery.recovering(
@@ -830,6 +831,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               partitions,
               nativeOffsets,
               entries.size.toUSize,
+              commitTimeoutMillis,
               error,
               ErrorBufferSize.toUSize,
               errorCode

@@ -383,6 +383,26 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     def attempt: IO[Unit] = seek.handleErrorWith(_ => IO.sleep(250.millis) *> attempt)
     attempt.timeout(30.seconds)
 
+  test(conformance("a commit that cannot complete in time fails as a timed out request")):
+    withBroker: server =>
+      val topic     = uniqueTopic("commit-timeout")
+      val partition = validPartition(0)
+
+      for
+        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), partition)))
+        settings <- consumerSettings(server, uniqueGroup("commit-timeout"))
+        // A nanosecond cannot cover a round trip, so the outcome does not depend on how fast the broker is. Recovery is
+        // off, because the policy would otherwise retry this and report its own exhaustion instead.
+        bounded = settings.withCommitTimeout(1.nanos).withCommitRecovery(CommitRecovery.none)
+        outcome <-
+          PlatformKafkaClient().consumer(bounded, Selection.Topics(NonEmptySet.one(topic)))
+            .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(60.seconds)
+      yield outcome match
+        case Left(failure: KafkaException.BackendFailure) =>
+          assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), s"got ${failure.getMessage}")
+          assert(failure.code.exists(_.retriable), "a commit that ran out of time should be worth retrying")
+        case other => fail(s"expected a timed out commit to fail, got $other")
+
   test(conformance("a later commit replaces an earlier one, even where its offset is lower")):
     withBroker: server =>
       val topic     = validTopic(partitionedTopic)

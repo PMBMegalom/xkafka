@@ -238,6 +238,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       // either one receives nothing further, so the first failure is kept and reported to whoever reads from it.
       failure <- Resource.eval(Deferred[F, Throwable])
       _       <- Resource.eval(F.delay(underlying.on("rebalance", rebalanced(underlying, dispatcher, assignments, failure))))
+      // The client reports a commit's outcome on an event rather than through a callback, so this is the only place a
+      // failed commit is observable at all.
+      reported <- Resource.eval(Ref.of[F, Option[Deferred[F, Either[Throwable, Unit]]]](None))
+      _        <- Resource.eval(F.delay(underlying.on("offset.commit", commitReported(dispatcher, reported))))
+      // One commit is in flight at a time, so the next report is unambiguously its own.
+      commits <- Resource.eval(Mutex[F])
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
       _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
       _ <- Resource.eval(select(underlying, selection))
@@ -246,7 +252,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       stopping <- Resource.eval(Deferred[F, Unit])
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
-      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, stopping, random, failure)
+      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, stopping, random, reported, commits, failure)
       // Started after the selection and cancelled before the disconnect that follows it.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
@@ -269,6 +275,19 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           // rejects would otherwise stop the tracking without anything saying so.
           .onError(failure.complete(_).void)
       )
+
+  /** A commit that ran out of time is classified the way the broker would classify one, so the recovery policy retries it. */
+  private val commitTimedOut: KafkaException.BackendFailure =
+    new KafkaException.BackendFailure("the commit did not complete within its timeout", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+
+  private def commitReported(
+      dispatcher: Dispatcher[F],
+      reported: Ref[F, Option[Deferred[F, Either[Throwable, Unit]]]]
+  ): js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit] =
+    (error, _) =>
+      val outcome = rdError(error).fold[Either[Throwable, Unit]](Right(()))(failure => Left(rdFailure(failure)))
+      // A report nothing is waiting for is dropped, so one the client raises on its own cannot answer the next commit.
+      dispatcher.unsafeRunAndForget(reported.getAndSet(None).flatMap(_.traverse_(_.complete(outcome).void)))
 
   private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
     (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
@@ -442,6 +461,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       polled: Channel[F, confluent.RdMessage],
       stopping: Deferred[F, Unit],
       random: Random[F],
+      reported: Ref[F, Option[Deferred[F, Either[Throwable, Unit]]]],
+      commits: Mutex[F],
       failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
@@ -461,7 +482,14 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     private val offsetCommitter: OffsetCommitter[F] =
       CommitRecovery.recovering(
         new OffsetCommitter[F]:
-          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = F.delay(underlying.commit(committedOffsets(offsets))).void
+          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+            commits.lock.surround(
+              Deferred[F, Either[Throwable, Unit]].flatMap: outcome =>
+                reported.set(Some(outcome)) *> F.delay(underlying.commit(committedOffsets(offsets))).void *>
+                  outcome.get.timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut))).flatMap(F.fromEither)
+                    // A report arriving after the wait has given up must not complete whatever commits next.
+                    .guarantee(reported.set(None))
+            )
 
           /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
           override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)))

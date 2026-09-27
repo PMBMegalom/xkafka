@@ -246,6 +246,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     autoOffsetReset: AutoOffsetReset,
     isolationLevel: IsolationLevel,
     commitRecovery: CommitRecovery,
+    commitTimeout: FiniteDuration,
     pollTimeout: FiniteDuration,
     requestTimeout: FiniteDuration,
     properties: Map[String, String]
@@ -259,6 +260,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       isolationLevel,
       commitRecovery,
+      commitTimeout,
       pollTimeout,
       requestTimeout,
       properties
@@ -273,6 +275,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       isolationLevel,
       commitRecovery,
+      commitTimeout,
       pollTimeout,
       requestTimeout,
       properties
@@ -287,6 +290,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       isolationLevel,
       commitRecovery,
+      commitTimeout,
       pollTimeout,
       requestTimeout,
       properties
@@ -301,6 +305,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       value,
       isolationLevel,
       commitRecovery,
+      commitTimeout,
       pollTimeout,
       requestTimeout,
       properties
@@ -316,6 +321,23 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       value,
       commitRecovery,
+      commitTimeout,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
+
+  /** How long a commit waits for the broker before it fails as `ErrorCode.RequestTimedOut`, which the recovery policy retries. */
+  def withCommitTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      value,
       pollTimeout,
       requestTimeout,
       properties
@@ -331,6 +353,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       isolationLevel,
       value,
+      commitTimeout,
       pollTimeout,
       requestTimeout,
       properties
@@ -349,6 +372,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       isolationLevel,
       commitRecovery,
+      commitTimeout,
       value,
       requestTimeout,
       properties
@@ -367,6 +391,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       autoOffsetReset,
       isolationLevel,
       commitRecovery,
+      commitTimeout,
       pollTimeout,
       value,
       properties
@@ -376,17 +401,31 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings
-      .from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, commitRecovery, pollTimeout, requestTimeout, values)
+    ConsumerSettings.from(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      commitTimeout,
+      pollTimeout,
+      requestTimeout,
+      values
+    )
 
   override def toString: String =
-    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$pollTimeout,$requestTimeout,${redacted(
+    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
       )})"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
   val DefaultPollTimeout: FiniteDuration = 100.millis
+
+  /** Long enough that a commit is not abandoned while the coordinator is merely busy. */
+  val DefaultCommitTimeout: FiniteDuration = 15.seconds
 
   /** What Kafka's own clients wait for the same answers, through `default.api.timeout.ms`. */
   val DefaultRequestTimeout: FiniteDuration = 60.seconds
@@ -399,6 +438,7 @@ object ConsumerSettings:
       autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
       isolationLevel: IsolationLevel = IsolationLevel.ReadUncommitted,
       commitRecovery: CommitRecovery = CommitRecovery.Default,
+      commitTimeout: FiniteDuration = ConsumerSettings.DefaultCommitTimeout,
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty
@@ -412,6 +452,7 @@ object ConsumerSettings:
         autoOffsetReset,
         isolationLevel,
         commitRecovery,
+        commitTimeout,
         pollTimeout,
         requestTimeout,
         properties

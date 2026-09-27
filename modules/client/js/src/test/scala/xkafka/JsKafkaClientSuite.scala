@@ -178,9 +178,10 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   test("consumer decodes a pulled batch, keeps header order, and commits the exact next offset"):
     for
-      committed    <- IO(js.Array[js.Dynamic]())
-      delivered    <- IO(js.Array[confluent.RdMessage]())
-      pollTimeouts <- IO(js.Array[Int]())
+      committed       <- IO(js.Array[js.Dynamic]())
+      delivered       <- IO(js.Array[confluent.RdMessage]())
+      pollTimeouts    <- IO(js.Array[Int]())
+      commitListeners <- IO(js.Array[js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]]())
       message =
         js.Dynamic.literal(
           topic = "events",
@@ -207,22 +208,22 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             ],
           setDefaultConsumeTimeout = ((value: Int) => pollTimeouts.push(value): Unit): js.Function1[Int, Unit],
           on =
-            ((_: String, _: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) => ()): js.Function2[
-              String,
-              js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit],
-              Unit
-            ],
+            (
+                (event: String, listener: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) =>
+                  if event == "offset.commit" then commitListeners.push(listener): Unit else ()
+            ): js.Function2[String, js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit], Unit],
           subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
           consume =
             (
                 (_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) =>
                   done(null, delivered.splice(0, delivered.length).toJSArray)
             ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit], Unit],
+          // The client takes no callback for a commit and reports its outcome on an event, so the stub does the same.
           commit =
-            ((offsets: js.Array[confluent.RdTopicPartitionOffset]) => offsets.foreach(value => committed.push(dynamic(value)): Unit)): js.Function1[
-              js.Array[confluent.RdTopicPartitionOffset],
-              Unit
-            ]
+            ((offsets: js.Array[confluent.RdTopicPartitionOffset]) =>
+              offsets.foreach(value => committed.push(dynamic(value)): Unit)
+              commitListeners.foreach(_(null, offsets.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+            ): js.Function1[js.Array[confluent.RdTopicPartitionOffset], Unit]
         ).asInstanceOf[confluent.RdConsumer]
       settings =
         ConsumerSettings
@@ -231,8 +232,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       record <-
         KafkaClientPlatform
           .fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10", DefaultIsolationLevel)))
-          .consumer(settings, Selection.Topics(NonEmptySet.one(topic("events")))).use(_.records.take(1).compile.lastOrError)
-      _ <- record.offset.commit
+          // Committing inside the resource, because a commit now waits for the client to report it.
+          .consumer(settings, Selection.Topics(NonEmptySet.one(topic("events")))).use(_.records.take(1).compile.lastOrError.flatTap(_.offset.commit))
     yield
       assertEquals(record.record.topicPartition, TopicPartition(topic("events"), partition(2)))
       assertEquals(record.record.key, "key")

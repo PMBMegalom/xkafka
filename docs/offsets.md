@@ -66,6 +66,24 @@ val settings =
 worth retrying is `ErrorCode.retriable`, which is the same on every backend, so
 all three retry the same conditions and wait the same way.
 
+## How long a commit waits
+
+`ConsumerSettings.commitTimeout` bounds a commit, defaulting to fifteen seconds.
+A commit that does not complete within it fails as `ErrorCode.RequestTimedOut`,
+which is a retriable code, so the recovery policy tries it again rather than
+giving up:
+
+```scala
+settings.withCommitTimeout(5.seconds)
+```
+
+@:callout(warning)
+A commit that ran out of time may still be applied afterwards. The broker was
+already asked, and nothing withdraws the request. Committing is idempotent for
+the same offset, so a retry that succeeds leaves the group where the first
+attempt would have.
+@:@
+
 The spread is what keeps consumers that hit one condition together from
 returning together. It is applied after the doubling stops growing, so a delay
 can exceed `maxDelay` by that fraction.
