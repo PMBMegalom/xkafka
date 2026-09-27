@@ -86,6 +86,11 @@ Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full.
 
+## Commit recovery
+
+`ConsumerSettings.commitRecovery` says how a failed offset commit is retried. It
+defaults to `CommitRecovery.Default`. See [Offsets](offsets.md).
+
 ## Isolation
 
 `ConsumerSettings` carries `isolationLevel`, which says whether records of a

@@ -446,6 +446,17 @@ final class ClientSuite extends FunSuite:
       IsolationLevel.ReadCommitted
     )
 
+  test("the commit recovery defaults and is carried by its wither"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val policy       = CommitRecovery.exponential(3, initialDelay = 1.second, maxDelay = 4.seconds, jitter = 0d).toOption.get
+
+    assertEquals(settings.commitRecovery, CommitRecovery.Default)
+    assertEquals(settings.withCommitRecovery(policy).commitRecovery, policy)
+    assertEquals(settings.withCommitRecovery(policy).withGroupId(group).commitRecovery, policy)
+    assertEquals(settings.withCommitRecovery(policy).withProperty("fetch.min.bytes", "1").toOption.get.commitRecovery, policy)
+    assertEquals(settings.withCommitRecovery(CommitRecovery.none).toString.contains("none"), true)
+
   test("a transactional id must not be blank"):
     assertEquals(TransactionalId.from("  "), Left(ValidationError.EmptyTransactionalId))
     assertEquals(TransactionalId.from("writer").map(_.value), Right("writer"))

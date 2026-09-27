@@ -28,7 +28,7 @@ import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, In
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Dispatcher, Mutex}
+import cats.effect.std.{Dispatcher, Mutex, Random}
 import fs2.concurrent.{Channel, SignallingRef}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -204,7 +204,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     if value == null || js.isUndefined(value) then None else Some(error.asInstanceOf[confluent.RdError])
 
   private def rdFailure(error: confluent.RdError): KafkaException.BackendFailure =
-    new KafkaException.BackendFailure(error.message, Some(ErrorCode.fromLibrdkafka(error.code)), error.isRetriable.toOption, error.isFatal.toOption)
+    val code = ErrorCode.fromLibrdkafka(error.code)
+    // Derived from the portable code, so the same condition is retriable on every backend. The client's own flag is not always present.
+    new KafkaException.BackendFailure(error.message, Some(code), Some(code.retriable), error.isFatal.toOption)
 
   /** For the calls that report only whether they failed. */
   private def outcome(register: js.Function1[confluent.RdError | Null, Unit] => Unit): F[Unit] =
@@ -242,7 +244,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       polled <- Resource.eval(Channel.bounded[F, confluent.RdMessage](RecordQueueSize))
       // Set by `stopConsuming`, and read before each consume so that no batch already in flight is dropped.
       stopping <- Resource.eval(Deferred[F, Unit])
-      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, stopping, failure)
+      // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
+      random <- Resource.eval(Random.scalaUtilRandom[F])
+      consumer = new ConfluentKafkaConsumer(underlying, settings, assignments, polled, stopping, random, failure)
       // Started after the selection and cancelled before the disconnect that follows it.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
@@ -424,6 +428,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       assignments: SignallingRef[F, Set[TopicPartition]],
       polled: Channel[F, confluent.RdMessage],
       stopping: Deferred[F, Unit],
+      random: Random[F],
       failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
@@ -441,11 +446,16 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       topicPartitions.iterator.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
 
     private val offsetCommitter: OffsetCommitter[F] =
-      new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = F.delay(underlying.commit(committedOffsets(offsets))).void
+      CommitRecovery.recovering(
+        new OffsetCommitter[F]:
+          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = F.delay(underlying.commit(committedOffsets(offsets))).void
 
-        /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
-        override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)))
+          /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
+          override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)))
+        ,
+        settings.commitRecovery,
+        random
+      )
 
     /** Pulls batches from librdkafka. An empty batch means the consume timeout elapsed with nothing available. */
     /** The consumer's single consume, which both its records and its rebalance events come from.

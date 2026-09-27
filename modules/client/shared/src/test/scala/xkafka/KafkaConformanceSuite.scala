@@ -168,6 +168,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           case Left(failure: KafkaException.BackendFailure) =>
             assert(failure.code.isDefined, s"expected a portable code, got ${failure.code}")
             assert(!failure.code.contains(ErrorCode.Other(-1)), s"expected a classified code, got ${failure.code}")
+            // A broker that cannot be reached is worth trying again, and every backend has to say so identically,
+            // because the commit recovery decides what to retry from this alone.
+            assertEquals(failure.retriable, Some(true), s"a broker that is unreachable should be retriable, code was ${failure.code}")
+            assertEquals(failure.code.map(_.retriable), failure.retriable, "retriable should follow the portable code")
           case Left(other) => fail(s"expected a BackendFailure, got $other")
           case Right(_)    => fail("expected producing to an unreachable broker to fail")
     .timeout(90.seconds)

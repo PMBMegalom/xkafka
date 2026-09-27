@@ -56,6 +56,18 @@ enum ErrorCode derives CanEqual:
   case Other(value: Int)
 
 object ErrorCode:
+  /** The conditions worth trying again, which are the ones a broker reports while it is moving rather than refusing.
+    *
+    * This is the single answer every backend reports through `KafkaException.BackendFailure.retriable`, so the same condition is retriable on all of
+    * them. The backends' own notions disagree, and one of them does not always have one.
+    */
+  extension (code: ErrorCode)
+    def retriable: Boolean =
+      code match
+        case NetworkException | RequestTimedOut | LeaderNotAvailable | NotLeaderOrFollower | BrokerNotAvailable | CoordinatorNotAvailable |
+            NotCoordinator | CoordinatorLoadInProgress | RebalanceInProgress => true
+        case _ => false
+
   private val protocol: Map[Int, ErrorCode] =
     Map(
       1  -> OffsetOutOfRange,
@@ -119,6 +131,10 @@ object KafkaException:
 
   /** Settings that could not be constructed, carrying every reason they could not. */
   final class InvalidSettings(val errors: NonEmptyList[SettingsError]) extends KafkaException(errors.toList.map(_.message).mkString("; "))
+
+  /** Offsets that could not be committed, after every attempt the recovery policy allowed. */
+  final class CommitFailed(val attempts: Int, val offsets: Map[TopicPartition, Offset], cause: Throwable)
+      extends KafkaException(s"committing ${offsets.size} offsets failed after $attempts attempts", cause)
 
   /** An operation the portable API cannot carry out with what it was given. */
   final class Unsupported(val detail: String) extends KafkaException(detail)

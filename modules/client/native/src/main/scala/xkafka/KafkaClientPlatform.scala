@@ -28,7 +28,7 @@ import scala.scalanative.unsigned.*
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Mutex, Semaphore, Supervisor}
+import cats.effect.std.{Mutex, Random, Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.concurrent.{Channel, SignallingRef}
@@ -134,7 +134,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
       // reads the records instead of leaving a consumer that never receives anything.
       failure <- Resource.eval(Deferred[F, Throwable])
-      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, stopping, failure)
+      // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
+      random <- Resource.eval(Random.scalaUtilRandom[F])
+      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, stopping, random, failure)
       // Started after the client and cancelled before it, so no poll is in flight when the handle is destroyed.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
@@ -471,7 +473,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   /** Builds a failure from the message and code the call wrote into its own out-parameters. */
   private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure =
     val classified = ErrorCode.fromLibrdkafka(!code)
-    new KafkaException.BackendFailure(fromCString(error), Some(classified), retriable = Some(retriable(classified)), fatal = Some(false))
+    new KafkaException.BackendFailure(fromCString(error), Some(classified), retriable = Some(classified.retriable), fatal = Some(false))
 
   /** Allocates the out-parameters a shim call reports a failure through. They live in this frame, so concurrent calls cannot share them. */
   private def errorSlots(using Zone): (CString, Ptr[CInt]) =
@@ -479,12 +481,6 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     val code  = alloc[CInt](1)
     !code = 0
     (error, code)
-
-  private def retriable(code: ErrorCode): Boolean =
-    code match
-      case ErrorCode.NetworkException | ErrorCode.RequestTimedOut | ErrorCode.LeaderNotAvailable | ErrorCode.NotLeaderOrFollower | ErrorCode
-            .BrokerNotAvailable | ErrorCode.CoordinatorNotAvailable | ErrorCode.NotCoordinator | ErrorCode.CoordinatorLoadInProgress => true
-      case _ => false
 
   private def backendFailure(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
 
@@ -644,21 +640,27 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       polled: Channel[F, NativeRecord],
       assignments: SignallingRef[F, Set[TopicPartition]],
       stopping: Deferred[F, Unit],
+      random: Random[F],
       failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
 
     private val offsetCommitter: OffsetCommitter[F] =
-      new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
+      CommitRecovery.recovering(
+        new OffsetCommitter[F]:
+          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
 
-        /** librdkafka names a group by the metadata its consumer carries, which also fences a member the group has already replaced.
-          *
-          * The metadata is freshly allocated here and owned by whoever reads it.
-          */
-        override private[xkafka] val membership: GroupMembership[F] =
-          GroupMembership.Backend(client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))))
+          /** librdkafka names a group by the metadata its consumer carries, which also fences a member the group has already replaced.
+            *
+            * The metadata is freshly allocated here and owned by whoever reads it.
+            */
+          override private[xkafka] val membership: GroupMembership[F] =
+            GroupMembership.Backend(client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))))
+        ,
+        settings.commitRecovery,
+        random
+      )
 
     /** The consumer's single poll, which both its records and its assignment come from.
       *

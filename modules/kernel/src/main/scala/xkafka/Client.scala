@@ -245,6 +245,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     valueDeserializer: Deserializer[F, V],
     autoOffsetReset: AutoOffsetReset,
     isolationLevel: IsolationLevel,
+    commitRecovery: CommitRecovery,
     pollTimeout: FiniteDuration,
     requestTimeout: FiniteDuration,
     properties: Map[String, String]
@@ -257,6 +258,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       valueDeserializer.mapK(fk),
       autoOffsetReset,
       isolationLevel,
+      commitRecovery,
       pollTimeout,
       requestTimeout,
       properties
@@ -270,6 +272,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       valueDeserializer,
       autoOffsetReset,
       isolationLevel,
+      commitRecovery,
       pollTimeout,
       requestTimeout,
       properties
@@ -283,40 +286,101 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       valueDeserializer,
       autoOffsetReset,
       isolationLevel,
+      commitRecovery,
       pollTimeout,
       requestTimeout,
       properties
     ) {}
 
   def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, value, isolationLevel, pollTimeout, requestTimeout, properties) {}
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      value,
+      isolationLevel,
+      commitRecovery,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
 
   /** Whether records of a transaction that has not committed are delivered. */
   def withIsolationLevel(value: IsolationLevel): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, value, pollTimeout, requestTimeout, properties) {}
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      value,
+      commitRecovery,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
+
+  /** How a failed offset commit is retried. */
+  def withCommitRecovery(value: CommitRecovery): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      value,
+      pollTimeout,
+      requestTimeout,
+      properties
+    ) {}
 
   /** How long one poll waits for records before it returns empty.
     *
     * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
     */
   def withPollTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, value, requestTimeout, properties) {}
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      value,
+      requestTimeout,
+      properties
+    ) {}
 
   /** How long a call that asks the broker something waits for its answer.
     *
     * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
     */
   def withRequestTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, pollTimeout, value, properties) {}
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      pollTimeout,
+      value,
+      properties
+    ) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, pollTimeout, requestTimeout, values)
+    ConsumerSettings
+      .from(client, groupId, keyDeserializer, valueDeserializer, autoOffsetReset, isolationLevel, commitRecovery, pollTimeout, requestTimeout, values)
 
   override def toString: String =
-    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$pollTimeout,$requestTimeout,${redacted(
+    s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$pollTimeout,$requestTimeout,${redacted(
         properties
       )})"
 
@@ -334,6 +398,7 @@ object ConsumerSettings:
       valueDeserializer: Deserializer[F, V],
       autoOffsetReset: AutoOffsetReset = AutoOffsetReset.Latest,
       isolationLevel: IsolationLevel = IsolationLevel.ReadUncommitted,
+      commitRecovery: CommitRecovery = CommitRecovery.Default,
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty
@@ -346,6 +411,7 @@ object ConsumerSettings:
         valueDeserializer,
         autoOffsetReset,
         isolationLevel,
+        commitRecovery,
         pollTimeout,
         requestTimeout,
         properties

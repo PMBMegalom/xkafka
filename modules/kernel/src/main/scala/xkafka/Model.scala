@@ -21,6 +21,8 @@
 
 package xkafka
 
+import scala.concurrent.duration.FiniteDuration
+
 import cats.{Order, Show}
 import cats.data.NonEmptyList
 import fs2.Chunk
@@ -36,6 +38,9 @@ enum ValidationError derives CanEqual:
   case OffsetOverflow
   case EmptyConsumerGroup
   case EmptyTransactionalId
+  case NegativeAttemptCount(value: Int)
+  case NonPositiveDelay(value: FiniteDuration)
+  case JitterOutOfRange(value: Double)
   case NonPositivePartitionCount(value: Int)
   case NonPositiveReplicationFactor(value: Short)
 
@@ -51,6 +56,9 @@ enum ValidationError derives CanEqual:
       case OffsetOverflow                      => "offset cannot be advanced past Long.MaxValue"
       case EmptyConsumerGroup                  => "consumer group must not be empty"
       case EmptyTransactionalId                => "transactional id must not be empty"
+      case NegativeAttemptCount(value)         => s"attempt count must not be negative, was $value"
+      case NonPositiveDelay(value)             => s"delay must be positive, was $value"
+      case JitterOutOfRange(value)             => s"jitter must be between 0 and 1, was $value"
       case NonPositivePartitionCount(value)    => s"partition count must be positive, was $value"
       case NonPositiveReplicationFactor(value) => s"replication factor must be positive, was $value"
 

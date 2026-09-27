@@ -28,6 +28,7 @@ import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
+import cats.effect.std.Random
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.kafka.{
@@ -44,8 +45,7 @@ import org.apache.kafka.clients.consumer.{ConsumerGroupMetadata as JavaConsumerG
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.{
-  AuthenticationException, InvalidPidMappingException, ProducerFencedException, RetriableException, SaslAuthenticationException,
-  SslAuthenticationException
+  AuthenticationException, InvalidPidMappingException, ProducerFencedException, SaslAuthenticationException, SslAuthenticationException
 }
 import org.apache.kafka.common.protocol.Errors
 import internal.ClientProperties
@@ -70,7 +70,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     for
       consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings)).mapK(handleBackendErrors)
       _        <- Resource.eval(select(consumer, selection))
-    yield new Fs2KafkaConsumerAdapter(consumer)
+      // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
+      random <- Resource.eval(Random.scalaUtilRandom[F])
+    yield new Fs2KafkaConsumerAdapter(consumer, settings.commitRecovery, random)
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     Fs2KafkaProducer.transactional(
@@ -144,10 +146,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private def backend[A](value: F[A]): F[A] =
     value.adaptError:
-      case error: JavaKafkaException => new KafkaException.BackendFailure(
+      case error: JavaKafkaException =>
+        val code = protocolCode(error)
+        new KafkaException.BackendFailure(
           Option(error.getMessage).getOrElse(error.getClass.getName),
-          code = protocolCode(error),
-          retriable = Some(error.isInstanceOf[RetriableException]),
+          code = code,
+          // Derived from the portable code, so the same condition is retriable on every backend.
+          retriable = code.map(_.retriable),
           fatal = Some(error.isInstanceOf[InvalidPidMappingException] || error.isInstanceOf[ProducerFencedException]),
           cause = error
         )
@@ -255,19 +260,25 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
       F.fromEither(validated)
 
-  private final class Fs2KafkaConsumerAdapter[K, V](underlying: Fs2KafkaConsumer[F, K, V]) extends KafkaConsumer[F, K, V]:
+  private final class Fs2KafkaConsumerAdapter[K, V](underlying: Fs2KafkaConsumer[F, K, V], recovery: CommitRecovery, random: Random[F])
+      extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
-      new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
-          backend(underlying.commitSync(
-            offsets.map:
-              case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
-                  new OffsetAndMetadata(offset.value)
-          ))
+      CommitRecovery.recovering(
+        new OffsetCommitter[F]:
+          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+            backend(underlying.commitSync(
+              offsets.map:
+                case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
+                    new OffsetAndMetadata(offset.value)
+            ))
 
-        override private[xkafka] val membership: GroupMembership[F] =
-          GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)))
+          override private[xkafka] val membership: GroupMembership[F] =
+            GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)))
+        ,
+        recovery,
+        random
+      )
 
     override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] =
       underlying.records.translate(handleBackendErrors).evalMap(consumerRecord)
