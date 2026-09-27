@@ -45,7 +45,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             Unit
           ],
         disconnect =
-          ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+          ((_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+            Int,
             js.Function2[confluent.RdError | Null, js.Any, Unit],
             Unit
           ],
@@ -101,9 +102,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               ): js.Function2[js.Any, js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
             disconnect =
               (
-                  (done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+                  (_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
                     dispatcher.unsafeRunAndForget(disconnected.update(_ + 1) >> IO(done(null, ())))
-              ): js.Function1[js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
+              ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
             setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
             on =
               (
@@ -319,7 +320,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             Unit
           ],
         disconnect =
-          ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+          ((_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+            Int,
             js.Function2[confluent.RdError | Null, js.Any, Unit],
             Unit
           ],

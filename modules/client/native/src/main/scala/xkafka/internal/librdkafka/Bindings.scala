@@ -38,7 +38,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
-  def xkafka_producer_destroy(producer: CVoidPtr): Unit = extern
+  def xkafka_producer_destroy(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
 
   def xkafka_headers_new(count: CSize): CVoidPtr = extern
 

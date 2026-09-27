@@ -117,7 +117,11 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     for
-      client <- nativeClient(createProducer(settings.client, settings.properties), Bindings.xkafka_producer_destroy)
+      client <-
+        nativeClient(
+          createProducer(settings.client, settings.properties),
+          handle => Bindings.xkafka_producer_destroy(handle, settings.closeTimeout.toMillis.toInt)
+        )
       // Outstanding acknowledgements finish before the client.handle they poll is destroyed.
       supervisor <- Supervisor[F](await = true)
       batches    <- Resource.eval(Semaphore[F](1))
@@ -214,7 +218,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             settings.producer.properties ++
               Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString)
           ),
-          Bindings.xkafka_producer_destroy
+          handle => Bindings.xkafka_producer_destroy(handle, settings.producer.closeTimeout.toMillis.toInt)
         )
       supervisor <- Supervisor[F](await = true)
       batches    <- Resource.eval(Semaphore[F](1))

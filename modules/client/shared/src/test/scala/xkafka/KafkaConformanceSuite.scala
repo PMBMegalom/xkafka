@@ -176,6 +176,20 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           case Right(_)    => fail("expected producing to an unreachable broker to fail")
     .timeout(90.seconds)
 
+  test(conformance("releasing a producer delivers the records it had not acknowledged yet")):
+    withBroker: server =>
+      val topic     = uniqueTopic("close-flush")
+      val partition = validPartition(0)
+      val values    = List("a", "b", "c")
+      val records   = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), partition)))
+
+      for
+        settings <- producerSettings(server)
+        // The acknowledgement is deliberately dropped, so only the release can get these to the broker.
+        _        <- PlatformKafkaClient().producer(settings).use(_.produce(records).void).timeout(60.seconds)
+        consumed <- consume(server, topic, values.size)
+      yield assertEquals(consumed.flatMap(_.record.value), values, "a released producer should deliver what it still held")
+
   test(conformance("a producer reports the partitions of a topic")):
     withBroker: server =>
       // Made with more than one partition by the fixture, so the answer is not the one a topic gets by default.

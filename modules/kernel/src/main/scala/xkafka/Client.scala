@@ -158,30 +158,40 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     client: ClientSettings,
     keySerializer: Serializer[F, K],
     valueSerializer: Serializer[F, V],
-    properties: Map[String, String]
+    properties: Map[String, String],
+    closeTimeout: FiniteDuration
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
-    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties) {}
+    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, closeTimeout) {}
 
-  def withClient(value: ClientSettings): ProducerSettings[F, K, V] = new ProducerSettings(value, keySerializer, valueSerializer, properties) {}
+  def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
+    new ProducerSettings(value, keySerializer, valueSerializer, properties, closeTimeout) {}
+
+  /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
+  def withCloseTimeout(value: FiniteDuration): ProducerSettings[F, K, V] =
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, value) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, values)
+    ProducerSettings.from(client, keySerializer, valueSerializer, values, closeTimeout)
 
-  override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)})"
+  override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$closeTimeout)"
 
 object ProducerSettings:
+  /** Long enough that a producer with records still in flight delivers them rather than dropping them on the way out. */
+  val DefaultCloseTimeout: FiniteDuration = 60.seconds
+
   def from[F[_], K, V](
       client: ClientSettings,
       keySerializer: Serializer[F, K],
       valueSerializer: Serializer[F, V],
-      properties: Map[String, String] = Map.empty
+      properties: Map[String, String] = Map.empty,
+      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Producer))
-      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties) {})
+      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, closeTimeout) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)

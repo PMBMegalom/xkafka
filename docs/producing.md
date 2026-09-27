@@ -81,6 +81,26 @@ val program =
   yield found
 ```
 
+## Releasing a producer
+
+Releasing the resource delivers the records the producer has already accepted
+before it closes, which is what makes dropping the acknowledgement safe.
+`closeTimeout` bounds that wait and defaults to sixty seconds:
+
+```scala
+settings.withCloseTimeout(10.seconds)
+```
+
+Whatever is still undelivered when it runs out is dropped, so shortening it
+trades data for a faster shutdown.
+
+@:callout(info)
+This bounds a producer only. A consumer's close is bounded by each backend's own
+group machinery, which is not something the portable settings can set: librdkafka
+only advances a bounded close while its own consumer queue is being served, which
+a released consumer is not.
+@:@
+
 ## Records
 
 A `ProducerRecord` names its topic, key, and value, and optionally a partition,

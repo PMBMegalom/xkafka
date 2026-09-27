@@ -449,6 +449,15 @@ final class ClientSuite extends FunSuite:
       IsolationLevel.ReadCommitted
     )
 
+  test("the producer close timeout defaults and is carried by its wither"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+
+    assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
+    assertEquals(settings.withCloseTimeout(5.seconds).closeTimeout, 5.seconds)
+    assertEquals(settings.withCloseTimeout(5.seconds).withClient(clientSettings).closeTimeout, 5.seconds)
+    assertEquals(settings.withCloseTimeout(5.seconds).withProperty("linger.ms", "5").toOption.get.closeTimeout, 5.seconds)
+
   test("the commit timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get

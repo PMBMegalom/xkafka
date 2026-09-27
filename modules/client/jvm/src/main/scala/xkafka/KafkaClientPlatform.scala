@@ -183,7 +183,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       Fs2ProducerSettings(serializer(settings.keySerializer), serializer(settings.valueSerializer)).withProperties(
         settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
           ClientProperties(settings.client)
-      ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(","))
+      ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withCloseTimeout(settings.closeTimeout)
 
     settings.client.clientId.fold(base)(base.withClientId)
 

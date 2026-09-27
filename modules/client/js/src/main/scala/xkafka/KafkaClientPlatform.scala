@@ -21,6 +21,7 @@
 
 package xkafka
 
+import scala.concurrent.duration.FiniteDuration
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array, Uint8Array}
@@ -105,7 +106,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private def ignore(value: js.Any): Unit = ()
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
-    producerHandle(settings.client, settings.properties).map(_.adapter(settings))
+    producerHandle(settings.client, settings.properties, settings.closeTimeout).map(_.adapter(settings))
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     val timeoutMillis = settings.transactionTimeout.toMillis.toInt
@@ -114,21 +115,26 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         producerHandle(
           settings.producer.client,
           settings.producer.properties ++
-            Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString)
+            Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString),
+          settings.producer.closeTimeout
         )
       _ <- Resource.eval(outcome(done => handle.underlying.initTransactions(timeoutMillis, done)))
       // One transactional id carries one transaction at a time, so this keeps concurrent callers out of each other's.
       lock <- Resource.eval(Mutex[F])
     yield new ConfluentTransactionalProducer(handle, settings, lock, timeoutMillis)
 
-  private def producerHandle(client: ClientSettings, properties: Map[String, String]): Resource[F, ProducerHandle] =
+  private def producerHandle(client: ClientSettings, properties: Map[String, String], closeTimeout: FiniteDuration): Resource[F, ProducerHandle] =
     for
       underlying <- Resource.eval(F.delay(driver.producer(client, properties)))
       dispatcher <- Dispatcher.sequential[F]
       pending    <- Resource.eval(Ref.of[F, Map[Double, Deferred[F, Either[Throwable, RecordMetadata]]]](Map.empty))
       counter    <- Resource.eval(Ref.of[F, Double](0d))
       _          <- Resource.eval(F.delay(underlying.on("delivery-report", deliveryReport(dispatcher, pending))))
-      _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
+      // Disconnecting delivers what the producer still holds, bounded by the caller's close timeout.
+      _ <-
+        Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ =>
+          callback[js.Any](done => underlying.disconnect(closeTimeout.toMillis.toInt, done)).void
+        )
       // librdkafka only surfaces delivery reports while the client is polled.
       _ <- Resource.eval(F.delay(underlying.setPollInterval(DeliveryPollIntervalMillis)))
     yield ProducerHandle(underlying, pending, counter)

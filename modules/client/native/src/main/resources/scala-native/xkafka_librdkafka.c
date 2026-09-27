@@ -232,7 +232,7 @@ rd_kafka_t *xkafka_producer_new(const char *brokers,
         return producer;
 }
 
-void xkafka_producer_destroy(rd_kafka_t *producer) {
+void xkafka_producer_destroy(rd_kafka_t *producer, int timeout_ms) {
         xkafka_client_t *state;
 
         if (producer == NULL)
@@ -240,7 +240,9 @@ void xkafka_producer_destroy(rd_kafka_t *producer) {
 
         /* Read before destroying, since the opaque is unreachable afterwards. */
         state = (xkafka_client_t *)rd_kafka_opaque(producer);
-        rd_kafka_flush(producer, 10000);
+        /* Records already accepted are delivered first, for as long as the caller
+         * allows. Whatever is still outstanding afterwards is dropped. */
+        rd_kafka_flush(producer, timeout_ms);
         rd_kafka_destroy(producer);
         xkafka_client_free(state);
 }
@@ -536,6 +538,9 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
         return consumer;
 }
 
+/* Bounded by librdkafka's own group machinery rather than by the caller. Starting
+ * the close on a queue would let a timeout apply, but the close only advances
+ * while librdkafka's consumer queue is served, which this is not. */
 void xkafka_consumer_destroy(rd_kafka_t *consumer) {
         xkafka_client_t *state;
 

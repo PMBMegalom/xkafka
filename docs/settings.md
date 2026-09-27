@@ -112,6 +112,13 @@ transaction that has not committed are delivered. It defaults to
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default
 matches what Kafka's own clients use.
 
+`ProducerSettings` carries one, because only a producer has work of its own to
+finish on the way out.
+
+| setting | default | what it bounds |
+| --- | --- | --- |
+| `closeTimeout` | 60s | how long releasing a producer waits to deliver what it holds |
+
 `ClientSettings` carries one more, because it applies to producers and consumers
 alike.
 

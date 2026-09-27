@@ -43,7 +43,7 @@ private[xkafka] object RdKafka extends js.Object:
 private[xkafka] trait RdProducer extends js.Object:
   def connect(metadataOptions: js.UndefOr[js.Any], callback: js.Function2[RdError | Null, js.Any, Unit]): this.type = js.native
 
-  def disconnect(callback: js.Function2[RdError | Null, js.Any, Unit]): this.type = js.native
+  def disconnect(timeout: Int, callback: js.Function2[RdError | Null, js.Any, Unit]): this.type = js.native
 
   def produce(
       topic: String,
