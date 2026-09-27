@@ -26,7 +26,7 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
-import fs2.Chunk
+import fs2.{Chunk, Stream}
 import munit.{CatsEffectSuite, TestOptions}
 
 /** Behaviour every backend is expected to share, asserted identically on each one.
@@ -175,6 +175,32 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           case Left(other) => fail(s"expected a BackendFailure, got $other")
           case Right(_)    => fail("expected producing to an unreachable broker to fail")
     .timeout(90.seconds)
+
+  test(conformance("a producer reports the partitions of a topic")):
+    withBroker: server =>
+      // Made with more than one partition by the fixture, so the answer is not the one a topic gets by default.
+      val topic = validTopic(partitionedTopic)
+
+      for
+        settings <- producerSettings(server)
+        observed <- PlatformKafkaClient().producer(settings).use(_.partitionsFor(topic)).timeout(60.seconds)
+      yield assertEquals(observed.toList.map(_.value).sorted, List(0, 1))
+
+  test(conformance("the producer pipe delivers every batch, in order")):
+    withBroker: server =>
+      val topic     = uniqueTopic("pipe")
+      val partition = validPartition(0)
+      val values    = List("a", "b", "c", "d")
+      val batches   = values.map(value => NonEmptyList.one(record(topic, Some("k"), Some(value), partition)))
+
+      for
+        settings <- producerSettings(server)
+        results  <-
+          PlatformKafkaClient().producer(settings).use(producer => Stream.emits(batches).through(producer.pipe()).compile.toList).timeout(60.seconds)
+        consumed <- consume(server, topic, values.size)
+      yield
+        assertEquals(results.flatMap(_.records.toList.flatMap(_._1.value)), values, "the pipe should report batches in the order it took them")
+        assertEquals(consumed.flatMap(_.record.value), values, "and the broker should hold them in that order")
 
   test(conformance("a consumer resource can be allocated and released repeatedly")):
     withBroker: server =>

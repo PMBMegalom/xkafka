@@ -215,12 +215,18 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
   private def invalidBackendValue(field: String, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field: $error")
 
+  private def portablePartitions(values: Iterable[org.apache.kafka.common.PartitionInfo]): F[Set[Partition]] =
+    values.toList.traverse(value => F.fromEither(Partition.from(value.partition).leftMap(error => invalidBackendValue("partition", error))))
+      .map(_.toSet)
+
   private def isolationLevel(value: IsolationLevel): String =
     value match
       case IsolationLevel.ReadUncommitted => "read_uncommitted"
       case IsolationLevel.ReadCommitted   => "read_committed"
 
   private final class Fs2KafkaProducerAdapter[K, V](underlying: Fs2KafkaProducer[F, K, V]) extends KafkaProducer[F, K, V]:
+
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = backend(underlying.partitionsFor(topic.value)).flatMap(portablePartitions)
 
     // fs2-kafka is already two-stage, and pairs each record with its own metadata, so both survive unflattened.
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
@@ -364,10 +370,6 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           case Some(value) => F.fromEither(Offset.from(value).leftMap(error => invalidBackendValue(field, error))).map(topicPartition -> _)
           case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing $field for $topicPartition"))
       .map(_.toMap)
-
-    private def portablePartitions(values: Iterable[org.apache.kafka.common.PartitionInfo]): F[Set[Partition]] =
-      values.toList.traverse(value => F.fromEither(Partition.from(value.partition).leftMap(error => invalidBackendValue("partition", error))))
-        .map(_.toSet)
 
     private def consumerRecord(committable: Fs2CommittableConsumerRecord[F, K, V]): F[CommittableConsumerRecord[F, K, V]] =
       val source    = committable.record

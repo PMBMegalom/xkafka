@@ -36,6 +36,17 @@ yield ()
 
 `produceAndAwait` combines both stages when that pipelining is not wanted.
 
+`pipe` does the pipelining for a stream of batches, which mapping
+`produceAndAwait` over one does not:
+
+```scala
+batches.through(producer.pipe(maxInFlight = 256))
+```
+
+It enqueues later batches while earlier ones are still being acknowledged, and
+reports the results in the order the batches arrived. `maxInFlight` bounds how
+many wait for the broker at once.
+
 A producer that must write records and consumer offsets as one unit is a
 different type. See [Transactions](transactions.md).
 
@@ -47,6 +58,28 @@ means the backend acknowledged the record but reported no metadata for it.
 
 `RecordMetadata` carries the topic-partition, and the offset and timestamp when
 the backend supplies them.
+
+## Partitions
+
+`partitionsFor` reports the partitions a topic currently has, which is what
+choosing one to produce to needs:
+
+```scala mdoc:compile-only
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+import xkafka.*
+
+val utf8 = Serializer.utf8[IO]
+
+val program =
+  for
+    client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    settings <- ProducerSettings.from(client, utf8, utf8).liftTo[IO]
+    topic    <- Topic.from("events").liftTo[IO]
+    found    <- KafkaClient[IO].producer(settings).use(_.partitionsFor(topic))
+  yield found
+```
 
 ## Records
 

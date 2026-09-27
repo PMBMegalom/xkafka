@@ -121,6 +121,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
                 settings.valueSerializer.serialize(first.topic, first.headers, first.value)
               ).tupled.as(IO.pure(ProducerResult(records.map(_ -> None))))
 
+            override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set.empty)
+
       override def admin(settings: ClientSettings): Resource[IO, KafkaAdminClient[IO]] =
         Resource.pure:
           new KafkaAdminClient[IO]:

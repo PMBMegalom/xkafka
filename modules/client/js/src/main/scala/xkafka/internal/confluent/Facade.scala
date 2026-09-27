@@ -61,6 +61,8 @@ private[xkafka] trait RdProducer extends js.Object:
 
   def on(event: String, listener: js.Function2[RdError | Null, RdDeliveryReport, Unit]): this.type = js.native
 
+  def getMetadata(options: js.Any, callback: js.Function2[RdError | Null, RdMetadata, Unit]): js.Any = js.native
+
   def initTransactions(timeout: Int, callback: js.Function1[RdError | Null, Unit]): Unit = js.native
 
   def beginTransaction(callback: js.Function1[RdError | Null, Unit]): Unit = js.native

@@ -371,6 +371,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       counter: Ref[F, Double]
   ) extends KafkaProducer[F, K, V]:
 
+    override def partitionsFor(topic: Topic): F[Set[Partition]] =
+      topicMetadata(options => callback[confluent.RdMetadata](done => underlying.getMetadata(options, done): Unit), Some(topic.value))
+        .flatMap(partitionsOf(_, topic))
+
     /** Each record is enqueued with its own opaque token, so its delivery report is matched back to it exactly. */
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
       for
@@ -405,6 +409,15 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         settings.keySerializer.serialize(record.topic, record.headers, record.key),
         settings.valueSerializer.serialize(record.topic, record.headers, record.value)
       ).mapN((key, value) => EncodedRecord(record, key, value, rdHeaders(record.headers)))
+
+  /** Both clients read metadata the same way, so the request and the reading of it are shared. */
+  private def topicMetadata(read: js.Any => F[confluent.RdMetadata], topic: Option[String]): F[js.Array[confluent.RdTopicMetadata]] =
+    read(confluent.Values.rdMetadataOptions(topic.orUndefined)).map(_.topics)
+
+  private def partitionsOf(values: js.Array[confluent.RdTopicMetadata], topic: Topic): F[Set[Partition]] =
+    values.find(_.name == topic.value) match
+      case Some(value) => value.partitions.toList.traverse(entry => partition(entry.id)).map(_.toSet)
+      case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
 
   private def committedOffsets(offsets: Map[TopicPartition, Offset]): js.Array[confluent.RdTopicPartitionOffset] =
     offsets.iterator.map: (topicPartition, offset) =>
@@ -526,11 +539,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
               (portableTopicPartition(value), optionalOffset("timestamp offset", value.offset)).mapN(_ -> _)
             .map(found => timestampsToSearch.keys.map(topicPartition => topicPartition -> found.toMap.getOrElse(topicPartition, None)).toMap)
 
-    override def partitionsFor(topic: Topic): F[Set[Partition]] =
-      metadata(Some(topic.value)).flatMap: values =>
-        values.find(_.name == topic.value) match
-          case Some(value) => value.partitions.toList.traverse(entry => portablePartition(entry.id)).map(_.toSet)
-          case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = metadata(Some(topic.value)).flatMap(partitionsOf(_, topic))
 
     override def listTopics: F[Map[Topic, Set[Partition]]] =
       metadata(None).flatMap:
@@ -539,7 +548,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       .map(_.toMap)
 
     private def metadata(topic: Option[String]): F[js.Array[confluent.RdTopicMetadata]] =
-      callback[confluent.RdMetadata](done => underlying.getMetadata(confluent.Values.rdMetadataOptions(topic.orUndefined), done): Unit).map(_.topics)
+      topicMetadata(options => callback[confluent.RdMetadata](done => underlying.getMetadata(options, done): Unit), topic)
 
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
       F.async_ : resume =>

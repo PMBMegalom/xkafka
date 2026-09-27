@@ -306,10 +306,13 @@ final class ClientSuite extends FunSuite:
       new KafkaProducer[Option, String, String]:
         override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[Option[ProducerResult[String, String]]] =
           Some(Some(ProducerResult(records.map(_ -> None))))
+
+        override def partitionsFor(value: Topic): Option[Set[Partition]] = Some(Set(partition))
     val mapped = source.mapK(optionToErrorOr)
 
     assertEquals(mapped.produce(NonEmptyList.one(producerRecord)), Right(Right(result)))
     assertEquals(mapped.produceAndAwait(NonEmptyList.one(producerRecord)), Right(result))
+    assertEquals(mapped.partitionsFor(topic), Right(Set(partition)))
 
   test("KafkaConsumer transforms both its stream and committable offsets"):
     val sourceRecord = CommittableConsumerRecord(consumerRecord, committableOffset)

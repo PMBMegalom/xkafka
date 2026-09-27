@@ -26,7 +26,7 @@ import scala.concurrent.duration.{FiniteDuration, *}
 import cats.{Applicative, FlatMap, Foldable, Functor, Order, Show}
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptySet, Validated, ValidatedNel}
-import cats.effect.{Async, Temporal}
+import cats.effect.{Async, Concurrent, Temporal}
 import cats.tagless.FunctorK
 import fs2.{Chunk, Pipe, Stream}
 
@@ -601,10 +601,27 @@ trait KafkaProducer[F[_], K, V]:
   /** Enqueues `records` and waits for the broker to acknowledge them. */
   final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[ProducerResult[K, V]] = F.flatten(produce(records))
 
+  /** Returns the partitions currently known for `topic`, which is what choosing one to produce to needs. */
+  def partitionsFor(topic: Topic): F[Set[Partition]]
+
+  /** Produces each batch and reports its acknowledgement, in the order the batches arrived.
+    *
+    * Enqueueing carries on while earlier batches are still being acknowledged, which is what the two stages of `produce` are for, and is why this is
+    * not the same as mapping `produceAndAwait` over the stream. At most `maxInFlight` batches wait for the broker at once.
+    *
+    * @param maxInFlight
+    *   positive bound on the batches awaiting acknowledgement
+    */
+  final def pipe(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], ProducerResult[K, V]] =
+    if maxInFlight <= 0 then _ => Stream.raiseError(new IllegalArgumentException("maxInFlight must be positive"))
+    else _.evalMap(produce).parEvalMap(maxInFlight)(identity)
+
   /** Transforms the effect. Translating the acknowledgement nested inside the enqueue needs a `Functor[G]`, so this is not a lawful `FunctorK`. */
   final def mapK[G[_]](fk: FunctionK[F, G])(using G: Functor[G]): KafkaProducer[G, K, V] =
     new KafkaProducer[G, K, V]:
       override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[ProducerResult[K, V]]] = G.map(fk(self.produce(records)))(fk.apply)
+
+      override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
 
 /** Produces records and records consumer offsets as one unit.
   *

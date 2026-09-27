@@ -471,6 +471,37 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       finally Bindings.xkafka_subscription_destroy(nativeSubscription)
 
   /** Builds a failure from the message and code the call wrote into its own out-parameters. */
+  private def readTopicMetadata(handle: CVoidPtr, requestTimeoutMillis: Int, requestedTopic: Option[Topic]): Map[Topic, Set[Partition]] =
+    Zone.acquire: zone =>
+      given Zone             = zone
+      val (error, errorCode) = errorSlots
+      val metadata           =
+        Bindings.xkafka_consumer_metadata(
+          handle,
+          requestedTopic.map(topic => toCString(topic.value)).orNull,
+          requestTimeoutMillis,
+          error,
+          ErrorBufferSize.toUSize,
+          errorCode
+        )
+      if metadata == null then throw nativeError(error, errorCode)
+
+      try Vector.tabulate(Bindings.xkafka_metadata_topic_count(metadata).toInt): topicIndex =>
+          val topicValue = fromCString(Bindings.xkafka_metadata_topic_at(metadata, topicIndex.toUSize))
+          val topic      = Topic.from(topicValue).fold(error => throw invalidBackendValue("metadata topic", topicValue, error), identity)
+          val partitions =
+            Vector.tabulate(Bindings.xkafka_metadata_partition_count_at(metadata, topicIndex.toUSize).toInt): partitionIndex =>
+              val partitionValue = Bindings.xkafka_metadata_partition_at(metadata, topicIndex.toUSize, partitionIndex.toUSize)
+              Partition.from(partitionValue).fold(error => throw invalidBackendValue("metadata partition", partitionValue, error), identity)
+            .toSet
+          topic -> partitions
+        .toMap
+      finally Bindings.xkafka_metadata_destroy(metadata)
+
+  private def readPartitionsFor(handle: CVoidPtr, requestTimeoutMillis: Int, topic: Topic): Set[Partition] =
+    readTopicMetadata(handle, requestTimeoutMillis, Some(topic))
+      .getOrElse(topic, throw new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
+
   private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure =
     val classified = ErrorCode.fromLibrdkafka(!code)
     new KafkaException.BackendFailure(fromCString(error), Some(classified), retriable = Some(classified.retriable), fatal = Some(false))
@@ -508,6 +539,11 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       batches: Semaphore[F],
       settings: ProducerSettings[F, K, V]
   ) extends KafkaProducer[F, K, V]:
+
+    /** A metadata lookup is a round trip against the cluster, so it is bounded the way the administration calls are. */
+    private val metadataTimeoutMillis = settings.client.metadataRefreshInterval.toMillis.toInt.min(AdminTimeoutMillis)
+
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic))
 
     /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip. */
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
@@ -695,9 +731,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]] =
       if timestampsToSearch.isEmpty then F.pure(Map.empty) else client(readOffsetsForTimes(timestampsToSearch))
 
-    override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(topic))
+    override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(client.handle, requestTimeoutMillis, topic))
 
-    override def listTopics: F[Map[Topic, Set[Partition]]] = client(readTopicMetadata(None))
+    override def listTopics: F[Map[Topic, Set[Partition]]] = client(readTopicMetadata(client.handle, requestTimeoutMillis, None))
 
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = client(seekTo(topicPartition, offset.value))
 
@@ -939,36 +975,6 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               Option.when(value >= 0L)(Offset.from(value).fold(error => throw invalidBackendValue("timestamp offset", value, error), identity))
             topicPartition -> offset
         .toMap
-
-    private def readTopicMetadata(requestedTopic: Option[Topic]): Map[Topic, Set[Partition]] =
-      Zone.acquire: zone =>
-        given Zone             = zone
-        val (error, errorCode) = errorSlots
-        val metadata           =
-          Bindings.xkafka_consumer_metadata(
-            client.handle,
-            requestedTopic.map(topic => toCString(topic.value)).orNull,
-            requestTimeoutMillis,
-            error,
-            ErrorBufferSize.toUSize,
-            errorCode
-          )
-        if metadata == null then throw nativeError(error, errorCode)
-
-        try Vector.tabulate(Bindings.xkafka_metadata_topic_count(metadata).toInt): topicIndex =>
-            val topicValue = fromCString(Bindings.xkafka_metadata_topic_at(metadata, topicIndex.toUSize))
-            val topic      = Topic.from(topicValue).fold(error => throw invalidBackendValue("metadata topic", topicValue, error), identity)
-            val partitions =
-              Vector.tabulate(Bindings.xkafka_metadata_partition_count_at(metadata, topicIndex.toUSize).toInt): partitionIndex =>
-                val partitionValue = Bindings.xkafka_metadata_partition_at(metadata, topicIndex.toUSize, partitionIndex.toUSize)
-                Partition.from(partitionValue).fold(error => throw invalidBackendValue("metadata partition", partitionValue, error), identity)
-              .toSet
-            topic -> partitions
-          .toMap
-        finally Bindings.xkafka_metadata_destroy(metadata)
-
-    private def readPartitionsFor(topic: Topic): Set[Partition] =
-      readTopicMetadata(Some(topic)).getOrElse(topic, throw new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
 
     private def readPosition(topicPartition: TopicPartition): Option[Offset] =
       Zone.acquire: zone =>
