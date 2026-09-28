@@ -38,6 +38,8 @@ enum ValidationError derives CanEqual:
   case OffsetOverflow
   case EmptyConsumerGroup
   case EmptyTransactionalId
+  case MissingHeaderValue
+  case InvalidHeaderLength(expected: Int, actual: Int)
   case NegativeAttemptCount(value: Int)
   case NonPositiveDelay(value: FiniteDuration)
   case JitterOutOfRange(value: Double)
@@ -46,21 +48,23 @@ enum ValidationError derives CanEqual:
 
   def message: String =
     this match
-      case EmptyTopic                          => "topic must not be empty"
-      case TopicTooLong(length)                => s"topic must be at most ${Topic.MaxLength} characters, was $length"
-      case InvalidTopicCharacters(value)       => s"topic '$value' must contain only [a-zA-Z0-9._-]"
-      case ReservedTopicName(value)            => s"topic must not be '$value'"
-      case EmptyTopicPattern                   => "topic pattern must not be empty"
-      case NegativePartition(value)            => s"partition must not be negative, was $value"
-      case NegativeOffset(value)               => s"offset must not be negative, was $value"
-      case OffsetOverflow                      => "offset cannot be advanced past Long.MaxValue"
-      case EmptyConsumerGroup                  => "consumer group must not be empty"
-      case EmptyTransactionalId                => "transactional id must not be empty"
-      case NegativeAttemptCount(value)         => s"attempt count must not be negative, was $value"
-      case NonPositiveDelay(value)             => s"delay must be positive, was $value"
-      case JitterOutOfRange(value)             => s"jitter must be between 0 and 1, was $value"
-      case NonPositivePartitionCount(value)    => s"partition count must be positive, was $value"
-      case NonPositiveReplicationFactor(value) => s"replication factor must be positive, was $value"
+      case EmptyTopic                            => "topic must not be empty"
+      case TopicTooLong(length)                  => s"topic must be at most ${Topic.MaxLength} characters, was $length"
+      case InvalidTopicCharacters(value)         => s"topic '$value' must contain only [a-zA-Z0-9._-]"
+      case ReservedTopicName(value)              => s"topic must not be '$value'"
+      case EmptyTopicPattern                     => "topic pattern must not be empty"
+      case NegativePartition(value)              => s"partition must not be negative, was $value"
+      case NegativeOffset(value)                 => s"offset must not be negative, was $value"
+      case OffsetOverflow                        => "offset cannot be advanced past Long.MaxValue"
+      case EmptyConsumerGroup                    => "consumer group must not be empty"
+      case EmptyTransactionalId                  => "transactional id must not be empty"
+      case MissingHeaderValue                    => "header has no value"
+      case InvalidHeaderLength(expected, actual) => s"header value must be $expected bytes, was $actual"
+      case NegativeAttemptCount(value)           => s"attempt count must not be negative, was $value"
+      case NonPositiveDelay(value)               => s"delay must be positive, was $value"
+      case JitterOutOfRange(value)               => s"jitter must be between 0 and 1, was $value"
+      case NonPositivePartitionCount(value)      => s"partition count must be positive, was $value"
+      case NonPositiveReplicationFactor(value)   => s"replication factor must be positive, was $value"
 
 object ValidationError:
   given Show[ValidationError] = Show.show(_.message)
@@ -170,7 +174,9 @@ object TopicPartition:
   given Order[TopicPartition] = Order.whenEqual(Order.by(_.topic), Order.by(_.partition))
   given Show[TopicPartition]  = Show.show(value => s"${value.topic.value}-${value.partition.value}")
 
-final case class Header(key: String, value: Option[Chunk[Byte]])
+final case class Header(key: String, value: Option[Chunk[Byte]]):
+  /** Reads this header's value as `A`, failing where the bytes do not carry one. */
+  def as[A](using deserializer: HeaderDeserializer[A]): Either[ValidationError, A] = deserializer.deserialize(value)
 
 opaque type Headers = Vector[Header]
 
@@ -185,6 +191,9 @@ object Headers:
     def values: Vector[Header] = headers
 
     def append(header: Header): Headers = headers :+ header
+
+    /** Appends a header whose value is encoded by `A`'s serializer. */
+    def append[A](key: String, value: A)(using serializer: HeaderSerializer[A]): Headers = headers :+ Header(key, Some(serializer.serialize(value)))
 
     def getAll(key: String): Vector[Option[Chunk[Byte]]] =
       headers.collect:
