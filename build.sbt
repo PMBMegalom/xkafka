@@ -88,9 +88,9 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   timeoutMinutes = Some(45)
 )
 
-val installValgrind = WorkflowStep.Run(
-  List("sudo apt-get install --yes valgrind"),
-  name = Some("Install Valgrind")
+val installLeakCheckerDependencies = WorkflowStep.Run(
+  List("sudo apt-get install --yes llvm"),
+  name = Some("Install LeakSanitizer symbolizer")
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
@@ -99,7 +99,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
     installNativeDependencies,
-    installValgrind,
+    installLeakCheckerDependencies,
     WorkflowStep.Run(List("scripts/native-leak-check.sh"), name = Some("Check the Native downstream application for leaks"))
   ),
   oses = List("ubuntu-24.04"),

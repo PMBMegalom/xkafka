@@ -14,17 +14,30 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "$script_dir/.." && pwd)"
 downstream_dir="$project_dir/tests/downstream"
 version="0.1.0-LEAKCHECK"
+platform="$(uname -s)"
 
 if [[ "${1:-}" == "--run" ]]; then
   binary="${XKAFKA_SMOKE_BINARY:?the linked smoke binary was not passed through}"
-  case "$(uname -s)" in
+  case "$platform" in
     Darwin) exec leaks --atExit -- "$binary" ;;
     Linux)
       export LD_LIBRARY_PATH="$XKAFKA_LIBRDKAFKA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-      exec valgrind --leak-check=full --error-exitcode=1 "$binary"
+      if [[ -z "${LSAN_SYMBOLIZER_PATH:-}" ]]; then
+        if ! LSAN_SYMBOLIZER_PATH="$(command -v llvm-symbolizer)"; then
+          echo "llvm-symbolizer is required for the Native leak check" >&2
+          exit 2
+        fi
+      fi
+      export LSAN_SYMBOLIZER_PATH
+      export LSAN_OPTIONS="suppressions=$script_dir/native-leak-check.lsan:print_suppressions=1${LSAN_OPTIONS:+:$LSAN_OPTIONS}"
+      exec "$binary"
       ;;
-    *)      echo "no leak checker configured for $(uname -s)" >&2; exit 2 ;;
+    *)      echo "no leak checker configured for $platform" >&2; exit 2 ;;
   esac
+fi
+
+if [[ "$platform" == Linux ]]; then
+  export XKAFKA_NATIVE_LEAK_CHECK=1
 fi
 
 echo "Publishing $version locally"

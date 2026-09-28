@@ -31,10 +31,16 @@ lazy val smoke = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 
       // A static librdkafka leaves the libraries it was built against undefined, so an application linking the
       // archive asks for them itself. This is the recipe the README documents, executed rather than asserted.
-      if (!sys.env.contains("XKAFKA_LIBRDKAFKA_STATIC")) prefixed
-      else {
-        val searchPaths = sys.env.getOrElse("XKAFKA_LIBRDKAFKA_SEARCH_PATHS", "").split(' ').toList.filter(_.nonEmpty)
-        prefixed.withLinkingOptions(_ ++ searchPaths ++ Seq("-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd"))
-      }
+      val linked =
+        if (!sys.env.contains("XKAFKA_LIBRDKAFKA_STATIC")) prefixed
+        else {
+          val searchPaths = sys.env.getOrElse("XKAFKA_LIBRDKAFKA_SEARCH_PATHS", "").split(' ').toList.filter(_.nonEmpty)
+          prefixed.withLinkingOptions(_ ++ searchPaths ++ Seq("-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd"))
+        }
+
+      // Valgrind cannot run Scala Native 0.5.12: the runtime grows its guard region by probing below the stack
+      // pointer, which Memcheck deliberately treats as inaccessible. Standalone LeakSanitizer observes the same
+      // malloc/free traffic without changing that stack model and exits unsuccessfully when it finds a leak.
+      if (sys.env.contains("XKAFKA_NATIVE_LEAK_CHECK")) linked.withLinkingOptions(_ :+ "-fsanitize=leak") else linked
     }
   )

@@ -357,8 +357,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
 
-      - name: Install Valgrind
-        run: sudo apt-get install --yes valgrind
+      - name: Install LeakSanitizer symbolizer
+        run: sudo apt-get install --yes llvm
 
       - name: Check the Native downstream application for leaks
         run: scripts/native-leak-check.sh
