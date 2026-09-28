@@ -22,8 +22,7 @@ val key   = Serializer.utf8[IO].option
 val value = Deserializer.utf8[IO].option
 ```
 
-A tombstone is a record whose value is `None`, so modelling it is the same as
-modelling any absent value.
+A tombstone is a record whose value is `None`.
 
 ## Instances
 

@@ -1,7 +1,7 @@
 # Administration
 
-`KafkaClient[F].admin` is a `Resource` over the topic operations. It reads and changes cluster
-metadata only, so it neither produces nor consumes.
+`KafkaClient[F].admin` is a `Resource` over the topic operations. It reads and
+changes cluster metadata only, and neither produces nor consumes.
 
 ```scala mdoc:compile-only
 import cats.data.{NonEmptyList, NonEmptySet}
@@ -25,24 +25,25 @@ val program =
 - `createPartitions` adds partitions to a topic, which Kafka allows only as an increase.
 - `describeTopics` reports the partitions of each requested topic.
 
-`NewTopic.from` rejects a partition count or replication factor that is not positive, so a request
-the broker would refuse cannot be built.
+`NewTopic.from` rejects a partition count or replication factor that is not
+positive, so a request the broker would refuse cannot be built.
 
 @:callout(warning)
-Kafka reports an outcome for each topic, and the backends do not agree on whether that detail
-survives the trip. These operations therefore report the first failure and nothing more, which is
-what every backend can deliver. A request covering several topics may have changed the cluster
-before the failure it reports.
+Kafka reports an outcome for each topic, but the backends do not agree on whether
+that detail survives. These operations therefore report only the first failure. A
+request covering several topics may already have changed the cluster before the
+failure it reports.
 @:@
 
 @:callout(info)
-`describeTopics` fails where the cluster does not have one of the requested topics. Creating,
-growing, and deleting all propagate through the cluster in their own time, so a description taken
-immediately afterwards may not agree with the request that preceded it.
+`describeTopics` fails if the cluster does not have one of the requested topics.
+Creating, growing, and deleting topics all propagate through the cluster in their
+own time, so a description taken immediately afterwards may not yet reflect the
+request before it.
 @:@
 
 ## What it does not do
 
-Access control, quotas, configuration, consumer group administration, delegation tokens, and log
-directories are absent. The topic operations above are the ones every backend supports with the
-same meaning.
+Access control, quotas, configuration, consumer group administration, delegation
+tokens, and log directories are not covered. The topic operations above are the
+ones every backend supports with the same meaning.

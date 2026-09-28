@@ -19,16 +19,16 @@ survives being lifted into an effect.
 `ErrorCode` along with retriable and fatal classifications. A `None` for any of
 those means the backend did not make that classification available.
 
-`retriable` follows the portable code rather than whatever each backend calls
-retriable, so the same condition answers the same way everywhere. `ErrorCode`
-exposes the same answer directly, and it is what commit recovery decides from:
+`retriable` is derived from the portable `ErrorCode`, not from each backend's own
+notion of what is retriable, so the same condition answers the same way on all
+three platforms. `ErrorCode.retriable` gives the same answer directly, and commit
+recovery uses it to decide what to retry:
 
 ```scala
 if failure.code.exists(_.retriable) then retry else give up
 ```
 
-The conditions it holds true are the ones where the broker is moving rather than
-refusing: an unavailable or loading coordinator, a leader that has moved, a
+It is true for an unavailable or loading coordinator, a leader that has moved, a
 rebalance in progress, a network failure, and a timed out request.
 
 ## Portable codes

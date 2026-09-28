@@ -4,8 +4,8 @@ Every record arrives as a `CommittableConsumerRecord`, pairing the record with
 the offset that commits it. Commits are explicit, so processing and commit
 policy stay in the calling effect.
 
-A successful `record.offset.commit` stores `record.offset.nextOffset`, which is
-the offset after the one just handled.
+A successful `record.offset.commit` stores `record.offset.nextOffset`, the
+offset after the one just handled.
 
 ## Batches
 
@@ -16,8 +16,8 @@ is active:
 CommittableOffsetBatch.fromFoldable(offsets).commit
 ```
 
-A batch retains only the greatest next offset for each topic-partition, and
-performs one backend commit per originating consumer.
+A batch keeps only the greatest next offset for each topic-partition, and makes
+one backend commit per originating consumer.
 
 ## Committing on a schedule
 
@@ -33,15 +33,14 @@ consumer.records
 
 Only non-empty batches are committed.
 
-## Recovering a failed commit
+## Retrying a failed commit
 
-A commit fails for two kinds of reason. Some say the broker is moving, such as a
-coordinator that is loading or a group that is rebalancing, and those clear on
-their own. The rest say the commit will never be accepted, and retrying one only
-delays the failure.
+Some commit failures clear on their own, such as a coordinator that is loading
+or a group that is rebalancing. Others never will, and retrying them only delays
+the failure.
 
-`ConsumerSettings.commitRecovery` retries the first kind. It defaults to ten
-attempts, doubling from 10ms, held at 10s, and spread by a fifth:
+`ConsumerSettings.commitRecovery` retries the first kind. `ErrorCode.retriable`
+decides which failures qualify, and it answers the same on every backend:
 
 ```scala mdoc:compile-only
 import scala.concurrent.duration.*
@@ -62,39 +61,38 @@ val settings =
   yield settings.withCommitRecovery(policy)
 ```
 
-`CommitRecovery.none` turns it off, so a failed commit fails. What counts as
-worth retrying is `ErrorCode.retriable`, which is the same on every backend, so
-all three retry the same conditions and wait the same way.
+The default policy makes ten attempts, starting at 10ms, doubling each time, and
+stopping the doubling at 10s. Each delay is then spread by a fifth, so that
+consumers which hit one condition together do not all retry at the same moment.
+The spread is applied after the cap, so a delay can exceed `maxDelay` by that
+fraction.
+
+`CommitRecovery.none` disables retrying. When every attempt has been used, the
+commit fails with `KafkaException.CommitFailed`, which carries the number of
+attempts, the offsets that were not committed, and the failure from the last
+attempt.
+
+@:callout(info)
+Recovery wraps the committer, so it applies wherever a commit happens: a single
+`CommittableOffset.commit`, a batch, `commitBatchWithin`, and `consumeChunk`.
+@:@
 
 ## How long a commit waits
 
-`ConsumerSettings.commitTimeout` bounds a commit, defaulting to fifteen seconds.
-A commit that does not complete within it fails as `ErrorCode.RequestTimedOut`,
-which is a retriable code, so the recovery policy tries it again rather than
-giving up:
+`ConsumerSettings.commitTimeout` bounds a commit and defaults to fifteen
+seconds. A commit that does not finish in time fails as
+`ErrorCode.RequestTimedOut`. That code is retriable, so the recovery policy
+tries again:
 
 ```scala
 settings.withCommitTimeout(5.seconds)
 ```
 
 @:callout(warning)
-A commit that ran out of time may still be applied afterwards. The broker was
-already asked, and nothing withdraws the request. Committing is idempotent for
-the same offset, so a retry that succeeds leaves the group where the first
-attempt would have.
-@:@
-
-The spread is what keeps consumers that hit one condition together from
-returning together. It is applied after the doubling stops growing, so a delay
-can exceed `maxDelay` by that fraction.
-
-When every attempt is used up, the commit fails with
-`KafkaException.CommitFailed`, which carries how many attempts were made, the
-offsets that were not committed, and the failure that caused the last one.
-
-@:callout(info)
-Recovery wraps the committer, so it applies wherever a commit happens: a single
-`CommittableOffset.commit`, a batch, `commitBatchWithin`, and `consumeChunk`.
+A commit that timed out may still be applied by the broker afterwards, because
+the request has already been sent. Committing the same offset twice has no
+further effect, so a later attempt that succeeds leaves the group in the same
+place.
 @:@
 
 ## Transformations

@@ -27,35 +27,39 @@ val program =
 
 `Selection` says where a consumer's records come from.
 
-`Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a non-empty
+`Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a
 `TopicPattern`, which matches complete topic names. Portable patterns should use
-regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
-Both join a consumer group, so the partitions a consumer holds follow the group's rebalances.
+regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular
+expressions. Both join a consumer group, so the partitions a consumer holds
+follow the group's rebalances.
 
-`Selection.Partitions` takes a non-empty set of topic-partitions and reads exactly those. No group
-is joined, so the assignment never changes and nothing rebalances it away. Two consumers naming the
-same partition each read all of it, even where they share a consumer group, because there is no
-group membership to divide it between them.
+`Selection.Partitions` takes a non-empty set of topic-partitions and reads
+exactly those. It joins no group, so the assignment never changes. Two consumers
+naming the same partition each read all of it, even when they share a consumer
+group, because no group membership divides the partition between them.
 
-The consumer group is still the key that committed offsets are stored under, so consumers naming the
-same partitions under one group do share those offsets, and a consumer resuming from a commit reads
-from wherever the other left off.
+Committed offsets are still stored under the consumer group. Consumers reading
+the same partitions under one group therefore share those offsets, and one
+resuming from a commit continues from where the other left off.
 
 @:callout(warning)
-Kafka stores whatever was committed last for a partition, with no comparison against what is already
-there. Two consumers committing the same partition therefore race, and the later commit wins even
-where its offset is lower, which moves the group backwards and replays records. A batch keeps the
-highest offset per partition, but only among the offsets in that batch. Give consumers their own
-group unless they are meant to share a position.
+Kafka stores the last offset committed for a partition without comparing it to
+what is already there. Two consumers committing the same partition race, and the
+later commit wins even when its offset is lower, which moves the group backwards
+and replays records. A batch keeps the highest offset per partition, but only
+among the offsets in that batch. Give consumers their own group unless they are
+meant to share a position.
 @:@
 
 @:callout(info)
-A seek is refused until the partition it names is being fetched, which holding the assignment does
-not yet mean. Retry briefly if you seek immediately after a consumer starts.
+A seek is refused until the partition it names is being fetched, which happens
+after the assignment arrives. Retry briefly if you seek immediately after
+starting a consumer.
 @:@
 
-A consumer delivers records of a transaction that has not committed unless `isolationLevel` says
-otherwise. See [Transactions](transactions.md).
+By default a consumer delivers records from transactions that have not
+committed. Set `isolationLevel` to change that. See
+[Transactions](transactions.md).
 
 ## Inspecting the consumer
 
@@ -73,58 +77,60 @@ Within the consumer resource:
 - `stopConsuming` stops fetching and lets the streams drain.
 
 @:callout(info)
-`position` answers `None` until this consumer has consumed from the partition. A backend may
-settle on a position sooner, such as when a seek names an offset, so the value every backend
-agrees on is the one after records have been consumed.
+`position` returns `None` until this consumer has consumed from the partition.
+Some backends settle on a position sooner, for instance when a seek names an
+offset, so the value every backend agrees on is the one after records have been
+consumed.
 @:@
 
 ## Processing every record
 
-`consumeChunk` takes a function over a chunk of records and commits that chunk once the function
-returns, so the common case needs no stream plumbing.
+`consumeChunk` takes a function over a chunk of records and commits that chunk
+once the function returns:
 
 ```scala
 consumer.consumeChunk: records =>
   records.traverse_(handle).as(CommitNow)
 ```
 
-Partitions are processed alongside one another, so a slow chunk holds back only the partition it
-came from. It returns once `stopConsuming` has been called and everything already fetched has been
-processed, and otherwise runs until it is cancelled or something fails. Returning `CommitNow` is what
-makes the commit visible where the records are handled.
+Partitions are processed concurrently, so a slow chunk holds back only the
+partition it came from. Returning `CommitNow` is what triggers the commit.
+
+`consumeChunk` runs until it is cancelled, until something fails, or until
+`stopConsuming` has been called and everything already fetched has been
+processed.
 
 @:callout(warning)
-A consumer joins its group at a different moment on each backend. The Java client joins when the
-application polls, so a consumer nobody reads holds nothing. The JavaScript and Native backends
-join when the consumer resource is allocated, so one nobody reads still takes a share of the
-partitions and does not hand them back. Release a consumer you are not reading.
+Consumers join their group at different moments on different backends. The Java
+client joins when the application polls, so a consumer nobody reads holds no
+partitions. The JavaScript and Native backends join when the consumer resource is
+allocated, so a consumer nobody reads still takes a share of the partitions and
+does not give them back. Release consumers you are not reading.
 @:@
 
 ## Stopping
 
-`stopConsuming` stops fetching. The record streams end once the records already fetched have been
-handed over, so nothing that was read from the broker is dropped, and offsets stay committable
-afterwards.
+`stopConsuming` stops fetching. The record streams then end once the records
+already fetched have been handed over. Nothing read from the broker is dropped,
+and offsets remain committable.
+
+Run it alongside the stream:
 
 ```scala
-consumer.records
-  .evalTap(record => handle(record) *> record.offset.commit)
-  .interruptWhen(shutdownRequested)
+val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain
+val stop    = shutdownRequested.get *> consumer.stopConsuming
+
+(consume, stop).parTupled
 ```
 
-That interrupts mid-record and loses whatever was fetched. This does not:
+`stopConsuming` returns as soon as fetching has been told to stop, without
+waiting for the streams to drain. Calling it more than once has no further
+effect, and a stream started after it is empty.
 
-```scala
-shutdownRequested.get *> consumer.stopConsuming
-```
-
-run alongside the stream, which then completes on its own once it has drained. It returns as soon as
-fetching has been told to stop, without waiting for that draining. Calling it again does nothing
-further, and a stream started afterwards is empty.
-
-Releasing the consumer resource, or cancelling whatever reads it, stops it abruptly instead. Neither
-waits for what has been fetched to be handed over, so whoever resumes the group reads those offsets
-again.
+Interrupting the stream instead, with `interruptWhen` for example, stops it
+mid-record and discards whatever had been fetched. Releasing the consumer
+resource, or cancelling whatever reads it, does the same. In those cases whoever
+resumes the group reads those offsets again.
 
 ## Partition streams
 
@@ -142,7 +148,7 @@ how far ahead each partition buffers before it is held back.
 
 @:callout(warning)
 A consumer that subscribes to a topic before that topic exists sees it once the
-backend refreshes its metadata. `metadataRefreshInterval` sets how long that takes
-and defaults to five minutes, so lower it if a consumer must discover a topic
+backend refreshes its metadata. `metadataRefreshInterval` sets how long that
+takes and defaults to five minutes. Lower it if a consumer must discover a topic
 promptly.
 @:@

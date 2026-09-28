@@ -23,7 +23,8 @@ val program =
 
 `produce` returns `F[F[ProducerResult]]`. The outer effect completes once the
 backend has accepted the records for delivery, and the inner one once the broker
-has acknowledged them, so several batches can be in flight at once:
+has acknowledged them. Holding the inner effect lets several batches be in
+flight at once:
 
 ```scala
 for
@@ -34,21 +35,22 @@ for
 yield ()
 ```
 
-`produceAndAwait` combines both stages when that pipelining is not wanted.
+`produceAndAwait` runs both stages together, for callers that do not need the
+pipelining.
 
-`pipe` does the pipelining for a stream of batches, which mapping
-`produceAndAwait` over one does not:
+For a stream of batches, use `pipe`:
 
 ```scala
 batches.through(producer.pipe(maxInFlight = 256))
 ```
 
-It enqueues later batches while earlier ones are still being acknowledged, and
-reports the results in the order the batches arrived. `maxInFlight` bounds how
-many wait for the broker at once.
+`pipe` enqueues later batches while earlier ones are still being acknowledged,
+and emits results in the order the batches arrived. `maxInFlight` sets how many
+batches may await the broker at once. Mapping `produceAndAwait` over a stream
+instead would send one batch at a time.
 
-A producer that must write records and consumer offsets as one unit is a
-different type. See [Transactions](transactions.md).
+To write records and consumer offsets atomically, use a transactional producer.
+See [Transactions](transactions.md).
 
 ## Results
 
@@ -59,10 +61,16 @@ means the backend acknowledged the record but reported no metadata for it.
 `RecordMetadata` carries the topic-partition, and the offset and timestamp when
 the backend supplies them.
 
+## Records
+
+A `ProducerRecord` names its topic, key, and value, and optionally a partition,
+a timestamp, and headers. A key or value of `None`, through the `.option`
+codecs, represents a Kafka null. Tombstones are produced this way.
+
 ## Partitions
 
-`partitionsFor` reports the partitions a topic currently has, which is what
-choosing one to produce to needs:
+`partitionsFor` returns the partitions a topic currently has. Use it to pick a
+partition to produce to:
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList
@@ -81,29 +89,35 @@ val program =
   yield found
 ```
 
+## Acknowledgements
+
+`acks` sets how many replicas must hold a record before the broker acknowledges
+it. It defaults to `Acks.AllReplicas`:
+
+```scala
+settings.withAcks(Acks.Leader)
+```
+
+| value | the broker replies once | a record is lost if |
+| --- | --- | --- |
+| `Acks.NoAcknowledgement` | the record is sent | delivery fails for any reason |
+| `Acks.Leader` | the partition leader has it | the leader fails before a follower copies it |
+| `Acks.AllReplicas` | every in-sync replica has it | every in-sync replica fails |
+
 ## Releasing a producer
 
-Releasing the resource delivers the records the producer has already accepted
-before it closes, which is what makes dropping the acknowledgement safe.
-`closeTimeout` bounds that wait and defaults to sixty seconds:
+Releasing the resource delivers the records the producer has already accepted,
+then closes it. `closeTimeout` sets how long that takes at most, and defaults to
+sixty seconds:
 
 ```scala
 settings.withCloseTimeout(10.seconds)
 ```
 
-Whatever is still undelivered when it runs out is dropped, so shortening it
-trades data for a faster shutdown.
+Records still undelivered when the timeout expires are dropped. Lower the
+timeout for a faster shutdown, at the cost of losing more on the way out.
 
 @:callout(info)
-This bounds a producer only. A consumer's close is bounded by each backend's own
-group machinery, which is not something the portable settings can set: librdkafka
-only advances a bounded close while its own consumer queue is being served, which
-a released consumer is not.
+`closeTimeout` applies to producers only. Each backend bounds a consumer's close
+with its own group machinery, and that bound is not configurable here.
 @:@
-
-## Records
-
-A `ProducerRecord` names its topic, key, and value, and optionally a partition,
-a timestamp, and headers. A key or value of `None`, through the `.option`
-codecs, is how a Kafka null is expressed, which is also how tombstones are
-modelled.

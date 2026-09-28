@@ -1,8 +1,8 @@
 # Transactions
 
-A transactional producer writes records and records consumer offsets as one unit. Everything it
-wrote becomes visible together when the transaction commits, and none of it at all where the
-transaction aborts.
+A transactional producer writes records and consumer offsets as one unit.
+Everything it wrote becomes visible together when the transaction commits, and
+none of it becomes visible if the transaction aborts.
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList
@@ -23,35 +23,42 @@ val program =
   yield ()
 ```
 
-`transactionally` commits where its body succeeds and aborts where the body fails or is cancelled,
-so the transaction never outlives the work it covers. A producer carries one transactional id, and
-Kafka allows that id one transaction at a time, so concurrent callers wait for one another.
+`transactionally` commits the transaction if its body succeeds, and aborts it if
+the body fails or is cancelled.
+
+A transactional producer only writes inside transactions, which is why
+`transactionalProducer` is a separate constructor rather than an option on
+`producer`.
+
+Kafka allows one transaction at a time per transactional id, so concurrent calls
+to `transactionally` on one producer run one after another.
 
 @:callout(warning)
-That waiting is what makes a nested transaction deadlock. A `transactionally` inside the body of
-another one on the same producer waits for a transaction that cannot finish until the body returns.
-Use one transaction per unit of work, and a producer of its own where two must overlap.
+Do not nest `transactionally` on the same producer. The inner call waits for the
+outer transaction to finish, and the outer transaction cannot finish until its
+body returns, so the pair deadlocks. Use one transaction per unit of work, or a
+second producer with its own transactional id.
 @:@
-
-A transactional producer writes only inside transactions, which is why `transactionalProducer` is a
-constructor of its own rather than a mode of `producer`.
 
 ## Reading what a transaction wrote
 
-Records of an open transaction are already in the log. A consumer reads them unless it is told not
-to, so a reader that should see only committed work asks for it:
+Records written by an open transaction are already in the log, and a consumer
+delivers them by default. To read only committed records, set the isolation
+level:
 
 ```scala
 settings.withIsolationLevel(IsolationLevel.ReadCommitted)
 ```
 
-The default is `ReadUncommitted`, which is Kafka's own, and which delivers every record as soon as
-it is written, including records of a transaction that later aborts.
+The default is `IsolationLevel.ReadUncommitted`, which is also Kafka's default.
+It delivers every record as soon as it is written, including records from a
+transaction that later aborts.
 
 ## Read, process, write
 
-`commitOffsets` records the offsets a consumer reached as part of the transaction, so the records
-produced and the position they were produced from land together or not at all.
+`commitOffsets` adds the offsets a consumer has reached to the transaction, so
+the records produced and the position they were produced from are committed
+together:
 
 ```scala
 consumer.records.chunks.evalMap: chunk =>
@@ -60,31 +67,33 @@ consumer.records.chunks.evalMap: chunk =>
     transaction.produce(derive(chunk)) *> transaction.commitOffsets(batch)
 ```
 
-The batch carries the committer each offset came from, and that committer knows its consumer, so
-naming the wrong group is not something this can express.
+The batch already identifies the consumer its offsets came from, so
+`commitOffsets` needs no consumer argument and cannot record them against the
+wrong group.
 
 @:callout(warning)
-A transactional pipeline is only atomic end to end when its reader also uses
-`IsolationLevel.ReadCommitted`. Otherwise the downstream consumer sees records of a transaction that
-has not committed, and may see records an abort later withdrew.
+The pipeline is only atomic end to end if whatever reads the output topic also
+sets `IsolationLevel.ReadCommitted`. A reader left on the default sees records
+from transactions that have not committed, including ones that later abort.
 @:@
 
 @:callout(info)
-`produce` inside a transaction waits for the broker to acknowledge the records, because a
-transaction cannot commit records that have not been acknowledged. It therefore returns
-`F[ProducerResult]`, without the second stage a plain producer offers.
+`produce` inside a transaction returns `F[ProducerResult]` rather than the two
+stages a plain producer offers. A transaction cannot commit records the broker
+has not acknowledged, so the call waits for them.
 @:@
 
 ## Settings
 
-`TransactionalProducerSettings` wraps `ProducerSettings` and adds the two values Kafka needs.
+`TransactionalProducerSettings` wraps `ProducerSettings` and adds two values.
 
-| setting | default | what it means |
+| setting | default | maps to |
 | --- | --- | --- |
 | `transactionalId` | required | Kafka's `transactional.id` |
-| `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms`, defaulting to what its own producers use |
+| `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms` |
 
-Give each producer instance that must run alongside another its own `transactionalId`. Allocating a
-second producer under an id already in use fences the first, so its open transaction can no longer
-commit. That is what the id is for when a replacement takes over from an instance that has gone, and
-a failure when both were meant to run.
+Give each producer that runs alongside another its own `transactionalId`.
+Creating a second producer with an id already in use fences the first, and its
+open transaction can then no longer commit. That is the intended behaviour when a
+replacement takes over from an instance that has stopped, and a source of
+failures when two producers were meant to run at the same time.
