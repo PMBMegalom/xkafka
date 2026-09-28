@@ -22,7 +22,7 @@
 package xkafka
 
 import cats.arrow.FunctionK
-import cats.effect.{Async, Ref}
+import cats.effect.{Async, Outcome, Ref}
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import cats.tagless.FunctorK
@@ -43,17 +43,21 @@ object PartitionRecords:
       maxQueuedRecords: Int,
       pausing: PartitionPausing[F]
   ): Stream[F, PartitionRecords[F, K, V]] =
-    if maxQueuedRecords <= 0 then Stream.raiseError(new IllegalArgumentException("maxQueuedRecords must be positive"))
-    else
-      Stream.eval(Runtime.create(consumer, assignments, maxQueuedRecords, pausing)).flatMap: runtime =>
-        runtime.stream.onFinalize(runtime.close)
+    validateMaxQueuedRecords(maxQueuedRecords) match
+      case Left(error)  => Stream.raiseError(error)
+      case Right(valid) => Stream.eval(Runtime.create(consumer, assignments, valid, pausing)).flatMap: runtime =>
+          runtime.stream.onFinalize(runtime.close)
 
-  /** `queued` counts what has been routed and not yet read, which is what decides whether the partition is paused. */
+  private[xkafka] def validateMaxQueuedRecords(value: Int): Either[IllegalArgumentException, Int] =
+    Either.cond(value > 0, value, new IllegalArgumentException("maxQueuedRecords must be positive"))
+
+  /** `queued` counts what has been reserved for routing and not yet read, which is what decides whether the partition is paused. */
   private final case class PartitionState[F[_], K, V](
       topicPartition: TopicPartition,
       channel: Channel[F, CommittableConsumerRecord[F, K, V]],
       queued: Ref[F, Int],
-      paused: Ref[F, Boolean]
+      paused: Ref[F, Boolean],
+      mutex: Mutex[F]
   )
 
   private final class Runtime[F[_], K, V](
@@ -86,7 +90,19 @@ object PartitionRecords:
       */
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
       stateFor(record.record.topicPartition).flatMap: state =>
-        state.channel.send(record) >> state.queued.updateAndGet(_ + 1).flatMap(queued => pauseWhenFull(state, queued))
+        state.mutex.lock.surround:
+          F.uncancelable: poll =>
+            state.queued.updateAndGet(_ + 1).flatMap: queued =>
+              F.guaranteeCase(poll(pauseWhenFull(state, queued))):
+                case Outcome.Succeeded(_) => F.unit
+                case _                    => rollback(state)
+              .flatMap: _ =>
+                state.channel.send(record).onError(_ => rollback(state)).flatMap:
+                  case Right(()) => F.unit
+                  case Left(_)   => rollback(state)
+
+    private def rollback(state: PartitionState[F, K, V]): F[Unit] =
+      state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued))
 
     /** A partition nobody is reading stops being fetched, so the records beside it keep arriving.
       *
@@ -104,7 +120,9 @@ object PartitionRecords:
     private def readable(state: PartitionState[F, K, V]): PartitionRecords[F, K, V] =
       PartitionRecords(
         state.topicPartition,
-        state.channel.stream.evalTap(_ => state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued)))
+        state.channel.stream.evalTap: _ =>
+          state.mutex.lock.surround:
+            state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued))
       )
 
     private def stateFor(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
@@ -118,7 +136,8 @@ object PartitionRecords:
                 channel <- Channel.unbounded[F, CommittableConsumerRecord[F, K, V]]
                 queued  <- Ref.of[F, Int](0)
                 paused  <- Ref.of[F, Boolean](false)
-                state = PartitionState(topicPartition, channel, queued, paused)
+                mutex   <- Mutex[F]
+                state = PartitionState(topicPartition, channel, queued, paused, mutex)
                 _ <- states.set(current.updated(topicPartition, state))
                 _ <- output.send(readable(state)).void
               yield state

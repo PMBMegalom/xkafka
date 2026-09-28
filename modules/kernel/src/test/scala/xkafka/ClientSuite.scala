@@ -95,28 +95,103 @@ final class ClientSuite extends FunSuite:
     assert(renderedSettings.forall(!_.contains("-secret")))
 
   test("client settings accumulate portable validation errors"):
-    val settings = ClientSettings.from(NonEmptyList.of("", " ", "localhost:9092"), properties = Map("" -> "value"))
+    val settings =
+      ClientSettings.from(NonEmptyList.of("", " ", "localhost:9092"), properties = Map("" -> "value"), metadataRefreshInterval = Duration.Zero)
 
     assertEquals(
       settings.toEither,
       Left(NonEmptyList.of(
         SettingsError.BlankBootstrapServer(0),
         SettingsError.BlankBootstrapServer(1),
-        SettingsError.BlankPropertyName(SettingsError.PropertyScope.Client)
+        SettingsError.BlankPropertyName(SettingsError.PropertyScope.Client),
+        SettingsError.NonPositiveDuration(SettingsError.DurationField.MetadataRefreshInterval, Duration.Zero)
       ))
     )
 
   test("producer settings validate producer properties during construction"):
     val serializer = Serializer.const[IO, String](None)
-    val settings   = ProducerSettings.from(clientSettings, serializer, serializer, properties = Map(" " -> "value"))
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer, properties = Map(" " -> "value"), closeTimeout = (-1).millis)
 
-    assertEquals(settings.toEither, Left(NonEmptyList.one(SettingsError.BlankPropertyName(SettingsError.PropertyScope.Producer))))
+    assertEquals(
+      settings.toEither,
+      Left(NonEmptyList.of(
+        SettingsError.BlankPropertyName(SettingsError.PropertyScope.Producer),
+        SettingsError.NonPositiveDuration(SettingsError.DurationField.CloseTimeout, (-1).millis)
+      ))
+    )
 
   test("consumer settings validate consumer properties during construction"):
     val deserializer = Deserializer.utf8[IO]
-    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer, properties = Map("" -> "value"))
+    val tooLong      = (Int.MaxValue.toLong + 1L).millis
+    val settings     =
+      ConsumerSettings.from(
+        clientSettings,
+        group,
+        deserializer,
+        deserializer,
+        commitTimeout = Duration.Zero,
+        pollTimeout = (-1).millis,
+        requestTimeout = tooLong,
+        properties = Map("" -> "value")
+      )
 
-    assertEquals(settings.toEither, Left(NonEmptyList.one(SettingsError.BlankPropertyName(SettingsError.PropertyScope.Consumer))))
+    assertEquals(
+      settings.toEither,
+      Left(NonEmptyList.of(
+        SettingsError.BlankPropertyName(SettingsError.PropertyScope.Consumer),
+        SettingsError.NonPositiveDuration(SettingsError.DurationField.CommitTimeout, Duration.Zero),
+        SettingsError.NonPositiveDuration(SettingsError.DurationField.PollTimeout, (-1).millis),
+        SettingsError.DurationExceedsMaximum(SettingsError.DurationField.RequestTimeout, tooLong)
+      ))
+    )
+
+  test("every duration accepts the largest portable millisecond value"):
+    val serializer   = Serializer.const[IO, String](None)
+    val deserializer = Deserializer.utf8[IO]
+    val id           = TransactionalId.from("writer").toOption.get
+    val maximum      = SettingsError.MaxDuration
+
+    assert(ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = maximum).isValid)
+    assert(ProducerSettings.from(clientSettings, serializer, serializer, closeTimeout = maximum).isValid)
+    assert(TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = maximum).isValid)
+    assert(
+      ConsumerSettings
+        .from(clientSettings, group, deserializer, deserializer, commitTimeout = maximum, pollTimeout = maximum, requestTimeout = maximum).isValid
+    )
+
+  test("duration withers revalidate through the smart constructors"):
+    val serializer    = Serializer.const[IO, String](None)
+    val deserializer  = Deserializer.utf8[IO]
+    val id            = TransactionalId.from("writer").toOption.get
+    val producer      = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer).toOption.get
+    val consumer      = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val tooLong       = (Int.MaxValue.toLong + 1L).millis
+
+    assertEquals(
+      clientSettings.withMetadataRefreshInterval(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.MetadataRefreshInterval, Duration.Zero)))
+    )
+    assertEquals(
+      producer.withCloseTimeout(tooLong).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationExceedsMaximum(SettingsError.DurationField.CloseTimeout, tooLong)))
+    )
+    assertEquals(
+      transactional.withTransactionTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.TransactionTimeout, Duration.Zero)))
+    )
+    assertEquals(
+      consumer.withCommitTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.CommitTimeout, Duration.Zero)))
+    )
+    assertEquals(
+      consumer.withPollTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.PollTimeout, Duration.Zero)))
+    )
+    assertEquals(
+      consumer.withRequestTimeout(tooLong).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationExceedsMaximum(SettingsError.DurationField.RequestTimeout, tooLong)))
+    )
 
   test("settings reject properties xkafka manages itself"):
     val client = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("group.id" -> "mine", "bootstrap.servers" -> "other"))
@@ -204,11 +279,13 @@ final class ClientSuite extends FunSuite:
   test("the consumer request timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val requested    = settings.withRequestTimeout(5.seconds).toOption.get
+    val both         = settings.withRequestTimeout(5.seconds).andThen(_.withPollTimeout(25.millis)).toOption.get
 
     assertEquals(settings.requestTimeout, ConsumerSettings.DefaultRequestTimeout)
-    assertEquals(settings.withRequestTimeout(5.seconds).requestTimeout, 5.seconds)
-    assertEquals(settings.withRequestTimeout(5.seconds).withPollTimeout(25.millis).requestTimeout, 5.seconds)
-    assertEquals(settings.withRequestTimeout(5.seconds).withProperty("fetch.min.bytes", "1").toOption.get.requestTimeout, 5.seconds)
+    assertEquals(requested.requestTimeout, 5.seconds)
+    assertEquals(both.requestTimeout, 5.seconds)
+    assertEquals(requested.withProperty("fetch.min.bytes", "1").toOption.get.requestTimeout, 5.seconds)
 
   test("settings reject the api timeout the request timeout owns"):
     val deserializer = Deserializer.utf8[IO]
@@ -222,11 +299,12 @@ final class ClientSuite extends FunSuite:
   test("the consumer poll timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val updated      = settings.withPollTimeout(25.millis).toOption.get
 
     assertEquals(settings.pollTimeout, ConsumerSettings.DefaultPollTimeout)
-    assertEquals(settings.withPollTimeout(25.millis).pollTimeout, 25.millis)
-    assertEquals(settings.withPollTimeout(25.millis).withGroupId(group).pollTimeout, 25.millis)
-    assertEquals(settings.withPollTimeout(25.millis).withProperty("fetch.min.bytes", "1").toOption.get.pollTimeout, 25.millis)
+    assertEquals(updated.pollTimeout, 25.millis)
+    assertEquals(updated.withGroupId(group).pollTimeout, 25.millis)
+    assertEquals(updated.withProperty("fetch.min.bytes", "1").toOption.get.pollTimeout, 25.millis)
 
   test("withers revalidate and preserve the remaining settings"):
     val updated = clientSettings.withClientId("probe").withProperty("linger.ms", "5")
@@ -406,9 +484,9 @@ final class ClientSuite extends FunSuite:
       new OffsetCommitter[Option]:
         override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
 
-        override private[xkafka] val membership: GroupMembership[Option] = GroupMembership.Backend(Some(TestGroupHandle("workers")))
+        override private[xkafka] val membership: GroupMembership[Option] = GroupMembership.Backend(Some(TestGroupHandle("workers")), _ => Some(()))
 
-    assertEquals(source.mapK(optionToSyncIO).membership.handle.map(_.unsafeRunSync()), Some(TestGroupHandle("workers")))
+    assertEquals(source.mapK(optionToSyncIO).membership.handle.map(_.acquire.unsafeRunSync()), Some(TestGroupHandle("workers")))
 
   test("a committer that did not come from a consumer names no group"):
     val source =
@@ -422,20 +500,26 @@ final class ClientSuite extends FunSuite:
     val serializer = Serializer.const[IO, String](None)
     val id         = TransactionalId.from("writer").toOption.get
     val settings   = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer).toOption.get
+    val updated    = settings.withTransactionTimeout(5.seconds).toOption.get
 
     assertEquals(settings.transactionalId, id)
     assertEquals(settings.transactionTimeout, TransactionalProducerSettings.DefaultTransactionTimeout)
-    assertEquals(settings.withTransactionTimeout(5.seconds).transactionTimeout, 5.seconds)
-    assertEquals(settings.withTransactionTimeout(5.seconds).withProperty("linger.ms", "5").toOption.get.transactionTimeout, 5.seconds)
+    assertEquals(updated.transactionTimeout, 5.seconds)
+    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.transactionTimeout, 5.seconds)
     assertEquals(settings.withProperty("linger.ms", "5").toOption.get.producer.properties, Map("linger.ms" -> "5"))
 
   test("settings reject the transaction properties the typed model owns"):
     val serializer = Serializer.const[IO, String](None)
     val id         = TransactionalId.from("writer").toOption.get
+    val tooLong    = (Int.MaxValue.toLong + 1L).millis
 
     assertEquals(
-      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, properties = Map("transactional.id" -> "other")).toEither,
-      Left(NonEmptyList.one(SettingsError.ManagedProperty("transactional.id", SettingsError.PropertyScope.Producer)))
+      TransactionalProducerSettings
+        .from(clientSettings, id, serializer, serializer, transactionTimeout = tooLong, properties = Map("transactional.id" -> "other")).toEither,
+      Left(NonEmptyList.of(
+        SettingsError.ManagedProperty("transactional.id", SettingsError.PropertyScope.Producer),
+        SettingsError.DurationExceedsMaximum(SettingsError.DurationField.TransactionTimeout, tooLong)
+      ))
     )
 
   test("the consumer isolation level defaults and is carried by its wither"):
@@ -475,20 +559,22 @@ final class ClientSuite extends FunSuite:
   test("the producer close timeout defaults and is carried by its wither"):
     val serializer = Serializer.const[IO, String](None)
     val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val updated    = settings.withCloseTimeout(5.seconds).toOption.get
 
     assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
-    assertEquals(settings.withCloseTimeout(5.seconds).closeTimeout, 5.seconds)
-    assertEquals(settings.withCloseTimeout(5.seconds).withClient(clientSettings).closeTimeout, 5.seconds)
-    assertEquals(settings.withCloseTimeout(5.seconds).withProperty("linger.ms", "5").toOption.get.closeTimeout, 5.seconds)
+    assertEquals(updated.closeTimeout, 5.seconds)
+    assertEquals(updated.withClient(clientSettings).closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.closeTimeout, 5.seconds)
 
   test("the commit timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val updated      = settings.withCommitTimeout(2.seconds).toOption.get
 
     assertEquals(settings.commitTimeout, ConsumerSettings.DefaultCommitTimeout)
-    assertEquals(settings.withCommitTimeout(2.seconds).commitTimeout, 2.seconds)
-    assertEquals(settings.withCommitTimeout(2.seconds).withCommitRecovery(CommitRecovery.none).commitTimeout, 2.seconds)
-    assertEquals(settings.withCommitTimeout(2.seconds).withProperty("fetch.min.bytes", "1").toOption.get.commitTimeout, 2.seconds)
+    assertEquals(updated.commitTimeout, 2.seconds)
+    assertEquals(updated.withCommitRecovery(CommitRecovery.none).commitTimeout, 2.seconds)
+    assertEquals(updated.withProperty("fetch.min.bytes", "1").toOption.get.commitTimeout, 2.seconds)
 
   test("the commit recovery defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]

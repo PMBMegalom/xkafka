@@ -87,6 +87,27 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   javas = List(JavaSpec.temurin("17")),
   timeoutMinutes = Some(45)
 )
+
+val installValgrind = WorkflowStep.Run(
+  List("sudo apt-get install --yes valgrind"),
+  name = Some("Install Valgrind")
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "native-leaks",
+  name = "Native leak check",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    setupNode,
+    installNativeDependencies,
+    installValgrind,
+    WorkflowStep.Run(List("scripts/native-leak-check.sh"), name = Some("Check the Native downstream application for leaks"))
+  ),
+  oses = List("ubuntu-24.04"),
+  scalas = List("3"),
+  javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(45)
+)
+
 // One of the downstream Native builds links against an installed librdkafka, which is the arrangement the
 // README promises needs no xkafka settings of its own.
 val installLibrdkafka = WorkflowStep.Run(
@@ -129,7 +150,9 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04")) else job
+    if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks")).distinct)
+    else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
+    else job
   }
 }
 

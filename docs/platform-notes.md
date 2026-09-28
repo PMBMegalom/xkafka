@@ -55,6 +55,11 @@ On macOS add a `-L` for the OpenSSL installation as well.
 The backend is `@confluentinc/kafka-javascript`, reached through its librdkafka
 configuration keys. It targets Node.js rather than browsers.
 
+Its producer binding accepts string and buffer header values but not a Kafka
+null header value. Producing `Header(name, None)` therefore raises
+`KafkaException.Unsupported`; it is never changed into empty bytes. The JVM and
+Native backends preserve null header values.
+
 ## Transformations
 
 Serializers, deserializers, producer and consumer settings, committable offsets

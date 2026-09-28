@@ -8,7 +8,7 @@ libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % "@VERSION@"
 
 The `%%%` operator selects the artifact for the platform being built. The same
 code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
-each brings its own backend.
+each selects its platform adapter.
 
 Two modules are published:
 
@@ -47,8 +47,8 @@ import xkafka.*
 val client = KafkaClient[IO]
 ```
 
-The selected artifact supplies the backend, so this line is the same on every
-platform.
+The selected artifact supplies the adapter, so this line is the same on every
+platform. The platform's runtime dependencies are described below.
 
 ## Scala.js
 

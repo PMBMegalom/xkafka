@@ -7,7 +7,7 @@ their respective licenses and are not relicensed as part of xkafka.
 
 | Component | Version | License | Use |
 | --- | --- | --- | --- |
-| [fs2-kafka](https://github.com/typelevel/fs2-kafka) | 4.0.0 | MIT | JVM Kafka backend |
+| [fs2-kafka](https://github.com/typelevel/fs2-kafka) | 4.1.1 | MIT | JVM Kafka backend |
 | [Confluent Kafka JavaScript](https://github.com/confluentinc/confluent-kafka-javascript) | 1.10.1 | MIT | Scala.js Kafka backend |
 | [librdkafka](https://github.com/confluentinc/librdkafka) | 2.15.1 | BSD-2-Clause | Native backend and the native layer used by the JavaScript backend |
 

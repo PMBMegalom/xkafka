@@ -102,6 +102,19 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         val expected = List[(String, Option[List[Byte]])](("a", Some(List[Byte](1))), ("b", Some(List[Byte](2))), ("a", Some(List[Byte](3))))
         assertEquals(observed, expected)
 
+  test(conformance("a header without a value is preserved or rejected explicitly")):
+    withBroker: server =>
+      val topic   = uniqueTopic("null-header")
+      val headers = Headers(Header("missing", None), Header("empty", Some(Chunk.empty)))
+      val headed  = record(topic, Some("key"), Some("value"), validPartition(0), headers)
+
+      produce(server, NonEmptyList.one(headed)).attempt.flatMap:
+        case Left(_: KafkaException.Unsupported) => IO(assertEquals(backend, "js"))
+        case Left(error)                         => IO(fail(s"unexpected error: $error"))
+        case Right(_)                            => consume(server, topic, 1).map: consumed =>
+            assert(backend != "js", "the JavaScript backend must reject the value its wrapper cannot represent")
+            assertEquals(consumed.head.record.headers.values, headers.values)
+
   test(conformance("producing reports metadata for every record")):
     withBroker: server =>
       val topic     = uniqueTopic("metadata")
@@ -294,7 +307,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       val late = ProducerRecord[Option[String], Option[String]](topic, Some("key"), Some("value"))
 
       for
-        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].map(_.withMetadataRefreshInterval(refresh))
+        client   <- ClientSettings.from(NonEmptyList.one(server)).andThen(_.withMetadataRefreshInterval(refresh)).liftTo[IO]
         settings <-
           ConsumerSettings.from(client, uniqueGroup("late"), optionalDeserializer, optionalDeserializer, AutoOffsetReset.Earliest).liftTo[IO]
         outcome <-
@@ -377,20 +390,37 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             // A second consumer naming the same partition takes no share of it, because neither joined a group.
             PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(named))).use: second =>
               for
-                held       <- first.assignment
-                also       <- second.assignment
-                fromFirst  <- first.records.head.compile.lastOrError
-                fromSecond <- second.records.head.compile.lastOrError
-              yield (held, also, fromFirst.record, fromSecond.record)
+                held        <- first.assignment
+                also        <- second.assignment
+                firstChange <- first.assignmentChanges.head.compile.lastOrError
+                laterChange <- first.assignmentChanges.drop(1).head.compile.last.timeoutTo(250.millis, IO.pure(None))
+                fromFirst   <- first.records.head.compile.lastOrError
+                fromSecond  <- second.records.head.compile.lastOrError
+              yield (held, also, firstChange, laterChange, fromFirst.record, fromSecond.record)
           .timeout(90.seconds)
       yield
-        val (held, also, fromFirst, fromSecond) = outcome
+        val (held, also, firstChange, laterChange, fromFirst, fromSecond) = outcome
         assertEquals(held, Set(named), "a named partition should be assigned outright")
         assertEquals(also, Set(named), "a second consumer naming it should hold it too, since no group divides it")
+        assertEquals(firstChange, Set(named), "the direct assignment should be the first assignment change")
+        assertEquals(laterChange, None, "a direct assignment should not report a later change")
         assertEquals(fromFirst.topicPartition, named)
         // Both share a consumer group, and both still read the same record, because naming partitions joins no group.
         assertEquals(fromSecond.topicPartition, named)
         assertEquals(fromSecond.offset, fromFirst.offset, "both consumers should read the same record, not a share of the partition")
+
+  test(conformance("partition streams reject a non-positive queue threshold")):
+    withBroker: server =>
+      for
+        settings <- consumerSettings(server, uniqueGroup("queue-threshold"))
+        outcome  <-
+          PlatformKafkaClient()
+            .consumer(settings, Selection.Partitions(NonEmptySet.one(TopicPartition(validTopic(partitionedTopic), validPartition(0)))))
+            .use(_.partitionedRecords(0).compile.drain).attempt
+      yield outcome match
+        case Left(error: IllegalArgumentException) => assertEquals(error.getMessage, "maxQueuedRecords must be positive")
+        case Left(error)                           => fail(s"unexpected error: $error")
+        case Right(())                             => fail("expected a non-positive queue threshold to fail")
 
   /** librdkafka refuses a seek until the partition it names is being fetched, which holding the assignment does not yet mean. */
   private def whenSeekable(seek: IO[Unit]): IO[Unit] =
@@ -407,7 +437,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         settings <- consumerSettings(server, uniqueGroup("commit-timeout"))
         // A nanosecond cannot cover a round trip, so the outcome does not depend on how fast the broker is. Recovery is
         // off, because the policy would otherwise retry this and report its own exhaustion instead.
-        bounded = settings.withCommitTimeout(1.nanos).withCommitRecovery(CommitRecovery.none)
+        bounded <- settings.withCommitTimeout(1.nanos).map(_.withCommitRecovery(CommitRecovery.none)).liftTo[IO]
         outcome <-
           PlatformKafkaClient().consumer(bounded, Selection.Topics(NonEmptySet.one(topic)))
             .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(60.seconds)
@@ -523,6 +553,40 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               admin.deleteTopics(NonEmptySet.one(topic)).attempt
           .timeout(90.seconds)
       yield assert(outcome.isLeft, s"creating an existing topic should fail, got $outcome")
+
+  test(conformance("creating a topic with an invalid configuration fails")):
+    withBroker: server =>
+      val topic = uniqueTopic("admin-config")
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1, configuration = Map("xkafka.invalid.config" -> "value")).liftTo[IO]
+        outcome  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            admin.createTopics(NonEmptySet.one(newTopic)).attempt.flatTap(_ => admin.deleteTopics(NonEmptySet.one(topic)).attempt).timeout(90.seconds)
+      yield assert(outcome.isLeft, s"creating a topic with an invalid configuration should fail, got $outcome")
+
+  test(conformance("partition growth fails unless its count is positive and larger")):
+    withBroker: server =>
+      val topic = uniqueTopic("admin-grow")
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+        outcomes <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            for
+              invalid <- admin.createPartitions(topic, 0).attempt
+              _       <- admin.createTopics(NonEmptySet.one(newTopic))
+              same    <- admin.createPartitions(topic, 1).attempt
+              _       <- admin.deleteTopics(NonEmptySet.one(topic)).attempt
+            yield (invalid, same)
+          .timeout(90.seconds)
+      yield
+        outcomes._1 match
+          case Left(failure: KafkaException.InvalidValue) => assertEquals(failure.error, ValidationError.NonPositivePartitionCount(0))
+          case other                                      => fail(s"a non-positive partition count should fail validation, got $other")
+        assert(outcomes._2.isLeft, s"growing a topic to its existing size should fail, got ${outcomes._2}")
 
   test(conformance("stopping a consumer returns before its streams drain, and stays stopped")):
     withBroker: server =>
@@ -644,7 +708,13 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               result <- running.joinWithNever.timeout(60.seconds)
             yield result
           .timeout(120.seconds)
-      yield assert(outcome.isLeft, s"a fenced producer should not be able to commit, got $outcome")
+      yield outcome match
+        case Left(failure: KafkaException.BackendFailure) =>
+          assertEquals(failure.retriable, Some(false), failure.getMessage)
+          assertEquals(failure.fatal, Some(true), failure.getMessage)
+          if backend == "jvm" then assertEquals(failure.transactionAbortRequired, None, failure.getMessage)
+          else assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
+        case other => fail(s"a fenced producer should report a backend failure, got $other")
 
   test(conformance("a transaction opened inside another one cannot proceed")):
     withBroker: server =>

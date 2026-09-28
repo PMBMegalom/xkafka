@@ -169,12 +169,14 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
         override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
 
-        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
-          GroupMembership.resolve(batch).flatMap(_.traverse_ {
-            case (ConfluentGroupHandle(consumer), offsets) =>
-              outcome(done => handle.underlying.sendOffsetsToTransaction(committedOffsets(offsets), consumer, timeoutMillis, done))
-            case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
-          })
+        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] = GroupMembership.resolve(batch).use(commitMemberships)
+
+        private def commitMemberships(memberships: List[(GroupHandle, Map[TopicPartition, Offset])]): F[Unit] =
+          memberships.traverse_ : membership =>
+            membership match
+              case (ConfluentGroupHandle(consumer), offsets) =>
+                outcome(done => handle.underlying.sendOffsetsToTransaction(committedOffsets(offsets), consumer, timeoutMillis, done))
+              case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
 
   private def deliveryReport[K, V](
       dispatcher: Dispatcher[F],
@@ -211,8 +213,13 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
   private def rdFailure(error: confluent.RdError): KafkaException.BackendFailure =
     val code = ErrorCode.fromLibrdkafka(error.code)
-    // Derived from the portable code, so the same condition is retriable on every backend. The client's own flag is not always present.
-    new KafkaException.BackendFailure(error.message, Some(code), Some(code.retriable), error.isFatal.toOption)
+    new KafkaException.BackendFailure(
+      error.message,
+      Some(code),
+      error.isRetriable.toOption.orElse(Some(code.retriable)),
+      error.isFatal.toOption,
+      error.isTxnRequiresAbort.toOption
+    )
 
   /** For the calls that report only whether they failed. */
   private def outcome(register: js.Function1[confluent.RdError | Null, Unit] => Unit): F[Unit] =
@@ -238,21 +245,24 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           settings.autoOffsetReset,
           settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel))
         )))
-      dispatcher  <- Dispatcher.sequential[F]
-      assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
+      assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](initialAssignment(selection)))
       // Neither the consume nor the rebalance reporting can carry its own failure out, and a consumer that has lost
       // either one receives nothing further, so the first failure is kept and reported to whoever reads from it.
       failure <- Resource.eval(Deferred[F, Throwable])
-      _       <- Resource.eval(F.delay(underlying.on("rebalance", rebalanced(underlying, dispatcher, assignments, failure))))
       // The client reports a commit's outcome on an event rather than through a callback, so this is the only place a
       // failed commit is observable at all.
-      reported <- Resource.eval(Ref.of[F, Option[Deferred[F, Either[Throwable, Unit]]]](None))
-      _        <- Resource.eval(F.delay(underlying.on("offset.commit", commitReported(dispatcher, reported))))
-      // One commit is in flight at a time, so the next report is unambiguously its own.
+      reported <- Resource.eval(Ref.of[F, Option[PendingCommit]](None))
+      // Recovery and its backoff stay inside this lock, so one logical commit is in flight at a time.
       commits <- Resource.eval(Mutex[F])
       _ <- Resource.make(callback[js.Any](done => underlying.connect((), done)).void)(_ => callback[js.Any](done => underlying.disconnect(done)).void)
-      _ <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
-      _ <- Resource.eval(select(underlying, selection))
+      // These are acquired after the connection, so release removes both listeners and closes their dispatcher before disconnecting the client.
+      dispatcher <- Dispatcher.sequential[F]
+      rebalanceListener = rebalanced(underlying, dispatcher, assignments, failure)
+      _ <- consumerListener(underlying, "rebalance", rebalanceListener)
+      commitListener = commitReported(dispatcher, reported, failure)
+      _      <- consumerListener(underlying, "offset.commit", commitListener)
+      _      <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
+      _      <- Resource.eval(select(underlying, selection))
       polled <- Resource.eval(Channel.bounded[F, confluent.RdMessage](RecordQueueSize))
       // Set by `stopConsuming`, and read before each consume so that no batch already in flight is dropped.
       stopping <- Resource.eval(Deferred[F, Unit])
@@ -262,6 +272,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       // Started after the selection and cancelled before the disconnect that follows it.
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
+
+  private def consumerListener(
+      underlying: confluent.RdConsumer,
+      event: String,
+      listener: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]
+  ): Resource[F, Unit] = Resource.make(F.delay(underlying.on(event, listener)).void)(_ => F.delay(underlying.removeListener(event, listener)).void)
 
   /** node-rdkafka emits the event before it applies the change, and reports only the partitions added or revoked, which differ by rebalance protocol.
     *
@@ -279,21 +295,52 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         F.delay(underlying.assignments()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet)).flatMap(assignments.set)
           // The dispatcher discards this effect's outcome, so an assignment the backend reports in terms this client
           // rejects would otherwise stop the tracking without anything saying so.
-          .onError(failure.complete(_).void)
+          .handleErrorWith(failure.complete(_).void)
       )
 
   /** A commit that ran out of time is classified the way the broker would classify one, so the recovery policy retries it. */
   private val commitTimedOut: KafkaException.BackendFailure =
     new KafkaException.BackendFailure("the commit did not complete within its timeout", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
 
+  private final case class PendingCommit(offsets: Map[TopicPartition, Offset], outcome: Deferred[F, Either[Throwable, Unit]])
+
   private def commitReported(
       dispatcher: Dispatcher[F],
-      reported: Ref[F, Option[Deferred[F, Either[Throwable, Unit]]]]
+      reported: Ref[F, Option[PendingCommit]],
+      failure: Deferred[F, Throwable]
   ): js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit] =
-    (error, _) =>
+    (error, offsets) =>
       val outcome = rdError(error).fold[Either[Throwable, Unit]](Right(()))(failure => Left(rdFailure(failure)))
-      // A report nothing is waiting for is dropped, so one the client raises on its own cannot answer the next commit.
-      dispatcher.unsafeRunAndForget(reported.getAndSet(None).flatMap(_.traverse_(_.complete(outcome).void)))
+      dispatcher.unsafeRunAndForget(
+        portableCommittedOffsets(offsets).attempt.flatMap:
+          case Right(committed) =>
+            // A timed-out report may arrive after another logical commit starts. Only the offsets the event actually
+            // reports can answer the waiter, so a late event for different offsets is harmless.
+            reported.modify:
+              case Some(pending) if pending.offsets == committed => None    -> Some(pending.outcome)
+              case current                                       => current -> None
+            .flatMap(_.traverse_(_.complete(outcome).void))
+          case Left(invalid) =>
+            // An event without a representable offset map cannot be correlated safely. It is a malformed backend
+            // response, so fail both the consumer and the current commit rather than letting either wait silently.
+            failure.complete(invalid).void *> reported.getAndSet(None).flatMap(_.traverse_(_.outcome.complete(Left(invalid)).void))
+      )
+
+  private def portableCommittedOffsets(values: js.Array[confluent.RdTopicPartition]): F[Map[TopicPartition, Offset]] =
+    val listed =
+      F.delay:
+        val raw = values.asInstanceOf[js.Any]
+        if raw == null || js.isUndefined(raw) then throw new KafkaException.InvalidBackendResponse("commit report is missing its offsets")
+        values.toList
+
+    listed.flatMap:
+      _.traverse: value =>
+        val committed = value.asInstanceOf[confluent.RdTopicPartitionOffset]
+        val offset    =
+          committed.offset.toOption.toRight(new KafkaException.InvalidBackendResponse("commit report is missing its offset"))
+            .flatMap(exactOffset("committed offset", _))
+        (portableTopicPartition(value), F.fromEither(offset)).mapN(_ -> _)
+      .map(_.toMap)
 
   private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
     (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)
@@ -326,7 +373,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       topics.traverse_(value => outcome(done => underlying.deleteTopic(value.value, requestTimeoutMillis, done)))
 
     override def createPartitions(topic: Topic, count: Int): F[Unit] =
-      outcome(done => underlying.createPartitions(topic.value, count, requestTimeoutMillis, done))
+      F.fromEither(KafkaAdminClient.validatePartitionCount(count))
+        .flatMap(valid => outcome(done => underlying.createPartitions(topic.value, valid, requestTimeoutMillis, done)))
 
     override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
       F.async_[js.Array[confluent.RdTopicDescription]]: resume =>
@@ -360,6 +408,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           topicPartitions.toSortedSet.toList.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
         F.delay(consumer.assign(assigned)).void
 
+  private def initialAssignment(selection: Selection): Set[TopicPartition] =
+    selection match
+      case Selection.Partitions(topicPartitions) => topicPartitions.toSortedSet.toSet
+      case _: Selection.Subscription             => Set.empty
+
   private def invalidBackendValue(field: String, value: String, error: Any, cause: Throwable = null): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error", cause)
 
@@ -374,11 +427,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private def portableBytes(value: Uint8Array): Chunk[Byte] =
     Chunk.array(int8Array2ByteArray(new Int8Array(value.buffer, value.byteOffset, value.length)))
 
-  private def nodeBuffer(value: Option[Chunk[Byte]]): Uint8Array | Null =
-    value.map: chunk =>
-      val signed = byteArray2Int8Array(chunk.toArray)
-      confluent.Buffer.from(new Uint8Array(signed.buffer, signed.byteOffset, signed.length))
-    .orNull
+  private def nodeBuffer(value: Option[Chunk[Byte]]): Uint8Array | Null = value.map(nodeBuffer).orNull
+
+  private def nodeBuffer(value: Chunk[Byte]): Uint8Array =
+    val signed = byteArray2Int8Array(value.toArray)
+    confluent.Buffer.from(new Uint8Array(signed.buffer, signed.byteOffset, signed.length))
 
   /** librdkafka hands back one single-entry object per header, so duplicate names and their order both survive the round trip. */
   private def portableHeaders(headers: js.UndefOr[js.Array[confluent.RdHeader]]): Headers =
@@ -404,10 +457,20 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
       for
         encoded <- records.traverse(encodeRecord)
-        awaited <- encoded.traverse(record => register.map(record -> _))
-        _       <- F.delay(awaited.toList.foreach((record, token) => enqueue(record, token._1)))
-      yield awaited.traverse((record, token) => token._2.get.flatMap(F.fromEither).map(metadata => record.source -> Some(metadata)))
-        .map(ProducerResult(_))
+        result  <-
+          F.uncancelable: _ =>
+            for
+              awaited <- encoded.traverse(record => register.map(record -> _))
+              tokens = awaited.toList.map((_, token) => token._1).toSet
+              _ <-
+                F.delay(awaited.toList.foreach((record, token) => enqueue(record, token._1)))
+                  // A synchronous failure may follow a successfully enqueued prefix. Its reports are deliberately
+                  // ignored because the outer effect says the batch was not wholly accepted; every registration is
+                  // nevertheless rolled back, including records the backend never saw.
+                  .onError(_ => pending.update(_ -- tokens))
+            yield awaited.traverse((record, token) => token._2.get.flatMap(F.fromEither).map(metadata => record.source -> Some(metadata)))
+              .map(ProducerResult(_))
+      yield result
 
     private def register: F[(Double, Deferred[F, Either[Throwable, RecordMetadata]])] =
       for
@@ -430,10 +493,11 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       ignore(enqueued)
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord[K, V]] =
-      (
-        settings.keySerializer.serialize(record.topic, record.headers, record.key),
-        settings.valueSerializer.serialize(record.topic, record.headers, record.value)
-      ).mapN((key, value) => EncodedRecord(record, key, value, rdHeaders(record.headers)))
+      rdHeaders(record.headers).flatMap: headers =>
+        (
+          settings.keySerializer.serialize(record.topic, record.headers, record.key),
+          settings.valueSerializer.serialize(record.topic, record.headers, record.value)
+        ).mapN((key, value) => EncodedRecord(record, key, value, headers))
 
   /** Both clients read metadata the same way, so the request and the reading of it are shared. */
   private def topicMetadata(read: js.Any => F[confluent.RdMetadata], topic: Option[String]): F[js.Array[confluent.RdTopicMetadata]] =
@@ -450,8 +514,12 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     .toJSArray
 
   /** librdkafka takes headers as an ordered array of single-entry objects, so duplicate names keep their produced order. */
-  private def rdHeaders(headers: Headers): js.Array[confluent.RdHeader] =
-    headers.values.map(header => confluent.Values.rdHeader(header.key, nodeBuffer(header.value))).toJSArray
+  private def rdHeaders(headers: Headers): F[js.Array[confluent.RdHeader]] =
+    headers.values.toList.traverse: header =>
+      header.value match
+        case Some(value) => F.pure(confluent.Values.rdHeader(header.key, nodeBuffer(value)))
+        case None => F.raiseError(new KafkaException.Unsupported(s"the JavaScript backend cannot produce header '${header.key}' without a value"))
+    .map(_.toJSArray)
 
   private final case class EncodedRecord[K, V](
       source: ProducerRecord[K, V],
@@ -467,7 +535,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       polled: Channel[F, confluent.RdMessage],
       stopping: Deferred[F, Unit],
       random: Random[F],
-      reported: Ref[F, Option[Deferred[F, Either[Throwable, Unit]]]],
+      reported: Ref[F, Option[PendingCommit]],
       commits: Mutex[F],
       failure: Deferred[F, Throwable]
   ) extends KafkaConsumer[F, K, V]:
@@ -485,24 +553,29 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     private def requested(topicPartitions: Set[TopicPartition]): js.Array[confluent.RdTopicPartition] =
       topicPartitions.iterator.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
 
-    private val offsetCommitter: OffsetCommitter[F] =
-      CommitRecovery.recovering(
-        new OffsetCommitter[F]:
-          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
-            commits.lock.surround(
-              Deferred[F, Either[Throwable, Unit]].flatMap: outcome =>
-                reported.set(Some(outcome)) *> F.delay(underlying.commit(committedOffsets(offsets))).void *>
-                  outcome.get.timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut))).flatMap(F.fromEither)
-                    // A report arriving after the wait has given up must not complete whatever commits next.
-                    .guarantee(reported.set(None))
-            )
+    private val reportingOffsetCommitter: OffsetCommitter[F] =
+      new OffsetCommitter[F]:
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+          Deferred[F, Either[Throwable, Unit]].flatMap: outcome =>
+            val pending = PendingCommit(offsets, outcome)
+            F.uncancelable: poll =>
+              reported.set(Some(pending)) *>
+                (F.delay(underlying.commit(committedOffsets(offsets))).void *>
+                  poll(outcome.get.timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut))).flatMap(F.fromEither)))
+                  // This covers cancellation and a synchronous throw from `commit`, not only the wait itself. It removes
+                  // this attempt only, since its event may already have removed it before completing the Deferred.
+                  .guarantee(reported.update(_.filterNot(_ == pending)))
 
-          /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
-          override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)))
-        ,
-        settings.commitRecovery,
-        random
-      )
+        /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
+        override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)), _ => F.unit)
+
+    private val recoveringOffsetCommitter = CommitRecovery.recovering(reportingOffsetCommitter, settings.commitRecovery, random)
+
+    private val offsetCommitter: OffsetCommitter[F] =
+      new OffsetCommitter[F]:
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = commits.lock.surround(recoveringOffsetCommitter.commit(offsets))
+
+        override private[xkafka] def membership: GroupMembership[F] = recoveringOffsetCommitter.membership
 
     /** Pulls batches from librdkafka. An empty batch means the consume timeout elapsed with nothing available. */
     /** The consumer's single consume, which both its records and its rebalance events come from.
@@ -526,7 +599,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         case unavailable: KafkaException.BackendFailure if unavailable.code.contains(ErrorCode.UnknownTopicOrPartition) => js.Array()
 
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
-      assignments.discrete.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+      assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def assignment: F[Set[TopicPartition]] =
       F.delay(underlying.assignments()).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))

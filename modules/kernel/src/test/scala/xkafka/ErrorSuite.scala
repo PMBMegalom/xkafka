@@ -33,6 +33,7 @@ final class ErrorSuite extends FunSuite:
         code = Some(ErrorCode.RequestTimedOut),
         retriable = Some(true),
         fatal = Some(false),
+        transactionAbortRequired = Some(true),
         cause = cause
       )
 
@@ -40,6 +41,7 @@ final class ErrorSuite extends FunSuite:
     assertEquals(error.code, Some(ErrorCode.RequestTimedOut))
     assertEquals(error.retriable, Some(true))
     assertEquals(error.fatal, Some(false))
+    assertEquals(error.transactionAbortRequired, Some(true))
     assertEquals(error.getCause, cause)
     assertEquals(error.getMessage, "Kafka backend failure [RequestTimedOut]: request failed")
 

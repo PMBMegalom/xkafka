@@ -49,3 +49,10 @@ and keeps its password out of `toString`.
 
 A rejected broker certificate or an incorrect password fails the call as
 `KafkaException.BackendFailure`.
+
+On the JVM and Native, `BackendFailure.code` distinguishes these as
+`SslAuthenticationFailed` and `SaslAuthenticationFailed`. The Confluent
+JavaScript binding reports both through its transport error code before the
+callback reaches xkafka, so Scala.js exposes `NetworkException` instead. Use the
+failure detail and broker logs to distinguish certificate and credential
+failures on Scala.js.

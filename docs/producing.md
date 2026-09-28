@@ -22,9 +22,10 @@ val program =
 ## Two stages
 
 `produce` returns `F[F[ProducerResult]]`. The outer effect completes once the
-backend has accepted the records for delivery, and the inner one once the broker
-has acknowledged them. Holding the inner effect lets several batches be in
-flight at once:
+backend has accepted the records for delivery, and the inner one once the
+backend reports their delivery outcome. With acknowledgements enabled this
+includes the broker's response. Holding the inner effect lets several batches be
+in flight at once:
 
 ```scala
 for
@@ -44,10 +45,10 @@ For a stream of batches, use `pipe`:
 batches.through(producer.pipe(maxInFlight = 256))
 ```
 
-`pipe` enqueues later batches while earlier ones are still being acknowledged,
-and emits results in the order the batches arrived. `maxInFlight` sets how many
-batches may await the broker at once. Mapping `produceAndAwait` over a stream
-instead would send one batch at a time.
+`pipe` enqueues later batches while earlier ones still await their delivery
+outcome, and emits results in the order the batches arrived. `maxInFlight` sets
+how many batches may await delivery at once. Mapping `produceAndAwait` over a
+stream instead would send one batch at a time.
 
 To write records and consumer offsets atomically, use a transactional producer.
 See [Transactions](transactions.md).
@@ -56,7 +57,7 @@ See [Transactions](transactions.md).
 
 A `ProducerResult` pairs every record with the metadata its backend reported for
 it, as a `NonEmptyList[(ProducerRecord, Option[RecordMetadata])]`. A `None`
-means the backend acknowledged the record but reported no metadata for it.
+means the backend completed delivery without reporting metadata for the record.
 
 `RecordMetadata` carries the topic-partition, and the offset and timestamp when
 the backend supplies them.
@@ -98,24 +99,26 @@ it. It defaults to `Acks.AllReplicas`:
 settings.withAcks(Acks.Leader)
 ```
 
-| value | the broker replies once | a record is lost if |
+| value | when delivery can complete | a record is lost if |
 | --- | --- | --- |
-| `Acks.NoAcknowledgement` | the record is sent | delivery fails for any reason |
+| `Acks.NoAcknowledgement` | the producer sends it without waiting for a broker response | delivery fails without the caller knowing |
 | `Acks.Leader` | the partition leader has it | the leader fails before a follower copies it |
 | `Acks.AllReplicas` | every in-sync replica has it | every in-sync replica fails |
 
 ## Releasing a producer
 
-Releasing the resource delivers the records the producer has already accepted,
-then closes it. `closeTimeout` sets how long that takes at most, and defaults to
+Releasing the resource first waits for records the producer has already accepted,
+then closes the backend. `closeTimeout` bounds that delivery wait and defaults to
 sixty seconds:
 
 ```scala
 settings.withCloseTimeout(10.seconds)
 ```
 
-Records still undelivered when the timeout expires are dropped. Lower the
-timeout for a faster shutdown, at the cost of losing more on the way out.
+Records still undelivered when the timeout expires are dropped. Final backend
+teardown happens afterwards, so the complete resource finalizer may take longer
+than `closeTimeout`. Lower the timeout for a faster delivery wait, at the cost of
+losing more on the way out.
 
 @:callout(info)
 `closeTimeout` applies to producers. There is no equivalent setting for

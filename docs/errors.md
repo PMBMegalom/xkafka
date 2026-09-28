@@ -1,6 +1,9 @@
 # Errors
 
-Every failure xkafka raises is a `KafkaException`.
+Failures xkafka classifies from Kafka or its portable data model are
+`KafkaException` values. User-supplied effects keep their own failures, and
+ordinary method precondition failures such as a non-positive partition-stream
+queue threshold use their usual exception type.
 
 | case | raised when |
 | --- | --- |
@@ -15,13 +18,16 @@ survives being lifted into an effect.
 
 ## Backend failures
 
-`BackendFailure` preserves the original cause and carries a portable
-`ErrorCode` along with retriable and fatal classifications. A `None` for any of
-those means the backend did not make that classification available.
+`BackendFailure` preserves an original cause when one is available and carries a portable
+`ErrorCode` along with retriable, fatal, and transaction-abort-required
+classifications. A `None` for any of those means the backend did not make that
+classification available.
 
-`retriable` answers the same way on all three platforms for the same condition.
-`ErrorCode.retriable` gives that answer directly, and commit recovery uses it to
-decide what to retry:
+The classifications preserve what a backend reports. When a backend supplies
+only a code, `retriable` falls back to the portable `ErrorCode.retriable` answer;
+`fatal` and `transactionAbortRequired` remain `None` when unavailable. Code that
+needs one portable retry decision should use `ErrorCode.retriable`; commit
+recovery does so as well:
 
 ```scala
 if failure.code.exists(_.retriable) then retry else give up

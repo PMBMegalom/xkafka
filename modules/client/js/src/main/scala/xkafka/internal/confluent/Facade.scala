@@ -79,7 +79,7 @@ private[xkafka] trait RdProducer extends js.Object:
   ): Unit = js.native
 
 /** One header. librdkafka keeps these in an array, so duplicate names and their order both survive. */
-private[xkafka] type RdHeader = js.Dictionary[Uint8Array | String]
+private[xkafka] type RdHeader = js.Dictionary[Uint8Array | String | Null]
 
 @js.native
 private[xkafka] trait RdConsumer extends js.Object:
@@ -125,6 +125,8 @@ private[xkafka] trait RdConsumer extends js.Object:
   def setDefaultConsumeTimeout(timeoutMs: Int): Unit = js.native
 
   def on(event: String, listener: js.Function2[RdError | Null, js.Array[RdTopicPartition], Unit]): this.type = js.native
+
+  def removeListener(event: String, listener: js.Function2[RdError | Null, js.Array[RdTopicPartition], Unit]): this.type = js.native
 
 @js.native
 @JSImport("@confluentinc/kafka-javascript", "AdminClient")
@@ -198,10 +200,11 @@ private[xkafka] trait RdPartitionMetadata extends js.Object:
 
 @js.native
 private[xkafka] trait RdError extends js.Object:
-  val message: String                  = js.native
-  val code: Int                        = js.native
-  val isFatal: js.UndefOr[Boolean]     = js.native
-  val isRetriable: js.UndefOr[Boolean] = js.native
+  val message: String                         = js.native
+  val code: Int                               = js.native
+  val isFatal: js.UndefOr[Boolean]            = js.native
+  val isRetriable: js.UndefOr[Boolean]        = js.native
+  val isTxnRequiresAbort: js.UndefOr[Boolean] = js.native
 
 @js.native
 private[xkafka] trait RdDeliveryReport extends js.Object:
@@ -283,7 +286,7 @@ private[xkafka] object Values:
     result("timeout") = 10000
     result
 
-  def rdHeader(name: String, value: Uint8Array | Null): RdHeader =
-    val result = js.Dictionary.empty[Uint8Array | String]
-    result(name) = if value == null then "" else value.asInstanceOf[Uint8Array]
+  def rdHeader(name: String, value: Uint8Array): RdHeader =
+    val result = js.Dictionary.empty[Uint8Array | String | Null]
+    result(name) = value
     result

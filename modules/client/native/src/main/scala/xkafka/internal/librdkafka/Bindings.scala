@@ -86,7 +86,7 @@ private[xkafka] object Bindings:
 
   def xkafka_batch_timestamp_at(batch: CVoidPtr, index: CSize): CLongLong = extern
 
-  def xkafka_batch_destroy(producer: CVoidPtr, batch: CVoidPtr): Unit = extern
+  def xkafka_batch_free(batch: CVoidPtr): Unit = extern
 
   def xkafka_consumer_new(
       brokers: CString,
@@ -311,13 +311,48 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_producer_init_transactions(producer: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+  def xkafka_producer_init_transactions(
+      producer: CVoidPtr,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt],
+      fatal: Ptr[CInt],
+      retriable: Ptr[CInt],
+      transactionAbortRequired: Ptr[CInt]
+  ): CInt = extern
 
-  def xkafka_producer_begin_transaction(producer: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+  def xkafka_producer_begin_transaction(
+      producer: CVoidPtr,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt],
+      fatal: Ptr[CInt],
+      retriable: Ptr[CInt],
+      transactionAbortRequired: Ptr[CInt]
+  ): CInt = extern
 
-  def xkafka_producer_commit_transaction(producer: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+  def xkafka_producer_commit_transaction(
+      producer: CVoidPtr,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt],
+      fatal: Ptr[CInt],
+      retriable: Ptr[CInt],
+      transactionAbortRequired: Ptr[CInt]
+  ): CInt = extern
 
-  def xkafka_producer_abort_transaction(producer: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+  def xkafka_producer_abort_transaction(
+      producer: CVoidPtr,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt],
+      fatal: Ptr[CInt],
+      retriable: Ptr[CInt],
+      transactionAbortRequired: Ptr[CInt]
+  ): CInt = extern
 
   def xkafka_consumer_group_metadata(consumer: CVoidPtr): CVoidPtr = extern
 
@@ -333,7 +368,10 @@ private[xkafka] object Bindings:
       timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
-      errorCode: Ptr[CInt]
+      errorCode: Ptr[CInt],
+      fatal: Ptr[CInt],
+      retriable: Ptr[CInt],
+      transactionAbortRequired: Ptr[CInt]
   ): CInt = extern
 
   def xkafka_consumer_commit(

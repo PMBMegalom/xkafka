@@ -120,6 +120,7 @@ object KafkaException:
       val code: Option[ErrorCode] = None,
       val retriable: Option[Boolean] = None,
       val fatal: Option[Boolean] = None,
+      val transactionAbortRequired: Option[Boolean] = None,
       cause: Throwable = null
   ) extends KafkaException(BackendFailure.message(detail, code), cause)
 

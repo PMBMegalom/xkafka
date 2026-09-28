@@ -101,11 +101,11 @@ partition it came from. Returning `CommitNow` is what triggers the commit.
 processed.
 
 @:callout(warning)
-Consumers join their group at different moments on different backends. The Java
-client joins when the application polls, so a consumer nobody reads holds no
-partitions. The JavaScript and Native backends join when the consumer resource is
-allocated, so a consumer nobody reads still takes a share of the partitions and
-does not give them back. Release consumers you are not reading.
+Consumers join their group at different moments on different backends. The JVM
+backend begins group work when its record stream is pulled, so a consumer nobody
+reads holds no partitions. The JavaScript and Native backends start a background
+poll when the consumer resource is allocated, so a consumer nobody reads still
+takes a share of the partitions. Release consumers you are not reading.
 @:@
 
 ## Stopping
@@ -143,8 +143,9 @@ consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>
 }.parJoinUnbounded
 ```
 
-Every emitted stream must be consumed concurrently. `maxQueuedRecords` bounds
-how far ahead each partition buffers before it is held back.
+Every emitted stream must be consumed concurrently. `maxQueuedRecords` is the
+point at which a shared-source backend pauses a partition. Records already in
+flight can temporarily take its buffer past that threshold.
 
 @:callout(warning)
 A consumer that subscribes to a topic before that topic exists sees it once the

@@ -115,24 +115,35 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     Resource.eval(Ref.of[F, Gate](Open(0))).flatMap: gate =>
       Resource.make(acquire.map(handle => new NativeClient(handle, gate)))(client => client.close >> F.blocking(destroy(client.handle)))
 
-  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
+  /** Owns producer batches outside their acknowledgement fibers, so resource release can cancel those fibers, flush and destroy the producer within
+    * its configured bound, and only then free any batch slots the backend could still have referenced.
+    */
+  private def producerHandle(acquire: F[CVoidPtr], destroy: CVoidPtr => Unit): Resource[F, NativeProducerHandle] =
     for
-      client <-
-        nativeClient(
-          createProducer(settings.client, settings.properties.updated("acks", settings.acks.property)),
-          handle => Bindings.xkafka_producer_destroy(handle, settings.closeTimeout.toMillis.toInt)
-        )
-      // Outstanding acknowledgements finish before the client.handle they poll is destroyed.
-      supervisor <- Supervisor[F](await = true)
+      owned  <- Resource.make(Ref.of[F, Set[CVoidPtr]](Set.empty))(releaseBatches)
+      client <- nativeClient(acquire, destroy)
+      // Release cancels acknowledgement fibers before closing the client instead of waiting indefinitely for them.
+      supervisor <- Supervisor[F](await = false)
       batches    <- Resource.eval(Semaphore[F](1))
-    yield new LibrdkafkaProducer(client, supervisor, batches, settings)
+    yield NativeProducerHandle(client, supervisor, batches, owned)
+
+  private def releaseBatches(owned: Ref[F, Set[CVoidPtr]]): F[Unit] =
+    owned.getAndSet(Set.empty).flatMap(values => F.blocking(values.foreach(Bindings.xkafka_batch_free)))
+
+  private final case class NativeProducerHandle(client: NativeClient, supervisor: Supervisor[F], batches: Semaphore[F], owned: Ref[F, Set[CVoidPtr]])
+
+  override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
+    producerHandle(
+      createProducer(settings.client, settings.properties.updated("acks", settings.acks.property)),
+      handle => Bindings.xkafka_producer_destroy(handle, settings.closeTimeout.toMillis.toInt)
+    ).map(handle => new LibrdkafkaProducer(handle.client, handle.supervisor, handle.batches, handle.owned, settings))
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
       client      <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
       _           <- Resource.eval(client(select(client.handle, selection)))
       polled      <- Resource.eval(Channel.bounded[F, NativeRecord](RecordQueueSize))
-      assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](Set.empty))
+      assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](initialAssignment(selection)))
       // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
       stopping <- Resource.eval(Deferred[F, Unit])
       // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
@@ -211,8 +222,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     val timeoutMillis = settings.transactionTimeout.toMillis.toInt
     for
-      client <-
-        nativeClient(
+      handle <-
+        producerHandle(
           createProducer(
             settings.producer.client,
             settings.producer.properties.updated("acks", settings.producer.acks.property) ++
@@ -220,19 +231,32 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           ),
           handle => Bindings.xkafka_producer_destroy(handle, settings.producer.closeTimeout.toMillis.toInt)
         )
-      supervisor <- Supervisor[F](await = true)
-      batches    <- Resource.eval(Semaphore[F](1))
-      _          <- Resource.eval(client(initTransactions(client.handle, timeoutMillis)))
+      _ <- Resource.eval(handle.client(initTransactions(handle.client.handle, timeoutMillis)))
       // One transactional id carries one transaction at a time, so this keeps concurrent callers out of each other's.
       lock <- Resource.eval(Mutex[F])
-    yield new LibrdkafkaTransactionalProducer(client, new LibrdkafkaProducer(client, supervisor, batches, settings.producer), lock, timeoutMillis)
+    yield new LibrdkafkaTransactionalProducer(
+      handle.client,
+      new LibrdkafkaProducer(handle.client, handle.supervisor, handle.batches, handle.owned, settings.producer),
+      lock,
+      timeoutMillis
+    )
 
   private def initTransactions(producer: CVoidPtr, timeoutMillis: Int): Unit =
     Zone.acquire: zone =>
-      given Zone             = zone
-      val (error, errorCode) = errorSlots
-      if Bindings.xkafka_producer_init_transactions(producer, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode) != 0 then
-        throw nativeError(error, errorCode)
+      given Zone                                                         = zone
+      val (error, errorCode, fatal, retriable, transactionAbortRequired) = classifiedErrorSlots
+      val result                                                         =
+        Bindings.xkafka_producer_init_transactions(
+          producer,
+          timeoutMillis,
+          error,
+          ErrorBufferSize.toUSize,
+          errorCode,
+          fatal,
+          retriable,
+          transactionAbortRequired
+        )
+      if result != 0 then throw classifiedNativeError(error, errorCode, fatal, retriable, transactionAbortRequired)
 
   private final class LibrdkafkaTransactionalProducer[K, V](client: NativeClient, records: KafkaProducer[F, K, V], lock: Mutex[F], timeoutMillis: Int)
       extends KafkaTransactionalProducer[F, K, V]:
@@ -249,33 +273,56 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
         override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
 
-        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
-          GroupMembership.resolve(batch).flatMap(_.traverse_ {
-            case (LibrdkafkaGroupHandle(metadata), offsets) => client(sendOffsets(metadata, offsets))
-                .guarantee(F.blocking(Bindings.xkafka_consumer_group_metadata_destroy(metadata)))
-            case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
-          })
+        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] = GroupMembership.resolve(batch).use(commitMemberships)
+
+        private def commitMemberships(memberships: List[(GroupHandle, Map[TopicPartition, Offset])]): F[Unit] =
+          memberships.traverse_ : membership =>
+            membership match
+              case (LibrdkafkaGroupHandle(metadata), offsets) => client(sendOffsets(metadata, offsets))
+              case (other, _)                                 => F.raiseError(GroupMembership.unrecognised(other))
 
     private def begin(): Unit =
       Zone.acquire: zone =>
-        given Zone             = zone
-        val (error, errorCode) = errorSlots
-        if Bindings.xkafka_producer_begin_transaction(client.handle, error, ErrorBufferSize.toUSize, errorCode) != 0 then
-          throw nativeError(error, errorCode)
+        given Zone                                                         = zone
+        val (error, errorCode, fatal, retriable, transactionAbortRequired) = classifiedErrorSlots
+        val result                                                         =
+          Bindings
+            .xkafka_producer_begin_transaction(client.handle, error, ErrorBufferSize.toUSize, errorCode, fatal, retriable, transactionAbortRequired)
+        if result != 0 then throw classifiedNativeError(error, errorCode, fatal, retriable, transactionAbortRequired)
 
     private def commit(): Unit =
       Zone.acquire: zone =>
-        given Zone             = zone
-        val (error, errorCode) = errorSlots
-        if Bindings.xkafka_producer_commit_transaction(client.handle, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode) != 0 then
-          throw nativeError(error, errorCode)
+        given Zone                                                         = zone
+        val (error, errorCode, fatal, retriable, transactionAbortRequired) = classifiedErrorSlots
+        val result                                                         =
+          Bindings.xkafka_producer_commit_transaction(
+            client.handle,
+            timeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode,
+            fatal,
+            retriable,
+            transactionAbortRequired
+          )
+        if result != 0 then throw classifiedNativeError(error, errorCode, fatal, retriable, transactionAbortRequired)
 
     private def abort(): Unit =
       Zone.acquire: zone =>
-        given Zone             = zone
-        val (error, errorCode) = errorSlots
-        if Bindings.xkafka_producer_abort_transaction(client.handle, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode) != 0 then
-          throw nativeError(error, errorCode)
+        given Zone                                                         = zone
+        val (error, errorCode, fatal, retriable, transactionAbortRequired) = classifiedErrorSlots
+        val result                                                         =
+          Bindings.xkafka_producer_abort_transaction(
+            client.handle,
+            timeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode,
+            fatal,
+            retriable,
+            transactionAbortRequired
+          )
+        if result != 0 then throw classifiedNativeError(error, errorCode, fatal, retriable, transactionAbortRequired)
 
     private def sendOffsets(metadata: CVoidPtr, offsets: Map[TopicPartition, Offset]): Unit =
       if offsets.nonEmpty then
@@ -290,8 +337,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               topics(index) = toCString(topicPartition.topic.value)
               partitions(index) = topicPartition.partition.value
               nativeOffsets(index) = offset.value
-          val (error, errorCode) = errorSlots
-          val result             =
+          val (error, errorCode, fatal, retriable, transactionAbortRequired) = classifiedErrorSlots
+          val result                                                         =
             Bindings.xkafka_producer_send_offsets(
               client.handle,
               metadata,
@@ -302,9 +349,12 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               timeoutMillis,
               error,
               ErrorBufferSize.toUSize,
-              errorCode
+              errorCode,
+              fatal,
+              retriable,
+              transactionAbortRequired
             )
-          if result != 0 then throw nativeError(error, errorCode)
+          if result != 0 then throw classifiedNativeError(error, errorCode, fatal, retriable, transactionAbortRequired)
 
   override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
     nativeClient(createAdmin(settings), Bindings.xkafka_admin_destroy).map(new LibrdkafkaAdminClient(_))
@@ -335,7 +385,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
     override def deleteTopics(topics: NonEmptySet[Topic]): F[Unit] = client(delete(topics.toSortedSet.toVector))
 
-    override def createPartitions(topic: Topic, count: Int): F[Unit] = client(addPartitions(topic, count))
+    override def createPartitions(topic: Topic, count: Int): F[Unit] =
+      F.fromEither(KafkaAdminClient.validatePartitionCount(count)).flatMap(valid => client(addPartitions(topic, valid)))
 
     /** Topic metadata already reports what the cluster holds, so this asks for that rather than a second admin call. */
     override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
@@ -348,8 +399,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       new KafkaException.BackendFailure(
         s"the cluster has no topic '${topic.value}'",
         Some(ErrorCode.UnknownTopicOrPartition),
-        retriable = Some(false),
-        fatal = Some(false)
+        retriable = Some(false)
       )
 
     private def create(topics: Vector[NewTopic]): Unit =
@@ -442,6 +492,11 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       case Selection.Partitions(topicPartitions) => assignPartitions(consumer, topicPartitions)
       case subscription: Selection.Subscription  => subscribeTopics(consumer, subscription)
 
+  private def initialAssignment(selection: Selection): Set[TopicPartition] =
+    selection match
+      case Selection.Partitions(topicPartitions) => topicPartitions.toSortedSet.toSet
+      case _: Selection.Subscription             => Set.empty
+
   /** Names the partitions to read directly, so the consumer joins no group and its assignment never changes. */
   private def assignPartitions(consumer: CVoidPtr, topicPartitions: NonEmptySet[TopicPartition]): Unit =
     Zone.acquire: zone =>
@@ -508,7 +563,24 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
   private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure =
     val classified = ErrorCode.fromLibrdkafka(!code)
-    new KafkaException.BackendFailure(fromCString(error), Some(classified), retriable = Some(classified.retriable), fatal = Some(false))
+    new KafkaException.BackendFailure(fromCString(error), Some(classified), retriable = Some(classified.retriable))
+
+  private def classifiedNativeError(
+      error: CString,
+      code: Ptr[CInt],
+      fatal: Ptr[CInt],
+      retriable: Ptr[CInt],
+      transactionAbortRequired: Ptr[CInt]
+  ): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(
+      fromCString(error),
+      Some(ErrorCode.fromLibrdkafka(!code)),
+      nativeFlag(retriable),
+      nativeFlag(fatal),
+      nativeFlag(transactionAbortRequired)
+    )
+
+  private def nativeFlag(value: Ptr[CInt]): Option[Boolean] = Option.when(!value >= 0)(!value != 0)
 
   /** Allocates the out-parameters a shim call reports a failure through. They live in this frame, so concurrent calls cannot share them. */
   private def errorSlots(using Zone): (CString, Ptr[CInt]) =
@@ -516,6 +588,16 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     val code  = alloc[CInt](1)
     !code = 0
     (error, code)
+
+  private def classifiedErrorSlots(using Zone): (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) =
+    val (error, code)            = errorSlots
+    val fatal                    = alloc[CInt](1)
+    val retriable                = alloc[CInt](1)
+    val transactionAbortRequired = alloc[CInt](1)
+    !fatal = -1
+    !retriable = -1
+    !transactionAbortRequired = -1
+    (error, code, fatal, retriable, transactionAbortRequired)
 
   private def backendFailure(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
 
@@ -541,6 +623,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       client: NativeClient,
       supervisor: Supervisor[F],
       batches: Semaphore[F],
+      owned: Ref[F, Set[CVoidPtr]],
       settings: ProducerSettings[F, K, V]
   ) extends KafkaProducer[F, K, V]:
 
@@ -553,17 +636,31 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
       for
         encoded <- records.traverse(encodeRecord)
-        // Delivery reports are served from whichever batch is being awaited, so the slots they write into are
-        // only ever touched by one call at a time.
-        batch <- batches.permit.use(_ => client(enqueue(encoded)))
-        // The batch is heap allocated and librdkafka writes into it after the enqueue returns, so releasing it
-        // is owned by a supervised fiber. Dropping the acknowledgement therefore cannot leak it.
-        awaiting <-
-          supervisor.supervise(
-            (awaitDelivery(batch) *> batches.permit.use(_ => client(awaitBatch(batch, records))))
-              .guarantee(batches.permit.use(_ => client(Bindings.xkafka_batch_destroy(client.handle, batch))))
-          )
-      yield awaiting.joinWithNever
+        result  <-
+          F.uncancelable: _ =>
+            for
+              batch <- client(allocateBatch(encoded.size))
+              _     <- owned.update(_ + batch)
+              // Delivery reports are served from whichever batch is being awaited, so the slots they write into are
+              // only ever touched by one call at a time.
+              enqueued <- batches.permit.use(_ => client(enqueue(batch, encoded))).attempt
+              result   <-
+                enqueued match
+                  case Right(_) => superviseBatch(batch, awaitDelivery(batch) *> batches.permit.use(_ => client(awaitBatch(batch, records))))
+                  // A prefix can already belong to librdkafka when a later enqueue fails. It keeps its supervised cleanup,
+                  // while the caller receives the failure saying that the complete batch was not accepted.
+                  case Left(failure) => superviseBatch(batch, awaitDelivery(batch)).void *> F.raiseError(failure)
+            yield result
+      yield result
+
+    private def superviseBatch[A](batch: CVoidPtr, result: F[A]): F[F[A]] =
+      supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch))).map(_.joinWithNever)
+
+    private def releaseBatchWhenComplete(batch: CVoidPtr): F[Unit] =
+      batches.permit.use(_ => F.blocking(Bindings.xkafka_batch_pending(batch).toInt)).flatMap: pending =>
+        if pending == 0 then
+          owned.modify(current => (current - batch, current.contains(batch))).flatMap(F.whenA(_)(F.blocking(Bindings.xkafka_batch_free(batch))))
+        else F.unit
 
     /** Serves delivery reports until this batch has all of its own.
       *
@@ -583,40 +680,35 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         settings.valueSerializer.serialize(record.topic, record.headers, record.value)
       ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
 
-    private def enqueue(records: NonEmptyList[EncodedRecord]): CVoidPtr =
-      val batch = Bindings.xkafka_batch_new(records.size.toUSize)
-      if batch == null then throw backendFailure("could not allocate a producer batch")
+    private def allocateBatch(size: Int): CVoidPtr =
+      val batch = Bindings.xkafka_batch_new(size.toUSize)
+      if batch == null then throw backendFailure("could not allocate a producer batch") else batch
 
-      try
-        Zone.acquire: zone =>
-          given Zone             = zone
-          val (error, errorCode) = errorSlots
-          records.toList.foreach: record =>
-            val (keyPointer, keySize)     = cBytes(record.key)
-            val (valuePointer, valueSize) = cBytes(record.value)
-            val headers                   = nativeHeaders(record.headers, error, errorCode)
-            val result                    =
-              Bindings.xkafka_batch_add(
-                client.handle,
-                batch,
-                toCString(record.topic.value),
-                record.partition.fold(UnassignedPartition)(_.value),
-                record.timestamp.fold(-1L)(_.epochMillis),
-                keyPointer,
-                keySize,
-                valuePointer,
-                valueSize,
-                headers,
-                error,
-                ErrorBufferSize.toUSize,
-                errorCode
-              )
-            if result != 0 then throw nativeError(error, errorCode)
-        batch
-      catch
-        case failure: Throwable =>
-          Bindings.xkafka_batch_destroy(client.handle, batch)
-          throw failure
+    private def enqueue(batch: CVoidPtr, records: NonEmptyList[EncodedRecord]): Unit =
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        records.toList.foreach: record =>
+          val (keyPointer, keySize)     = cBytes(record.key)
+          val (valuePointer, valueSize) = cBytes(record.value)
+          val headers                   = nativeHeaders(record.headers, error, errorCode)
+          val result                    =
+            Bindings.xkafka_batch_add(
+              client.handle,
+              batch,
+              toCString(record.topic.value),
+              record.partition.fold(UnassignedPartition)(_.value),
+              record.timestamp.fold(-1L)(_.epochMillis),
+              keyPointer,
+              keySize,
+              valuePointer,
+              valueSize,
+              headers,
+              error,
+              ErrorBufferSize.toUSize,
+              errorCode
+            )
+          if result != 0 then throw nativeError(error, errorCode)
 
     private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
       val native = Bindings.xkafka_headers_new(headers.values.size.toUSize)
@@ -692,16 +784,18 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         new OffsetCommitter[F]:
           override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
 
-          /** librdkafka names a group by the metadata its consumer carries, which also fences a member the group has already replaced.
-            *
-            * The metadata is freshly allocated here and owned by whoever reads it.
-            */
+          /** librdkafka names a group by freshly allocated metadata, which also fences a member the group has already replaced. */
           override private[xkafka] val membership: GroupMembership[F] =
-            GroupMembership.Backend(client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))))
+            GroupMembership.Backend(client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))), releaseGroupMetadata)
         ,
         settings.commitRecovery,
         random
       )
+
+    private def releaseGroupMetadata(handle: GroupHandle): F[Unit] =
+      handle match
+        case LibrdkafkaGroupHandle(metadata) => F.blocking(Bindings.xkafka_consumer_group_metadata_destroy(metadata))
+        case _                               => F.unit
 
     /** The consumer's single poll, which both its records and its assignment come from.
       *
@@ -722,7 +816,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def assignment: F[Set[TopicPartition]] = client(readAssignment())
 
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
-      assignments.discrete.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+      assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty) else client(readCommitted(topicPartitions))

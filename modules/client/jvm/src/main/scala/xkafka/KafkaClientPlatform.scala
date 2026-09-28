@@ -90,16 +90,17 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
         override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
 
-        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
-          GroupMembership.resolve(batch).flatMap(_.traverse_ {
-            case (Fs2GroupHandle(metadata), offsets) => backend(underlying.sendOffsetsToTransaction(
-                offsets.map((topicPartition, offset) =>
-                  new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) -> new OffsetAndMetadata(offset.value)
-                ),
-                metadata
-              ))
-            case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
-          })
+        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] = GroupMembership.resolve(batch).use(commitMemberships)
+
+        private def commitMemberships(memberships: List[(GroupHandle, Map[TopicPartition, Offset])]): F[Unit] =
+          memberships.traverse_ : membership =>
+            membership match
+              case (Fs2GroupHandle(metadata), offsets) =>
+                val committed =
+                  offsets.map: (topicPartition, offset) =>
+                    new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) -> new OffsetAndMetadata(offset.value)
+                backend(underlying.sendOffsetsToTransaction(committed, metadata))
+              case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
 
   override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
     Fs2KafkaAdminClient.resource(adminSettings(settings)).mapK(handleBackendErrors).map(new Fs2KafkaAdminClientAdapter(_))
@@ -117,7 +118,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     override def deleteTopics(topics: NonEmptySet[Topic]): F[Unit] = backend(underlying.deleteTopics(topics.map(_.value)))
 
     override def createPartitions(topic: Topic, count: Int): F[Unit] =
-      backend(underlying.createPartitions(Map(topic.value -> JavaNewPartitions.increaseTo(count))))
+      F.fromEither(KafkaAdminClient.validatePartitionCount(count))
+        .flatMap(valid => backend(underlying.createPartitions(Map(topic.value -> JavaNewPartitions.increaseTo(valid)))))
 
     override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
       backend(underlying.describeTopics(topics.map(_.value))).flatMap: described =>
@@ -290,7 +292,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
             ))
 
           override private[xkafka] val membership: GroupMembership[F] =
-            GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)))
+            GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)), _ => F.unit)
         ,
         recovery,
         random
@@ -311,10 +313,12 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       * stall another.
       */
     override def partitionedRecords(maxQueuedRecords: Int)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
-      underlying.partitionsMapStream.translate(handleBackendErrors).flatMap: partitions =>
-        Stream.emits(partitions.toList).evalMap: (javaTopicPartition, records) =>
-          portableTopicPartition(javaTopicPartition)
-            .map(topicPartition => PartitionRecords(topicPartition, records.translate(handleBackendErrors).evalMap(consumerRecord)))
+      PartitionRecords.validateMaxQueuedRecords(maxQueuedRecords) match
+        case Left(error) => Stream.raiseError(error)
+        case Right(_)    => underlying.partitionsMapStream.translate(handleBackendErrors).flatMap: partitions =>
+            Stream.emits(partitions.toList).evalMap: (javaTopicPartition, records) =>
+              portableTopicPartition(javaTopicPartition)
+                .map(topicPartition => PartitionRecords(topicPartition, records.translate(handleBackendErrors).evalMap(consumerRecord)))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)

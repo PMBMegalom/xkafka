@@ -21,8 +21,8 @@
 
 package xkafka
 
-import cats.MonadThrow
 import cats.arrow.FunctionK
+import cats.effect.{MonadCancelThrow, Resource}
 import cats.syntax.all.*
 
 /** What a backend needs in order to record a consumer's offsets against its group.
@@ -42,7 +42,7 @@ private[xkafka] trait GroupHandle
   */
 private[xkafka] sealed trait GroupMembership[F[_]]:
   /** What the backend that built this committer needs in order to record its offsets, absent where the committer did not come from a consumer. */
-  def handle: Option[F[GroupHandle]]
+  def handle: Option[GroupMembership.Backend[F]]
 
   def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G]
 
@@ -52,12 +52,12 @@ private[xkafka] object GroupMembership:
     * A transaction reads these to record offsets against the groups they came from, and the wording of both failures lives here so that every backend
     * reports the same thing.
     */
-  def resolve[F[_]](batch: CommittableOffsetBatch[F])(using F: MonadThrow[F]): F[List[(GroupHandle, Map[TopicPartition, Offset])]] =
+  def resolve[F[_]](batch: CommittableOffsetBatch[F])(using F: MonadCancelThrow[F]): Resource[F, List[(GroupHandle, Map[TopicPartition, Offset])]] =
     batch.offsets.toList.traverse { (committer, offsets) =>
       committer.membership.handle match
-        case Some(handle) => handle.map(_ -> offsets)
-        case None         => F
-            .raiseError(new KafkaException.Unsupported("a transaction can only record offsets that came from a consumer of the same backend"))
+        case Some(handle) => Resource.makeFull[F, GroupHandle](poll => poll(handle.acquire))(handle.release).map(_ -> offsets)
+        case None         => Resource
+            .eval(F.raiseError(new KafkaException.Unsupported("a transaction can only record offsets that came from a consumer of the same backend")))
     }
 
   /** For a handle built by one backend and read by another. */
@@ -66,12 +66,12 @@ private[xkafka] object GroupMembership:
 
   /** For a committer that did not come from a consumer, so no transaction can say which group its offsets belong to. */
   final case class Absent[F[_]]() extends GroupMembership[F]:
-    override def handle: Option[F[GroupHandle]] = None
+    override def handle: Option[Backend[F]] = None
 
     override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] = Absent()
 
   /** For a committer whose consumer a transaction of the same backend can name. */
-  final case class Backend[F[_]](value: F[GroupHandle]) extends GroupMembership[F]:
-    override def handle: Option[F[GroupHandle]] = Some(value)
+  final case class Backend[F[_]](acquire: F[GroupHandle], release: GroupHandle => F[Unit]) extends GroupMembership[F]:
+    override def handle: Option[Backend[F]] = Some(this)
 
-    override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] = Backend(fk(value))
+    override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] = Backend(fk(acquire), handle => fk(release(handle)))

@@ -29,13 +29,16 @@ import scala.scalajs.js.typedarray.Uint8Array
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Dispatcher
+import cats.syntax.all.*
 import fs2.Chunk
 import internal.confluent
 import munit.CatsEffectSuite
 
 final class JsKafkaClientSuite extends CatsEffectSuite:
   test("wraps librdkafka failures with their code and classification"):
-    val failure  = js.Dynamic.literal(message = "connection failed", code = -195, isRetriable = true, isFatal = false).asInstanceOf[confluent.RdError]
+    val failure =
+      js.Dynamic.literal(message = "connection failed", code = -195, isRetriable = true, isFatal = false, isTxnRequiresAbort = true)
+        .asInstanceOf[confluent.RdError]
     val producer =
       js.Dynamic.literal(
         connect =
@@ -68,6 +71,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       assertEquals(error.code, Some(ErrorCode.NetworkException))
       assertEquals(error.retriable, Some(true))
       assertEquals(error.fatal, Some(false))
+      assertEquals(error.transactionAbortRequired, Some(true))
 
   test("librdkafka configuration is built directly, with the managed keys derived from typed settings"):
     val producer = dynamic(confluent.Values.rdProducerConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("linger.ms" -> "5")))
@@ -177,6 +181,105 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             assertEquals(result.records.toList.map((_, metadata) => metadata.flatMap(_.offset.map(_.value))), List(Some(41L)))
       yield ()
 
+  test("producer rejects a header without a value rather than changing it to empty bytes"):
+    val produced = js.Array[js.Any]()
+    val producer =
+      js.Dynamic.literal(
+        connect =
+          ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+            js.Any,
+            js.Function2[confluent.RdError | Null, js.Any, Unit],
+            Unit
+          ],
+        disconnect =
+          ((_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+            Int,
+            js.Function2[confluent.RdError | Null, js.Any, Unit],
+            Unit
+          ],
+        setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
+        on =
+          ((_: String, _: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) => ()): js.Function2[
+            String,
+            js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit],
+            Unit
+          ],
+        produce =
+          ((_: String, _: js.Any, _: js.Any, _: js.Any, _: js.Any, _: js.Any, headers: js.Any) => produced.push(headers): Unit): js.Function7[
+            String,
+            js.Any,
+            js.Any,
+            js.Any,
+            js.Any,
+            js.Any,
+            js.Any,
+            Unit
+          ]
+      ).asInstanceOf[confluent.RdProducer]
+    val record   = ProducerRecord(topic("events"), "key", "value", headers = Headers(Header("missing", None)))
+    val settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
+
+    KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use(_.produce(NonEmptyList.one(record))).attempt.map:
+      case Left(error: KafkaException.Unsupported) =>
+        assertEquals(error.detail, "the JavaScript backend cannot produce header 'missing' without a value")
+        assertEquals(produced.length, 0)
+      case Left(error) => fail(s"unexpected error: $error")
+      case Right(_)    => fail("expected a missing header value to be rejected")
+
+  test("a partial enqueue failure rolls back the batch and leaves the producer usable"):
+    Dispatcher.sequential[IO].use: dispatcher =>
+      for
+        attempts <- IO(js.Array[js.Dynamic]())
+        reporter <- Deferred[IO, js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]]
+        producer =
+          js.Dynamic.literal(
+            connect =
+              ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+                js.Any,
+                js.Function2[confluent.RdError | Null, js.Any, Unit],
+                Unit
+              ],
+            disconnect =
+              ((_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+                Int,
+                js.Function2[confluent.RdError | Null, js.Any, Unit],
+                Unit
+              ],
+            setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
+            on =
+              (
+                  (_: String, listener: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) =>
+                    dispatcher.unsafeRunAndForget(reporter.complete(listener).void)
+              ): js.Function2[String, js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit], Unit],
+            produce =
+              (
+                  (topic: String, partition: js.Any, _: js.Any, _: js.Any, _: js.Any, opaque: js.Any, _: js.Any) =>
+                    attempts.push(js.Dynamic.literal(topic = topic, partition = partition, opaque = opaque)): Unit
+                    if attempts.length == 2 then throw new RuntimeException("local queue is full")
+              ): js.Function7[String, js.Any, js.Any, js.Any, js.Any, js.Any, js.Any, Unit]
+          ).asInstanceOf[confluent.RdProducer]
+        record   = ProducerRecord(topic("events"), "key", "value", partition = Some(partition(0)))
+        settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).toOption.get
+        outcomes <-
+          KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer)).producer(settings).use: value =>
+            for
+              failed          <- value.produce(NonEmptyList.of(record, record)).attempt
+              acknowledgement <- value.produce(NonEmptyList.one(record))
+              report          <- reporter.get
+              _               <-
+                IO:
+                  List(attempts(0), attempts(2)).zipWithIndex.foreach: (attempt, index) =>
+                    report(
+                      null,
+                      js.Dynamic.literal(topic = attempt.topic, partition = attempt.partition, offset = index.toDouble, opaque = attempt.opaque)
+                        .asInstanceOf[confluent.RdDeliveryReport]
+                    )
+              succeeded <- acknowledgement
+            yield (failed, succeeded)
+      yield
+        assertEquals(outcomes._1.leftMap(_.getMessage), Left("local queue is full"))
+        assertEquals(outcomes._2.records.toList.map((_, metadata) => metadata.flatMap(_.offset.map(_.value))), List(Some(1L)))
+
   test("consumer decodes a pulled batch, keeps header order, and commits the exact next offset"):
     for
       committed       <- IO(js.Array[js.Dynamic]())
@@ -213,6 +316,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 (event: String, listener: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) =>
                   if event == "offset.commit" then commitListeners.push(listener): Unit else ()
             ): js.Function2[String, js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit], Unit],
+          removeListener = ignoreConsumerListener,
           subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
           consume =
             (
@@ -255,6 +359,131 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       // The consumer poll timeout has to reach the client, which is the only place it takes effect.
       assertEquals(pollTimeouts.toList, List(ConsumerSettings.DefaultPollTimeout.toMillis.toInt))
 
+  test("a late commit report cannot answer the next commit"):
+    Dispatcher.sequential[IO].use: dispatcher =>
+      for
+        delivered       <- IO(js.Array(commitMessage(0d), commitMessage(1d)))
+        listener        <- Deferred[IO, CommitListener]
+        submitted       <- IO(js.Array[js.Array[confluent.RdTopicPartitionOffset]]())
+        secondSubmitted <- Deferred[IO, Unit]
+        consumer =
+          commitConsumer(
+            delivered,
+            value => dispatcher.unsafeRunAndForget(listener.complete(value).void),
+            offsets =>
+              submitted.push(offsets): Unit
+              if submitted.length == 2 then dispatcher.unsafeRunAndForget(secondSubmitted.complete(()).void)
+          )
+        settings = consumerSettings.withCommitTimeout(100.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+        outcomes <-
+          KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+            .use: value =>
+              for
+                records   <- value.records.take(2).compile.toList
+                first     <- records.head.offset.commit.attempt
+                second    <- records(1).offset.commit.start
+                _         <- secondSubmitted.get.timeout(1.second)
+                report    <- listener.get
+                _         <- IO(report(null, submitted(0).asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+                afterLate <- second.join.map(Some(_)).timeoutTo(25.millis, IO.pure(None))
+                refused =
+                  dynamic(js.Dynamic.literal(message = "commit refused", code = 13, isFatal = false, isRetriable = true))
+                    .asInstanceOf[confluent.RdError]
+                _             <- IO(report(refused, submitted(1).asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+                secondOutcome <- second.joinWithNever.attempt
+              yield (first, afterLate, secondOutcome)
+      yield
+        outcomes._1 match
+          case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.RequestTimedOut))
+          case other                                        => fail(s"the first commit should time out, got $other")
+        assertEquals(outcomes._2, None)
+        outcomes._3 match
+          case Left(failure: KafkaException.BackendFailure) =>
+            assertEquals(failure.detail, "commit refused")
+            assertEquals(failure.code, Some(ErrorCode.NetworkException))
+          case other => fail(s"the reported failure should reach the second commit, got $other")
+
+  test("a synchronous commit failure does not leave a waiter for the next report"):
+    for
+      delivered <- IO(js.Array(commitMessage(0d), commitMessage(1d)))
+      listeners <- IO(js.Array[CommitListener]())
+      submitted <- IO(js.Array[js.Array[confluent.RdTopicPartitionOffset]]())
+      consumer =
+        commitConsumer(
+          delivered,
+          listener => listeners.push(listener): Unit,
+          offsets =>
+            submitted.push(offsets): Unit
+            if submitted.length == 1 then throw new RuntimeException("commit exploded")
+            else listeners.foreach(_(null, offsets.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+        )
+      settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+      outcomes <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          .use: value =>
+            for
+              records <- value.records.take(2).compile.toList
+              first   <- records.head.offset.commit.attempt
+              second  <- records(1).offset.commit.attempt
+            yield (first, second)
+    yield
+      assertEquals(outcomes._1.leftMap(_.getMessage), Left("commit exploded"))
+      assertEquals(outcomes._2, Right(()))
+
+  test("a commit report without offsets fails inside the consumer error channel"):
+    for
+      delivered <- IO(js.Array(commitMessage(0d)))
+      listeners <- IO(js.Array[CommitListener]())
+      consumer =
+        commitConsumer(
+          delivered,
+          listener => listeners.push(listener): Unit,
+          _ => listeners.foreach(_(null, null.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+        )
+      settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
+    yield outcome match
+      case Left(failure: KafkaException.InvalidBackendResponse) => assertEquals(failure.detail, "commit report is missing its offsets")
+      case other                                                => fail(s"a malformed report should fail as an invalid backend response, got $other")
+
+  test("cancelling a commit removes its waiter before another commit starts"):
+    Dispatcher.sequential[IO].use: dispatcher =>
+      for
+        delivered       <- IO(js.Array(commitMessage(0d), commitMessage(1d)))
+        listener        <- Deferred[IO, CommitListener]
+        submitted       <- IO(js.Array[js.Array[confluent.RdTopicPartitionOffset]]())
+        firstSubmitted  <- Deferred[IO, Unit]
+        secondSubmitted <- Deferred[IO, Unit]
+        consumer =
+          commitConsumer(
+            delivered,
+            value => dispatcher.unsafeRunAndForget(listener.complete(value).void),
+            offsets =>
+              submitted.push(offsets): Unit
+              val observed = if submitted.length == 1 then firstSubmitted else secondSubmitted
+              dispatcher.unsafeRunAndForget(observed.complete(()).void)
+          )
+        settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+        pendingAfterLate <-
+          KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+            .use: value =>
+              for
+                records <- value.records.take(2).compile.toList
+                first   <- records.head.offset.commit.start
+                _       <- firstSubmitted.get.timeout(1.second)
+                _       <- first.cancel
+                second  <- records(1).offset.commit.start
+                _       <- secondSubmitted.get.timeout(1.second)
+                report  <- listener.get
+                _       <- IO(report(null, submitted(0).asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+                pending <- second.join.map(Some(_)).timeoutTo(25.millis, IO.pure(None))
+                _       <- IO(report(null, submitted(1).asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+                _       <- second.joinWithNever
+              yield pending
+      yield assertEquals(pendingAfterLate, None)
+
   test("a rebalance the client cannot read fails the consumer rather than stopping its assignment tracking"):
     for
       handlers <- IO(js.Array[js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]]())
@@ -277,6 +506,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 (_: String, handler: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) =>
                   handlers.push(handler): Unit
             ): js.Function2[String, js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit], Unit],
+          removeListener = ignoreConsumerListener,
           subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
           consume =
             ((_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) => done(null, js.Array())): js.Function2[
@@ -299,6 +529,57 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]),
       s"the unreadable assignment should reach whoever reads the consumer, got $outcome"
     )
+
+  test("consumer release removes callback work before disconnecting"):
+    for
+      order           <- IO(js.Array[String]())
+      assignmentCalls <- IO(js.Array[Unit]())
+      listeners       <- IO(js.Dictionary("rebalance" -> js.Array[CommitListener](), "offset.commit" -> js.Array[CommitListener]()))
+      state           <- IO(js.Dynamic.literal(disconnected = false))
+      consumer =
+        js.Dynamic.literal(
+          connect =
+            ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+              js.Any,
+              js.Function2[confluent.RdError | Null, js.Any, Unit],
+              Unit
+            ],
+          disconnect =
+            ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+              order.push("disconnect"): Unit
+              state.updateDynamic("disconnected")(true)
+              listeners("rebalance").foreach(_(null, js.Array()))
+              done(null, ())
+            ): js.Function1[js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
+          setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+          on = ((event: String, listener: CommitListener) => listeners(event).push(listener): Unit): js.Function2[String, CommitListener, Unit],
+          removeListener =
+            (
+                (event: String, listener: CommitListener) =>
+                  order.push(s"remove:$event"): Unit
+                  val index = listeners(event).indexOf(listener)
+                  if index >= 0 then listeners(event).splice(index, 1): Unit
+            ): js.Function2[String, CommitListener, Unit],
+          subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
+          consume =
+            ((_: Int, _: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) => ()): js.Function2[
+              Int,
+              js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit],
+              Unit
+            ],
+          assignments =
+            (() =>
+              assignmentCalls.push(()): Unit
+              if state.selectDynamic("disconnected").asInstanceOf[Boolean] then throw new RuntimeException("Local: Erroneous state")
+              js.Array[confluent.RdTopicPartition]()
+            ): js.Function0[js.Array[confluent.RdTopicPartition]]
+        ).asInstanceOf[confluent.RdConsumer]
+      _ <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer))
+          .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))).use_
+    yield
+      assertEquals(order.toList, List("remove:offset.commit", "remove:rebalance", "disconnect"))
+      assertEquals(assignmentCalls.length, 0)
 
   test("the isolation level reaches the backend as the property it spells"):
     val settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
@@ -361,12 +642,55 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   /** Likewise every producer, which asks every replica for an answer unless told otherwise. */
   private val DefaultAcks = "acks" -> "all"
 
+  private type CommitListener = js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]
+
   private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 
   private val utf8Serializer: Serializer[IO, String] = Serializer.instance((_, _, value) => IO.pure(Some(Chunk.array(value.getBytes("UTF-8")))))
 
   private val utf8Deserializer: Deserializer[IO, String] =
     Deserializer.instance((_, _, value) => IO.pure(value.fold("")(bytes => new String(bytes.toArray, "UTF-8"))))
+
+  private def commitConsumer(
+      delivered: js.Array[confluent.RdMessage],
+      register: CommitListener => Unit,
+      commitOffsets: js.Array[confluent.RdTopicPartitionOffset] => Unit
+  ): confluent.RdConsumer =
+    js.Dynamic.literal(
+      connect =
+        ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+          js.Any,
+          js.Function2[confluent.RdError | Null, js.Any, Unit],
+          Unit
+        ],
+      disconnect =
+        ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
+          js.Function2[confluent.RdError | Null, js.Any, Unit],
+          Unit
+        ],
+      setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+      on =
+        (
+            (event: String, listener: CommitListener) => if event == "offset.commit" then register(listener)
+        ): js.Function2[String, CommitListener, Unit],
+      removeListener = ignoreConsumerListener,
+      subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
+      consume =
+        (
+            (_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) =>
+              done(null, delivered.splice(0, delivered.length).toJSArray)
+        ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit], Unit],
+      commit =
+        ((offsets: js.Array[confluent.RdTopicPartitionOffset]) => commitOffsets(offsets)): js.Function1[js.Array[
+          confluent.RdTopicPartitionOffset
+        ], Unit]
+    ).asInstanceOf[confluent.RdConsumer]
+
+  private def commitMessage(offset: Double): confluent.RdMessage =
+    js.Dynamic.literal(topic = "events", partition = 0, offset = offset, key = uint8("key"), value = uint8("value"), headers = js.Array())
+      .asInstanceOf[confluent.RdMessage]
+
+  private def ignoreConsumerListener: js.Function2[String, CommitListener, Unit] = ((_: String, _: CommitListener) => ())
 
   /** Captures what a client would have been built with. Acquiring the client then fails, because the stub hands back nothing, so the properties are
     * asserted on afterwards instead of from inside an effect whose failure has to be swallowed.
@@ -412,7 +736,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private def rdHeader(name: String, value: Array[Byte]): confluent.RdHeader =
     val bytes = new Uint8Array(value.length)
     value.zipWithIndex.foreach((byte, index) => bytes(index) = byte.toShort)
-    val result = js.Dictionary.empty[Uint8Array | String]
+    val result = js.Dictionary.empty[Uint8Array | String | Null]
     result(name) = bytes
     result
 
@@ -421,6 +745,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private def partition(value: Int): Partition = Partition.from(value).fold(error => fail(error.toString), identity)
 
   private val group = ConsumerGroup.from("workers").fold(error => fail(error.toString), identity)
+
+  private val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
 
   private def uint8(value: String): Uint8Array =
     val bytes  = value.getBytes("UTF-8")

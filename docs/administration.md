@@ -22,11 +22,14 @@ val program =
 
 - `createTopics` creates each topic with the partitions, replication factor, and configuration given.
 - `deleteTopics` deletes each topic.
-- `createPartitions` adds partitions to a topic, which Kafka allows only as an increase.
+- `createPartitions` requests the topic's new total partition count, which Kafka allows only as an increase.
 - `describeTopics` reports the partitions of each requested topic.
 
 `NewTopic.from` rejects a partition count or replication factor that is not
-positive, so a request the broker would refuse cannot be built.
+positive. `createPartitions` likewise rejects a non-positive count before
+contacting Kafka. The broker still validates cluster-dependent constraints such
+as duplicate topics, replication capacity, topic configuration, and whether a
+new total partition count is greater than the current one.
 
 @:callout(warning)
 Kafka reports an outcome for each topic, but the backends do not agree on whether

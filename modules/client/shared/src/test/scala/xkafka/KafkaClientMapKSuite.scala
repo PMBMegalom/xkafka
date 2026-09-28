@@ -51,7 +51,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       new OffsetCommitter[ErrorIO]:
         override def commit(offsets: Map[TopicPartition, Offset]): ErrorIO[Unit] = EitherT.pure(())
 
-        override private[xkafka] val membership: GroupMembership[ErrorIO] = GroupMembership.Backend(EitherT.pure(TestGroupHandle("workers")))
+        override private[xkafka] val membership: GroupMembership[ErrorIO] =
+          GroupMembership.Backend(EitherT.pure(TestGroupHandle("workers")), _ => EitherT.pure(()))
 
     IO.ref(List.empty[GroupHandle]).flatMap: seen =>
       val client = sourceRecording(value => seen.update(_ :+ value)).imapK(ioToErrorIO)(errorIOToIO)
@@ -108,7 +109,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
                   override def commitOffsets(batch: CommittableOffsetBatch[IO]): IO[Unit] =
                     batch.offsets.toList.traverse_ { (committer, _) =>
-                      committer.membership.handle.fold(IO.raiseError[Unit](new IllegalStateException("no membership")))(_.flatMap(record))
+                      committer.membership.handle.fold(IO.raiseError[Unit](new IllegalStateException("no membership")))(_.acquire.flatMap(record))
                     }
 
       override def producer[K, V](settings: ProducerSettings[IO, K, V]): Resource[IO, KafkaProducer[IO, K, V]] =

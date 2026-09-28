@@ -45,7 +45,9 @@ A rejected value raises `KafkaException.InvalidValue`, which carries the
 accumulation survives the lift.
 
 Bootstrap servers must be `host:port`, including bracketed IPv6 literals.
-Property names must not be blank.
+Property names must not be blank. Every duration must be positive and at most
+`Int.MaxValue` milliseconds (about 24.9 days), which is the largest timeout the
+JavaScript and Native backend calls can represent without overflow.
 
 ## Properties
 
@@ -85,7 +87,10 @@ map cannot disagree.
 
 Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
-`ValidatedNel[SettingsError, *]` and revalidate in full.
+`ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
+duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
+`withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`, and
+`withRequestTimeout`.
 
 ## Consumer settings
 
@@ -114,7 +119,7 @@ Beyond the serializers, `ProducerSettings` carries:
 | setting | default | meaning |
 | --- | --- | --- |
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
-| `closeTimeout` | 60s | how long releasing a producer waits to deliver what it holds |
+| `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
 
 See [Producing](producing.md) for both.
 

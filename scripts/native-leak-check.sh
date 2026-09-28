@@ -19,7 +19,10 @@ if [[ "${1:-}" == "--run" ]]; then
   binary="$downstream_dir/.native/target/scala-3.3.8/native/xkafka.downstream.DownstreamSmoke"
   case "$(uname -s)" in
     Darwin) exec leaks --atExit -- "$binary" ;;
-    Linux)  exec valgrind --leak-check=full --error-exitcode=1 "$binary" ;;
+    Linux)
+      export LD_LIBRARY_PATH="$XKAFKA_LIBRDKAFKA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      exec valgrind --leak-check=full --error-exitcode=1 "$binary"
+      ;;
     *)      echo "no leak checker configured for $(uname -s)" >&2; exit 2 ;;
   esac
 fi

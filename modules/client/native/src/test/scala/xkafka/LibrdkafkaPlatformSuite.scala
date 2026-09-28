@@ -21,6 +21,8 @@
 
 package xkafka
 
+import scala.concurrent.duration.*
+
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import fs2.Chunk
@@ -63,3 +65,28 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
     val settings   = ProducerSettings.from(client, serializer, serializer, Map("message.timeout.ms" -> "not-a-duration")).toOption.get
 
     interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))
+
+  test("producer release bounds an unavailable record by its close timeout"):
+    val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
+    val client     = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
+    val settings   =
+      ProducerSettings.from(client, serializer, serializer, Map("message.timeout.ms" -> "60000", "socket.timeout.ms" -> "1000")).toOption.get
+        .withCloseTimeout(100.millis).toOption.get
+    val record = ProducerRecord(Topic.from("events").toOption.get, "key", "value")
+
+    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.one(record)).void).timeout(5.seconds)
+
+  test("a partially enqueued batch fails promptly and remains owned through release"):
+    val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
+    val client     = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
+    val settings   =
+      ProducerSettings.from(
+        client,
+        serializer,
+        serializer,
+        Map("message.timeout.ms" -> "60000", "socket.timeout.ms" -> "1000", "queue.buffering.max.messages" -> "1")
+      ).toOption.get.withCloseTimeout(100.millis).toOption.get
+    val record = ProducerRecord(Topic.from("events").toOption.get, "key", "value")
+
+    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).attempt).timeout(5.seconds).map: outcome =>
+      assert(outcome.isLeft, s"the second record should exceed the one-message local queue, got $outcome")

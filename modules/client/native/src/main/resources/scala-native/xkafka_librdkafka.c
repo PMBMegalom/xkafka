@@ -358,7 +358,6 @@ int xkafka_batch_add(rd_kafka_t *producer,
         return 0;
 }
 
-/* Serves delivery reports until every enqueued message has one. */
 /* Serves whatever delivery reports are ready. The caller decides how long to keep asking, so one
  * batch waiting for its reports does not stop another from being enqueued. */
 void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms) {
@@ -411,14 +410,11 @@ int64_t xkafka_batch_timestamp_at(const xkafka_batch_t *batch, size_t index) {
         return batch->slots[index].timestamp;
 }
 
-/* Drains any outstanding reports before freeing, so librdkafka never writes
- * into slots that have already been released. */
-void xkafka_batch_destroy(rd_kafka_t *producer, xkafka_batch_t *batch) {
+/* Called only once every report has arrived, or after the producer has been destroyed and can no
+ * longer reach the slots. */
+void xkafka_batch_free(xkafka_batch_t *batch) {
         if (batch == NULL)
                 return;
-
-        while (batch->pending > 0)
-                rd_kafka_poll(producer, 100);
 
         free(batch->slots);
         free(batch);
@@ -938,8 +934,6 @@ int32_t xkafka_metadata_partition_at(const void *metadata,
             .id;
 }
 
-/* Stops and restarts fetching for the listed partitions. Kafka keeps each paused partition's
- * position, so resuming continues from the record after the last one handed to the application. */
 /* librdkafka's admin calls are asynchronous: the request goes on a queue and the outcome arrives as
  * an event. Each helper below submits, waits for its event, and reports the first failure it finds,
  * because the portable API reports one failure rather than an outcome for each topic. */
@@ -972,6 +966,8 @@ static int xkafka_admin_await(rd_kafka_queue_t *queue,
                 results = rd_kafka_CreateTopics_result_topics(rd_kafka_event_CreateTopics_result(event), &count);
         else if (expected == RD_KAFKA_EVENT_DELETETOPICS_RESULT)
                 results = rd_kafka_DeleteTopics_result_topics(rd_kafka_event_DeleteTopics_result(event), &count);
+        else if (expected == RD_KAFKA_EVENT_CREATEPARTITIONS_RESULT)
+                results = rd_kafka_CreatePartitions_result_topics(rd_kafka_event_CreatePartitions_result(event), &count);
 
         for (index = 0; results != NULL && index < count; index++) {
                 if (rd_kafka_topic_result_error(results[index]) != RD_KAFKA_RESP_ERR_NO_ERROR) {
@@ -1010,7 +1006,11 @@ rd_kafka_t *xkafka_admin_new(const char *brokers,
 
         client = rd_kafka_new(RD_KAFKA_PRODUCER, conf, error, error_size);
         if (client == NULL) {
-                xkafka_set_error(error, error_size, error_code, error);
+                /* rd_kafka_new already wrote the detail into error. Copying that buffer onto
+                 * itself through snprintf has undefined behaviour. */
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
+                rd_kafka_conf_destroy(conf);
                 return NULL;
         }
         return client;
@@ -1050,12 +1050,24 @@ int xkafka_admin_create_topics(rd_kafka_t *client,
                 size_t entry;
                 topics[index] = rd_kafka_NewTopic_new(names[index], (int)partitions[index], (int)replication[index], error, error_size);
                 if (topics[index] == NULL) {
-                        xkafka_set_error(error, error_size, error_code, error);
+                        /* The constructor already populated error. */
+                        if (error_code != NULL)
+                                *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
                         outcome = -1;
                         break;
                 }
-                for (entry = 0; entry < config_counts[index]; entry++, configured++)
-                        rd_kafka_NewTopic_set_config(topics[index], config_names[configured], config_values[configured]);
+                for (entry = 0; entry < config_counts[index]; entry++, configured++) {
+                        rd_kafka_resp_err_t configured_result =
+                            rd_kafka_NewTopic_set_config(topics[index], config_names[configured], config_values[configured]);
+                        if (configured_result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                                xkafka_set_error_at(error, error_size, error_code,
+                                                    rd_kafka_err2str(configured_result), configured_result);
+                                outcome = -1;
+                                break;
+                        }
+                }
+                if (outcome != 0)
+                        break;
         }
 
         if (outcome == 0) {
@@ -1120,7 +1132,9 @@ int xkafka_admin_create_partitions(rd_kafka_t *client,
         int outcome;
 
         if (request == NULL) {
-                xkafka_set_error(error, error_size, error_code, error);
+                /* The constructor already populated error. */
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
                 return -1;
         }
 
@@ -1246,12 +1260,18 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
 static int xkafka_take_error(rd_kafka_error_t *result,
                              char *error,
                              size_t error_size,
-                             int32_t *error_code) {
+                             int32_t *error_code,
+                             int32_t *is_fatal,
+                             int32_t *is_retriable,
+                             int32_t *txn_requires_abort) {
         if (result == NULL)
                 return 0;
         xkafka_set_error_at(error, error_size, error_code,
                             rd_kafka_error_string(result),
                             rd_kafka_error_code(result));
+        *is_fatal = rd_kafka_error_is_fatal(result);
+        *is_retriable = rd_kafka_error_is_retriable(result);
+        *txn_requires_abort = rd_kafka_error_txn_requires_abort(result);
         rd_kafka_error_destroy(result);
         return -1;
 }
@@ -1260,35 +1280,51 @@ int xkafka_producer_init_transactions(rd_kafka_t *producer,
                                       int timeout_ms,
                                       char *error,
                                       size_t error_size,
-                                      int32_t *error_code) {
+                                      int32_t *error_code,
+                                      int32_t *is_fatal,
+                                      int32_t *is_retriable,
+                                      int32_t *txn_requires_abort) {
         return xkafka_take_error(rd_kafka_init_transactions(producer, timeout_ms),
-                                 error, error_size, error_code);
+                                 error, error_size, error_code, is_fatal,
+                                 is_retriable, txn_requires_abort);
 }
 
 int xkafka_producer_begin_transaction(rd_kafka_t *producer,
                                       char *error,
                                       size_t error_size,
-                                      int32_t *error_code) {
+                                      int32_t *error_code,
+                                      int32_t *is_fatal,
+                                      int32_t *is_retriable,
+                                      int32_t *txn_requires_abort) {
         return xkafka_take_error(rd_kafka_begin_transaction(producer), error,
-                                 error_size, error_code);
+                                 error_size, error_code, is_fatal, is_retriable,
+                                 txn_requires_abort);
 }
 
 int xkafka_producer_commit_transaction(rd_kafka_t *producer,
                                        int timeout_ms,
                                        char *error,
                                        size_t error_size,
-                                       int32_t *error_code) {
+                                       int32_t *error_code,
+                                       int32_t *is_fatal,
+                                       int32_t *is_retriable,
+                                       int32_t *txn_requires_abort) {
         return xkafka_take_error(rd_kafka_commit_transaction(producer, timeout_ms),
-                                 error, error_size, error_code);
+                                 error, error_size, error_code, is_fatal,
+                                 is_retriable, txn_requires_abort);
 }
 
 int xkafka_producer_abort_transaction(rd_kafka_t *producer,
                                       int timeout_ms,
                                       char *error,
                                       size_t error_size,
-                                      int32_t *error_code) {
+                                      int32_t *error_code,
+                                      int32_t *is_fatal,
+                                      int32_t *is_retriable,
+                                      int32_t *txn_requires_abort) {
         return xkafka_take_error(rd_kafka_abort_transaction(producer, timeout_ms),
-                                 error, error_size, error_code);
+                                 error, error_size, error_code, is_fatal,
+                                 is_retriable, txn_requires_abort);
 }
 
 /* The metadata outlives the consumer it came from, so a transaction records
@@ -1313,7 +1349,10 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
                                  int timeout_ms,
                                  char *error,
                                  size_t error_size,
-                                 int32_t *error_code) {
+                                 int32_t *error_code,
+                                 int32_t *is_fatal,
+                                 int32_t *is_retriable,
+                                 int32_t *txn_requires_abort) {
         rd_kafka_topic_partition_list_t *native_offsets;
         int status;
 
@@ -1328,7 +1367,8 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
             rd_kafka_send_offsets_to_transaction(
                 producer, native_offsets,
                 (const rd_kafka_consumer_group_metadata_t *)metadata, timeout_ms),
-            error, error_size, error_code);
+            error, error_size, error_code, is_fatal, is_retriable,
+            txn_requires_abort);
         rd_kafka_topic_partition_list_destroy(native_offsets);
         return status;
 }

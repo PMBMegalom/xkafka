@@ -115,6 +115,53 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       case Left(error)                           => fail(s"unexpected error: $error")
       case Right(())                             => fail("expected an invalid queue bound to fail")
 
+  test("a full partition is paused before its record becomes visible"):
+    for
+      assignment   <- Ref[IO].of(Set(firstPartition))
+      input        <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened       <- Deferred[IO, Unit]
+      pauseStarted <- Deferred[IO, Unit]
+      allowPause   <- Deferred[IO, Unit]
+      resumed      <- Deferred[IO, Unit]
+      received     <- Deferred[IO, CommittableConsumerRecord[IO, String, String]]
+      pausing = blockingPausing(pauseStarted, allowPause, resumed)
+      reading <-
+        testConsumer(assignment, input, pausing).partitionedRecords(1).take(1).flatMap: partition =>
+          Stream.exec(opened.complete(()).void) ++ partition.records.evalTap(record => received.complete(record).void).take(1)
+        .compile.drain.start
+      _ <- opened.get
+      expected = record(firstPartition, 0L, "first")
+      _      <- input.send(expected).void
+      _      <- pauseStarted.get.timeout(5.seconds)
+      _      <- IO.sleep(100.millis)
+      before <- received.tryGet
+      _ = assertEquals(before, None)
+      _        <- allowPause.complete(())
+      observed <- received.get.timeout(5.seconds)
+      _        <- resumed.get.timeout(5.seconds)
+      _        <- reading.joinWithNever.timeout(5.seconds)
+    yield assertEquals(observed, expected)
+
+  test("cancelling before a counted record is sent rolls the count back"):
+    for
+      assignment   <- Ref[IO].of(Set(firstPartition))
+      input        <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened       <- Deferred[IO, Unit]
+      pauseStarted <- Deferred[IO, Unit]
+      allowPause   <- Deferred[IO, Unit]
+      resumed      <- Deferred[IO, Unit]
+      pausing = blockingPausing(pauseStarted, allowPause, resumed)
+      reading <-
+        testConsumer(assignment, input, pausing).partitionedRecords(1).take(1).flatMap: partition =>
+          Stream.exec(opened.complete(()).void) ++ partition.records
+        .compile.drain.start
+      _ <- opened.get
+      _ <- input.send(record(firstPartition, 0L, "cancelled")).void
+      _ <- pauseStarted.get.timeout(5.seconds)
+      _ <- reading.cancel.timeout(5.seconds)
+      _ <- resumed.get.timeout(5.seconds)
+    yield ()
+
   test("consumeChunk hands over every record and commits what it processed"):
     val expected = List(firstPartition -> "a", firstPartition -> "b", secondPartition -> "c")
 
@@ -141,12 +188,14 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
 
   private def testConsumer(
       currentAssignment: Ref[IO, Set[TopicPartition]],
-      input: Channel[IO, CommittableConsumerRecord[IO, String, String]]
+      input: Channel[IO, CommittableConsumerRecord[IO, String, String]],
+      partitionPausing: PartitionPausing[IO] = PartitionPausing.Absent()
   ): KafkaConsumer[IO, String, String] =
     new KafkaConsumer[IO, String, String]:
       override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = input.stream
       override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
       override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes
+      override private[xkafka] val pausing: PartitionPausing[IO]      = partitionPausing
       // A backend stops fetching and lets what it has already fetched drain, which is what closing does here.
       override def stopConsuming: IO[Unit]                                                                                      = input.close.void
       override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]]                     = IO.pure(Map.empty)
@@ -159,6 +208,14 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       override def seekToBeginning(topicPartitions: Set[TopicPartition]): IO[Unit]                                              = IO.unit
       override def seekToEnd(topicPartitions: Set[TopicPartition]): IO[Unit]                                                    = IO.unit
       override def position(topicPartition: TopicPartition): IO[Option[Offset]]                                                 = IO.pure(None)
+
+  private def blockingPausing(pauseStarted: Deferred[IO, Unit], allowPause: Deferred[IO, Unit], resumed: Deferred[IO, Unit]): PartitionPausing[IO] =
+    new PartitionPausing.Backend[IO]:
+      override def pause(topicPartitions: Set[TopicPartition]): IO[Unit] =
+        IO(assertEquals(topicPartitions, Set(firstPartition))) >> pauseStarted.complete(()).void >> allowPause.get
+
+      override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] =
+        IO(assertEquals(topicPartitions, Set(firstPartition))) >> resumed.complete(()).void
 
   private def record(topicPartition: TopicPartition, offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
     val partition       = topicPartition

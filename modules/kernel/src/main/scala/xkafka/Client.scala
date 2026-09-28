@@ -27,6 +27,7 @@ import cats.{Applicative, FlatMap, Foldable, Functor, Order, Show}
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptySet, Validated, ValidatedNel}
 import cats.effect.{Async, Concurrent, Temporal}
+import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.{Chunk, Pipe, Stream}
 
@@ -72,6 +73,8 @@ enum SettingsError derives CanEqual:
   case BlankCertificateAuthority
   case BlankSaslUsername
   case BlankSaslPassword
+  case NonPositiveDuration(field: SettingsError.DurationField, value: FiniteDuration)
+  case DurationExceedsMaximum(field: SettingsError.DurationField, value: FiniteDuration)
 
   def message: String =
     this match
@@ -82,8 +85,20 @@ enum SettingsError derives CanEqual:
       case BlankCertificateAuthority            => "certificate authority must not be blank"
       case BlankSaslUsername                    => "SASL username must not be blank"
       case BlankSaslPassword                    => "SASL password must not be blank"
+      case NonPositiveDuration(field, value)    => s"${field.label} must be positive, was $value"
+      case DurationExceedsMaximum(field, value) => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
 
 object SettingsError:
+  val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
+
+  enum DurationField(val label: String) derives CanEqual:
+    case MetadataRefreshInterval extends DurationField("metadataRefreshInterval")
+    case CloseTimeout            extends DurationField("closeTimeout")
+    case TransactionTimeout      extends DurationField("transactionTimeout")
+    case CommitTimeout           extends DurationField("commitTimeout")
+    case PollTimeout             extends DurationField("pollTimeout")
+    case RequestTimeout          extends DurationField("requestTimeout")
+
   enum PropertyScope(val label: String) derives CanEqual:
     case Client   extends PropertyScope("client")
     case Producer extends PropertyScope("producer")
@@ -98,6 +113,11 @@ private def propertyErrors(properties: Map[String, String], scope: SettingsError
   val blank   = Option.when(properties.keysIterator.exists(_.trim.isEmpty))(SettingsError.BlankPropertyName(scope)).toList
   val managed = properties.keysIterator.filter(name => ManagedProperties.contains(name.trim.toLowerCase)).toList.sorted
   blank ++ managed.map(SettingsError.ManagedProperty(_, scope))
+
+private def durationErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
+  if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
+  else if value > SettingsError.MaxDuration then List(SettingsError.DurationExceedsMaximum(field, value))
+  else Nil
 
 /** Accepts `host:port`, including bracketed IPv6 literals, so an unusable endpoint is caught at construction. */
 private def bootstrapServerError(value: String, index: Int): Option[SettingsError] =
@@ -131,8 +151,8 @@ sealed abstract case class ClientSettings private (
     new ClientSettings(bootstrapServers, clientId, properties, value, metadataRefreshInterval) {}
 
   /** How long a topic created after a client started can stay unseen. */
-  def withMetadataRefreshInterval(value: FiniteDuration): ClientSettings =
-    new ClientSettings(bootstrapServers, clientId, properties, security, value) {}
+  def withMetadataRefreshInterval(value: FiniteDuration): ValidatedNel[SettingsError, ClientSettings] =
+    ClientSettings.from(bootstrapServers, clientId, properties, security, value)
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ClientSettings] = withProperties(properties.updated(name, value))
 
@@ -153,8 +173,10 @@ object ClientSettings:
       metadataRefreshInterval: FiniteDuration = ClientSettings.DefaultMetadataRefreshInterval
   ): ValidatedNel[SettingsError, ClientSettings] =
     val bootstrapErrors = bootstrapServers.toList.zipWithIndex.flatMap((server, index) => bootstrapServerError(server, index))
-    validateSettings(bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client))
-      .map(_ => new ClientSettings(bootstrapServers, clientId, properties, security, metadataRefreshInterval) {})
+    val errors          =
+      bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client) ++
+        durationErrors(SettingsError.DurationField.MetadataRefreshInterval, metadataRefreshInterval)
+    validateSettings(errors).map(_ => new ClientSettings(bootstrapServers, clientId, properties, security, metadataRefreshInterval) {})
 
 sealed abstract case class ProducerSettings[F[_], K, V] private (
     client: ClientSettings,
@@ -175,8 +197,8 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     new ProducerSettings(client, keySerializer, valueSerializer, properties, value, closeTimeout) {}
 
   /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
-  def withCloseTimeout(value: FiniteDuration): ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, value) {}
+  def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value)
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
@@ -201,8 +223,9 @@ object ProducerSettings:
       acks: Acks = ProducerSettings.DefaultAcks,
       closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Producer))
-      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout) {})
+    val errors =
+      propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout)
+    validateSettings(errors).map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
@@ -220,8 +243,9 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     new TransactionalProducerSettings(producer.withClient(value), transactionalId, transactionTimeout) {}
 
   /** Kafka's `transaction.timeout.ms`. */
-  def withTransactionTimeout(value: FiniteDuration): TransactionalProducerSettings[F, K, V] =
-    new TransactionalProducerSettings(producer, transactionalId, value) {}
+  def withTransactionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, value))
+      .map(_ => new TransactionalProducerSettings(producer, transactionalId, value) {})
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     withProperties(producer.properties.updated(name, value))
@@ -241,8 +265,10 @@ object TransactionalProducerSettings:
       transactionTimeout: FiniteDuration = TransactionalProducerSettings.DefaultTransactionTimeout,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties)
-      .map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+    (
+      ProducerSettings.from(client, keySerializer, valueSerializer, properties),
+      validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, transactionTimeout))
+    ).mapN((producer, _) => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})
 
   given [K, V]: FunctorK[[F[_]] =>> TransactionalProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: TransactionalProducerSettings[F, K, V])(fk: FunctionK[F, G]): TransactionalProducerSettings[G, K, V] =
@@ -367,8 +393,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     ) {}
 
   /** How long a commit waits for the broker before it fails as `ErrorCode.RequestTimedOut`, which the recovery policy retries. */
-  def withCommitTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
+  def withCommitTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    ConsumerSettings.from(
       client,
       groupId,
       keyDeserializer,
@@ -380,7 +406,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       pollTimeout,
       requestTimeout,
       properties
-    ) {}
+    )
 
   /** How a failed offset commit is retried. */
   def withCommitRecovery(value: CommitRecovery): ConsumerSettings[F, K, V] =
@@ -402,8 +428,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     *
     * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
     */
-  def withPollTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
+  def withPollTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    ConsumerSettings.from(
       client,
       groupId,
       keyDeserializer,
@@ -415,14 +441,14 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       value,
       requestTimeout,
       properties
-    ) {}
+    )
 
   /** How long a call that asks the broker something waits for its answer.
     *
     * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
     */
-  def withRequestTimeout(value: FiniteDuration): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
+  def withRequestTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    ConsumerSettings.from(
       client,
       groupId,
       keyDeserializer,
@@ -434,7 +460,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       pollTimeout,
       value,
       properties
-    ) {}
+    )
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
@@ -482,7 +508,11 @@ object ConsumerSettings:
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Consumer)).map(_ =>
+    val errors =
+      propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
+        durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
+        durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout)
+    validateSettings(errors).map(_ =>
       new ConsumerSettings(
         client,
         groupId,
@@ -565,6 +595,9 @@ trait KafkaAdminClient[F[_]]:
       override def describeTopics(topics: NonEmptySet[Topic]): G[Map[Topic, Set[Partition]]] = fk(self.describeTopics(topics))
 
 object KafkaAdminClient:
+  private[xkafka] def validatePartitionCount(value: Int): Either[KafkaException.InvalidValue, Int] =
+    if value > 0 then Right(value) else Left(new KafkaException.InvalidValue(ValidationError.NonPositivePartitionCount(value)))
+
   given FunctorK[KafkaAdminClient] with
     override def mapK[F[_], G[_]](client: KafkaAdminClient[F])(fk: FunctionK[F, G]): KafkaAdminClient[G] = client.mapK(fk)
 
@@ -783,7 +816,7 @@ trait KafkaConsumer[F[_], K, V]:
     * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails.
     *
     * @param maxQueuedRecords
-    *   positive queue bound for each partition stream
+    *   positive per-partition threshold at which a shared-source backend pauses fetching; records already in flight can temporarily exceed it
     */
   final def consumeChunk(process: Chunk[ConsumerRecord[K, V]] => F[CommitNow], maxQueuedRecords: Int = 256)(using F: Async[F]): F[Unit] =
     partitionedRecords(maxQueuedRecords).map(
@@ -798,7 +831,7 @@ trait KafkaConsumer[F[_], K, V]:
     * Every emitted stream must be consumed concurrently; backpressure from one partition otherwise backpressures the shared record source.
     *
     * @param maxQueuedRecords
-    *   positive queue bound for each partition stream
+    *   positive per-partition threshold at which a shared-source backend pauses fetching; records already in flight can temporarily exceed it
     */
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
     PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords, pausing)

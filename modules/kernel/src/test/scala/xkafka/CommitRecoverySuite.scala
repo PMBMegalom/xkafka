@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.effect.{IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
 import cats.effect.std.Random
 import cats.syntax.all.*
 import munit.CatsEffectSuite
@@ -132,13 +132,63 @@ final class CommitRecoverySuite extends CatsEffectSuite:
       attempts <- Ref[IO].of(0)
       random   <- Random.scalaUtilRandom[IO]
       committer = failing(attempts, failures = 0, failure = retriableFailure)
-      handle <- CommitRecovery.recovering(committer, policy, random).membership.handle.sequence
+      handle <- CommitRecovery.recovering(committer, policy, random).membership.handle.traverse(_.acquire)
     yield assertEquals(handle, Some(TestGroupHandle))
+
+  test("resolving several group memberships releases earlier handles when a later acquisition fails"):
+    for
+      acquired <- Ref[IO].of(0)
+      released <- Ref[IO].of(0)
+      acquire =
+        acquired.getAndUpdate(_ + 1).flatMap:
+          case 0 => IO.pure(TestGroupHandle)
+          case _ => IO.raiseError[GroupHandle](new RuntimeException("second acquisition failed"))
+      batch = membershipBatch(managedCommitter(acquire, released.update(_ + 1)), managedCommitter(acquire, released.update(_ + 1)))
+      result       <- GroupMembership.resolve(batch).use_.attempt
+      acquisitions <- acquired.get
+      releases     <- released.get
+    yield
+      assert(result.isLeft)
+      assertEquals(acquisitions, 2)
+      assertEquals(releases, 1)
+
+  test("cancelling group membership acquisition releases earlier handles"):
+    for
+      acquired <- Ref[IO].of(0)
+      released <- Ref[IO].of(0)
+      waiting  <- Deferred[IO, Unit]
+      acquire =
+        acquired.getAndUpdate(_ + 1).flatMap:
+          case 0 => IO.pure(TestGroupHandle)
+          case _ => waiting.complete(()).void *> IO.never[GroupHandle]
+      batch = membershipBatch(managedCommitter(acquire, released.update(_ + 1)), managedCommitter(acquire, released.update(_ + 1)))
+      fiber    <- GroupMembership.resolve(batch).use_.start
+      _        <- waiting.get
+      _        <- fiber.cancel
+      releases <- released.get
+    yield assertEquals(releases, 1)
 
   private val retriableFailure =
     new KafkaException.BackendFailure("rebalance in progress", code = Some(ErrorCode.RebalanceInProgress), retriable = Some(true))
 
   private val permanentFailure = new KafkaException.BackendFailure("unknown member", code = Some(ErrorCode.UnknownMemberId), retriable = Some(false))
+
+  private def managedCommitter(acquire: IO[GroupHandle], release: IO[Unit]): OffsetCommitter[IO] =
+    new OffsetCommitter[IO]:
+      override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+
+      override private[xkafka] val membership: GroupMembership[IO] = GroupMembership.Backend(acquire, _ => release)
+
+  private def membershipBatch(first: OffsetCommitter[IO], second: OffsetCommitter[IO]): CommittableOffsetBatch[IO] =
+    CommittableOffsetBatch.empty[IO].updated(committable(first)).updated(committable(second))
+
+  private def committable(value: OffsetCommitter[IO]): CommittableOffset[IO] =
+    new CommittableOffset[IO]:
+      override def topicPartition: TopicPartition = CommitRecoverySuite.this.topicPartition
+
+      override def nextOffset: Offset = Offset.from(1L).toOption.get
+
+      override def committer: OffsetCommitter[IO] = value
 
   /** Fails its first `failures` commits and succeeds afterwards, counting every attempt. */
   private def failing(attempts: Ref[IO, Int], failures: Int, failure: Throwable): OffsetCommitter[IO] =
@@ -146,6 +196,6 @@ final class CommitRecoverySuite extends CatsEffectSuite:
       override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] =
         attempts.updateAndGet(_ + 1).flatMap(attempt => IO.raiseError(failure).whenA(attempt <= failures))
 
-      override private[xkafka] val membership: GroupMembership[IO] = GroupMembership.Backend(IO.pure(TestGroupHandle))
+      override private[xkafka] val membership: GroupMembership[IO] = GroupMembership.Backend(IO.pure(TestGroupHandle), _ => IO.unit)
 
   private case object TestGroupHandle extends GroupHandle

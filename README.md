@@ -23,8 +23,10 @@ KafkaClient[IO]
 ```
 
 The selected JVM, Scala.js, or Scala Native artifact supplies the corresponding
-backend automatically. Producer and consumer settings use the same portable
-model everywhere. For example:
+adapter automatically. Producer and consumer settings use the same portable
+model everywhere. The Native adapter links to an installed librdkafka; see the
+[platform notes](https://pmbmegalom.github.io/xkafka/platform-notes.html) for
+runtime requirements. For example:
 
 ```scala
 import cats.data.NonEmptyList
