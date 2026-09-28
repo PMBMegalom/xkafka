@@ -567,8 +567,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
             val pending = PendingCommit(offsets, outcome)
             F.uncancelable: poll =>
               reported.set(Some(pending)) *>
-                (F.delay(underlying.commit(committedOffsets(offsets))).void *>
-                  poll(outcome.get.timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut))).flatMap(F.fromEither)))
+                poll(
+                  (F.delay(underlying.commit(committedOffsets(offsets))).void *> outcome.get)
+                    .timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut))).flatMap(F.fromEither)
+                )
                   // This covers cancellation and a synchronous throw from `commit`, not only the wait itself. It removes
                   // this attempt only, since its event may already have removed it before completing the Deferred.
                   .guarantee(reported.update(_.filterNot(_ == pending)))
