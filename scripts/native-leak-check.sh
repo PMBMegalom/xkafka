@@ -16,7 +16,7 @@ downstream_dir="$project_dir/tests/downstream"
 version="0.1.0-LEAKCHECK"
 
 if [[ "${1:-}" == "--run" ]]; then
-  binary="$downstream_dir/.native/target/scala-3.3.8/native/xkafka.downstream.DownstreamSmoke"
+  binary="${XKAFKA_SMOKE_BINARY:?the linked smoke binary was not passed through}"
   case "$(uname -s)" in
     Darwin) exec leaks --atExit -- "$binary" ;;
     Linux)
@@ -44,7 +44,16 @@ fi
 export XKAFKA_LIBRDKAFKA_PREFIX
 export XKAFKA_VERSION="$version"
 
+# `print` reports what the link actually produced, so the path follows the Scala version the
+# downstream build is on instead of naming one here for a bump to invalidate.
 echo "Building the Native smoke binary"
-(cd "$downstream_dir" && sbt --error smokeNative/nativeLink)
+binary="$(cd "$downstream_dir" && sbt --error "print smokeNative/nativeLink" | tr -d '\r' | tail -n 1)"
+
+if [[ ! -x "$binary" ]]; then
+  echo "the Native link reported '$binary', which is not an executable" >&2
+  exit 1
+fi
+
+export XKAFKA_SMOKE_BINARY="$binary"
 
 exec "$script_dir/with-kafka.sh" "$script_dir/native-leak-check.sh" --run
