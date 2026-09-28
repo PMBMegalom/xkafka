@@ -137,6 +137,12 @@
         <p><code>BackendFailure</code> preserves the original cause and carries a portable
         <code>ErrorCode</code> along with retriable and fatal classifications. A <code>None</code> for any of
         those means the backend did not make that classification available.</p>
+        <p><code>retriable</code> answers the same way on all three platforms for the same condition.
+        <code>ErrorCode.retriable</code> gives that answer directly, and commit recovery uses it to
+        decide what to retry:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span>.</span><span class="identifier">exists</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">retriable</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
+        <p>It is true for an unavailable or loading coordinator, a leader that has moved, a
+        rebalance in progress, a network failure, and a timed out request.</p>
         
         <h2 id="portable-codes" class="section"><a class="anchor-link left" href="#portable-codes"><i class="icofont-laika link">&#xef71;</i></a>Portable codes</h2>
         <p>The named <code>ErrorCode</code> cases are Kafka protocol errors, which every broker

@@ -94,6 +94,9 @@
     <li class="level1 nav-leaf"><a href="#two-stages">Two stages</a></li>
     <li class="level1 nav-leaf"><a href="#results">Results</a></li>
     <li class="level1 nav-leaf"><a href="#records">Records</a></li>
+    <li class="level1 nav-leaf"><a href="#partitions">Partitions</a></li>
+    <li class="level1 nav-leaf"><a href="#acknowledgements">Acknowledgements</a></li>
+    <li class="level1 nav-leaf"><a href="#releasing-a-producer">Releasing a producer</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -122,16 +125,24 @@
         <h2 id="two-stages" class="section"><a class="anchor-link left" href="#two-stages"><i class="icofont-laika link">&#xef71;</i></a>Two stages</h2>
         <p><code>produce</code> returns <code>F[F[ProducerResult]]</code>. The outer effect completes once the
         backend has accepted the records for delivery, and the inner one once the broker
-        has acknowledged them, so several batches can be in flight at once:</p>
+        has acknowledged them. Holding the inner effect lets several batches be in
+        flight at once:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">for</span><span>
   </span><span class="identifier">first</span><span>  &lt;- </span><span class="identifier">producer</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">firstBatch</span><span>)
   </span><span class="identifier">second</span><span> &lt;- </span><span class="identifier">producer</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">secondBatch</span><span>)
   </span><span class="identifier">_</span><span>      &lt;- </span><span class="identifier">first</span><span>
   </span><span class="identifier">_</span><span>      &lt;- </span><span class="identifier">second</span><span>
 </span><span class="keyword">yield</span><span> ()</span></code></pre>
-        <p><code>produceAndAwait</code> combines both stages when that pipelining is not wanted.</p>
-        <p>A producer that must write records and consumer offsets as one unit is a
-        different type. See <a href="transactions.html">Transactions</a>.</p>
+        <p><code>produceAndAwait</code> runs both stages together, for callers that do not need the
+        pipelining.</p>
+        <p>For a stream of batches, use <code>pipe</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">batches</span><span>.</span><span class="identifier">through</span><span>(</span><span class="identifier">producer</span><span>.</span><span class="identifier">pipe</span><span>(</span><span class="identifier">maxInFlight</span><span> = </span><span class="number-literal">256</span><span>))</span></code></pre>
+        <p><code>pipe</code> enqueues later batches while earlier ones are still being acknowledged,
+        and emits results in the order the batches arrived. <code>maxInFlight</code> sets how many
+        batches may await the broker at once. Mapping <code>produceAndAwait</code> over a stream
+        instead would send one batch at a time.</p>
+        <p>To write records and consumer offsets atomically, use a transactional producer.
+        See <a href="transactions.html">Transactions</a>.</p>
         
         <h2 id="results" class="section"><a class="anchor-link left" href="#results"><i class="icofont-laika link">&#xef71;</i></a>Results</h2>
         <p>A <code>ProducerResult</code> pairs every record with the metadata its backend reported for
@@ -143,8 +154,70 @@
         <h2 id="records" class="section"><a class="anchor-link left" href="#records"><i class="icofont-laika link">&#xef71;</i></a>Records</h2>
         <p>A <code>ProducerRecord</code> names its topic, key, and value, and optionally a partition,
         a timestamp, and headers. A key or value of <code>None</code>, through the <code>.option</code>
-        codecs, is how a Kafka null is expressed, which is also how tombstones are
-        modelled.</p>
+        codecs, represents a Kafka null. Tombstones are produced this way.</p>
+        
+        <h2 id="partitions" class="section"><a class="anchor-link left" href="#partitions"><i class="icofont-laika link">&#xef71;</i></a>Partitions</h2>
+        <p><code>partitionsFor</code> returns the partitions a topic currently has. Use it to pick a
+        partition to produce to:</p>
+        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">utf8</span><span> = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">found</span><span>    &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">producer</span><span>(</span><span class="identifier">settings</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">partitionsFor</span><span>(</span><span class="identifier">topic</span><span>))
+  </span><span class="keyword">yield</span><span> </span><span class="identifier">found</span></code></pre>
+        
+        <h2 id="acknowledgements" class="section"><a class="anchor-link left" href="#acknowledgements"><i class="icofont-laika link">&#xef71;</i></a>Acknowledgements</h2>
+        <p><code>acks</code> sets how many replicas must hold a record before the broker acknowledges
+        it. It defaults to <code>Acks.AllReplicas</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withAcks</span><span>(</span><span class="type-name">Acks</span><span>.</span><span class="type-name">Leader</span><span>)</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>value</th>
+              <th>the broker replies once</th>
+              <th>a record is lost if</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Acks.NoAcknowledgement</code></td>
+              <td>the record is sent</td>
+              <td>delivery fails for any reason</td>
+            </tr>
+            <tr>
+              <td><code>Acks.Leader</code></td>
+              <td>the partition leader has it</td>
+              <td>the leader fails before a follower copies it</td>
+            </tr>
+            <tr>
+              <td><code>Acks.AllReplicas</code></td>
+              <td>every in-sync replica has it</td>
+              <td>every in-sync replica fails</td>
+            </tr>
+          </tbody>
+        </table>
+        
+        <h2 id="releasing-a-producer" class="section"><a class="anchor-link left" href="#releasing-a-producer"><i class="icofont-laika link">&#xef71;</i></a>Releasing a producer</h2>
+        <p>Releasing the resource delivers the records the producer has already accepted,
+        then closes it. <code>closeTimeout</code> sets how long that takes at most, and defaults to
+        sixty seconds:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withCloseTimeout</span><span>(</span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>)</span></code></pre>
+        <p>Records still undelivered when the timeout expires are dropped. Lower the
+        timeout for a faster shutdown, at the cost of losing more on the way out.</p>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p><code>closeTimeout</code> applies to producers. There is no equivalent setting for
+          consumers: how long a consumer takes to leave its group is decided by the
+          platform, not by these settings.</p>
+        </div>
 
         
 <hr class="footer-rule"/>

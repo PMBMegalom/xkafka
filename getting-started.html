@@ -92,6 +92,7 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#dependency">Dependency</a></li>
+    <li class="level1 nav-leaf"><a href="#versioning">Versioning</a></li>
     <li class="level1 nav-leaf"><a href="#constructing-a-client">Constructing a client</a></li>
     <li class="level1 nav-leaf"><a href="#scala-js">Scala.js</a></li>
     <li class="level1 nav-leaf"><a href="#scala-native">Scala Native</a></li>
@@ -106,7 +107,7 @@
         <h1 id="getting-started" class="title">Getting started</h1>
         
         <h2 id="dependency" class="section"><a class="anchor-link left" href="#dependency"><i class="icofont-laika link">&#xef71;</i></a>Dependency</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.1-778a137-SNAPSHOT&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.1-4e607cf-SNAPSHOT&quot;</span></code></pre>
         <p>The <code>%%%</code> operator selects the artifact for the platform being built. The same
         code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
         each brings its own backend.</p>
@@ -118,6 +119,18 @@
           kernel.</li>
         </ul>
         <p>Most applications need <code>xkafka-client</code> alone.</p>
+        
+        <h2 id="versioning" class="section"><a class="anchor-link left" href="#versioning"><i class="icofont-laika link">&#xef71;</i></a>Versioning</h2>
+        <p>xkafka follows early semantic versioning.</p>
+        <p>Within a series, upgrades keep binary compatibility. Code built against <code>0.1.0</code>
+        runs against <code>0.1.1</code> without recompiling.</p>
+        <p>Across a series, upgrades may break compatibility, in both binary and source
+        form. Going from <code>0.1.x</code> to <code>0.2.0</code> can mean recompiling, and changing code.</p>
+        <p>After <code>1.0.0</code>, that boundary moves to the major version, and every <code>1.x.y</code> will
+        stay binary compatible with <code>1.0.0</code>.</p>
+        <p>While the major version is <code>0</code>, expect the API to change between series.</p>
+        <p>If another dependency brings in a version across one of these boundaries, sbt
+        warns about it.</p>
         
         <h2 id="constructing-a-client" class="section"><a class="anchor-link left" href="#constructing-a-client"><i class="icofont-laika link">&#xef71;</i></a>Constructing a client</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>

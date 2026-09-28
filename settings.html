@@ -95,8 +95,9 @@
     <li class="level1 nav-leaf"><a href="#properties">Properties</a></li>
     <li class="level1 nav-leaf"><a href="#managed-properties">Managed properties</a></li>
     <li class="level1 nav-leaf"><a href="#withers">Withers</a></li>
-    <li class="level1 nav-leaf"><a href="#isolation">Isolation</a></li>
-    <li class="level1 nav-leaf"><a href="#timeouts">Timeouts</a></li>
+    <li class="level1 nav-leaf"><a href="#consumer-settings">Consumer settings</a></li>
+    <li class="level1 nav-leaf"><a href="#producer-settings">Producer settings</a></li>
+    <li class="level1 nav-leaf"><a href="#client-settings">Client settings</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -106,9 +107,10 @@
       <main class="content">
 
         <h1 id="settings" class="title">Settings</h1>
-        <p>Three settings types describe a client. <code>ClientSettings</code> covers the connection,
-        and the producer and consumer settings build on it. <code>TransactionalProducerSettings</code>
-        wraps the producer settings, and <a href="transactions.html">Transactions</a> covers what it adds.</p>
+        <p><code>ClientSettings</code> describes the connection. <code>ProducerSettings</code> and
+        <code>ConsumerSettings</code> each build on it and add what their client needs.
+        <code>TransactionalProducerSettings</code> wraps <code>ProducerSettings</code>, and is covered in
+        <a href="transactions.html">Transactions</a>.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -166,7 +168,7 @@
         <p><code>ManagedProperties</code> lists the names xkafka derives from the typed settings:
         bootstrap servers, client and group IDs, offset reset, automatic commits, the
         default API timeout, the metadata refresh names, the isolation level, the
-        transaction names, and the TLS and SASL names.
+        acknowledgement and transaction names, and the TLS and SASL names.
         Supplying one through the map is a <code>SettingsError</code>, so the typed settings and the
         map cannot disagree.</p>
         
@@ -175,23 +177,32 @@
         can invalidate the result, such as <code>withProperty</code>, return
         <code>ValidatedNel[SettingsError, *]</code> and revalidate in full.</p>
         
-        <h2 id="isolation" class="section"><a class="anchor-link left" href="#isolation"><i class="icofont-laika link">&#xef71;</i></a>Isolation</h2>
-        <p><code>ConsumerSettings</code> carries <code>isolationLevel</code>, which says whether records of a
-        transaction that has not committed are delivered. It defaults to
-        <code>ReadUncommitted</code>, which is Kafka&#39;s own default. See
-        <a href="transactions.html">Transactions</a>.</p>
-        
-        <h2 id="timeouts" class="section"><a class="anchor-link left" href="#timeouts"><i class="icofont-laika link">&#xef71;</i></a>Timeouts</h2>
-        <p><code>ConsumerSettings</code> carries two, and both mean the same thing on every backend.</p>
+        <h2 id="consumer-settings" class="section"><a class="anchor-link left" href="#consumer-settings"><i class="icofont-laika link">&#xef71;</i></a>Consumer settings</h2>
+        <p>Beyond the group and the deserializers, <code>ConsumerSettings</code> carries:</p>
         <table>
           <thead>
             <tr>
               <th>setting</th>
               <th>default</th>
-              <th>what it bounds</th>
+              <th>meaning</th>
             </tr>
           </thead>
           <tbody>
+            <tr>
+              <td><code>autoOffsetReset</code></td>
+              <td><code>Latest</code></td>
+              <td>where to start when the group has no committed offset</td>
+            </tr>
+            <tr>
+              <td><code>isolationLevel</code></td>
+              <td><code>ReadUncommitted</code></td>
+              <td>whether records from uncommitted transactions are delivered</td>
+            </tr>
+            <tr>
+              <td><code>commitRecovery</code></td>
+              <td><code>CommitRecovery.Default</code></td>
+              <td>how a failed commit is retried</td>
+            </tr>
             <tr>
               <td><code>pollTimeout</code></td>
               <td>100ms</td>
@@ -200,21 +211,54 @@
             <tr>
               <td><code>requestTimeout</code></td>
               <td>60s</td>
-              <td>how long a call that asks the broker something waits for its answer</td>
+              <td>how long a call that asks the broker something waits for an answer</td>
+            </tr>
+            <tr>
+              <td><code>commitTimeout</code></td>
+              <td>15s</td>
+              <td>how long a commit waits before failing as a timed out request</td>
             </tr>
           </tbody>
         </table>
         <p><code>requestTimeout</code> bounds <code>committed</code>, <code>beginningOffsets</code>, <code>endOffsets</code>,
-        <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, and <code>seek</code>. Its default
-        matches what Kafka&#39;s own clients use.</p>
-        <p><code>ClientSettings</code> carries one more, because it applies to producers and consumers
-        alike.</p>
+        <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, and <code>seek</code>. Its default matches
+        what Kafka&#39;s own clients use.</p>
+        <p>See <a href="offsets.html">Offsets</a> for commit recovery and the commit timeout, and
+        <a href="transactions.html">Transactions</a> for the isolation level.</p>
+        
+        <h2 id="producer-settings" class="section"><a class="anchor-link left" href="#producer-settings"><i class="icofont-laika link">&#xef71;</i></a>Producer settings</h2>
+        <p>Beyond the serializers, <code>ProducerSettings</code> carries:</p>
         <table>
           <thead>
             <tr>
               <th>setting</th>
               <th>default</th>
-              <th>what it bounds</th>
+              <th>meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>acks</code></td>
+              <td><code>Acks.AllReplicas</code></td>
+              <td>how many replicas must hold a record before it is acknowledged</td>
+            </tr>
+            <tr>
+              <td><code>closeTimeout</code></td>
+              <td>60s</td>
+              <td>how long releasing a producer waits to deliver what it holds</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>See <a href="producing.html">Producing</a> for both.</p>
+        
+        <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
+        <p><code>ClientSettings</code> applies to producers and consumers alike:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>setting</th>
+              <th>default</th>
+              <th>meaning</th>
             </tr>
           </thead>
           <tbody>
@@ -225,9 +269,12 @@
             </tr>
           </tbody>
         </table>
-        <p>Each backend spells it differently, so the typed setting is what keeps the two
-        the same: the Java client takes it as <code>metadata.max.age.ms</code>, and librdkafka takes
-        it as <code>topic.metadata.refresh.interval.ms</code> and derives its own cache age from it.</p>
+        <p>Setting this once covers every platform. Kafka spells it
+        <code>metadata.max.age.ms</code> and librdkafka spells it
+        <code>topic.metadata.refresh.interval.ms</code>, so look for those names when comparing
+        against their documentation.</p>
+        <p><code>ClientSettings</code> also carries the bootstrap servers, an optional client id, and
+        the security settings. See <a href="transport-security.html">Transport security</a>.</p>
 
         
 <hr class="footer-rule"/>

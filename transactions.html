@@ -103,9 +103,9 @@
       <main class="content">
 
         <h1 id="transactions" class="title">Transactions</h1>
-        <p>A transactional producer writes records and records consumer offsets as one unit. Everything it
-        wrote becomes visible together when the transaction commits, and none of it at all where the
-        transaction aborts.</p>
+        <p>A transactional producer writes records and consumer offsets as one unit.
+        Everything it wrote becomes visible together when the transaction commits, and
+        none of it becomes visible if the transaction aborts.</p>
         <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -122,55 +122,62 @@
     </span><span class="identifier">record</span><span>    = </span><span class="type-name">ProducerRecord</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="string-literal">&quot;key&quot;</span><span>, </span><span class="string-literal">&quot;value&quot;</span><span>)
     </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">transactionalProducer</span><span>(</span><span class="identifier">settings</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">transactionally</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">record</span><span>))))
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
-        <p><code>transactionally</code> commits where its body succeeds and aborts where the body fails or is cancelled,
-        so the transaction never outlives the work it covers. A producer carries one transactional id, and
-        Kafka allows that id one transaction at a time, so concurrent callers wait for one another.</p>
+        <p><code>transactionally</code> commits the transaction if its body succeeds, and aborts it if
+        the body fails or is cancelled.</p>
+        <p>A transactional producer only writes inside transactions, which is why
+        <code>transactionalProducer</code> is a separate constructor rather than an option on
+        <code>producer</code>.</p>
+        <p>Kafka allows one transaction at a time per transactional id, so concurrent calls
+        to <code>transactionally</code> on one producer run one after another.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>That waiting is what makes a nested transaction deadlock. A <code>transactionally</code> inside the body of
-          another one on the same producer waits for a transaction that cannot finish until the body returns.
-          Use one transaction per unit of work, and a producer of its own where two must overlap.</p>
+          <p>Do not nest <code>transactionally</code> on the same producer. The inner call waits for the
+          outer transaction to finish, and the outer transaction cannot finish until its
+          body returns, so the pair deadlocks. Use one transaction per unit of work, or a
+          second producer with its own transactional id.</p>
         </div>
-        <p>A transactional producer writes only inside transactions, which is why <code>transactionalProducer</code> is a
-        constructor of its own rather than a mode of <code>producer</code>.</p>
         
         <h2 id="reading-what-a-transaction-wrote" class="section"><a class="anchor-link left" href="#reading-what-a-transaction-wrote"><i class="icofont-laika link">&#xef71;</i></a>Reading what a transaction wrote</h2>
-        <p>Records of an open transaction are already in the log. A consumer reads them unless it is told not
-        to, so a reader that should see only committed work asks for it:</p>
+        <p>Records written by an open transaction are already in the log, and a consumer
+        delivers them by default. To read only committed records, set the isolation
+        level:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withIsolationLevel</span><span>(</span><span class="type-name">IsolationLevel</span><span>.</span><span class="type-name">ReadCommitted</span><span>)</span></code></pre>
-        <p>The default is <code>ReadUncommitted</code>, which is Kafka&#39;s own, and which delivers every record as soon as
-        it is written, including records of a transaction that later aborts.</p>
+        <p>The default is <code>IsolationLevel.ReadUncommitted</code>, which is also Kafka&#39;s default.
+        It delivers every record as soon as it is written, including records from a
+        transaction that later aborts.</p>
         
         <h2 id="read-process-write" class="section"><a class="anchor-link left" href="#read-process-write"><i class="icofont-laika link">&#xef71;</i></a>Read, process, write</h2>
-        <p><code>commitOffsets</code> records the offsets a consumer reached as part of the transaction, so the records
-        produced and the position they were produced from land together or not at all.</p>
+        <p><code>commitOffsets</code> adds the offsets a consumer has reached to the transaction, so
+        the records produced and the position they were produced from are committed
+        together:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">chunks</span><span>.</span><span class="identifier">evalMap</span><span>: </span><span class="identifier">chunk</span><span> =&gt;
   </span><span class="keyword">val</span><span> </span><span class="identifier">batch</span><span> = </span><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">chunk</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">offset</span><span>))
   </span><span class="identifier">producer</span><span>.</span><span class="identifier">transactionally</span><span>: </span><span class="identifier">transaction</span><span> =&gt;
     </span><span class="identifier">transaction</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">derive</span><span>(</span><span class="identifier">chunk</span><span>)) *&gt; </span><span class="identifier">transaction</span><span>.</span><span class="identifier">commitOffsets</span><span>(</span><span class="identifier">batch</span><span>)</span></code></pre>
-        <p>The batch carries the committer each offset came from, and that committer knows its consumer, so
-        naming the wrong group is not something this can express.</p>
+        <p>The batch already identifies the consumer its offsets came from, so
+        <code>commitOffsets</code> needs no consumer argument and cannot record them against the
+        wrong group.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>A transactional pipeline is only atomic end to end when its reader also uses
-          <code>IsolationLevel.ReadCommitted</code>. Otherwise the downstream consumer sees records of a transaction that
-          has not committed, and may see records an abort later withdrew.</p>
+          <p>The pipeline is only atomic end to end if whatever reads the output topic also
+          sets <code>IsolationLevel.ReadCommitted</code>. A reader left on the default sees records
+          from transactions that have not committed, including ones that later abort.</p>
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p><code>produce</code> inside a transaction waits for the broker to acknowledge the records, because a
-          transaction cannot commit records that have not been acknowledged. It therefore returns
-          <code>F[ProducerResult]</code>, without the second stage a plain producer offers.</p>
+          <p><code>produce</code> inside a transaction returns <code>F[ProducerResult]</code> rather than the two
+          stages a plain producer offers. A transaction cannot commit records the broker
+          has not acknowledged, so the call waits for them.</p>
         </div>
         
         <h2 id="settings" class="section"><a class="anchor-link left" href="#settings"><i class="icofont-laika link">&#xef71;</i></a>Settings</h2>
-        <p><code>TransactionalProducerSettings</code> wraps <code>ProducerSettings</code> and adds the two values Kafka needs.</p>
+        <p><code>TransactionalProducerSettings</code> wraps <code>ProducerSettings</code> and adds two values.</p>
         <table>
           <thead>
             <tr>
               <th>setting</th>
               <th>default</th>
-              <th>what it means</th>
+              <th>maps to</th>
             </tr>
           </thead>
           <tbody>
@@ -182,14 +189,15 @@
             <tr>
               <td><code>transactionTimeout</code></td>
               <td>60s</td>
-              <td>Kafka&#39;s <code>transaction.timeout.ms</code>, defaulting to what its own producers use</td>
+              <td>Kafka&#39;s <code>transaction.timeout.ms</code></td>
             </tr>
           </tbody>
         </table>
-        <p>Give each producer instance that must run alongside another its own <code>transactionalId</code>. Allocating a
-        second producer under an id already in use fences the first, so its open transaction can no longer
-        commit. That is what the id is for when a replacement takes over from an instance that has gone, and
-        a failure when both were meant to run.</p>
+        <p>Give each producer that runs alongside another its own <code>transactionalId</code>.
+        Creating a second producer with an id already in use fences the first, and its
+        open transaction can then no longer commit. That is the intended behaviour when a
+        replacement takes over from an instance that has stopped, and a source of
+        failures when two producers were meant to run at the same time.</p>
 
         
 <hr class="footer-rule"/>

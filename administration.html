@@ -102,8 +102,8 @@
       <main class="content">
 
         <h1 id="administration" class="title">Administration</h1>
-        <p><code>KafkaClient[F].admin</code> is a <code>Resource</code> over the topic operations. It reads and changes cluster
-        metadata only, so it neither produces nor consumes.</p>
+        <p><code>KafkaClient[F].admin</code> is a <code>Resource</code> over the topic operations. It reads and
+        changes cluster metadata only, and neither produces nor consumes.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -124,26 +124,27 @@
           <li><code>createPartitions</code> adds partitions to a topic, which Kafka allows only as an increase.</li>
           <li><code>describeTopics</code> reports the partitions of each requested topic.</li>
         </ul>
-        <p><code>NewTopic.from</code> rejects a partition count or replication factor that is not positive, so a request
-        the broker would refuse cannot be built.</p>
+        <p><code>NewTopic.from</code> rejects a partition count or replication factor that is not
+        positive, so a request the broker would refuse cannot be built.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>Kafka reports an outcome for each topic, and the backends do not agree on whether that detail
-          survives the trip. These operations therefore report the first failure and nothing more, which is
-          what every backend can deliver. A request covering several topics may have changed the cluster
-          before the failure it reports.</p>
+          <p>Kafka reports an outcome for each topic, but the backends do not agree on whether
+          that detail survives. These operations therefore report only the first failure. A
+          request covering several topics may already have changed the cluster before the
+          failure it reports.</p>
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p><code>describeTopics</code> fails where the cluster does not have one of the requested topics. Creating,
-          growing, and deleting all propagate through the cluster in their own time, so a description taken
-          immediately afterwards may not agree with the request that preceded it.</p>
+          <p><code>describeTopics</code> fails if the cluster does not have one of the requested topics.
+          Creating, growing, and deleting topics all propagate through the cluster in their
+          own time, so a description taken immediately afterwards may not yet reflect the
+          request before it.</p>
         </div>
         
         <h2 id="what-it-does-not-do" class="section"><a class="anchor-link left" href="#what-it-does-not-do"><i class="icofont-laika link">&#xef71;</i></a>What it does not do</h2>
-        <p>Access control, quotas, configuration, consumer group administration, delegation tokens, and log
-        directories are absent. The topic operations above are the ones every backend supports with the
-        same meaning.</p>
+        <p>Access control, quotas, configuration, consumer group administration, delegation
+        tokens, and log directories are not covered. The topic operations above are the
+        ones every backend supports with the same meaning.</p>
 
         
 <hr class="footer-rule"/>

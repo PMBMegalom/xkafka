@@ -93,6 +93,7 @@
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#provided-codecs">Provided codecs</a></li>
     <li class="level1 nav-leaf"><a href="#nulls-and-tombstones">Nulls and tombstones</a></li>
+    <li class="level1 nav-leaf"><a href="#header-values">Header values</a></li>
     <li class="level1 nav-leaf"><a href="#instances">Instances</a></li>
   </ul>
 
@@ -119,8 +120,49 @@
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">key</span><span>   = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>
 </span><span class="keyword">val</span><span> </span><span class="identifier">value</span><span> = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span></code></pre>
-        <p>A tombstone is a record whose value is <code>None</code>, so modelling it is the same as
-        modelling any absent value.</p>
+        <p>A tombstone is a record whose value is <code>None</code>.</p>
+        
+        <h2 id="header-values" class="section"><a class="anchor-link left" href="#header-values"><i class="icofont-laika link">&#xef71;</i></a>Header values</h2>
+        <p>A header value is bytes. <code>HeaderSerializer</code> and <code>HeaderDeserializer</code> encode and
+        decode them, so a call site does not have to name a charset or a byte order:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">headers</span><span> = </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>.</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;trace&quot;</span><span>, </span><span class="string-literal">&quot;abc&quot;</span><span>).</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;attempt&quot;</span><span>, </span><span class="number-literal">2</span><span>)
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">trace</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">values</span><span>.</span><span class="identifier">head</span><span>.</span><span class="identifier">as</span><span>[</span><span class="type-name">String</span><span>]</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>type</th>
+              <th>encoding</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>String</code></td>
+              <td>UTF-8</td>
+            </tr>
+            <tr>
+              <td><code>Int</code></td>
+              <td>four bytes, most significant first</td>
+            </tr>
+            <tr>
+              <td><code>Long</code></td>
+              <td>eight bytes, most significant first</td>
+            </tr>
+            <tr>
+              <td><code>Chunk[Byte]</code></td>
+              <td>the bytes themselves</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Reading returns <code>Either[ValidationError, A]</code>. A header with no value fails as
+        <code>MissingHeaderValue</code>, and a numeric value of the wrong width fails as
+        <code>InvalidHeaderLength</code> rather than being truncated.</p>
+        <p><code>contramap</code> and <code>map</code> adapt a codec to another type, and <code>emap</code> rejects values
+        the bytes can carry but the type cannot.</p>
+        <p>Header codecs are plain functions, not effects. A header value is already in
+        memory by the time one is applied.</p>
         
         <h2 id="instances" class="section"><a class="anchor-link left" href="#instances"><i class="icofont-laika link">&#xef71;</i></a>Instances</h2>
         <p>With <code>F</code> fixed, <code>Serializer[F, A]</code> has a Cats <code>Contravariant</code> instance and

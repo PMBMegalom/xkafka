@@ -127,32 +127,36 @@
         
         <h2 id="what-a-consumer-reads" class="section"><a class="anchor-link left" href="#what-a-consumer-reads"><i class="icofont-laika link">&#xef71;</i></a>What a consumer reads</h2>
         <p><code>Selection</code> says where a consumer&#39;s records come from.</p>
-        <p><code>Selection.Topics</code> takes a non-empty set of topics. <code>Selection.Pattern</code> takes a non-empty
+        <p><code>Selection.Topics</code> takes a non-empty set of topics. <code>Selection.Pattern</code> takes a
         <code>TopicPattern</code>, which matches complete topic names. Portable patterns should use
-        regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular expressions.
-        Both join a consumer group, so the partitions a consumer holds follow the group&#39;s rebalances.</p>
-        <p><code>Selection.Partitions</code> takes a non-empty set of topic-partitions and reads exactly those. No group
-        is joined, so the assignment never changes and nothing rebalances it away. Two consumers naming the
-        same partition each read all of it, even where they share a consumer group, because there is no
-        group membership to divide it between them.</p>
-        <p>The consumer group is still the key that committed offsets are stored under, so consumers naming the
-        same partitions under one group do share those offsets, and a consumer resuming from a commit reads
-        from wherever the other left off.</p>
+        regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular
+        expressions. Both join a consumer group, so the partitions a consumer holds
+        follow the group&#39;s rebalances.</p>
+        <p><code>Selection.Partitions</code> takes a non-empty set of topic-partitions and reads
+        exactly those. It joins no group, so the assignment never changes. Two consumers
+        naming the same partition each read all of it, even when they share a consumer
+        group, because no group membership divides the partition between them.</p>
+        <p>Committed offsets are still stored under the consumer group. Consumers reading
+        the same partitions under one group therefore share those offsets, and one
+        resuming from a commit continues from where the other left off.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>Kafka stores whatever was committed last for a partition, with no comparison against what is already
-          there. Two consumers committing the same partition therefore race, and the later commit wins even
-          where its offset is lower, which moves the group backwards and replays records. A batch keeps the
-          highest offset per partition, but only among the offsets in that batch. Give consumers their own
-          group unless they are meant to share a position.</p>
+          <p>Kafka stores the last offset committed for a partition without comparing it to
+          what is already there. Two consumers committing the same partition race, and the
+          later commit wins even when its offset is lower, which moves the group backwards
+          and replays records. A batch keeps the highest offset per partition, but only
+          among the offsets in that batch. Give consumers their own group unless they are
+          meant to share a position.</p>
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p>A seek is refused until the partition it names is being fetched, which holding the assignment does
-          not yet mean. Retry briefly if you seek immediately after a consumer starts.</p>
+          <p>A seek is refused until the partition it names is being fetched, which happens
+          after the assignment arrives. Retry briefly if you seek immediately after
+          starting a consumer.</p>
         </div>
-        <p>A consumer delivers records of a transaction that has not committed unless <code>isolationLevel</code> says
-        otherwise. See <a href="transactions.html">Transactions</a>.</p>
+        <p>By default a consumer delivers records from transactions that have not
+        committed. Set <code>isolationLevel</code> to change that. See
+        <a href="transactions.html">Transactions</a>.</p>
         
         <h2 id="inspecting-the-consumer" class="section"><a class="anchor-link left" href="#inspecting-the-consumer"><i class="icofont-laika link">&#xef71;</i></a>Inspecting the consumer</h2>
         <p>Within the consumer resource:</p>
@@ -170,43 +174,47 @@
         </ul>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p><code>position</code> answers <code>None</code> until this consumer has consumed from the partition. A backend may
-          settle on a position sooner, such as when a seek names an offset, so the value every backend
-          agrees on is the one after records have been consumed.</p>
+          <p><code>position</code> returns <code>None</code> until this consumer has consumed from the partition.
+          Some backends settle on a position sooner, for instance when a seek names an
+          offset, so the value every backend agrees on is the one after records have been
+          consumed.</p>
         </div>
         
         <h2 id="processing-every-record" class="section"><a class="anchor-link left" href="#processing-every-record"><i class="icofont-laika link">&#xef71;</i></a>Processing every record</h2>
-        <p><code>consumeChunk</code> takes a function over a chunk of records and commits that chunk once the function
-        returns, so the common case needs no stream plumbing.</p>
+        <p><code>consumeChunk</code> takes a function over a chunk of records and commits that chunk
+        once the function returns:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">consumeChunk</span><span>: </span><span class="identifier">records</span><span> =&gt;
   </span><span class="identifier">records</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">handle</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">CommitNow</span><span>)</span></code></pre>
-        <p>Partitions are processed alongside one another, so a slow chunk holds back only the partition it
-        came from. It returns once <code>stopConsuming</code> has been called and everything already fetched has been
-        processed, and otherwise runs until it is cancelled or something fails. Returning <code>CommitNow</code> is what
-        makes the commit visible where the records are handled.</p>
+        <p>Partitions are processed concurrently, so a slow chunk holds back only the
+        partition it came from. Returning <code>CommitNow</code> is what triggers the commit.</p>
+        <p><code>consumeChunk</code> runs until it is cancelled, until something fails, or until
+        <code>stopConsuming</code> has been called and everything already fetched has been
+        processed.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>A consumer joins its group at a different moment on each backend. The Java client joins when the
-          application polls, so a consumer nobody reads holds nothing. The JavaScript and Native backends
-          join when the consumer resource is allocated, so one nobody reads still takes a share of the
-          partitions and does not hand them back. Release a consumer you are not reading.</p>
+          <p>Consumers join their group at different moments on different backends. The Java
+          client joins when the application polls, so a consumer nobody reads holds no
+          partitions. The JavaScript and Native backends join when the consumer resource is
+          allocated, so a consumer nobody reads still takes a share of the partitions and
+          does not give them back. Release consumers you are not reading.</p>
         </div>
         
         <h2 id="stopping" class="section"><a class="anchor-link left" href="#stopping"><i class="icofont-laika link">&#xef71;</i></a>Stopping</h2>
-        <p><code>stopConsuming</code> stops fetching. The record streams end once the records already fetched have been
-        handed over, so nothing that was read from the broker is dropped, and offsets stay committable
-        afterwards.</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>
-  .</span><span class="identifier">evalTap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>)
-  .</span><span class="identifier">interruptWhen</span><span>(</span><span class="identifier">shutdownRequested</span><span>)</span></code></pre>
-        <p>That interrupts mid-record and loses whatever was fetched. This does not:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">shutdownRequested</span><span>.</span><span class="identifier">get</span><span> *&gt; </span><span class="identifier">consumer</span><span>.</span><span class="identifier">stopConsuming</span></code></pre>
-        <p>run alongside the stream, which then completes on its own once it has drained. It returns as soon as
-        fetching has been told to stop, without waiting for that draining. Calling it again does nothing
-        further, and a stream started afterwards is empty.</p>
-        <p>Releasing the consumer resource, or cancelling whatever reads it, stops it abruptly instead. Neither
-        waits for what has been fetched to be handed over, so whoever resumes the group reads those offsets
-        again.</p>
+        <p><code>stopConsuming</code> stops fetching. The record streams then end once the records
+        already fetched have been handed over. Nothing read from the broker is dropped,
+        and offsets remain committable.</p>
+        <p>Run it alongside the stream:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">consume</span><span> = </span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">stop</span><span>    = </span><span class="identifier">shutdownRequested</span><span>.</span><span class="identifier">get</span><span> *&gt; </span><span class="identifier">consumer</span><span>.</span><span class="identifier">stopConsuming</span><span>
+
+(</span><span class="identifier">consume</span><span>, </span><span class="identifier">stop</span><span>).</span><span class="identifier">parTupled</span></code></pre>
+        <p><code>stopConsuming</code> returns as soon as fetching has been told to stop, without
+        waiting for the streams to drain. Calling it more than once has no further
+        effect, and a stream started after it is empty.</p>
+        <p>Interrupting the stream instead, with <code>interruptWhen</code> for example, stops it
+        mid-record and discards whatever had been fetched. Releasing the consumer
+        resource, or cancelling whatever reads it, does the same. In those cases whoever
+        resumes the group reads those offsets again.</p>
         
         <h2 id="partition-streams" class="section"><a class="anchor-link left" href="#partition-streams"><i class="icofont-laika link">&#xef71;</i></a>Partition streams</h2>
         <p><code>partitionedRecords</code> exposes a record stream for each assigned topic-partition
@@ -219,8 +227,8 @@
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
           <p>A consumer that subscribes to a topic before that topic exists sees it once the
-          backend refreshes its metadata. <code>metadataRefreshInterval</code> sets how long that takes
-          and defaults to five minutes, so lower it if a consumer must discover a topic
+          backend refreshes its metadata. <code>metadataRefreshInterval</code> sets how long that
+          takes and defaults to five minutes. Lower it if a consumer must discover a topic
           promptly.</p>
         </div>
 
