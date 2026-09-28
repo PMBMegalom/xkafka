@@ -449,6 +449,29 @@ final class ClientSuite extends FunSuite:
       IsolationLevel.ReadCommitted
     )
 
+  test("the acks setting defaults, carries through its wither, and reads as Kafka reads it"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+
+    assertEquals(settings.acks, ProducerSettings.DefaultAcks)
+    assertEquals(settings.acks, Acks.AllReplicas)
+    assertEquals(settings.withAcks(Acks.Leader).acks, Acks.Leader)
+    assertEquals(settings.withAcks(Acks.Leader).withProperty("linger.ms", "5").toOption.get.acks, Acks.Leader)
+    // The three values Kafka itself accepts, which both backends read from the same property.
+    assertEquals(Acks.values.toList.map(_.property), List("0", "1", "all"))
+
+  test("settings reject the acks property the typed model owns"):
+    val serializer = Serializer.const[IO, String](None)
+
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, Map("acks" -> "1")).toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("acks", SettingsError.PropertyScope.Producer)))
+    )
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, Map("request.required.acks" -> "1")).toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("request.required.acks", SettingsError.PropertyScope.Producer)))
+    )
+
   test("the producer close timeout defaults and is carried by its wither"):
     val serializer = Serializer.const[IO, String](None)
     val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get

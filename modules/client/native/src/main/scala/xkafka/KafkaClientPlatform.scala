@@ -119,7 +119,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     for
       client <-
         nativeClient(
-          createProducer(settings.client, settings.properties),
+          createProducer(settings.client, settings.properties.updated("acks", settings.acks.property)),
           handle => Bindings.xkafka_producer_destroy(handle, settings.closeTimeout.toMillis.toInt)
         )
       // Outstanding acknowledgements finish before the client.handle they poll is destroyed.
@@ -215,7 +215,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         nativeClient(
           createProducer(
             settings.producer.client,
-            settings.producer.properties ++
+            settings.producer.properties.updated("acks", settings.producer.acks.property) ++
               Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString)
           ),
           handle => Bindings.xkafka_producer_destroy(handle, settings.producer.closeTimeout.toMillis.toInt)

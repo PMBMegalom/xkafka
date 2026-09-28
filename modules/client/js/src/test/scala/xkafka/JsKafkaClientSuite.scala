@@ -141,7 +141,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           )
         settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "5")).toOption.get
         result <-
-          KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5")))
+          KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5", DefaultAcks)))
             .producer(settings).use: underlying =>
               for
                 acknowledgement <- underlying.produce(NonEmptyList.one(record))
@@ -302,9 +302,21 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   test("the isolation level reaches the backend as the property it spells"):
     val settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
-    val client   = KafkaClientPlatform.fromDriver[IO](driver(expectedConsumerProperties = Map("isolation.level" -> "read_committed")))
 
-    client.consumer(settings.withIsolationLevel(IsolationLevel.ReadCommitted), Selection.Topics(NonEmptySet.one(topic("events")))).use_.attempt.void
+    for
+      captured <- IO(js.Array[Map[String, String]]())
+      client = KafkaClientPlatform.fromDriver[IO](collectingDriver(captured))
+      _ <- client.consumer(settings.withIsolationLevel(IsolationLevel.ReadCommitted), Selection.Topics(NonEmptySet.one(topic("events")))).use_.attempt
+    yield assertEquals(captured.toList, List(Map("isolation.level" -> "read_committed")))
+
+  test("the acks setting reaches the backend as the property it spells"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get.withAcks(Acks.Leader)
+
+    for
+      captured <- IO(js.Array[Map[String, String]]())
+      _        <- KafkaClientPlatform.fromDriver[IO](collectingDriver(captured)).producer(settings).use_.attempt
+    yield assertEquals(captured.toList, List(Map("acks" -> "1")))
 
   test("the transactional settings reach the backend as the properties Kafka reads"):
     val serializer      = Serializer.const[IO, String](None)
@@ -339,12 +351,15 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             Unit
           ]
       ).asInstanceOf[confluent.RdProducer]
-    val expected = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "30000")
+    val expected = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "30000", DefaultAcks)
 
     KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = expected)).transactionalProducer(settings).use_
 
   /** Every consumer carries one, so a driver that is not given an expectation is given this. */
   private val DefaultIsolationLevel = "isolation.level" -> "read_uncommitted"
+
+  /** Likewise every producer, which asks every replica for an answer unless told otherwise. */
+  private val DefaultAcks = "acks" -> "all"
 
   private val clientSettings = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("tests")).toOption.get
 
@@ -353,10 +368,31 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private val utf8Deserializer: Deserializer[IO, String] =
     Deserializer.instance((_, _, value) => IO.pure(value.fold("")(bytes => new String(bytes.toArray, "UTF-8"))))
 
+  /** Captures what a client would have been built with. Acquiring the client then fails, because the stub hands back nothing, so the properties are
+    * asserted on afterwards instead of from inside an effect whose failure has to be swallowed.
+    */
+  /** Captures what a client would have been built with. Acquiring it then fails, because the stub hands back nothing, so the properties are asserted
+    * on afterwards rather than from inside an effect whose failure the test has to swallow.
+    */
+  private def collectingDriver(captured: js.Array[Map[String, String]]): ConfluentKafkaDriver =
+    new ConfluentKafkaDriver:
+      override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer =
+        captured.push(properties): Unit
+        null
+
+      override def consumer(
+          settings: ClientSettings,
+          groupId: ConsumerGroup,
+          autoOffsetReset: AutoOffsetReset,
+          properties: Map[String, String]
+      ): confluent.RdConsumer =
+        captured.push(properties): Unit
+        null
+
   private def driver(
       producerValue: confluent.RdProducer = null,
       consumerValue: confluent.RdConsumer = null,
-      expectedProducerProperties: Map[String, String] = Map.empty,
+      expectedProducerProperties: Map[String, String] = Map(DefaultAcks),
       expectedConsumerProperties: Map[String, String] = Map(DefaultIsolationLevel)
   ): ConfluentKafkaDriver =
     new ConfluentKafkaDriver:

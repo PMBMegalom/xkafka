@@ -184,6 +184,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
         settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
           ClientProperties(settings.client)
       ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withCloseTimeout(settings.closeTimeout)
+        .withProperty("acks", settings.acks.property)
 
     settings.client.clientId.fold(base)(base.withClientId)
 

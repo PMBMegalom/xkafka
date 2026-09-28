@@ -42,6 +42,8 @@ val ManagedProperties: Set[String] =
     "auto.offset.reset",
     "enable.auto.commit",
     "enable.auto.offset.store",
+    "acks",
+    "request.required.acks",
     "isolation.level",
     "transactional.id",
     "transaction.timeout.ms",
@@ -159,27 +161,35 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     keySerializer: Serializer[F, K],
     valueSerializer: Serializer[F, V],
     properties: Map[String, String],
+    acks: Acks,
     closeTimeout: FiniteDuration
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
-    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, closeTimeout) {}
+    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, acks, closeTimeout) {}
 
   def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
-    new ProducerSettings(value, keySerializer, valueSerializer, properties, closeTimeout) {}
+    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout) {}
+
+  /** How many replicas must have a record before the broker answers for it. */
+  def withAcks(value: Acks): ProducerSettings[F, K, V] =
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, value, closeTimeout) {}
 
   /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
   def withCloseTimeout(value: FiniteDuration): ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, value) {}
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, value) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, values, closeTimeout)
+    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout)
 
-  override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$closeTimeout)"
+  override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$acks,$closeTimeout)"
 
 object ProducerSettings:
+  /** What both backends already ask for, and the only setting that survives losing a leader. */
+  val DefaultAcks: Acks = Acks.AllReplicas
+
   /** Long enough that a producer with records still in flight delivers them rather than dropping them on the way out. */
   val DefaultCloseTimeout: FiniteDuration = 60.seconds
 
@@ -188,10 +198,11 @@ object ProducerSettings:
       keySerializer: Serializer[F, K],
       valueSerializer: Serializer[F, V],
       properties: Map[String, String] = Map.empty,
+      acks: Acks = ProducerSettings.DefaultAcks,
       closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     validateSettings(propertyErrors(properties, SettingsError.PropertyScope.Producer))
-      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, closeTimeout) {})
+      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
@@ -236,6 +247,24 @@ object TransactionalProducerSettings:
   given [K, V]: FunctorK[[F[_]] =>> TransactionalProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: TransactionalProducerSettings[F, K, V])(fk: FunctionK[F, G]): TransactionalProducerSettings[G, K, V] =
       settings.mapK(fk)
+
+/** How many replicas must have a record before the broker answers for it. */
+enum Acks:
+  /** What both backends read this as, which is the same string on each of them. */
+  private[xkafka] def property: String =
+    this match
+      case Acks.NoAcknowledgement => "0"
+      case Acks.Leader            => "1"
+      case Acks.AllReplicas       => "all"
+
+  /** The broker does not answer at all, so a record can be lost with nothing saying so. */
+  case NoAcknowledgement
+
+  /** The partition leader alone, so a record is lost where the leader fails before a follower has taken it. */
+  case Leader
+
+  /** Every in-sync replica, which is the only one of the three that survives losing the leader. */
+  case AllReplicas
 
 enum AutoOffsetReset:
   case Earliest, Latest

@@ -61,7 +61,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           assertEquals(settings.properties.get("bootstrap.servers"), Some("unused:9092"))
           assertEquals(settings.properties.get("client.id"), Some("client"))
           assertEquals(settings.properties.get("compression.type"), Some("lz4"))
-          assertEquals(settings.properties.get("acks"), Some("all"))
+          // A value other than the default, so this proves the mapping rather than agreeing with it by chance.
+          assertEquals(settings.properties.get("acks"), Some("1"))
           mock
 
     val topic         = Topic.from("events").toOption.get
@@ -73,7 +74,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       Serializer.instance[IO, String]: (_, _, value) =>
         IO.pure(Some(Chunk.array(value.getBytes("UTF-8"))))
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip")).toOption.get
-    val settings = ProducerSettings.from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4", "acks" -> "all")).toOption.get
+    val settings = ProducerSettings.from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4")).toOption.get.withAcks(Acks.Leader)
     val record   =
       ProducerRecord(
         topic = topic,
