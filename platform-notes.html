@@ -145,6 +145,10 @@
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
         <p>The backend is <code>@confluentinc/kafka-javascript</code>, reached through its librdkafka
         configuration keys. It targets Node.js rather than browsers.</p>
+        <p>Its producer binding accepts string and buffer header values but not a Kafka
+        null header value. Producing <code>Header(name, None)</code> therefore raises
+        <code>KafkaException.Unsupported</code>; it is never changed into empty bytes. The JVM and
+        Native backends preserve null header values.</p>
         
         <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
         <p>Serializers, deserializers, producer and consumer settings, committable offsets

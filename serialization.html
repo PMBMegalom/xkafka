@@ -159,6 +159,12 @@
         <p>Reading returns <code>Either[ValidationError, A]</code>. A header with no value fails as
         <code>MissingHeaderValue</code>, and a numeric value of the wrong width fails as
         <code>InvalidHeaderLength</code> rather than being truncated.</p>
+        <p>Kafka permits a header to have no value, represented as <code>Header(name, None)</code>.
+        The JVM and Native backends preserve it. Confluent Kafka JavaScript accepts only
+        strings and buffers in its producer binding, so the Scala.js backend raises
+        <code>KafkaException.Unsupported</code> instead of silently changing a missing value into
+        empty bytes. <code>Header(name, Some(Chunk.empty))</code> remains a distinct, supported
+        empty value on every backend.</p>
         <p><code>contramap</code> and <code>map</code> adapt a codec to another type, and <code>emap</code> rejects values
         the bytes can carry but the type cannot.</p>
         <p>Header codecs are plain functions, not effects. A header value is already in

@@ -160,6 +160,12 @@
         <h2 id="failures" class="section"><a class="anchor-link left" href="#failures"><i class="icofont-laika link">&#xef71;</i></a>Failures</h2>
         <p>A rejected broker certificate or an incorrect password fails the call as
         <code>KafkaException.BackendFailure</code>.</p>
+        <p>On the JVM and Native, <code>BackendFailure.code</code> distinguishes these as
+        <code>SslAuthenticationFailed</code> and <code>SaslAuthenticationFailed</code>. The Confluent
+        JavaScript binding reports both through its transport error code before the
+        callback reaches xkafka, so Scala.js exposes <code>NetworkException</code> instead. Use the
+        failure detail and broker logs to distinguish certificate and credential
+        failures on Scala.js.</p>
 
         
 <hr class="footer-rule"/>

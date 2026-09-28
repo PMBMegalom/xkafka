@@ -124,9 +124,10 @@
         
         <h2 id="two-stages" class="section"><a class="anchor-link left" href="#two-stages"><i class="icofont-laika link">&#xef71;</i></a>Two stages</h2>
         <p><code>produce</code> returns <code>F[F[ProducerResult]]</code>. The outer effect completes once the
-        backend has accepted the records for delivery, and the inner one once the broker
-        has acknowledged them. Holding the inner effect lets several batches be in
-        flight at once:</p>
+        backend has accepted the records for delivery, and the inner one once the
+        backend reports their delivery outcome. With acknowledgements enabled this
+        includes the broker&#39;s response. Holding the inner effect lets several batches be
+        in flight at once:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">for</span><span>
   </span><span class="identifier">first</span><span>  &lt;- </span><span class="identifier">producer</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">firstBatch</span><span>)
   </span><span class="identifier">second</span><span> &lt;- </span><span class="identifier">producer</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">secondBatch</span><span>)
@@ -137,17 +138,17 @@
         pipelining.</p>
         <p>For a stream of batches, use <code>pipe</code>:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">batches</span><span>.</span><span class="identifier">through</span><span>(</span><span class="identifier">producer</span><span>.</span><span class="identifier">pipe</span><span>(</span><span class="identifier">maxInFlight</span><span> = </span><span class="number-literal">256</span><span>))</span></code></pre>
-        <p><code>pipe</code> enqueues later batches while earlier ones are still being acknowledged,
-        and emits results in the order the batches arrived. <code>maxInFlight</code> sets how many
-        batches may await the broker at once. Mapping <code>produceAndAwait</code> over a stream
-        instead would send one batch at a time.</p>
+        <p><code>pipe</code> enqueues later batches while earlier ones still await their delivery
+        outcome, and emits results in the order the batches arrived. <code>maxInFlight</code> sets
+        how many batches may await delivery at once. Mapping <code>produceAndAwait</code> over a
+        stream instead would send one batch at a time.</p>
         <p>To write records and consumer offsets atomically, use a transactional producer.
         See <a href="transactions.html">Transactions</a>.</p>
         
         <h2 id="results" class="section"><a class="anchor-link left" href="#results"><i class="icofont-laika link">&#xef71;</i></a>Results</h2>
         <p>A <code>ProducerResult</code> pairs every record with the metadata its backend reported for
         it, as a <code>NonEmptyList[(ProducerRecord, Option[RecordMetadata])]</code>. A <code>None</code>
-        means the backend acknowledged the record but reported no metadata for it.</p>
+        means the backend completed delivery without reporting metadata for the record.</p>
         <p><code>RecordMetadata</code> carries the topic-partition, and the offset and timestamp when
         the backend supplies them.</p>
         
@@ -182,15 +183,15 @@
           <thead>
             <tr>
               <th>value</th>
-              <th>the broker replies once</th>
+              <th>when delivery can complete</th>
               <th>a record is lost if</th>
             </tr>
           </thead>
           <tbody>
             <tr>
               <td><code>Acks.NoAcknowledgement</code></td>
-              <td>the record is sent</td>
-              <td>delivery fails for any reason</td>
+              <td>the producer sends it without waiting for a broker response</td>
+              <td>delivery fails without the caller knowing</td>
             </tr>
             <tr>
               <td><code>Acks.Leader</code></td>
@@ -206,12 +207,24 @@
         </table>
         
         <h2 id="releasing-a-producer" class="section"><a class="anchor-link left" href="#releasing-a-producer"><i class="icofont-laika link">&#xef71;</i></a>Releasing a producer</h2>
-        <p>Releasing the resource delivers the records the producer has already accepted,
-        then closes it. <code>closeTimeout</code> sets how long that takes at most, and defaults to
+        <p>Releasing the resource first waits for records the producer has already accepted,
+        then closes the backend. <code>closeTimeout</code> bounds that delivery wait and defaults to
         sixty seconds:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withCloseTimeout</span><span>(</span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>)</span></code></pre>
-        <p>Records still undelivered when the timeout expires are dropped. Lower the
-        timeout for a faster shutdown, at the cost of losing more on the way out.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">withCloseTimeout</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ProducerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ProducerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
+  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withCloseTimeout</span><span>(</span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
+        <p>Like every duration wither, it revalidates and returns
+        <code>ValidatedNel[SettingsError, ProducerSettings[F, K, V]]</code>. See
+        <a href="settings.html">Settings</a>.</p>
+        <p>Records still undelivered when the timeout expires are dropped. Final backend
+        teardown happens afterwards, so the complete resource finalizer may take longer
+        than <code>closeTimeout</code>. Lower the timeout for a faster delivery wait, at the cost of
+        losing more on the way out.</p>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
           <p><code>closeTimeout</code> applies to producers. There is no equivalent setting for

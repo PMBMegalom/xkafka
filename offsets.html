@@ -169,7 +169,17 @@
         seconds. A commit that does not finish in time fails as
         <code>ErrorCode.RequestTimedOut</code>. That code is retriable, so the recovery policy
         tries again:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withCommitTimeout</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">seconds</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">withCommitTimeout</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
+  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withCommitTimeout</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">seconds</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
+        <p>Like every duration wither, it revalidates and returns
+        <code>ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]</code>. See
+        <a href="settings.html">Settings</a>.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
           <p>A commit that timed out may still be applied by the broker afterwards, because
