@@ -112,8 +112,12 @@ then closes the backend. `closeTimeout` bounds that delivery wait and defaults t
 sixty seconds:
 
 ```scala
-settings.withCloseTimeout(10.seconds)
+settings.withCloseTimeout(10.seconds).liftTo[IO]
 ```
+
+Like every duration wither, it revalidates and returns
+`ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. See
+[Settings](settings.md).
 
 Records still undelivered when the timeout expires are dropped. Final backend
 teardown happens afterwards, so the complete resource finalizer may take longer

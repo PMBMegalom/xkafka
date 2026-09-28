@@ -259,7 +259,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       dispatcher <- Dispatcher.sequential[F]
       rebalanceListener = rebalanced(underlying, dispatcher, assignments, failure)
       _ <- consumerListener(underlying, "rebalance", rebalanceListener)
-      commitListener = commitReported(dispatcher, reported, failure)
+      commitListener = commitReported(dispatcher, reported)
       _      <- consumerListener(underlying, "offset.commit", commitListener)
       _      <- Resource.eval(F.delay(underlying.setDefaultConsumeTimeout(settings.pollTimeout.toMillis.toInt)))
       _      <- Resource.eval(select(underlying, selection))
@@ -304,43 +304,48 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
   private final case class PendingCommit(offsets: Map[TopicPartition, Offset], outcome: Deferred[F, Either[Throwable, Unit]])
 
+  /** What a commit event names, which is how it is matched to the commit waiting for one.
+    *
+    * The client omits an offset librdkafka reports as negative, so an event can name its partitions without naming their offsets. Both shapes still
+    * identify the commit they belong to.
+    */
+  private final case class CommitReport(partitions: Set[TopicPartition], offsets: Option[Map[TopicPartition, Offset]]):
+    def answers(pending: PendingCommit): Boolean = partitions.nonEmpty && offsets.fold(partitions == pending.offsets.keySet)(_ == pending.offsets)
+
   private def commitReported(
       dispatcher: Dispatcher[F],
-      reported: Ref[F, Option[PendingCommit]],
-      failure: Deferred[F, Throwable]
+      reported: Ref[F, Option[PendingCommit]]
   ): js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit] =
     (error, offsets) =>
       val outcome = rdError(error).fold[Either[Throwable, Unit]](Right(()))(failure => Left(rdFailure(failure)))
       dispatcher.unsafeRunAndForget(
-        portableCommittedOffsets(offsets).attempt.flatMap:
-          case Right(committed) =>
-            // A timed-out report may arrive after another logical commit starts. Only the offsets the event actually
-            // reports can answer the waiter, so a late event for different offsets is harmless.
-            reported.modify:
-              case Some(pending) if pending.offsets == committed => None    -> Some(pending.outcome)
-              case current                                       => current -> None
-            .flatMap(_.traverse_(_.complete(outcome).void))
-          case Left(invalid) =>
-            // An event without a representable offset map cannot be correlated safely. It is a malformed backend
-            // response, so fail both the consumer and the current commit rather than letting either wait silently.
-            failure.complete(invalid).void *> reported.getAndSet(None).flatMap(_.traverse_(_.outcome.complete(Left(invalid)).void))
+        commitReport(offsets).flatMap: report =>
+          // A timed-out report may arrive after another logical commit starts, and the client also reports commits
+          // this consumer never submitted. Only an event naming the commit in flight answers it; any other one is
+          // dropped, leaving that commit to end on its timeout, which the recovery policy retries.
+          reported.modify:
+            case Some(pending) if report.answers(pending) => None    -> Some(pending.outcome)
+            case current                                  => current -> None
+          .flatMap(_.traverse_(_.complete(outcome).void))
       )
 
-  private def portableCommittedOffsets(values: js.Array[confluent.RdTopicPartition]): F[Map[TopicPartition, Offset]] =
+  /** An event the client cannot read names nothing, so it answers no commit. It never fails the consumer, because a commit event is not something the
+    * consumer asked for and may belong to no commit of its own.
+    */
+  private def commitReport(values: js.Array[confluent.RdTopicPartition]): F[CommitReport] =
     val listed =
       F.delay:
         val raw = values.asInstanceOf[js.Any]
-        if raw == null || js.isUndefined(raw) then throw new KafkaException.InvalidBackendResponse("commit report is missing its offsets")
-        values.toList
+        if raw == null || js.isUndefined(raw) then List.empty[confluent.RdTopicPartition] else values.toList
 
-    listed.flatMap:
-      _.traverse: value =>
-        val committed = value.asInstanceOf[confluent.RdTopicPartitionOffset]
-        val offset    =
-          committed.offset.toOption.toRight(new KafkaException.InvalidBackendResponse("commit report is missing its offset"))
-            .flatMap(exactOffset("committed offset", _))
-        (portableTopicPartition(value), F.fromEither(offset)).mapN(_ -> _)
-      .map(_.toMap)
+    listed.flatMap(_.traverse(reportedOffset)).map(entries =>
+      CommitReport(entries.map(_._1).toSet, entries.traverse((topicPartition, offset) => offset.map(topicPartition -> _)).map(_.toMap))
+    ).handleError(_ => CommitReport(Set.empty, None))
+
+  private def reportedOffset(value: confluent.RdTopicPartition): F[(TopicPartition, Option[Offset])] =
+    portableTopicPartition(value).map: topicPartition =>
+      val committed = value.asInstanceOf[confluent.RdTopicPartitionOffset]
+      topicPartition -> committed.offset.toOption.flatMap(exactOffset("committed offset", _).toOption)
 
   private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
     (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)

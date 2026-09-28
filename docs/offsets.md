@@ -85,8 +85,12 @@ seconds. A commit that does not finish in time fails as
 tries again:
 
 ```scala
-settings.withCommitTimeout(5.seconds)
+settings.withCommitTimeout(5.seconds).liftTo[IO]
 ```
+
+Like every duration wither, it revalidates and returns
+`ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]`. See
+[Settings](settings.md).
 
 @:callout(warning)
 A commit that timed out may still be applied by the broker afterwards, because

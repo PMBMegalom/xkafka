@@ -430,9 +430,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       assertEquals(outcomes._1.leftMap(_.getMessage), Left("commit exploded"))
       assertEquals(outcomes._2, Right(()))
 
-  test("a commit report without offsets fails inside the consumer error channel"):
+  test("a commit report the client cannot read answers no commit and leaves the consumer running"):
     for
-      delivered <- IO(js.Array(commitMessage(0d)))
+      delivered <- IO(js.Array(commitMessage(0d), commitMessage(1d)))
       listeners <- IO(js.Array[CommitListener]())
       consumer =
         commitConsumer(
@@ -440,13 +440,58 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           listener => listeners.push(listener): Unit,
           _ => listeners.foreach(_(null, null.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
         )
+      settings = consumerSettings.withCommitTimeout(200.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          // Committing inside the stream means the second record arrives only if the first unreadable report left the
+          // consumer running.
+          .use(_.records.evalMap(_.offset.commit.attempt).take(2).compile.toList.timeout(5.seconds))
+    yield
+      assertEquals(outcome.length, 2)
+      outcome.foreach:
+        case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.RequestTimedOut))
+        case other                                        => fail(s"an unreadable report should leave the commit to time out, got $other")
+
+  test("a commit report whose offset the client omitted still answers its commit"):
+    for
+      delivered <- IO(js.Array(commitMessage(0d)))
+      listeners <- IO(js.Array[CommitListener]())
+      consumer =
+        commitConsumer(
+          delivered,
+          listener => listeners.push(listener): Unit,
+          // The client omits `offset` whenever librdkafka reports a negative one, so the event names only its partition.
+          _ => listeners.foreach(_(null, js.Array(partitionOnlyReport)))
+        )
+      settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
+    yield assertEquals(outcome, Right(()))
+
+  test("a failure reported without its offset reaches the commit instead of its timeout"):
+    for
+      delivered <- IO(js.Array(commitMessage(0d)))
+      listeners <- IO(js.Array[CommitListener]())
+      consumer =
+        commitConsumer(
+          delivered,
+          listener => listeners.push(listener): Unit,
+          _ =>
+            val refused =
+              dynamic(js.Dynamic.literal(message = "coordinator not available", code = 15, isFatal = false, isRetriable = true))
+                .asInstanceOf[confluent.RdError]
+            listeners.foreach(_(refused, js.Array(partitionOnlyReport)))
+        )
       settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
       outcome <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
           .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
     yield outcome match
-      case Left(failure: KafkaException.InvalidBackendResponse) => assertEquals(failure.detail, "commit report is missing its offsets")
-      case other                                                => fail(s"a malformed report should fail as an invalid backend response, got $other")
+      case Left(failure: KafkaException.BackendFailure) =>
+        assertEquals(failure.detail, "coordinator not available")
+        assertNotEquals(failure.code, Some(ErrorCode.RequestTimedOut))
+      case other => fail(s"the reported failure should reach the commit, got $other")
 
   test("cancelling a commit removes its waiter before another commit starts"):
     Dispatcher.sequential[IO].use: dispatcher =>
@@ -689,6 +734,10 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private def commitMessage(offset: Double): confluent.RdMessage =
     js.Dynamic.literal(topic = "events", partition = 0, offset = offset, key = uint8("key"), value = uint8("value"), headers = js.Array())
       .asInstanceOf[confluent.RdMessage]
+
+  /** What the client emits for a commit whose offset librdkafka reports as negative: the partition without its offset. */
+  private def partitionOnlyReport: confluent.RdTopicPartition =
+    js.Dynamic.literal(topic = "events", partition = 0).asInstanceOf[confluent.RdTopicPartition]
 
   private def ignoreConsumerListener: js.Function2[String, CommitListener, Unit] = ((_: String, _: CommitListener) => ())
 
