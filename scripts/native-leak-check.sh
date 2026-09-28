@@ -47,10 +47,16 @@ export XKAFKA_VERSION="$version"
 # `print` reports what the link actually produced, so the path follows the Scala version the
 # downstream build is on instead of naming one here for a bump to invalidate.
 echo "Building the Native smoke binary"
-binary="$(cd "$downstream_dir" && sbt --error "print smokeNative/nativeLink" | tr -d '\r' | tail -n 1)"
+binary=""
+while IFS= read -r candidate; do
+  candidate="${candidate%$'\r'}"
+  if [[ -x "$candidate" ]]; then
+    binary="$candidate"
+  fi
+done < <(cd "$downstream_dir" && sbt --no-colors --supershell=false --batch --error "print smokeNative/nativeLink")
 
 if [[ ! -x "$binary" ]]; then
-  echo "the Native link reported '$binary', which is not an executable" >&2
+  echo "the Native link did not report an executable" >&2
   exit 1
 fi
 
