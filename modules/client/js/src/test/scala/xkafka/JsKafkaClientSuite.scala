@@ -469,6 +469,19 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
     yield assertEquals(outcome, Right(()))
 
+  test("a commit report whose present offset is malformed answers no commit"):
+    for
+      delivered <- IO(js.Array(commitMessage(0d)))
+      listeners <- IO(js.Array[CommitListener]())
+      consumer = commitConsumer(delivered, listener => listeners.push(listener): Unit, _ => listeners.foreach(_(null, js.Array(commitReport(1.5)))))
+      settings = consumerSettings.withCommitTimeout(100.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
+    yield outcome match
+      case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.RequestTimedOut))
+      case other                                        => fail(s"a malformed report should leave the commit to time out, got $other")
+
   test("a failure reported without its offset reaches the commit instead of its timeout"):
     for
       delivered <- IO(js.Array(commitMessage(0d)))
@@ -738,6 +751,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   /** What the client emits for a commit whose offset librdkafka reports as negative: the partition without its offset. */
   private def partitionOnlyReport: confluent.RdTopicPartition =
     js.Dynamic.literal(topic = "events", partition = 0).asInstanceOf[confluent.RdTopicPartition]
+
+  private def commitReport(offset: Double): confluent.RdTopicPartition =
+    js.Dynamic.literal(topic = "events", partition = 0, offset = offset).asInstanceOf[confluent.RdTopicPartition]
 
   private def ignoreConsumerListener: js.Function2[String, CommitListener, Unit] = ((_: String, _: CommitListener) => ())
 

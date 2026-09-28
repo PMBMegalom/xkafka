@@ -111,8 +111,15 @@ Releasing the resource first waits for records the producer has already accepted
 then closes the backend. `closeTimeout` bounds that delivery wait and defaults to
 sixty seconds:
 
-```scala
-settings.withCloseTimeout(10.seconds).liftTo[IO]
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def withCloseTimeout[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSettings[F, K, V]] =
+  settings.withCloseTimeout(10.seconds).liftTo[IO]
 ```
 
 Like every duration wither, it revalidates and returns

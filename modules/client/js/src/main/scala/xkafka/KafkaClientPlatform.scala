@@ -203,7 +203,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
   /** librdkafka reports offsets as JavaScript numbers, which are exact only below 2^53. */
   private def exactOffset(field: String, value: Double): Either[Throwable, Offset] =
-    if value > MaxExactInteger then Left(new KafkaException.InvalidBackendResponse(s"$field $value exceeds the range JavaScript represents exactly"))
+    if !value.isWhole then Left(new KafkaException.InvalidBackendResponse(s"$field $value is not an integer"))
+    else if value > MaxExactInteger then
+      Left(new KafkaException.InvalidBackendResponse(s"$field $value exceeds the range JavaScript represents exactly"))
     else Offset.from(value.toLong).leftMap(error => invalidBackendValue(field, value.toString, error))
 
   /** node-rdkafka signals success with either null or undefined, and in Scala.js only the first of those is `null`. */
@@ -343,9 +345,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     ).handleError(_ => CommitReport(Set.empty, None))
 
   private def reportedOffset(value: confluent.RdTopicPartition): F[(TopicPartition, Option[Offset])] =
-    portableTopicPartition(value).map: topicPartition =>
+    portableTopicPartition(value).flatMap: topicPartition =>
       val committed = value.asInstanceOf[confluent.RdTopicPartitionOffset]
-      topicPartition -> committed.offset.toOption.flatMap(exactOffset("committed offset", _).toOption)
+      committed.offset.toOption.traverse(offset => F.fromEither(exactOffset("committed offset", offset))).map(topicPartition -> _)
 
   private def portableTopicPartition(value: confluent.RdTopicPartition): F[TopicPartition] =
     (topic(value.topic), partition(value.partition)).mapN(TopicPartition.apply)

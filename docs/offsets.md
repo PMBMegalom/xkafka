@@ -84,8 +84,15 @@ seconds. A commit that does not finish in time fails as
 `ErrorCode.RequestTimedOut`. That code is retriable, so the recovery policy
 tries again:
 
-```scala
-settings.withCommitTimeout(5.seconds).liftTo[IO]
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def withCommitTimeout[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
+  settings.withCommitTimeout(5.seconds).liftTo[IO]
 ```
 
 Like every duration wither, it revalidates and returns
