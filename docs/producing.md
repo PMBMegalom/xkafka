@@ -118,6 +118,7 @@ Records still undelivered when the timeout expires are dropped. Lower the
 timeout for a faster shutdown, at the cost of losing more on the way out.
 
 @:callout(info)
-`closeTimeout` applies to producers only. Each backend bounds a consumer's close
-with its own group machinery, and that bound is not configurable here.
+`closeTimeout` applies to producers. There is no equivalent setting for
+consumers: how long a consumer takes to leave its group is decided by the
+platform, not by these settings.
 @:@

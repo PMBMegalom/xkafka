@@ -126,9 +126,10 @@ See [Producing](producing.md) for both.
 | --- | --- | --- |
 | `metadataRefreshInterval` | 5m | how long a new topic, partition, or leader can go unnoticed |
 
-The two backends name this differently, which is why it is a typed setting: the
-Java client takes it as `metadata.max.age.ms`, and librdkafka takes it as
-`topic.metadata.refresh.interval.ms` and derives its own cache age from that.
+Setting this once covers every platform. Kafka spells it
+`metadata.max.age.ms` and librdkafka spells it
+`topic.metadata.refresh.interval.ms`, so look for those names when comparing
+against their documentation.
 
 `ClientSettings` also carries the bootstrap servers, an optional client id, and
 the security settings. See [Transport security](transport-security.md).

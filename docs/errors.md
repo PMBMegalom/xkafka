@@ -19,10 +19,9 @@ survives being lifted into an effect.
 `ErrorCode` along with retriable and fatal classifications. A `None` for any of
 those means the backend did not make that classification available.
 
-`retriable` is derived from the portable `ErrorCode`, not from each backend's own
-notion of what is retriable, so the same condition answers the same way on all
-three platforms. `ErrorCode.retriable` gives the same answer directly, and commit
-recovery uses it to decide what to retry:
+`retriable` answers the same way on all three platforms for the same condition.
+`ErrorCode.retriable` gives that answer directly, and commit recovery uses it to
+decide what to retry:
 
 ```scala
 if failure.code.exists(_.retriable) then retry else give up

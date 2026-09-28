@@ -55,6 +55,14 @@ settings and validation, producing and consuming, offsets and commits,
 transactions, topic administration, transport security, the error model,
 serialization, and the subtle differences between the three runtimes.
 
+## Versioning
+
+xkafka follows early semantic versioning. Upgrading within a series keeps binary
+compatibility, so code built against `0.1.0` runs against `0.1.1`. Upgrading
+across a series, from `0.1.x` to `0.2.0`, may break compatibility in both binary
+and source form. While the major version is `0`, expect the API to change between
+series.
+
 ## Building
 
 The build uses sbt. Run all ordinary tests with:

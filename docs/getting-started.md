@@ -19,6 +19,24 @@ Two modules are published:
 
 Most applications need `xkafka-client` alone.
 
+## Versioning
+
+xkafka follows early semantic versioning.
+
+Within a series, upgrades keep binary compatibility. Code built against `0.1.0`
+runs against `0.1.1` without recompiling.
+
+Across a series, upgrades may break compatibility, in both binary and source
+form. Going from `0.1.x` to `0.2.0` can mean recompiling, and changing code.
+
+After `1.0.0`, that boundary moves to the major version, and every `1.x.y` will
+stay binary compatible with `1.0.0`.
+
+While the major version is `0`, expect the API to change between series.
+
+If another dependency brings in a version across one of these boundaries, sbt
+warns about it.
+
 ## Constructing a client
 
 ```scala mdoc:compile-only
