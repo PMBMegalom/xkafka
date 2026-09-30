@@ -780,9 +780,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       for
         _        <- produce(server, seeded)
         settings <- transactionalSettings(server, uniqueTransactionalId("revoked"))
-        reading  <- consumerSettings(server, group)
-        read     <- Ref[IO].of(Vector.empty[CommittableConsumerRecord[IO, Option[String], Option[String]]])
-        outcome  <-
+        // Reading committed data also makes a committed offset wait until the transaction that recorded it has finished.
+        reading <- committedConsumerSettings(server, group)
+        read    <- Ref[IO].of(Vector.empty[CommittableConsumerRecord[IO, Option[String], Option[String]]])
+        outcome <-
           PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: first =>
             // The first consumer keeps reading, so it follows the rebalance while the test holds what it read before.
             first.records.evalMap(next => read.update(_ :+ next)).compile.drain.background.surround:
@@ -797,17 +798,25 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                           revoked <- IO.fromOption(before.keySet.find(!kept.contains(_)))(new AssertionError(s"nothing was revoked from $kept"))
                           stale   <- writeWith(producer, before(revoked)).attempt
                           lost    <- first.committed(Set(revoked))
+                          // The default protocol revokes every partition on a rebalance, so one the first consumer kept was read under an assignment it no longer holds either.
+                          earlier <- writeWith(producer, before(kept.head)).attempt
                           // A record read after the rebalance, from the partition the first consumer kept, is still its to commit.
                           _       <- produce(server, NonEmptyList.one(record(input, Some("k"), Some(marker), kept.head.partition)))
                           current <- read.get.map(_.find(_.record.value.contains(marker)).map(_.offset)).iterateUntil(_.isDefined).map(_.get)
                           _       <- writeWith(producer, current)
                           moved   <- first.committed(Set(current.topicPartition))
-                        yield (revoked, stale, lost.get(revoked).flatten, current, moved.get(current.topicPartition).flatten)
+                        yield (revoked, stale, lost.get(revoked).flatten, earlier, current, moved.get(current.topicPartition).flatten)
               yield outcome
           .timeout(90.seconds)
       yield
-        val (revoked, stale, lost, current, moved) = outcome
-        assert(stale.isLeft, s"the offset of $revoked was recorded after the partition moved to another consumer")
+        val (revoked, stale, lost, earlier, current, moved) = outcome
+        // Every backend classifies both the way the broker answers an offset from a generation the group has left.
+        def rejected(outcome: Either[Throwable, Unit], clue: String): Unit =
+          outcome match
+            case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.IllegalGeneration), failure.getMessage)
+            case other                                        => fail(s"$clue, got $other")
+        rejected(stale, s"the offset of $revoked was recorded after the partition moved to another consumer")
+        rejected(earlier, "an offset read before the rebalance was recorded for a partition the consumer kept")
         assertEquals(lost, None, "a rejected transaction should leave the revoked partition where it was")
         assertEquals(moved, Some(current.nextOffset), "an offset read after the rebalance should still commit")
 

@@ -30,15 +30,19 @@ import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
+import cats.syntax.all.*
 import fs2.Chunk
 import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, KafkaByteProducer, ProducerSettings as Fs2ProducerSettings}
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
-import org.apache.kafka.clients.consumer.{ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp}
+import org.apache.kafka.clients.consumer.{
+  CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp
+}
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
 import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.TimeoutException
+import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.serialization.ByteArraySerializer
 
 final class JvmKafkaClientSuite extends CatsEffectSuite:
@@ -210,3 +214,46 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           )
         assertEquals(generations, List(0L -> Some(1), 1L -> Some(1), 2L -> Some(2)))
     .timeout(10.seconds)
+
+  test("a transaction's offsets the group rejects as another generation's are classified the way librdkafka reports them"):
+    // Worded as the Java client words it, which appends the broker's own description of its answer.
+    def rejected(error: Errors) =
+      new CommitFailedException(s"Transaction offset Commit failed due to consumer group metadata mismatch: ${error.exception.getMessage}")
+    val cases =
+      List(
+        rejected(Errors.ILLEGAL_GENERATION) -> Some(ErrorCode.IllegalGeneration),
+        rejected(Errors.UNKNOWN_MEMBER_ID)  -> Some(ErrorCode.UnknownMemberId),
+        // Any other wording is left as before: Kafka's table has no entry for the exception, so it stays an unknown error.
+        new CommitFailedException("the group has already rebalanced") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
+      )
+    val transactionalId = TransactionalId.from("writer").toOption.get
+    val serializer      = Serializer.const[IO, String](None)
+    val settings        =
+      TransactionalProducerSettings.from(ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get, transactionalId, serializer, serializer)
+        .toOption.get
+    val topic = Topic.from("events").toOption.get
+
+    cases.traverse: (failure, expected) =>
+      val mock = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+      mock.sendOffsetsToTransactionException = failure
+      given MkProducer[IO] with
+        override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.pure(mock)
+      val readUnder =
+        new GroupMembership.Backend[IO](
+          "group",
+          IO(Fs2GroupHandle(new MockConsumer[Array[Byte], Array[Byte]]("earliest").groupMetadata())),
+          _ => IO.unit
+        )
+      val offset =
+        new CommittableOffset[IO]:
+          override def topicPartition: TopicPartition = TopicPartition(topic, Partition.from(0).toOption.get)
+          override def nextOffset: Offset             = Offset.from(1L).toOption.get
+          override def committer: OffsetCommitter[IO] =
+            new OffsetCommitter[IO]:
+              override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+          override private[xkafka] def membership: GroupMembership[IO] = readUnder
+      KafkaClientPlatform.fromFs2[IO].transactionalProducer(settings)
+        .use(_.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(offset)))).attempt.map:
+          case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, expected, failure.getMessage)
+          case other                                      => fail(s"expected a backend failure, got $other")
+    .void

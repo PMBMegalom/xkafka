@@ -44,7 +44,9 @@ import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.admin.{NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic}
-import org.apache.kafka.clients.consumer.{Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, OffsetAndMetadata}
+import org.apache.kafka.clients.consumer.{
+  CommitFailedException, Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, OffsetAndMetadata
+}
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.{
@@ -62,7 +64,7 @@ private[xkafka] object KafkaClientPlatform:
 /** What a transaction on this backend needs to record a consumer's offsets. The Java client names a group by the metadata its consumer carries, which
   * also fences a member the group has already replaced.
   */
-private final case class Fs2GroupHandle(metadata: JavaConsumerGroupMetadata) extends GroupHandle
+private[xkafka] final case class Fs2GroupHandle(metadata: JavaConsumerGroupMetadata) extends GroupHandle
 
 /** A value as it reaches the consumer adapter, with the group membership the consumer held when the value was polled. */
 private final case class Polled[V](value: V, membership: JavaConsumerGroupMetadata)
@@ -179,13 +181,27 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     *
     * Authentication never reached the broker, so it has no entry in that table. `Errors.forException` answers `INVALID_CONFIG` for the whole family,
     * which is a code the broker never sent, so those are named here.
+    *
+    * A transaction's offsets that the group rejects as no longer its member's come back as one `CommitFailedException` for either of two answers, and
+    * only its message, which ends with that answer's own description, says which. Reading it back gives the code librdkafka reports for the same
+    * rejection.
     */
   private def protocolCode(error: JavaKafkaException): Option[ErrorCode] =
     error match
       case _: SslAuthenticationException  => Some(ErrorCode.SslAuthenticationFailed)
       case _: SaslAuthenticationException => Some(ErrorCode.SaslAuthenticationFailed)
       case _: AuthenticationException     => None
-      case _ => Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
+      case failed: CommitFailedException  => rejectedMembership(failed).orElse(tabled(error))
+      case _                              => tabled(error)
+
+  private def tabled(error: JavaKafkaException): Option[ErrorCode] =
+    Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
+
+  /** The two answers the Java client folds into a `CommitFailedException` when a transaction records offsets. */
+  private def rejectedMembership(failed: CommitFailedException): Option[ErrorCode] =
+    Option(failed.getMessage)
+      .flatMap(message => List(Errors.ILLEGAL_GENERATION, Errors.UNKNOWN_MEMBER_ID).find(value => message.endsWith(value.exception.getMessage)))
+      .map(value => ErrorCode.fromProtocol(value.code.toInt))
 
   private def producerSettings[K, V](settings: ProducerSettings[F, K, V]): Fs2ProducerSettings[F, K, V] =
     val base =
