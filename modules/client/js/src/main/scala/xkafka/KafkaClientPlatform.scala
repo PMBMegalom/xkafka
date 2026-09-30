@@ -88,41 +88,8 @@ private object ConfluentKafkaDriver:
   */
 private final case class ConfluentGroupHandle(consumer: confluent.RdConsumer) extends GroupHandle
 
-/** One assignment of one partition to one consumer, from the rebalance that assigned it to the one that revoked it. */
-private final case class Lease(topic: String, partition: Int, number: Long)
-
-/** The partitions a consumer holds, and how many transactions are recording an offset under each of their leases right now.
-  *
-  * The client records offsets against the consumer's current membership, whatever assignment they were read under, so a lease is what says an offset
-  * still belongs to this consumer. `revocations` counts every revocation of a partition, so a consume can tell whether one happened while it ran.
-  */
-private final case class Leases(next: Long, current: Map[(String, Int), Lease], revocations: Map[(String, Int), Long], inFlight: Map[Lease, Int]):
-  def assigned(partitions: List[(String, Int)]): Leases =
-    copy(next = next + partitions.size, current = current ++ partitions.zipWithIndex.map((key, index) => key -> Lease(key._1, key._2, next + index)))
-
-  def revoked(partitions: List[(String, Int)]): (Leases, Set[Lease]) =
-    val counted = partitions.foldLeft(revocations)((counts, key) => counts.updated(key, counts.getOrElse(key, 0L) + 1L))
-    (copy(current = current -- partitions, revocations = counted), partitions.flatMap(current.get).toSet)
-
-  /** The lease a record from a consume was read under: its partition's lease once the consume returned, unless the partition was revoked while the
-    * consume ran, which leaves no telling which assignment the record came from.
-    */
-  def readUnder(key: (String, Int), before: Leases): Option[Lease] = current.get(key).filter(_ => revocations.get(key) == before.revocations.get(key))
-
-  def acquire(lease: Lease): (Leases, Boolean) =
-    if current.get(lease.topic -> lease.partition).contains(lease) then
-      (copy(inFlight = inFlight.updated(lease, inFlight.getOrElse(lease, 0) + 1)), true)
-    else (this, false)
-
-  def release(lease: Lease): Leases = copy(inFlight = inFlight.updatedWith(lease)(_.map(_ - 1).filter(_ > 0)))
-
-  def idle(leases: Set[Lease]): Boolean = leases.forall(lease => !inFlight.contains(lease))
-
-private object Leases:
-  val empty: Leases = Leases(0L, Map.empty, Map.empty, Map.empty)
-
 /** A record as the consume returned it, with the lease it was read under, if any can be named. */
-private final case class Polled(message: confluent.RdMessage, lease: Option[Lease])
+private final case class Polled(message: confluent.RdMessage, lease: Option[Lease[(String, Int)]])
 
 private def isolationLevel(value: IsolationLevel): String =
   value match
@@ -282,7 +249,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      leases      <- Resource.eval(SignallingRef[F, Leases](Leases.empty))
+      leases      <- Resource.eval(AssignmentLeases[F, (String, Int)](settings.assignmentFencing))
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](initialAssignment(selection)))
       // Neither the consume nor the rebalance reporting can carry its own failure out, and a consumer that has lost
       // either one receives nothing further, so the first failure is kept and reported to whoever reads from it.
@@ -339,7 +306,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     */
   private def rebalanced(
       dispatcher: Dispatcher[F],
-      leases: SignallingRef[F, Leases],
+      leases: AssignmentLeases[F, (String, Int)],
       assignments: SignallingRef[F, Set[TopicPartition]],
       open: Ref[F, Boolean],
       failure: Deferred[F, Throwable]
@@ -349,12 +316,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       val applied =
         rdError(error).map(_.code) match
           case Some(AssignPartitions) => F.delay(consumer.rebalanceProtocol() == "COOPERATIVE").flatMap: cooperative =>
-              // The eager protocol replaces the whole assignment, so anything still held is revoked with it.
-              leases.update(held => (if cooperative then held else held.revoked(held.current.keys.toList)._1).assigned(keys)) *>
+              leases.assign(keys, replacing = !cooperative) *>
                 F.delay(if cooperative then consumer.incrementalAssign(partitions) else consumer.assign(partitions)).void
-          case Some(RevokePartitions) => leases.modify(_.revoked(keys)).flatMap: ended =>
-              leases.discrete.exists(_.idle(ended)).compile.drain *>
-                F.delay(if consumer.rebalanceProtocol() == "COOPERATIVE" then consumer.incrementalUnassign(partitions) else consumer.unassign()).void
+          case Some(RevokePartitions) => leases.revoke(keys) *>
+              F.delay(if consumer.rebalanceProtocol() == "COOPERATIVE" then consumer.incrementalUnassign(partitions) else consumer.unassign()).void
           case _ => F.unit
       dispatcher.unsafeRunAndForget(
         (applied *>
@@ -365,15 +330,6 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
           // client may refuse the change it asked for, and nothing is left to report that to.
           .handleErrorWith(error => open.get.ifM(failure.complete(error).void, F.unit))
       )
-
-  /** Classified the way the broker classifies an offset recorded under a generation the group has left, which is what librdkafka reports for one. */
-  private val revokedAssignment: KafkaException.BackendFailure =
-    new KafkaException.BackendFailure(
-      "the offset was read under an assignment this consumer no longer holds",
-      Some(ErrorCode.IllegalGeneration),
-      Some(false),
-      Some(false)
-    )
 
   /** A commit that ran out of time is classified the way the broker would classify one, so the recovery policy retries it. */
   private val commitTimedOut: KafkaException.BackendFailure =
@@ -480,7 +436,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
               yield portableTopic -> partitions.toSet
         .map(_.toMap)
 
-  private def select(consumer: confluent.RdConsumer, selection: Selection, leases: Ref[F, Leases]): F[Unit] =
+  private def select(consumer: confluent.RdConsumer, selection: Selection, leases: AssignmentLeases[F, (String, Int)]): F[Unit] =
     selection match
       case Selection.Topics(values) => F.delay(consumer.subscribe(values.toSortedSet.toList.map[confluent.SubscriptionTopic](_.value).toJSArray)).void
       // librdkafka reads a topic beginning with "^" as a regular expression, which is what anchoring already produces.
@@ -489,7 +445,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         val assigned =
           topicPartitions.toSortedSet.toList.map(value => confluent.Values.rdTopicPartition(value.topic.value, value.partition.value)).toJSArray
         // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
-        leases.update(_.assigned(topicPartitions.toSortedSet.toList.map(value => value.topic.value -> value.partition.value))) *>
+        leases.assign(topicPartitions.toSortedSet.toList.map(value => value.topic.value -> value.partition.value), replacing = false) *>
           F.delay(consumer.assign(assigned)).void
 
   private def initialAssignment(selection: Selection): Set[TopicPartition] =
@@ -616,7 +572,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       underlying: confluent.RdConsumer,
       settings: ConsumerSettings[F, K, V],
       assignments: SignallingRef[F, Set[TopicPartition]],
-      leases: SignallingRef[F, Leases],
+      leases: AssignmentLeases[F, (String, Int)],
       polled: Channel[F, Polled],
       stopping: Deferred[F, Unit],
       random: Random[F],
@@ -675,23 +631,13 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
         .onFinalize(polled.close.void)
 
     /** A consume, with the lease each of its records was read under. */
-    private def leased: F[List[Polled]] =
-      for
-        before <- leases.get
-        batch  <- fetch
-        after  <- leases.get
-      yield batch.toList.map(message => Polled(message, after.readUnder(message.topic -> message.partition, before)))
+    private def leased: F[List[Polled]] = leases.reading(fetch.map(_.toList))(message => message.topic -> message.partition).map(_.map(Polled.apply))
 
-    /** What a transaction records an offset against.
-      *
-      * The client sends the consumer's current membership, so this holds the offset's lease for as long as the transaction records it, and a
-      * revocation waits for that before its partition can move to another member.
+    /** What a transaction records an offset against. The client sends the consumer's current membership, so the lease is what ties the offset to this
+      * consumer's assignment.
       */
-    private def membershipOf(lease: Option[Lease]): GroupMembership[F] =
-      val acquire =
-        lease.fold(F.raiseError[GroupHandle](revokedAssignment)): held =>
-          leases.modify(_.acquire(held)).ifM(F.pure(ConfluentGroupHandle(underlying)), F.raiseError(revokedAssignment))
-      new GroupMembership.Backend(this -> lease, acquire, _ => lease.traverse_(held => leases.update(_.release(held))))
+    private def membershipOf(lease: Option[Lease[(String, Int)]]): GroupMembership[F] =
+      leases.membership(this, lease, F.pure(ConfluentGroupHandle(underlying)), _ => F.unit)
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 

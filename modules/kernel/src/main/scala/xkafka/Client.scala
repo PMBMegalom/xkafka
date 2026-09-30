@@ -314,7 +314,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     commitTimeout: FiniteDuration,
     pollTimeout: FiniteDuration,
     requestTimeout: FiniteDuration,
-    properties: Map[String, String]
+    properties: Map[String, String],
+    assignmentFencing: Boolean
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -328,7 +329,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     ) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
@@ -343,7 +345,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     ) {}
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
@@ -358,7 +361,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     ) {}
 
   def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
@@ -373,7 +377,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     ) {}
 
   /** Whether records of a transaction that has not committed are delivered. */
@@ -389,7 +394,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     ) {}
 
   /** How long a commit waits for the broker before it fails as `ErrorCode.RequestTimedOut`, which the recovery policy retries. */
@@ -405,7 +411,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       value,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     )
 
   /** How a failed offset commit is retried. */
@@ -421,7 +428,30 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
+    ) {}
+
+  /** Whether a transaction records an offset only while this consumer still holds the partition assignment it was read under.
+    *
+    * On, which is the default, an offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, and a revocation
+    * waits for any transaction still recording one of its offsets before the partition can move to another consumer. Off, an offset is recorded
+    * against whatever membership the consumer holds when the transaction runs.
+    */
+  def withAssignmentFencing(enabled: Boolean): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      commitTimeout,
+      pollTimeout,
+      requestTimeout,
+      properties,
+      enabled
     ) {}
 
   /** How long one poll waits for records before it returns empty.
@@ -440,7 +470,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       value,
       requestTimeout,
-      properties
+      properties,
+      assignmentFencing
     )
 
   /** How long a call that asks the broker something waits for its answer.
@@ -459,7 +490,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       value,
-      properties
+      properties,
+      assignmentFencing
     )
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
@@ -477,13 +509,14 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      values
+      values,
+      assignmentFencing
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
-      )})"
+      )},$assignmentFencing)"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -506,7 +539,8 @@ object ConsumerSettings:
       commitTimeout: FiniteDuration = ConsumerSettings.DefaultCommitTimeout,
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
-      properties: Map[String, String] = Map.empty
+      properties: Map[String, String] = Map.empty,
+      assignmentFencing: Boolean = true
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
@@ -524,7 +558,8 @@ object ConsumerSettings:
         commitTimeout,
         pollTimeout,
         requestTimeout,
-        properties
+        properties,
+        assignmentFencing
       ) {}
     )
 

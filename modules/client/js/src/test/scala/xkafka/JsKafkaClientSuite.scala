@@ -627,6 +627,29 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       // Only the offset read under the current assignment ever reached the client.
       assertEquals(sent.length, 1)
 
+  test("with assignment fencing off, an offset read under a revoked assignment is still recorded, as it was before fencing"):
+    for
+      calls      <- IO(js.Array[String]())
+      delivered  <- IO(js.Array[confluent.RdMessage]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      sent       <- IO(js.Array[js.Function1[confluent.RdError | Null, Unit]]())
+      rd       = rebalancingConsumer(delivered, calls)
+      client   = KafkaClientPlatform.fromDriver[IO](transactionalDriver(transactionalProducer(sent, hold = false), rd, rebalances))
+      unfenced = consumerSettings.withAssignmentFencing(false)
+      outcome <-
+        (client.transactionalProducer(transactionalSettings), client.consumer(unfenced, Selection.Topics(NonEmptySet.one(topic("events"))))).tupled
+          .use: (producer, consumer) =>
+            for
+              _       <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.contains("assign"))
+              earlier <- IO(delivered.push(commitMessage(0d))) *> consumer.records.take(1).compile.lastOrError
+              _       <- IO(rebalance(rebalances(0), rd, RevokePartitions, 0)) *> until(calls.contains("unassign"))
+              stale   <- producer.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(earlier.offset))).attempt
+            yield stale
+          .timeout(10.seconds)
+    yield
+      assertEquals(outcome, Right(()))
+      assertEquals(sent.length, 1)
+
   test("a revocation waits for a transaction recording one of its offsets before it unassigns"):
     for
       calls      <- IO(js.Array[String]())
