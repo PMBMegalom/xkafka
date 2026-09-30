@@ -763,6 +763,48 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(afterAbort, None, "an aborted transaction should leave the group where it was")
         assertEquals(afterCommit.map(_.value), Some(1L), "a committed transaction should store the offset it recorded")
 
+  test(conformance("a transaction cannot record an offset from a partition its consumer has since lost", divergent = Set("jvm", "js", "native"))):
+    withBroker: server =>
+      val input  = validTopic(partitionedTopic)
+      val output = uniqueTopic("revoked-output")
+      val group  = uniqueGroup("revoked")
+      val seeded = NonEmptyList.of(0, 1).map(value => record(input, Some("k"), Some("seed"), validPartition(value)))
+
+      for
+        _        <- produce(server, seeded)
+        settings <- transactionalSettings(server, uniqueTransactionalId("revoked"))
+        reading  <- consumerSettings(server, group)
+        held     <- Deferred[IO, Map[TopicPartition, CommittableOffset[IO]]]
+        outcome  <-
+          PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: first =>
+            // The first consumer keeps reading, so it follows the rebalance while it holds one offset from each partition.
+            first.records.scan(Map.empty[TopicPartition, CommittableOffset[IO]])((offsets, next) =>
+              if offsets.contains(next.record.topicPartition) then offsets else offsets.updated(next.record.topicPartition, next.offset)
+            ).evalMap(offsets => held.complete(offsets).whenA(offsets.size == 2)).compile.drain.background.surround:
+              for
+                offsets <- held.get
+                outcome <-
+                  PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+                    PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: second =>
+                      second.records.compile.drain.background.surround:
+                        for
+                          kept    <- (assignmentOf(first, 1), assignmentOf(second, 1)).parTupled.map(_._1)
+                          revoked <- IO.fromOption(offsets.keySet.find(!kept.contains(_)))(new AssertionError(s"nothing was revoked from $kept"))
+                          batch = CommittableOffsetBatch.empty[IO].updated(offsets(revoked))
+                          result <-
+                            producer.transactionally(transaction =>
+                              transaction.produce(NonEmptyList.one(record(output, Some("k"), Some("stale"), validPartition(0)))) *>
+                                transaction.commitOffsets(batch)
+                            ).attempt
+                          progress <- first.committed(Set(revoked))
+                        yield (revoked, result, progress.get(revoked).flatten)
+              yield outcome
+          .timeout(90.seconds)
+      yield
+        val (revoked, result, progress) = outcome
+        assert(result.isLeft, s"the offset of $revoked was recorded after the partition moved to another consumer")
+        assertEquals(progress, None, "a rejected transaction should leave the revoked partition where it was")
+
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)
