@@ -22,8 +22,10 @@
 package xkafka
 
 import java.nio.charset.StandardCharsets
-import java.util.{List as JavaList, Map as JavaMap}
+import java.util.{List as JavaList, Map as JavaMap, Optional}
+import java.util.concurrent.atomic.AtomicInteger
 
+import scala.annotation.nowarn
 import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
@@ -33,7 +35,7 @@ import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, Ka
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
-import org.apache.kafka.clients.consumer.{ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp}
+import org.apache.kafka.clients.consumer.{ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp}
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
 import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.TimeoutException
@@ -164,3 +166,47 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(topics.get(topic), Some(partitions))
         assertEquals(position, 0L)
     .timeout(5.seconds)
+
+  test("a record keeps the membership it was polled under after the consumer moves to a later one"):
+    val topic              = Topic.from("events").toOption.get
+    val group              = ConsumerGroup.from("workers").toOption.get
+    val javaTopicPartition = new JavaTopicPartition(topic.value, 0)
+    val generation         = new AtomicInteger(1)
+    val mock               =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        // Only the deprecated constructor sets a generation, which is the one thing this test needs the consumer to change.
+        @nowarn("cat=deprecation")
+        override def groupMetadata(): ConsumerGroupMetadata = new ConsumerGroupMetadata(group.value, generation.get, "member", Optional.empty())
+    def add(offset: Long): Unit =
+      mock.addRecord(new JavaConsumerRecord(topic.value, 0, offset, "key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8)))
+    mock.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
+    // MockConsumer runs one task at the start of each poll, so the first poll returns two records and the second one moves the generation.
+    mock.schedulePollTask(() =>
+      mock.rebalance(JavaList.of(javaTopicPartition))
+      mock.updateBeginningOffsets(JavaMap.of(javaTopicPartition, Long.box(0L)))
+      add(0L)
+      add(1L)
+    )
+    mock.schedulePollTask(() =>
+      generation.set(2)
+      add(2L)
+    )
+    given MkConsumer[IO] with
+      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO.pure(mock)
+
+    val utf8     = Deserializer.utf8[IO]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).toOption.get
+    // Nothing is read until the second poll has moved the generation, so a record that took the generation current when it was read would show 2.
+    val moved = (IO.sleep(10.millis) *> IO(generation.get)).iterateUntil(_ == 2)
+
+    KafkaClientPlatform.fromFs2[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+      consumer.records.evalTap(_ => moved).take(3).compile.toList.map: records =>
+        val generations =
+          records.map(record =>
+            record.record.offset.value -> record.offset.membership.handle.map(_.key).collect { case metadata: ConsumerGroupMetadata =>
+              metadata.generationId
+            }
+          )
+        assertEquals(generations, List(0L -> Some(1), 1L -> Some(1), 2L -> Some(2)))
+    .timeout(10.seconds)

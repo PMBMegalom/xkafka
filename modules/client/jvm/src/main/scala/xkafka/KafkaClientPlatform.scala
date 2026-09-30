@@ -21,6 +21,9 @@
 
 package xkafka
 
+import java.lang.reflect.{InvocationHandler, InvocationTargetException, Method, Proxy}
+import java.util.concurrent.atomic.AtomicReference
+
 import scala.jdk.CollectionConverters.*
 
 import cats.Parallel
@@ -34,14 +37,14 @@ import fs2.{Chunk, Stream}
 import fs2.kafka.{
   AdminClientSettings as Fs2AdminClientSettings, AutoOffsetReset as Fs2AutoOffsetReset, CommittableConsumerRecord as Fs2CommittableConsumerRecord,
   CommitTimeoutException, ConsumerSettings as Fs2ConsumerSettings, Deserializer as Fs2Deserializer, Header as Fs2Header, Headers as Fs2Headers,
-  KafkaAdminClient as Fs2KafkaAdminClient, KafkaConsumer as Fs2KafkaConsumer, KafkaProducer as Fs2KafkaProducer, ProducerRecord as Fs2ProducerRecord,
-  ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
+  KafkaAdminClient as Fs2KafkaAdminClient, KafkaByteConsumer, KafkaConsumer as Fs2KafkaConsumer, KafkaProducer as Fs2KafkaProducer,
+  ProducerRecord as Fs2ProducerRecord, ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
 }
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.admin.{NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic}
-import org.apache.kafka.clients.consumer.{ConsumerGroupMetadata as JavaConsumerGroupMetadata, OffsetAndMetadata}
+import org.apache.kafka.clients.consumer.{Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, OffsetAndMetadata}
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.{
@@ -61,6 +64,9 @@ private[xkafka] object KafkaClientPlatform:
   */
 private final case class Fs2GroupHandle(metadata: JavaConsumerGroupMetadata) extends GroupHandle
 
+/** A value as it reaches the consumer adapter, with the group membership the consumer held when the value was polled. */
+private final case class Polled[V](value: V, membership: JavaConsumerGroupMetadata)
+
 private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkProducer: MkProducer[F], mkConsumer: MkConsumer[F])
     extends KafkaClient[F]:
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
@@ -68,8 +74,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      consumer <- Fs2KafkaConsumer.resource(consumerSettings(settings)).mapK(handleBackendErrors)
-      _        <- Resource.eval(select(consumer, selection))
+      membership <- Resource.eval(F.delay(new AtomicReference[JavaConsumerGroupMetadata]))
+      consumer   <- Fs2KafkaConsumer.resource(consumerSettings(settings, membership))(using F, recordingPolls(membership)).mapK(handleBackendErrors)
+      _          <- Resource.eval(select(consumer, selection))
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
     yield new Fs2KafkaConsumerAdapter(consumer, settings.commitRecovery, random)
@@ -190,9 +197,39 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     settings.client.clientId.fold(base)(base.withClientId)
 
-  private def consumerSettings[K, V](settings: ConsumerSettings[F, K, V]): Fs2ConsumerSettings[F, K, V] =
+  /** Builds the consumer `mkConsumer` would, and has each poll record the membership the consumer then holds.
+    *
+    * The Java consumer changes membership only inside a poll, and fs2-kafka deserializes a poll's records before it polls again, so the membership a
+    * record's deserializer reads is the one its poll ended under. The generation fs2-kafka's own committer reports is read when a transaction runs,
+    * which can be after a rebalance has moved the record's partition elsewhere.
+    */
+  private def recordingPolls(membership: AtomicReference[JavaConsumerGroupMetadata]): MkConsumer[F] =
+    new MkConsumer[F]:
+      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): F[KafkaByteConsumer] =
+        mkConsumer(settings).map: consumer =>
+          val recording: InvocationHandler =
+            (_: AnyRef, method: Method, arguments: Array[AnyRef]) =>
+              val result =
+                try method.invoke(consumer, Option(arguments).getOrElse(Array.empty[AnyRef])*)
+                catch case error: InvocationTargetException => throw error.getCause
+              if method.getName == "poll" then membership.set(consumer.groupMetadata())
+              result
+          Proxy.newProxyInstance(classOf[JavaConsumer[?, ?]].getClassLoader, Array(classOf[JavaConsumer[?, ?]]), recording)
+            .asInstanceOf[KafkaByteConsumer]
+
+  private def consumerSettings[K, V](
+      settings: ConsumerSettings[F, K, V],
+      membership: AtomicReference[JavaConsumerGroupMetadata]
+  ): Fs2ConsumerSettings[F, K, Polled[V]] =
+    val polled =
+      Fs2Deserializer.instance[F, Polled[V]]: (topic, headers, bytes) =>
+        for
+          value   <- deserializer(settings.valueDeserializer).deserialize(topic, headers, bytes)
+          current <-
+            F.delay(Option(membership.get)).flatMap(_.liftTo[F](new KafkaException.InvalidBackendResponse("a record arrived before any poll")))
+        yield Polled(value, current)
     val base =
-      Fs2ConsumerSettings(deserializer(settings.keyDeserializer), deserializer(settings.valueDeserializer)).withProperties(
+      Fs2ConsumerSettings(deserializer(settings.keyDeserializer), polled).withProperties(
         settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
           ClientProperties(settings.client)
       ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withGroupId(settings.groupId.value)
@@ -278,7 +315,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
       F.fromEither(validated)
 
-  private final class Fs2KafkaConsumerAdapter[K, V](underlying: Fs2KafkaConsumer[F, K, V], recovery: CommitRecovery, random: Random[F])
+  private final class Fs2KafkaConsumerAdapter[K, V](underlying: Fs2KafkaConsumer[F, K, Polled[V]], recovery: CommitRecovery, random: Random[F])
       extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
@@ -385,7 +422,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           case None        => F.raiseError(new KafkaException.InvalidBackendResponse(s"missing $field for $topicPartition"))
       .map(_.toMap)
 
-    private def consumerRecord(committable: Fs2CommittableConsumerRecord[F, K, V]): F[CommittableConsumerRecord[F, K, V]] =
+    private def consumerRecord(committable: Fs2CommittableConsumerRecord[F, K, Polled[V]]): F[CommittableConsumerRecord[F, K, V]] =
       val source    = committable.record
       val validated =
         for
@@ -401,7 +438,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
               offset = offset,
               timestamp = source.timestamp.toOption.map(Timestamp.fromEpochMillis),
               key = source.key,
-              value = source.value,
+              value = source.value.value,
               headers = portableHeaders(source.headers)
             )
           val portableOffset =
@@ -412,12 +449,18 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
               override val committer: OffsetCommitter[F] = offsetCommitter
 
+              override private[xkafka] val membership: GroupMembership[F] = membershipOf(source.value.membership)
+
           CommittableConsumerRecord(portableRecord, portableOffset)
 
       F.fromEither(validated)
 
     private def javaTopicPartition(topicPartition: TopicPartition): JavaTopicPartition =
       new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value)
+
+    /** The Java metadata compares by value, so every record polled under one membership names the same one. */
+    private def membershipOf(metadata: JavaConsumerGroupMetadata): GroupMembership[F] =
+      new GroupMembership.Backend(metadata, F.pure(Fs2GroupHandle(metadata)), _ => F.unit)
 
     private def portableTopicPartition(source: JavaTopicPartition): F[TopicPartition] =
       F.fromEither:
