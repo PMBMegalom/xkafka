@@ -78,6 +78,9 @@ private[xkafka] trait RdProducer extends js.Object:
       callback: js.Function1[RdError | Null, Unit]
   ): Unit = js.native
 
+/** What the client calls with each assignment and revocation, and the consumer it concerns as `this`. It applies neither itself. */
+private[xkafka] type RdRebalance = js.ThisFunction2[RdConsumer, RdError | Null, js.Array[RdTopicPartition], Unit]
+
 /** One header. librdkafka keeps these in an array, so duplicate names and their order both survive. */
 private[xkafka] type RdHeader = js.Dictionary[Uint8Array | String | Null]
 
@@ -90,6 +93,15 @@ private[xkafka] trait RdConsumer extends js.Object:
   def subscribe(topics: js.Array[SubscriptionTopic]): this.type = js.native
 
   def assign(topicPartitions: js.Array[RdTopicPartition]): this.type = js.native
+
+  def unassign(): this.type = js.native
+
+  def incrementalAssign(topicPartitions: js.Array[RdTopicPartition]): this.type = js.native
+
+  def incrementalUnassign(topicPartitions: js.Array[RdTopicPartition]): this.type = js.native
+
+  /** `COOPERATIVE` or `EAGER`, which decides whether a rebalance hands over the partitions it names or the whole assignment. */
+  def rebalanceProtocol(): String = js.native
 
   def consume(count: Int, callback: js.Function2[RdError | Null, js.Array[RdMessage], Unit]): Unit = js.native
 
@@ -234,7 +246,8 @@ private[xkafka] object Values:
       clientId: js.UndefOr[String],
       groupId: String,
       autoOffsetReset: AutoOffsetReset,
-      properties: Map[String, String]
+      properties: Map[String, String],
+      rebalance: RdRebalance
   ): js.Dictionary[js.Any] =
     val result = js.Dictionary.empty[js.Any]
     properties.foreach((name, value) => result(name) = value)
@@ -242,9 +255,8 @@ private[xkafka] object Values:
     clientId.foreach(value => result("client.id") = value)
     result("group.id") = groupId
     result("enable.auto.commit") = false
-    // node-rdkafka only wires the rebalance event when this is set, and the boolean form keeps its own
-    // assign and unassign, including the cooperative protocol split.
-    result("rebalance_cb") = true
+    // A function here leaves every assign and unassign to it, so a revocation takes effect only when it says so.
+    result("rebalance_cb") = rebalance
     // Likewise the only report a commit's outcome ever reaches, since the commit call itself takes no callback.
     result("offset_commit_cb") = true
     result("auto.offset.reset") = (

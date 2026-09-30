@@ -24,6 +24,7 @@ package xkafka
 import scala.concurrent.duration.*
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
+import scala.scalajs.js.timers
 import scala.scalajs.js.typedarray.Uint8Array
 
 import cats.data.{NonEmptyList, NonEmptySet}
@@ -77,7 +78,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     val producer = dynamic(confluent.Values.rdProducerConfig(js.Array("broker-1:9092", "broker-2:9092"), "client", Map("linger.ms" -> "5")))
     val consumer =
       dynamic(
-        confluent.Values.rdConsumerConfig(js.Array("broker-1:9092"), "client", "group", AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10"))
+        confluent.Values
+          .rdConsumerConfig(js.Array("broker-1:9092"), "client", "group", AutoOffsetReset.Earliest, Map("fetch.wait.max.ms" -> "10"), ignoreRebalance)
       )
 
     assertEquals(producer.selectDynamic("bootstrap.servers").asInstanceOf[String], "broker-1:9092,broker-2:9092")
@@ -89,6 +91,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     assertEquals(consumer.selectDynamic("fetch.wait.max.ms").asInstanceOf[String], "10")
     assertEquals(consumer.selectDynamic("enable.auto.commit").asInstanceOf[Boolean], false)
     assertEquals(consumer.selectDynamic("auto.offset.reset").asInstanceOf[String], "earliest")
+    // A function, so the client leaves every assign and unassign to it.
+    assertEquals(js.typeOf(consumer.selectDynamic("rebalance_cb")), "function")
 
   test("producer enqueues each record with its own opaque and reports metadata per record"):
     Dispatcher.sequential[IO].use: dispatcher =>
@@ -544,100 +548,153 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   test("a rebalance the client cannot read fails the consumer rather than stopping its assignment tracking"):
     for
-      handlers <- IO(js.Array[js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]]())
-      consumer =
-        js.Dynamic.literal(
-          connect =
-            ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
-              js.Any,
-              js.Function2[confluent.RdError | Null, js.Any, Unit],
-              Unit
-            ],
-          disconnect =
-            ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function1[
-              js.Function2[confluent.RdError | Null, js.Any, Unit],
-              Unit
-            ],
-          setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
-          on =
-            (
-                (_: String, handler: js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]) =>
-                  handlers.push(handler): Unit
-            ): js.Function2[String, js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit], Unit],
-          removeListener = ignoreConsumerListener,
-          subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
-          consume =
-            ((_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) => done(null, js.Array())): js.Function2[
-              Int,
-              js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit],
-              Unit
-            ],
-          // A partition this client rejects, so reading the assignment the rebalance reports raises.
-          assignments =
-            (() => js.Array(js.Dynamic.literal(topic = "events", partition = -1).asInstanceOf[confluent.RdTopicPartition])): js.Function0[
-              js.Array[confluent.RdTopicPartition]
-            ]
-        ).asInstanceOf[confluent.RdConsumer]
-      settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).toOption.get
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      consumer = rebalancingConsumer(js.Array(), js.Array())
+      // A partition this client rejects, so reading the assignment the rebalance leaves raises.
+      _ <-
+        IO(dynamic(consumer).updateDynamic("assignments")(
+          (() => js.Array(js.Dynamic.literal(topic = "events", partition = -1).asInstanceOf[confluent.RdTopicPartition])): js.Function0[
+            js.Array[confluent.RdTopicPartition]
+          ]
+        ))
       outcome <-
-        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
-          .use: value =>
-            IO(handlers.foreach(_(null, js.Array()))) *> value.records.compile.drain.timeout(5.seconds).attempt
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, rebalances = rebalances))
+          .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))).use: value =>
+            IO(rebalance(rebalances(0), consumer, AssignPartitions, 0)) *> value.records.compile.drain.timeout(5.seconds).attempt
     yield assert(
       outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]),
       s"the unreadable assignment should reach whoever reads the consumer, got $outcome"
     )
 
-  test("consumer release removes callback work before disconnecting"):
+  test("consumer release unassigns the revocation its disconnect brings, without reading the assignment afterwards"):
     for
-      order           <- IO(js.Array[String]())
-      assignmentCalls <- IO(js.Array[Unit]())
-      listeners       <- IO(js.Dictionary("rebalance" -> js.Array[CommitListener](), "offset.commit" -> js.Array[CommitListener]()))
-      state           <- IO(js.Dynamic.literal(disconnected = false))
-      consumer =
-        js.Dynamic.literal(
-          connect =
-            ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
-              js.Any,
-              js.Function2[confluent.RdError | Null, js.Any, Unit],
-              Unit
-            ],
-          disconnect =
-            ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
-              order.push("disconnect"): Unit
-              state.updateDynamic("disconnected")(true)
-              listeners("rebalance").foreach(_(null, js.Array()))
-              done(null, ())
-            ): js.Function1[js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
-          setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
-          on = ((event: String, listener: CommitListener) => listeners(event).push(listener): Unit): js.Function2[String, CommitListener, Unit],
-          removeListener =
-            (
-                (event: String, listener: CommitListener) =>
-                  order.push(s"remove:$event"): Unit
-                  val index = listeners(event).indexOf(listener)
-                  if index >= 0 then listeners(event).splice(index, 1): Unit
-            ): js.Function2[String, CommitListener, Unit],
-          subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
-          consume =
-            ((_: Int, _: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) => ()): js.Function2[
-              Int,
-              js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit],
-              Unit
-            ],
-          assignments =
-            (() =>
-              assignmentCalls.push(()): Unit
-              if state.selectDynamic("disconnected").asInstanceOf[Boolean] then throw new RuntimeException("Local: Erroneous state")
-              js.Array[confluent.RdTopicPartition]()
-            ): js.Function0[js.Array[confluent.RdTopicPartition]]
-        ).asInstanceOf[confluent.RdConsumer]
+      calls      <- IO(js.Array[String]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      consumer = rebalancingConsumer(js.Array(), calls)
+      // librdkafka revokes the assignment while it closes, and finishes closing only once that revocation is unassigned.
       _ <-
-        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer))
-          .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))).use_
+        IO(dynamic(consumer).updateDynamic("disconnect")(((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+          calls.push("disconnect"): Unit
+          dynamic(consumer).updateDynamic("closing")(done)
+          rebalance(rebalances(0), consumer, RevokePartitions, 0)
+        ): js.Function1[js.Function2[confluent.RdError | Null, js.Any, Unit], Unit]))
+      _ <-
+        IO(dynamic(consumer).updateDynamic("unassign")((() =>
+          calls.push("unassign"): Unit
+          val closing = dynamic(consumer).selectDynamic("closing")
+          if !js.isUndefined(closing) then closing.asInstanceOf[js.Function2[confluent.RdError | Null, js.Any, Unit]](null, ())
+        ): js.Function0[Unit]))
+      _ <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer, rebalances = rebalances))
+          .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))).use: _ =>
+            IO(rebalance(rebalances(0), consumer, AssignPartitions, 0)) *> until(calls.contains("assignments"))
+          .timeout(5.seconds)
     yield
-      assertEquals(order.toList, List("remove:offset.commit", "remove:rebalance", "disconnect"))
-      assertEquals(assignmentCalls.length, 0)
+      val disconnected = calls.indexOf("disconnect")
+      assert(disconnected >= 0, calls.toList.toString)
+      assertEquals(calls.toList.drop(disconnected), List("disconnect", "unassign"))
+
+  test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
+    for
+      calls      <- IO(js.Array[String]())
+      delivered  <- IO(js.Array[confluent.RdMessage]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      sent       <- IO(js.Array[js.Function1[confluent.RdError | Null, Unit]]())
+      rd     = rebalancingConsumer(delivered, calls)
+      client = KafkaClientPlatform.fromDriver[IO](transactionalDriver(transactionalProducer(sent, hold = false), rd, rebalances))
+      outcome <-
+        (client.transactionalProducer(transactionalSettings), client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))))
+          .tupled.use: (producer, consumer) =>
+            def read(offset: Double) = IO(delivered.push(commitMessage(offset))) *> consumer.records.take(1).compile.lastOrError
+            def recorded(value: CommittableConsumerRecord[IO, String, String]) =
+              producer.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(value.offset))).attempt
+            for
+              _            <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.count(_ == "assign") == 1)
+              earlier      <- read(0d)
+              _            <- IO(rebalance(rebalances(0), rd, RevokePartitions, 0)) *> until(calls.contains("unassign"))
+              revoked      <- recorded(earlier)
+              _            <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.count(_ == "assign") == 2)
+              later        <- read(1d)
+              stillRevoked <- recorded(earlier)
+              current      <- recorded(later)
+            yield (revoked, stillRevoked, current)
+          .timeout(10.seconds)
+    yield
+      val (revoked, stillRevoked, current) = outcome
+      assert(illegalGeneration(revoked), s"an offset from a revoked assignment should be rejected, got $revoked")
+      assert(illegalGeneration(stillRevoked), s"reassigning the partition should not revive an earlier offset, got $stillRevoked")
+      assertEquals(current, Right(()))
+      // Only the offset read under the current assignment ever reached the client.
+      assertEquals(sent.length, 1)
+
+  test("a revocation waits for a transaction recording one of its offsets before it unassigns"):
+    for
+      calls      <- IO(js.Array[String]())
+      delivered  <- IO(js.Array[confluent.RdMessage]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      sent       <- IO(js.Array[js.Function1[confluent.RdError | Null, Unit]]())
+      rd     = rebalancingConsumer(delivered, calls)
+      client = KafkaClientPlatform.fromDriver[IO](transactionalDriver(transactionalProducer(sent, hold = true), rd, rebalances))
+      outcome <-
+        (client.transactionalProducer(transactionalSettings), client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))))
+          .tupled.use: (producer, consumer) =>
+            for
+              _         <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.contains("assign"))
+              held      <- IO(delivered.push(commitMessage(0d))) *> consumer.records.take(1).compile.lastOrError
+              recording <- producer.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(held.offset))).attempt.start
+              _         <- until(sent.length == 1)
+              _         <- IO(rebalance(rebalances(0), rd, RevokePartitions, 0))
+              _         <- IO.sleep(200.millis)
+              early     <- IO(calls.contains("unassign"))
+              _         <- IO(sent(0)(null))
+              recorded  <- recording.joinWithNever
+              _         <- until(calls.contains("unassign"))
+            yield (early, recorded)
+          .timeout(10.seconds)
+    yield
+      val (early, recorded) = outcome
+      assert(!early, "the partition was unassigned while a transaction was still recording its offset")
+      assertEquals(recorded, Right(()))
+
+  test("a revocation during a consume leaves the records it returns unable to be recorded in a transaction"):
+    for
+      calls      <- IO(js.Array[String]())
+      delivered  <- IO(js.Array[confluent.RdMessage]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      sent       <- IO(js.Array[js.Function1[confluent.RdError | Null, Unit]]())
+      trigger    <- IO(js.Array[Unit]())
+      rd = rebalancingConsumer(delivered, calls)
+      // Once triggered, a consume that is still running when the partition is revoked and assigned again, and returns afterwards.
+      _ <-
+        IO(dynamic(rd).updateDynamic("consume")(
+          (
+              (_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) =>
+                if trigger.length > 0 then
+                  trigger.pop()
+                  rebalance(rebalances(0), rd, RevokePartitions, 0)
+                  rebalance(rebalances(0), rd, AssignPartitions, 0)
+                  timers.setTimeout(100d)(done(null, js.Array(commitMessage(0d)))): Unit
+                else done(null, delivered.splice(0, delivered.length).toJSArray)
+          ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit], Unit]
+        ))
+      client = KafkaClientPlatform.fromDriver[IO](transactionalDriver(transactionalProducer(sent, hold = false), rd, rebalances))
+      outcome <-
+        (client.transactionalProducer(transactionalSettings), client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))))
+          .tupled.use: (producer, consumer) =>
+            def recorded(value: CommittableConsumerRecord[IO, String, String]) =
+              producer.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(value.offset))).attempt
+            for
+              _       <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.contains("assign"))
+              spanned <- IO(trigger.push(())) *> consumer.records.take(1).compile.lastOrError
+              after   <- IO(delivered.push(commitMessage(1d))) *> consumer.records.take(1).compile.lastOrError
+              first   <- recorded(spanned)
+              second  <- recorded(after)
+            yield (first, second)
+          .timeout(10.seconds)
+    yield
+      val (spanned, after) = outcome
+      assert(illegalGeneration(spanned), s"a record from a consume the revocation interrupted should be rejected, got $spanned")
+      assertEquals(after, Right(()))
 
   test("the isolation level reaches the backend as the property it spells"):
     val settings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
@@ -744,6 +801,122 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         ], Unit]
     ).asInstanceOf[confluent.RdConsumer]
 
+  // What librdkafka reports to a rebalance callback for an assignment and a revocation.
+  private val AssignPartitions = -175
+  private val RevokePartitions = -174
+
+  private val ignoreRebalance: confluent.RdRebalance =
+    (_: confluent.RdConsumer, _: confluent.RdError | Null, _: js.Array[confluent.RdTopicPartition]) => ()
+
+  /** Calls the consumer's rebalance callback the way the client does, with the consumer as `this`. */
+  private def rebalance(callback: confluent.RdRebalance, consumer: confluent.RdConsumer, code: Int, partitions: Int*): Unit =
+    callback(
+      consumer,
+      js.Dynamic.literal(code = code, message = "rebalance").asInstanceOf[confluent.RdError],
+      partitions.map(value => confluent.Values.rdTopicPartition("events", value)).toJSArray
+    )
+
+  private def until(condition: => Boolean): IO[Unit] = (IO.sleep(10.millis) *> IO(condition)).iterateUntil(identity).void.timeout(5.seconds)
+
+  private def illegalGeneration(outcome: Either[Throwable, Unit]): Boolean =
+    outcome.left.exists:
+      case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.IllegalGeneration)
+      case _                                      => false
+
+  /** An eager-protocol consumer that applies what its rebalance callback tells it and records each call. */
+  private def rebalancingConsumer(delivered: js.Array[confluent.RdMessage], calls: js.Array[String]): confluent.RdConsumer =
+    val assigned = js.Array[confluent.RdTopicPartition]()
+    js.Dynamic.literal(
+      connect =
+        ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+          js.Any,
+          js.Function2[confluent.RdError | Null, js.Any, Unit],
+          Unit
+        ],
+      disconnect =
+        ((done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+          calls.push("disconnect"): Unit
+          done(null, ())
+        ): js.Function1[js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
+      setDefaultConsumeTimeout = ((_: Int) => ()): js.Function1[Int, Unit],
+      on = ((_: String, _: CommitListener) => ()): js.Function2[String, CommitListener, Unit],
+      removeListener = ignoreConsumerListener,
+      subscribe = ((_: js.Array[confluent.SubscriptionTopic]) => ()): js.Function1[js.Array[confluent.SubscriptionTopic], Unit],
+      consume =
+        (
+            (_: Int, done: js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit]) =>
+              done(null, delivered.splice(0, delivered.length).toJSArray)
+        ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Array[confluent.RdMessage], Unit], Unit],
+      rebalanceProtocol = (() => "EAGER"): js.Function0[String],
+      assign =
+        ((partitions: js.Array[confluent.RdTopicPartition]) =>
+          calls.push("assign"): Unit
+          assigned.splice(0, assigned.length, partitions.toSeq*): Unit
+        ): js.Function1[js.Array[confluent.RdTopicPartition], Unit],
+      unassign =
+        (() =>
+          calls.push("unassign"): Unit
+          assigned.splice(0, assigned.length): Unit
+        ): js.Function0[Unit],
+      assignments =
+        (() =>
+          calls.push("assignments"): Unit
+          assigned.toSeq.toJSArray
+        ): js.Function0[js.Array[confluent.RdTopicPartition]]
+    ).asInstanceOf[confluent.RdConsumer]
+
+  /** A transactional producer whose every call succeeds. Each offset send is kept, and with `hold` it completes only when the test calls it. */
+  private def transactionalProducer(sent: js.Array[js.Function1[confluent.RdError | Null, Unit]], hold: Boolean): confluent.RdProducer =
+    val succeed: js.Function1[js.Function1[confluent.RdError | Null, Unit], Unit] = (done: js.Function1[confluent.RdError | Null, Unit]) => done(null)
+    val timed: js.Function2[Int, js.Function1[confluent.RdError | Null, Unit], Unit] =
+      (_: Int, done: js.Function1[confluent.RdError | Null, Unit]) => done(null)
+    js.Dynamic.literal(
+      connect =
+        ((_: js.Any, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+          js.Any,
+          js.Function2[confluent.RdError | Null, js.Any, Unit],
+          Unit
+        ],
+      disconnect =
+        ((_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
+          Int,
+          js.Function2[confluent.RdError | Null, js.Any, Unit],
+          Unit
+        ],
+      setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
+      on =
+        ((_: String, _: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) => ()): js.Function2[
+          String,
+          js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit],
+          Unit
+        ],
+      initTransactions = timed,
+      beginTransaction = succeed,
+      commitTransaction = timed,
+      abortTransaction = timed,
+      sendOffsetsToTransaction =
+        (
+            (_: js.Array[confluent.RdTopicPartitionOffset], _: confluent.RdConsumer, _: Int, done: js.Function1[confluent.RdError | Null, Unit]) =>
+              sent.push(done): Unit
+              if !hold then done(null)
+        ): js.Function4[js.Array[confluent.RdTopicPartitionOffset], confluent.RdConsumer, Int, js.Function1[confluent.RdError | Null, Unit], Unit]
+    ).asInstanceOf[confluent.RdProducer]
+
+  private val transactionalSettings =
+    TransactionalProducerSettings.from(clientSettings, TransactionalId.from("writer").toOption.get, utf8Serializer, utf8Serializer).toOption.get
+
+  private def transactionalDriver(
+      producer: confluent.RdProducer,
+      consumer: confluent.RdConsumer,
+      rebalances: js.Array[confluent.RdRebalance]
+  ): ConfluentKafkaDriver =
+    driver(
+      producerValue = producer,
+      consumerValue = consumer,
+      expectedProducerProperties = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "60000", DefaultAcks),
+      rebalances = rebalances
+    )
+
   private def commitMessage(offset: Double): confluent.RdMessage =
     js.Dynamic.literal(topic = "events", partition = 0, offset = offset, key = uint8("key"), value = uint8("value"), headers = js.Array())
       .asInstanceOf[confluent.RdMessage]
@@ -773,7 +946,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           settings: ClientSettings,
           groupId: ConsumerGroup,
           autoOffsetReset: AutoOffsetReset,
-          properties: Map[String, String]
+          properties: Map[String, String],
+          rebalance: confluent.RdRebalance
       ): confluent.RdConsumer =
         captured.push(properties): Unit
         null
@@ -782,7 +956,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       producerValue: confluent.RdProducer = null,
       consumerValue: confluent.RdConsumer = null,
       expectedProducerProperties: Map[String, String] = Map(DefaultAcks),
-      expectedConsumerProperties: Map[String, String] = Map(DefaultIsolationLevel)
+      expectedConsumerProperties: Map[String, String] = Map(DefaultIsolationLevel),
+      rebalances: js.Array[confluent.RdRebalance] = js.Array()
   ): ConfluentKafkaDriver =
     new ConfluentKafkaDriver:
       override def producer(settings: ClientSettings, properties: Map[String, String]): confluent.RdProducer =
@@ -793,9 +968,11 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           settings: ClientSettings,
           groupId: ConsumerGroup,
           autoOffsetReset: AutoOffsetReset,
-          properties: Map[String, String]
+          properties: Map[String, String],
+          rebalance: confluent.RdRebalance
       ): confluent.RdConsumer =
         assertEquals(properties, expectedConsumerProperties)
+        rebalances.push(rebalance): Unit
         consumerValue
 
   private def rdHeader(name: String, value: Array[Byte]): confluent.RdHeader =

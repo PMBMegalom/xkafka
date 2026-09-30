@@ -763,7 +763,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(afterAbort, None, "an aborted transaction should leave the group where it was")
         assertEquals(afterCommit.map(_.value), Some(1L), "a committed transaction should store the offset it recorded")
 
-  test(conformance("a transaction cannot record an offset from a partition its consumer has since lost", divergent = Set("js"))):
+  test(conformance("a transaction cannot record an offset from a partition its consumer has since lost")):
     withBroker: server =>
       val input  = validTopic(partitionedTopic)
       val output = uniqueTopic("revoked-output")
