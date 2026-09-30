@@ -104,13 +104,14 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `pollTimeout` | 100ms | how long one poll waits for records before returning empty |
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for an answer |
 | `commitTimeout` | 15s | how long a commit waits before failing as a timed out request |
+| `assignmentFencing` | `true` | whether an offset commits only while this consumer still holds the partition it was read from |
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default matches
 what Kafka's own clients use.
 
-See [Offsets](offsets.md) for commit recovery and the commit timeout, and
-[Transactions](transactions.md) for the isolation level.
+See [Offsets](offsets.md) for commit recovery, the commit timeout, and assignment
+fencing, and [Transactions](transactions.md) for the isolation level.
 
 ## Producer settings
 

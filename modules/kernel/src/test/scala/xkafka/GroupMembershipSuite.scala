@@ -67,6 +67,35 @@ final class GroupMembershipSuite extends CatsEffectSuite:
       sent <- commits.get
     yield assertEquals(sent, List(Map(first -> at(5L))))
 
+  test("a batch commits each partition with the lease of the offset it keeps"):
+    for
+      received <- Ref[IO].of(List.empty[Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]])
+      owner =
+        new OffsetCommitter[IO]:
+          override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): IO[Unit] =
+            received.update(_ :+ offsets)
+      earlier = Lease(("events", 0), 1L)
+      later   = Lease(("events", 0), 2L)
+      other   = Lease(("events", 1), 3L)
+      _ <-
+        CommittableOffsetBatch
+          .fromFoldable(List(leased(first, 3L, owner, Some(earlier)), leased(first, 5L, owner, Some(later)), leased(second, 2L, owner, Some(other))))
+          .commit
+      sent <- received.get
+    yield assertEquals(sent, List(Map(first -> (at(5L), Some(later)), second -> (at(2L), Some(other)))))
+
+  private def leased(partition: TopicPartition, value: Long, owner: OffsetCommitter[IO], read: Option[Lease[LeaseKey]]): CommittableOffset[IO] =
+    new CommittableOffset[IO]:
+      override def topicPartition: TopicPartition = partition
+
+      override def nextOffset: Offset = at(value)
+
+      override def committer: OffsetCommitter[IO] = owner
+
+      override private[xkafka] def lease: Option[Lease[LeaseKey]] = read
+
   private final case class KeyedHandle(key: String) extends GroupHandle
 
   private def membership(key: String): GroupMembership[IO] = new GroupMembership.Backend[IO](key, IO.pure(KeyedHandle(key)), _ => IO.unit)

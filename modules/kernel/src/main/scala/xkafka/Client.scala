@@ -432,11 +432,11 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       assignmentFencing
     ) {}
 
-  /** Whether a transaction records an offset only while this consumer still holds the partition assignment it was read under.
+  /** Whether an offset commits only while this consumer still holds the partition assignment it was read under.
     *
-    * On, which is the default, an offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, and a revocation
-    * waits for any transaction still recording one of its offsets before the partition can move to another consumer. Off, an offset is recorded
-    * against whatever membership the consumer holds when the transaction runs.
+    * On, which is the default, an offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, whether it is
+    * committed on its own, in a batch, or in a transaction. Off, an offset is committed against whatever membership the consumer holds when the
+    * commit runs.
     */
   def withAssignmentFencing(enabled: Boolean): ConsumerSettings[F, K, V] =
     new ConsumerSettings(

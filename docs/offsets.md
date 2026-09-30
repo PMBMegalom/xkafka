@@ -19,6 +19,33 @@ CommittableOffsetBatch.fromFoldable(offsets).commit
 A batch keeps only the greatest next offset for each topic-partition, and makes
 one backend commit per originating consumer.
 
+## Offsets and rebalances
+
+An offset belongs to the assignment it was read under. Once the group revokes
+its partition, the offset can no longer be committed, whether on its own, in a
+batch, or in a [transaction](transactions.md). The commit fails with a
+`KafkaException.BackendFailure` whose code is `ErrorCode.IllegalGeneration`, and
+nothing is committed for that partition, so the consumer that holds it now keeps
+its position.
+
+This still applies when the partition later comes back to the same consumer.
+
+With the default partition assignment, a rebalance revokes every partition before
+assigning them again. Offsets read before any rebalance are then refused, including
+those of partitions the consumer keeps. `IllegalGeneration` is not retriable: read
+the records again after the rebalance and commit their offsets.
+
+Fencing is on by default, and can be turned off:
+
+```scala
+settings.withAssignmentFencing(false)
+```
+
+Without it, an offset is committed against whatever group membership the
+consumer holds when the commit runs. An offset read before a rebalance can then be
+committed after its partition has moved to another consumer, and move that
+partition back to an earlier position.
+
 ## Committing on a schedule
 
 `commitBatchWithin` is an FS2 pipe which commits whenever it collects `n`

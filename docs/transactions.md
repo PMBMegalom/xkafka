@@ -72,6 +72,14 @@ The batch already identifies the consumer its offsets came from, so
 wrong group.
 
 @:callout(warning)
+Offsets read before their partition was revoked cannot be recorded.
+`commitOffsets` fails with `ErrorCode.IllegalGeneration`, and `transactionally`
+aborts the transaction, so none of it becomes visible. Read the records again and
+process them in a new transaction. See
+[Offsets and rebalances](offsets.md#offsets-and-rebalances).
+@:@
+
+@:callout(warning)
 The pipeline is only atomic end to end if whatever reads the output topic also
 sets `IsolationLevel.ReadCommitted`. A reader left on the default sees records
 from transactions that have not committed, including ones that later abort.
