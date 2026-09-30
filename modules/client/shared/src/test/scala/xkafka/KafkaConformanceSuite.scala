@@ -820,7 +820,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(lost, None, "a rejected transaction should leave the revoked partition where it was")
         assertEquals(moved, Some(current.nextOffset), "an offset read after the rebalance should still commit")
 
-  test(conformance("with assignment fencing off, a transaction records an offset from a partition its consumer has lost", divergent = Set("jvm"))):
+  test(conformance("with assignment fencing off, a transaction records an offset from a partition its consumer has lost")):
     withBroker: server =>
       val input  = validTopic(partitionedTopic)
       val output = uniqueTopic("unfenced-output")

@@ -38,12 +38,12 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
     for
       leases  <- AssignmentLeases[IO, String](enabled = true)
       _       <- leases.assign(List("p"), replacing = false)
-      earlier <- leases.current("p")
+      earlier <- leases.held.map(_("p"))
       held    <- recorded(leases, earlier)
       _       <- leases.revoke(List("p"))
       revoked <- recorded(leases, earlier)
       _       <- leases.assign(List("p"), replacing = false)
-      later   <- leases.current("p")
+      later   <- leases.held.map(_("p"))
       stale   <- recorded(leases, earlier)
       current <- recorded(leases, later)
     yield
@@ -56,7 +56,7 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
     for
       leases  <- AssignmentLeases[IO, String](enabled = true)
       _       <- leases.assign(List("p"), replacing = false)
-      lease   <- leases.current("p")
+      lease   <- leases.held.map(_("p"))
       outcome <-
         handleOf(leases, lease).use: _ =>
           for
@@ -81,10 +81,10 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
     for
       leases  <- AssignmentLeases[IO, String](enabled = true)
       _       <- leases.assign(List("p", "q"), replacing = false)
-      earlier <- leases.current("p")
+      earlier <- leases.held.map(_("p"))
       _       <- leases.assign(List("p"), replacing = true)
-      later   <- leases.current("p")
-      gone    <- leases.current("q")
+      later   <- leases.held.map(_("p"))
+      gone    <- leases.held.map(_("q"))
     yield
       assert(earlier.isDefined && later.isDefined && earlier != later)
       assertEquals(gone, None)

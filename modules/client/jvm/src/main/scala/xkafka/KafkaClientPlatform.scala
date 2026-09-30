@@ -22,16 +22,18 @@
 package xkafka
 
 import java.lang.reflect.{InvocationHandler, InvocationTargetException, Method, Proxy}
+import java.util.Collection as JavaCollection
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.jdk.CollectionConverters.*
+import scala.util.Try
 
 import cats.Parallel
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.Random
+import cats.effect.std.{Dispatcher, Random}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.kafka.{
@@ -45,7 +47,7 @@ import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
 import org.apache.kafka.clients.admin.{NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic}
 import org.apache.kafka.clients.consumer.{
-  CommitFailedException, Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, OffsetAndMetadata
+  CommitFailedException, Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, ConsumerRebalanceListener, OffsetAndMetadata
 }
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
@@ -66,8 +68,8 @@ private[xkafka] object KafkaClientPlatform:
   */
 private[xkafka] final case class Fs2GroupHandle(metadata: JavaConsumerGroupMetadata) extends GroupHandle
 
-/** A value as it reaches the consumer adapter, with the group membership the consumer held when the value was polled. */
-private final case class Polled[V](value: V, membership: JavaConsumerGroupMetadata)
+/** A value as it reaches the consumer adapter, with the lease each partition held when its poll returned, which names the one it was read under. */
+private final case class Polled[V](value: V, held: ((String, Int)) => Option[Lease[(String, Int)]])
 
 private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkProducer: MkProducer[F], mkConsumer: MkConsumer[F])
     extends KafkaClient[F]:
@@ -76,12 +78,16 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
+      leases     <- Resource.eval(AssignmentLeases[F, (String, Int)](settings.assignmentFencing))
       membership <- Resource.eval(F.delay(new AtomicReference[JavaConsumerGroupMetadata]))
-      consumer   <- Fs2KafkaConsumer.resource(consumerSettings(settings, membership))(using F, recordingPolls(membership)).mapK(handleBackendErrors)
-      _          <- Resource.eval(select(consumer, selection))
+      // Acquired before the consumer, so it is still running when closing the consumer revokes its assignment.
+      rebalancing <- Dispatcher.sequential[F]
+      consumer    <-
+        Fs2KafkaConsumer.resource(consumerSettings(settings, leases))(using F, fencing(membership, leases, rebalancing)).mapK(handleBackendErrors)
+      _ <- Resource.eval(select(consumer, selection, leases))
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
-    yield new Fs2KafkaConsumerAdapter(consumer, settings.commitRecovery, random)
+    yield new Fs2KafkaConsumerAdapter(consumer, settings, leases, membership, random)
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     Fs2KafkaProducer.transactional(
@@ -144,12 +150,14 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     private def javaNewTopic(value: NewTopic): JavaNewTopic =
       new JavaNewTopic(value.topic.value, value.partitions, value.replicationFactor).configs(value.configuration.asJava)
 
-  private def select[K, V](consumer: Fs2KafkaConsumer[F, K, V], selection: Selection): F[Unit] =
+  private def select[K, V](consumer: Fs2KafkaConsumer[F, K, V], selection: Selection, leases: AssignmentLeases[F, (String, Int)]): F[Unit] =
     selection match
       case Selection.Topics(topics)              => backend(consumer.subscribe(topics.toNonEmptyList.map(_.value)))
       case Selection.Pattern(pattern)            => F.delay(pattern.anchored.r).flatMap(value => backend(consumer.subscribe(value)))
       case Selection.Partitions(topicPartitions) =>
-        backend(consumer.assign(topicPartitions.map(value => new JavaTopicPartition(value.topic.value, value.partition.value))))
+        // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
+        leases.assign(topicPartitions.toSortedSet.toList.map(value => value.topic.value -> value.partition.value), replacing = false) *>
+          backend(consumer.assign(topicPartitions.map(value => new JavaTopicPartition(value.topic.value, value.partition.value))))
 
   private val handleBackendErrors: FunctionK[F, F] =
     new FunctionK[F, F]:
@@ -213,37 +221,66 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     settings.client.clientId.fold(base)(base.withClientId)
 
-  /** Builds the consumer `mkConsumer` would, and has each poll record the membership the consumer then holds.
+  /** Builds the consumer `mkConsumer` would, with each rebalance passing through the leases before it reaches fs2-kafka.
     *
-    * The Java consumer changes membership only inside a poll, and fs2-kafka deserializes a poll's records before it polls again, so the membership a
-    * record's deserializer reads is the one its poll ended under. The generation fs2-kafka's own committer reports is read when a transaction runs,
-    * which can be after a rebalance has moved the record's partition elsewhere.
+    * fs2-kafka hands the consumer its rebalance listener when it subscribes, so this puts one in front of it. A revocation ends its leases and waits
+    * for any transaction still recording an offset under one of them before fs2-kafka hears of it, and since the Java consumer runs the listener
+    * inside a poll, the group cannot hand those partitions to another member until then. The transaction never calls the consumer, whose only thread
+    * is the one waiting here: it sends the membership each poll and each rebalance leave behind.
     */
-  private def recordingPolls(membership: AtomicReference[JavaConsumerGroupMetadata]): MkConsumer[F] =
+  private def fencing(
+      membership: AtomicReference[JavaConsumerGroupMetadata],
+      leases: AssignmentLeases[F, (String, Int)],
+      dispatcher: Dispatcher[F]
+  ): MkConsumer[F] =
     new MkConsumer[F]:
       override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): F[KafkaByteConsumer] =
         mkConsumer(settings).map: consumer =>
-          val recording: InvocationHandler =
+          // The listener runs on the consumer's own thread, so reading the consumer from it is allowed, including while it closes.
+          def remember(): Unit                                                        = Try(consumer.groupMetadata()).foreach(membership.set)
+          def leasing(listener: ConsumerRebalanceListener): ConsumerRebalanceListener =
+            new ConsumerRebalanceListener:
+              override def onPartitionsRevoked(partitions: JavaCollection[JavaTopicPartition]): Unit =
+                remember()
+                dispatcher.unsafeRunSync(leases.revoke(keys(partitions)))
+                listener.onPartitionsRevoked(partitions)
+
+              override def onPartitionsLost(partitions: JavaCollection[JavaTopicPartition]): Unit =
+                remember()
+                dispatcher.unsafeRunSync(leases.revoke(keys(partitions)))
+                listener.onPartitionsLost(partitions)
+
+              override def onPartitionsAssigned(partitions: JavaCollection[JavaTopicPartition]): Unit =
+                remember()
+                dispatcher.unsafeRunSync(leases.assign(keys(partitions), replacing = false))
+                listener.onPartitionsAssigned(partitions)
+          val handler: InvocationHandler =
             (_: AnyRef, method: Method, arguments: Array[AnyRef]) =>
+              val passed =
+                Option(arguments).getOrElse(Array.empty[AnyRef]).map:
+                  case listener: ConsumerRebalanceListener => leasing(listener)
+                  case other                               => other
               val result =
-                try method.invoke(consumer, Option(arguments).getOrElse(Array.empty[AnyRef])*)
+                try method.invoke(consumer, passed*)
                 catch case error: InvocationTargetException => throw error.getCause
-              if method.getName == "poll" then membership.set(consumer.groupMetadata())
+              if method.getName == "poll" then remember()
               result
-          Proxy.newProxyInstance(classOf[JavaConsumer[?, ?]].getClassLoader, Array(classOf[JavaConsumer[?, ?]]), recording)
+          Proxy.newProxyInstance(classOf[JavaConsumer[?, ?]].getClassLoader, Array(classOf[JavaConsumer[?, ?]]), handler)
             .asInstanceOf[KafkaByteConsumer]
 
+  private def keys(partitions: JavaCollection[JavaTopicPartition]): List[(String, Int)] =
+    partitions.asScala.toList.map(value => value.topic -> value.partition)
+
+  /** fs2-kafka deserializes a poll's records before it polls again, and leases change only inside a poll, so what the deserializer reads is what each
+    * partition held when the record's poll returned.
+    */
   private def consumerSettings[K, V](
       settings: ConsumerSettings[F, K, V],
-      membership: AtomicReference[JavaConsumerGroupMetadata]
+      leases: AssignmentLeases[F, (String, Int)]
   ): Fs2ConsumerSettings[F, K, Polled[V]] =
     val polled =
       Fs2Deserializer.instance[F, Polled[V]]: (topic, headers, bytes) =>
-        for
-          value   <- deserializer(settings.valueDeserializer).deserialize(topic, headers, bytes)
-          current <-
-            F.delay(Option(membership.get)).flatMap(_.liftTo[F](new KafkaException.InvalidBackendResponse("a record arrived before any poll")))
-        yield Polled(value, current)
+        (deserializer(settings.valueDeserializer).deserialize(topic, headers, bytes), leases.held).mapN(Polled.apply)
     val base =
       Fs2ConsumerSettings(deserializer(settings.keyDeserializer), polled).withProperties(
         settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
@@ -331,8 +368,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
       F.fromEither(validated)
 
-  private final class Fs2KafkaConsumerAdapter[K, V](underlying: Fs2KafkaConsumer[F, K, Polled[V]], recovery: CommitRecovery, random: Random[F])
-      extends KafkaConsumer[F, K, V]:
+  private final class Fs2KafkaConsumerAdapter[K, V](
+      underlying: Fs2KafkaConsumer[F, K, Polled[V]],
+      settings: ConsumerSettings[F, K, V],
+      leases: AssignmentLeases[F, (String, Int)],
+      membership: AtomicReference[JavaConsumerGroupMetadata],
+      random: Random[F]
+  ) extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
       CommitRecovery.recovering(
@@ -347,7 +389,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           override private[xkafka] val membership: GroupMembership[F] =
             GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)), _ => F.unit)
         ,
-        recovery,
+        settings.commitRecovery,
         random
       )
 
@@ -465,7 +507,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
               override val committer: OffsetCommitter[F] = offsetCommitter
 
-              override private[xkafka] val membership: GroupMembership[F] = membershipOf(source.value.membership)
+              override private[xkafka] val membership: GroupMembership[F] =
+                leases.membership(Fs2KafkaConsumerAdapter.this, source.value.held(source.topic -> source.partition), current, _ => F.unit)
 
           CommittableConsumerRecord(portableRecord, portableOffset)
 
@@ -474,9 +517,14 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     private def javaTopicPartition(topicPartition: TopicPartition): JavaTopicPartition =
       new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value)
 
-    /** The Java metadata compares by value, so every record polled under one membership names the same one. */
-    private def membershipOf(metadata: JavaConsumerGroupMetadata): GroupMembership[F] =
-      new GroupMembership.Backend(metadata, F.pure(Fs2GroupHandle(metadata)), _ => F.unit)
+    /** The membership a transaction sends. With fencing a revocation may be holding the consumer's only thread, so it is the one the last poll or
+      * rebalance left behind; without it, the consumer is asked, as it was before fencing existed.
+      */
+    private val current: F[GroupHandle] =
+      if settings.assignmentFencing then
+        F.delay(Option(membership.get)).flatMap(_.liftTo[F](new KafkaException.InvalidBackendResponse("no poll has reported a membership yet")))
+          .map(Fs2GroupHandle(_))
+      else backend(underlying.groupMetadata).map(Fs2GroupHandle(_))
 
     private def portableTopicPartition(source: JavaTopicPartition): F[TopicPartition] =
       F.fromEither:

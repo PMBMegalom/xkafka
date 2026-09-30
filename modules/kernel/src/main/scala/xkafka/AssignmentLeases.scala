@@ -79,8 +79,8 @@ private[xkafka] sealed trait AssignmentLeases[F[_], P]:
   /** Runs `read` and labels each item with the lease it was read under, where one can be named. */
   def reading[A](read: F[List[A]])(partition: A => P): F[List[(A, Option[Lease[P]])]]
 
-  /** The partition's current lease, for a backend whose reads cannot overlap a rebalance. */
-  def current(partition: P): F[Option[Lease[P]]]
+  /** The lease each partition holds right now, for a backend whose reads cannot overlap a rebalance. */
+  def held: F[P => Option[Lease[P]]]
 
   /** What a transaction records an offset read under `lease` against. `owner` tells one consumer's leases from another's, and `handle` names the
     * consumer's current membership, which is what the backend sends.
@@ -115,7 +115,7 @@ private[xkafka] object AssignmentLeases:
           after  <- leases.get
         yield items.map(item => item -> after.readUnder(partition(item), before))
 
-      override def current(partition: P): F[Option[Lease[P]]] = leases.get.map(_.current.get(partition))
+      override def held: F[P => Option[Lease[P]]] = leases.get.map(_.current.get)
 
       override def membership(owner: AnyRef, lease: Option[Lease[P]], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F] =
         val acquire =
@@ -135,7 +135,7 @@ private[xkafka] object AssignmentLeases:
 
       override def reading[A](read: F[List[A]])(partition: A => P): F[List[(A, Option[Lease[P]])]] = read.map(_.map(_ -> None))
 
-      override def current(partition: P): F[Option[Lease[P]]] = F.pure(None)
+      override def held: F[P => Option[Lease[P]]] = F.pure(_ => None)
 
       override def membership(owner: AnyRef, lease: Option[Lease[P]], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F] =
         new GroupMembership.Backend(owner, handle, release)

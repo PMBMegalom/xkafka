@@ -22,10 +22,9 @@
 package xkafka
 
 import java.nio.charset.StandardCharsets
-import java.util.{List as JavaList, Map as JavaMap, Optional}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.{List as JavaList, Map as JavaMap}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 
-import scala.annotation.nowarn
 import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
@@ -37,7 +36,7 @@ import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
 import org.apache.kafka.clients.consumer.{
-  CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndTimestamp
+  CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp
 }
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
 import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
@@ -171,49 +170,71 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(position, 0L)
     .timeout(5.seconds)
 
-  test("a record keeps the membership it was polled under after the consumer moves to a later one"):
-    val topic              = Topic.from("events").toOption.get
-    val group              = ConsumerGroup.from("workers").toOption.get
-    val javaTopicPartition = new JavaTopicPartition(topic.value, 0)
-    val generation         = new AtomicInteger(1)
-    val mock               =
-      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
-        // Only the deprecated constructor sets a generation, which is the one thing this test needs the consumer to change.
-        @nowarn("cat=deprecation")
-        override def groupMetadata(): ConsumerGroupMetadata = new ConsumerGroupMetadata(group.value, generation.get, "member", Optional.empty())
-    def add(offset: Long): Unit =
-      mock.addRecord(new JavaConsumerRecord(topic.value, 0, offset, "key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8)))
-    mock.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
-    // MockConsumer runs one task at the start of each poll, so the first poll returns two records and the second one moves the generation.
-    mock.schedulePollTask(() =>
-      mock.rebalance(JavaList.of(javaTopicPartition))
-      mock.updateBeginningOffsets(JavaMap.of(javaTopicPartition, Long.box(0L)))
-      add(0L)
-      add(1L)
+  test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after the partition returns can"):
+    val (consumer, partition) = subscribedMock()
+    val reassigned            = new CountDownLatch(1)
+    // MockConsumer runs one task at the start of each poll, so the first poll returns two records and the second revokes the partition and
+    // assigns it again before its own record.
+    consumer.schedulePollTask(() =>
+      consumer.rebalance(JavaList.of(partition))
+      consumer.updateBeginningOffsets(JavaMap.of(partition, Long.box(0L)))
+      addRecord(consumer, 0L)
+      addRecord(consumer, 1L)
     )
-    mock.schedulePollTask(() =>
-      generation.set(2)
-      add(2L)
+    consumer.schedulePollTask(() =>
+      consumer.rebalance(JavaList.of())
+      consumer.rebalance(JavaList.of(partition))
+      addRecord(consumer, 2L)
+      reassigned.countDown()
     )
-    given MkConsumer[IO] with
-      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO.pure(mock)
+    val producer = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
 
-    val utf8     = Deserializer.utf8[IO]
-    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
-    val settings = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).toOption.get
-    // Nothing is read until the second poll has moved the generation, so a record that took the generation current when it was read would show 2.
-    val moved = (IO.sleep(10.millis) *> IO(generation.get)).iterateUntil(_ == 2)
+    withMocks(consumer, producer): (transactional, reading) =>
+      // Nothing after the first record is taken until the partition has been assigned again, so a record that took the lease current when it
+      // was taken would carry the new one.
+      reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(3).compile.toList.flatMap: records =>
+        records.traverse(record => transactional.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(record.offset))).attempt)
+          .map: outcomes =>
+            assertEquals(records.map(_.record.offset.value), List(0L, 1L, 2L))
+            assert(outcomes.take(2).forall(illegalGeneration), s"offsets read before the revocation should be rejected, got $outcomes")
+            assertEquals(outcomes.lift(2), Some(Right(())))
 
-    KafkaClientPlatform.fromFs2[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
-      consumer.records.evalTap(_ => moved).take(3).compile.toList.map: records =>
-        val generations =
-          records.map(record =>
-            record.record.offset.value -> record.offset.membership.handle.map(_.key).collect { case metadata: ConsumerGroupMetadata =>
-              metadata.generationId
-            }
-          )
-        assertEquals(generations, List(0L -> Some(1), 1L -> Some(1), 2L -> Some(2)))
-    .timeout(10.seconds)
+  test("a revocation waits for a transaction recording one of its offsets before fs2-kafka hears of it"):
+    val (consumer, partition) = subscribedMock()
+    val sending               = new CountDownLatch(1)
+    val release               = new CountDownLatch(1)
+    val revoked               = new CountDownLatch(1)
+    consumer.schedulePollTask(() =>
+      consumer.rebalance(JavaList.of(partition))
+      consumer.updateBeginningOffsets(JavaMap.of(partition, Long.box(0L)))
+      addRecord(consumer, 0L)
+    )
+    // The next poll revokes the partition once the transaction is sending, and says when the revocation has gone through.
+    consumer.schedulePollTask(() =>
+      sending.await(): Unit
+      consumer.rebalance(JavaList.of())
+      revoked.countDown()
+    )
+    val producer =
+      new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+        override def sendOffsetsToTransaction(offsets: JavaMap[JavaTopicPartition, OffsetAndMetadata], metadata: ConsumerGroupMetadata): Unit =
+          sending.countDown()
+          release.await()
+          super.sendOffsetsToTransaction(offsets, metadata)
+
+    withMocks(consumer, producer): (transactional, reading) =>
+      for
+        held      <- reading.records.take(1).compile.lastOrError
+        recording <- transactional.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(held.offset))).attempt.start
+        _         <- IO.blocking(sending.await())
+        _         <- IO.sleep(200.millis)
+        early     <- IO(revoked.getCount == 0L)
+        _         <- IO(release.countDown())
+        recorded  <- recording.joinWithNever
+        _         <- IO.blocking(revoked.await(5, TimeUnit.SECONDS))
+      yield
+        assert(!early, "the revocation went through while a transaction was still recording its offset")
+        assertEquals(recorded, Right(()))
 
   test("a transaction's offsets the group rejects as another generation's are classified the way librdkafka reports them"):
     // Worded as the Java client words it, which appends the broker's own description of its answer.
@@ -257,3 +278,38 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, expected, failure.getMessage)
           case other                                      => fail(s"expected a backend failure, got $other")
     .void
+
+  private val topic = Topic.from("events").toOption.get
+  private val group = ConsumerGroup.from("workers").toOption.get
+
+  /** A consumer the client will subscribe, which MockConsumer requires to know the topic's partitions. */
+  private def subscribedMock(): (MockConsumer[Array[Byte], Array[Byte]], JavaTopicPartition) =
+    val consumer = new MockConsumer[Array[Byte], Array[Byte]]("earliest")
+    consumer.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
+    (consumer, new JavaTopicPartition(topic.value, 0))
+
+  private def addRecord(consumer: MockConsumer[Array[Byte], Array[Byte]], offset: Long): Unit =
+    consumer
+      .addRecord(new JavaConsumerRecord(topic.value, 0, offset, "key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8)))
+
+  /** A transactional producer and a subscribed consumer, both built by the client over the given mocks. */
+  private def withMocks[A](consumer: MockConsumer[Array[Byte], Array[Byte]], producer: MockProducer[Array[Byte], Array[Byte]])(
+      use: (KafkaTransactionalProducer[IO, String, String], KafkaConsumer[IO, String, String]) => IO[A]
+  ): IO[A] =
+    given MkConsumer[IO] with
+      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO.pure(consumer)
+    given MkProducer[IO] with
+      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.pure(producer)
+    val utf8       = Deserializer.utf8[IO]
+    val serializer = Serializer.utf8[IO]
+    val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val reading    = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).toOption.get
+    val writing    = TransactionalProducerSettings.from(client, TransactionalId.from("writer").toOption.get, serializer, serializer).toOption.get
+    val backend    = KafkaClientPlatform.fromFs2[IO]
+    (backend.transactionalProducer(writing), backend.consumer(reading, Selection.Topics(NonEmptySet.one(topic)))).tupled.use(use.tupled)
+      .timeout(10.seconds)
+
+  private def illegalGeneration(outcome: Either[Throwable, Unit]): Boolean =
+    outcome.left.exists:
+      case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.IllegalGeneration)
+      case _                                      => false
