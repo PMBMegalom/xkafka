@@ -641,6 +641,13 @@ trait OffsetCommitter[F[_]]:
 
   def commit(offsets: Map[TopicPartition, Offset]): F[Unit]
 
+  /** Commits offsets together with the lease each was read under, which a consumer that fences its assignment checks before committing.
+    *
+    * `CommittableOffset.commit` and `CommittableOffsetBatch.commit` come through here. A committer that does not fence commits the offsets alone.
+    */
+  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+    commit(offsets.view.mapValues(_._1).toMap)
+
   /** How a transaction names the consumer group these offsets belong to.
     *
     * A committer that came from a consumer carries what its own backend needs, so a transaction records offsets against the group that read them
@@ -660,6 +667,9 @@ object OffsetCommitter:
   private final case class TransformedOffsetCommitter[F[_], G[_]](underlying: OffsetCommitter[F], fk: FunctionK[F, G]) extends OffsetCommitter[G]:
     override def commit(offsets: Map[TopicPartition, Offset]): G[Unit] = fk(underlying.commit(offsets))
 
+    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): G[Unit] =
+      fk(underlying.commitLeased(offsets))
+
     override private[xkafka] def membership: GroupMembership[G] = underlying.membership.mapK(fk)
 
 trait CommittableOffset[F[_]]:
@@ -678,7 +688,10 @@ trait CommittableOffset[F[_]]:
     */
   private[xkafka] def membership: GroupMembership[F] = committer.membership
 
-  final def commit: F[Unit] = committer.commit(Map(topicPartition -> nextOffset))
+  /** The lease this offset was read under, where its consumer fences its assignment and could name one. */
+  private[xkafka] def lease: Option[Lease[LeaseKey]] = None
+
+  final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (nextOffset, lease)))
 
   final def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffset[G] =
     new CommittableOffset[G]:
@@ -689,6 +702,8 @@ trait CommittableOffset[F[_]]:
       override def committer: OffsetCommitter[G] = self.committer.mapK(fk)
 
       override private[xkafka] def membership: GroupMembership[G] = self.membership.mapK(fk)
+
+      override private[xkafka] def lease: Option[Lease[LeaseKey]] = self.lease
 
 object CommittableOffset:
   given FunctorK[CommittableOffset] with
@@ -701,7 +716,7 @@ object CommittableOffset:
 opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, CommittableOffsetBatch.Entry[F]]]
 
 object CommittableOffsetBatch:
-  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F])
+  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F], lease: Option[Lease[LeaseKey]])
 
   def empty[F[_]]: CommittableOffsetBatch[F] = Map.empty
 
@@ -712,7 +727,7 @@ object CommittableOffsetBatch:
     def updated(offset: CommittableOffset[F]): CommittableOffsetBatch[F] =
       batch.updated(
         offset.committer,
-        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.nextOffset, offset.membership))
+        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.nextOffset, offset.membership, offset.lease))
       )
 
     def updated(other: CommittableOffsetBatch[F]): CommittableOffsetBatch[F] =
@@ -733,11 +748,14 @@ object CommittableOffsetBatch:
     def size: Int = batch.valuesIterator.map(_.size).sum
 
     def commit(using F: Applicative[F]): F[Unit] =
-      offsets.foldLeft(F.unit):
-        case (result, (committer, offsets)) => F.productR(result)(committer.commit(offsets))
+      batch.foldLeft(F.unit):
+        case (result, (committer, entries)) => F
+            .productR(result)(committer.commitLeased(entries.view.mapValues(entry => entry.offset -> entry.lease).toMap))
 
     def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffsetBatch[G] =
-      batch.map((committer, entries) => committer.mapK(fk) -> entries.view.mapValues(entry => Entry(entry.offset, entry.membership.mapK(fk))).toMap)
+      batch.map((committer, entries) =>
+        committer.mapK(fk) -> entries.view.mapValues(entry => Entry(entry.offset, entry.membership.mapK(fk), entry.lease)).toMap
+      )
 
   given FunctorK[CommittableOffsetBatch] with
     override def mapK[F[_], G[_]](batch: CommittableOffsetBatch[F])(fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.mapK(fk)

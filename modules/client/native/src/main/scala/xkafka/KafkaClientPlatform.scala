@@ -799,6 +799,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         new OffsetCommitter[F]:
           override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
 
+          /** Each attempt holds the offsets' leases while it runs, so a revocation waits for a commit already sent. */
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+            leases.holding(offsets.values.map(_._2).toList)(commit(offsets.view.mapValues(_._1).toMap))
+
           /** librdkafka names a group by freshly allocated metadata, which also fences a member the group has already replaced. */
           override private[xkafka] val membership: GroupMembership[F] =
             GroupMembership.Backend(client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))), releaseGroupMetadata)
@@ -957,6 +961,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             override val nextOffset: Offset = portableNextOffset
 
             override val committer: OffsetCommitter[F] = offsetCommitter
+
+            override private[xkafka] val lease: Option[Lease[LeaseKey]] = read.lease
 
             override private[xkafka] val membership: GroupMembership[F] =
               leases.membership(

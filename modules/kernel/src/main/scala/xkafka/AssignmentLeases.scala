@@ -29,6 +29,9 @@ import fs2.concurrent.SignallingRef
 /** One assignment of one partition to one consumer, from the rebalance that assigned it to the one that revoked it. */
 private[xkafka] final case class Lease[P](partition: P, number: Long)
 
+/** How every backend names a partition in its leases: the topic and partition number as the client reports them. */
+private[xkafka] type LeaseKey = (String, Int)
+
 /** The partitions a consumer holds, and how many transactions are recording an offset under each of their leases right now.
   *
   * `revocations` counts every revocation of a partition, so a read can tell whether one happened while it ran.
@@ -55,6 +58,12 @@ private[xkafka] final case class Leases[P](next: Long, current: Map[P, Lease[P]]
     else (this, false)
 
   def release(lease: Lease[P]): Leases[P] = copy(inFlight = inFlight.updatedWith(lease)(_.map(_ - 1).filter(_ > 0)))
+
+  /** Acquires every lease or none of them. */
+  def acquireAll(leases: List[Lease[P]]): (Leases[P], Boolean) =
+    if leases.forall(lease => current.get(lease.partition).contains(lease)) then
+      (leases.foldLeft(this)((held, lease) => held.acquire(lease)._1), true)
+    else (this, false)
 
   def idle(leases: Set[Lease[P]]): Boolean = leases.forall(lease => !inFlight.contains(lease))
 
@@ -87,12 +96,17 @@ private[xkafka] sealed trait AssignmentLeases[F[_], P]:
     */
   def membership(owner: AnyRef, lease: Option[Lease[P]], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F]
 
+  /** Runs one attempt at a plain commit of offsets read under `leases`, holding them for as long as it runs, so a revocation waits for it. */
+  def holding[A](leases: List[Option[Lease[P]]])(attempt: F[A]): F[A]
+
 private[xkafka] object AssignmentLeases:
   def apply[F[_], P](enabled: Boolean)(using F: Concurrent[F]): F[AssignmentLeases[F, P]] =
     if enabled then SignallingRef[F, Leases[P]](Leases.empty).map(fenced) else F.pure(unfenced)
 
-  /** Classified the way the broker classifies an offset recorded under a generation the group has left. */
-  val revokedAssignment: KafkaException.BackendFailure =
+  /** Classified the way the broker classifies an offset recorded under a generation the group has left. A new one each time, since whoever catches it
+    * may add to it.
+    */
+  def revokedAssignment: KafkaException.BackendFailure =
     new KafkaException.BackendFailure(
       "the offset was read under an assignment this consumer no longer holds",
       Some(ErrorCode.IllegalGeneration),
@@ -127,6 +141,13 @@ private[xkafka] object AssignmentLeases:
           value => release(value).guarantee(lease.traverse_(held => leases.update(_.release(held))))
         )
 
+      override def holding[A](held: List[Option[Lease[P]]])(attempt: F[A]): F[A] =
+        held.sequence match
+          case None        => F.raiseError(revokedAssignment)
+          case Some(named) => F.bracket(leases.modify(_.acquireAll(named)))(acquired =>
+              if acquired then attempt else F.raiseError(revokedAssignment)
+            )(acquired => leases.update(state => named.foldLeft(state)(_.release(_))).whenA(acquired))
+
   private def unfenced[F[_], P](using F: Concurrent[F]): AssignmentLeases[F, P] =
     new AssignmentLeases[F, P]:
       override def assign(partitions: List[P], replacing: Boolean): F[Unit] = F.unit
@@ -139,3 +160,5 @@ private[xkafka] object AssignmentLeases:
 
       override def membership(owner: AnyRef, lease: Option[Lease[P]], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F] =
         new GroupMembership.Backend(owner, handle, release)
+
+      override def holding[A](leases: List[Option[Lease[P]]])(attempt: F[A]): F[A] = attempt

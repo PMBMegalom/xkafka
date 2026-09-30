@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.effect.{IO, Resource}
+import cats.effect.{Deferred, IO, Resource}
 import munit.CatsEffectSuite
 
 final class AssignmentLeasesSuite extends CatsEffectSuite:
@@ -100,6 +100,33 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
       assertEquals(read.map(_._2), List(None))
       assertEquals(outcome, Right(()))
       assertEquals(stale, Right(()))
+
+  test("a plain commit runs only while every lease it names is current, and a revocation waits for it"):
+    for
+      leases   <- AssignmentLeases[IO, String](enabled = true)
+      _        <- leases.assign(List("p", "q"), replacing = false)
+      p        <- leases.held.map(_("p"))
+      q        <- leases.held.map(_("q"))
+      unnamed  <- leases.holding(List(p, None))(IO.unit).attempt
+      started  <- Deferred[IO, Unit]
+      finish   <- Deferred[IO, Unit]
+      running  <- leases.holding(List(p, q))(started.complete(()) *> finish.get).start
+      _        <- started.get
+      revoking <- leases.revoke(List("q")).start
+      early    <- revoking.join.timeout(100.millis).attempt
+      _        <- finish.complete(())
+      _        <- running.joinWithNever
+      _        <- revoking.joinWithNever.timeout(1.second)
+      stale    <- leases.holding(List(p, q))(IO.unit).attempt
+      current  <- leases.holding(List(p))(IO.unit).attempt
+    yield
+      assert(illegalGeneration(unnamed), unnamed.toString)
+      assert(early.isLeft, "the revocation completed while a plain commit under its lease was running")
+      assert(illegalGeneration(stale), stale.toString)
+      assertEquals(current, Right(()))
+
+  test("with fencing off a plain commit runs whatever leases it names"):
+    AssignmentLeases[IO, String](enabled = false).flatMap(_.holding(List(None))(IO.unit).attempt).map(outcome => assertEquals(outcome, Right(())))
 
   private case object TestHandle extends GroupHandle
 

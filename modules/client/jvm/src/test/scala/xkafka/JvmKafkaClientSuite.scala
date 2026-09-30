@@ -199,6 +199,36 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             assert(outcomes.take(2).forall(illegalGeneration), s"offsets read before the revocation should be rejected, got $outcomes")
             assertEquals(outcomes.lift(2), Some(Right(())))
 
+  test("a plain commit of an offset read under a revoked assignment is refused before it reaches the consumer"):
+    val (consumer, partition) = subscribedMock()
+    val reassigned            = new CountDownLatch(1)
+    consumer.schedulePollTask(() =>
+      consumer.rebalance(JavaList.of(partition))
+      consumer.updateBeginningOffsets(JavaMap.of(partition, Long.box(0L)))
+      addRecord(consumer, 0L)
+      addRecord(consumer, 1L)
+    )
+    consumer.schedulePollTask(() =>
+      consumer.rebalance(JavaList.of())
+      consumer.rebalance(JavaList.of(partition))
+      addRecord(consumer, 2L)
+      reassigned.countDown()
+    )
+    val producer = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+
+    withMocks(consumer, producer): (_, reading) =>
+      reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(3).compile.toList.flatMap: records =>
+        for
+          stale     <- records(1).offset.commit.attempt
+          untouched <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)))
+          current   <- records(2).offset.commit.attempt
+          moved     <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)).map(_.offset))
+        yield
+          assert(illegalGeneration(stale), s"a plain commit from a revoked assignment should be refused, got $stale")
+          assertEquals(untouched, None, "the refused commit should not have reached the consumer")
+          assertEquals(current, Right(()))
+          assertEquals(moved, Some(3L))
+
   test("a revocation waits for a transaction recording one of its offsets before fs2-kafka hears of it"):
     val (consumer, partition) = subscribedMock()
     val sending               = new CountDownLatch(1)

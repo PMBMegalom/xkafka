@@ -860,6 +860,65 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         // Without fencing the offset goes out under the consumer's current membership, which the broker accepts, as it did before fencing existed.
         assertEquals(lost, Some(recorded))
 
+  test(conformance("a plain commit cannot move a partition back to an offset its consumer read before losing it")):
+    withBroker: server =>
+      rolledBack(server, fencing = true).map: (stale, earlier, ahead, after) =>
+        def rejected(outcome: Either[Throwable, Unit], clue: String): Unit =
+          outcome match
+            case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.IllegalGeneration), failure.getMessage)
+            case other                                        => fail(s"$clue, got $other")
+        rejected(stale, "the first consumer's offset for the partition it lost was committed")
+        rejected(earlier, "an offset read before the rebalance was committed for a partition the consumer kept")
+        assertEquals(after, Some(ahead), "the partition should stay where its new owner committed it")
+
+  test(conformance("with assignment fencing off, a plain commit moves a partition back to an offset its consumer read before losing it")):
+    withBroker: server =>
+      rolledBack(server, fencing = false).map: (stale, _, ahead, after) =>
+        assertEquals(stale, Right(()))
+        // Without fencing the old offset goes out under the consumer's current membership, which the broker accepts, as it did before fencing.
+        assert(after.exists(_.value < ahead.value), s"the stale commit should have moved the partition back from $ahead, got $after")
+
+  /** The first consumer reads one record from each partition and keeps it. Once a second consumer has taken one partition and committed past that
+    * record, the first plain-commits both records it kept. Answers both outcomes, where the second consumer committed, and where the partition it
+    * took ended up.
+    */
+  private def rolledBack(server: String, fencing: Boolean): IO[(Either[Throwable, Unit], Either[Throwable, Unit], Offset, Option[Offset])] =
+    val input  = validTopic(partitionedTopic)
+    val group  = uniqueGroup(if fencing then "rollback-fenced" else "rollback-unfenced")
+    val seeded = NonEmptyList.of(0, 0, 1, 1).map(value => record(input, Some("k"), Some("seed"), validPartition(value)))
+
+    for
+      _       <- produce(server, seeded)
+      reading <- committedConsumerSettings(server, group).map(_.withAssignmentFencing(fencing))
+      held    <- Ref[IO].of(Map.empty[TopicPartition, CommittableOffset[IO]])
+      taken   <- Ref[IO].of(Vector.empty[CommittableConsumerRecord[IO, Option[String], Option[String]]])
+      outcome <-
+        PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: first =>
+          first.records.evalMap(next =>
+            held.update(kept => if kept.contains(next.record.topicPartition) then kept else kept.updated(next.record.topicPartition, next.offset))
+          ).compile.drain.background.surround:
+            for
+              before  <- held.get.iterateUntil(_.size == 2)
+              outcome <-
+                PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: second =>
+                  second.records.evalMap(next => taken.update(_ :+ next)).compile.drain.background.surround:
+                    for
+                      kept    <- (assignmentOf(first, 1), assignmentOf(second, 1)).parTupled.map(_._1)
+                      revoked <- IO.fromOption(before.keySet.find(!kept.contains(_)))(new AssertionError(s"nothing was revoked from $kept"))
+                      // The second consumer reads past the first one's record and commits there.
+                      latest <-
+                        taken.get.map(
+                          _.filter(_.record.topicPartition == revoked).lastOption.filter(_.offset.nextOffset.value > before(revoked).nextOffset.value)
+                        ).iterateUntil(_.isDefined).map(_.get)
+                      _       <- latest.offset.commit
+                      stale   <- before(revoked).commit.attempt
+                      earlier <- before(kept.head).commit.attempt
+                      after   <- first.committed(Set(revoked))
+                    yield (stale, earlier, latest.offset.nextOffset, after.get(revoked).flatten)
+            yield outcome
+        .timeout(90.seconds)
+    yield outcome
+
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)

@@ -609,6 +609,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
                   // this attempt only, since its event may already have removed it before completing the Deferred.
                   .guarantee(reported.update(_.filterNot(_ == pending)))
 
+        /** Each attempt holds the offsets' leases until the client reports it, so a revocation waits for a commit already sent. */
+        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+          leases.holding(offsets.values.map(_._2).toList)(commit(offsets.view.mapValues(_._1).toMap))
+
         /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
         override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)), _ => F.unit)
 
@@ -617,6 +621,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
     private val offsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
         override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = commits.lock.surround(recoveringOffsetCommitter.commit(offsets))
+
+        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+          commits.lock.surround(recoveringOffsetCommitter.commitLeased(offsets))
 
         override private[xkafka] def membership: GroupMembership[F] = recoveringOffsetCommitter.membership
 
@@ -769,6 +776,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
             override val topicPartition: TopicPartition = TopicPartition(portableTopic, partition)
             override val nextOffset: Offset             = portableNextOffset
             override val committer: OffsetCommitter[F]  = offsetCommitter
+
+            override private[xkafka] val lease: Option[Lease[LeaseKey]] = read.lease
 
             override private[xkafka] val membership: GroupMembership[F] = membershipOf(read.lease)
 

@@ -135,6 +135,25 @@ final class CommitRecoverySuite extends CatsEffectSuite:
       handle <- CommitRecovery.recovering(committer, policy, random).membership.handle.traverse(_.acquire)
     yield assertEquals(handle, Some(TestGroupHandle))
 
+  test("recovery sends every attempt at a leased commit through the committer's own check"):
+    val policy = CommitRecovery.exponential(3, initialDelay = 1.milli, maxDelay = 1.milli).toOption.get
+
+    for
+      checks <- Ref[IO].of(0)
+      random <- Random.scalaUtilRandom[IO]
+      checking =
+        new OffsetCommitter[IO]:
+          override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.raiseError(retriableFailure)
+
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): IO[Unit] =
+            checks.update(_ + 1) *> commit(offsets.view.mapValues(_._1).toMap)
+      outcome  <- CommitRecovery.recovering(checking, policy, random).commitLeased(offsets.view.mapValues(_ -> None).toMap).attempt
+      observed <- checks.get
+    yield
+      // One first attempt and three retries, each checked again rather than checked once around all of them.
+      assertEquals(observed, 4)
+      assert(outcome.isLeft)
+
   test("resolving several group memberships releases earlier handles when a later acquisition fails"):
     for
       acquired <- Ref[IO].of(0)

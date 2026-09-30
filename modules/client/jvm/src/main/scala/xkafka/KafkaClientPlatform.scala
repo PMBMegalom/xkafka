@@ -22,7 +22,7 @@
 package xkafka
 
 import java.lang.reflect.{InvocationHandler, InvocationTargetException, Method, Proxy}
-import java.util.Collection as JavaCollection
+import java.util.{Collection as JavaCollection, Map as JavaMap}
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.jdk.CollectionConverters.*
@@ -33,7 +33,7 @@ import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Dispatcher, Random}
+import cats.effect.std.{Dispatcher, Mutex, Random}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.kafka.{
@@ -80,14 +80,19 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     for
       leases     <- Resource.eval(AssignmentLeases[F, (String, Int)](settings.assignmentFencing))
       membership <- Resource.eval(F.delay(new AtomicReference[JavaConsumerGroupMetadata]))
+      // The leases the plain commit in progress was read under, which the consumer checks on its own thread before committing.
+      expected <- Resource.eval(F.delay(new AtomicReference(Map.empty[LeaseKey, Option[Lease[LeaseKey]]])))
       // Acquired before the consumer, so it is still running when closing the consumer revokes its assignment.
       rebalancing <- Dispatcher.sequential[F]
       consumer    <-
-        Fs2KafkaConsumer.resource(consumerSettings(settings, leases))(using F, fencing(membership, leases, rebalancing)).mapK(handleBackendErrors)
+        Fs2KafkaConsumer.resource(consumerSettings(settings, leases))(using F, fencing(membership, expected, leases, rebalancing))
+          .mapK(handleBackendErrors)
       _ <- Resource.eval(select(consumer, selection, leases))
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
-    yield new Fs2KafkaConsumerAdapter(consumer, settings, leases, membership, random)
+      // One plain commit at a time, so the leases the consumer checks are the ones of the commit it is running.
+      plainCommits <- Resource.eval(Mutex[F])
+    yield new Fs2KafkaConsumerAdapter(consumer, settings, leases, membership, expected, plainCommits, random)
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     Fs2KafkaProducer.transactional(
@@ -230,6 +235,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     */
   private def fencing(
       membership: AtomicReference[JavaConsumerGroupMetadata],
+      expected: AtomicReference[Map[LeaseKey, Option[Lease[LeaseKey]]]],
       leases: AssignmentLeases[F, (String, Int)],
       dispatcher: Dispatcher[F]
   ): MkConsumer[F] =
@@ -237,7 +243,18 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): F[KafkaByteConsumer] =
         mkConsumer(settings).map: consumer =>
           // The listener runs on the consumer's own thread, so reading the consumer from it is allowed, including while it closes.
-          def remember(): Unit                                                        = Try(consumer.groupMetadata()).foreach(membership.set)
+          def remember(): Unit = Try(consumer.groupMetadata()).foreach(membership.set)
+          // A plain commit cannot be waited for, since it runs on the thread a revocation would be holding. It runs between polls instead, so a
+          // revocation has either not begun or has already ended the leases, and checking them here, on that thread, is enough.
+          def refuseRevoked(offsets: Option[AnyRef]): Unit =
+            val waiting = expected.get
+            if waiting.nonEmpty then
+              offsets.collect { case committed: JavaMap[?, ?] =>
+                committed.keySet.asScala.toList.collect { case value: JavaTopicPartition => value.topic -> value.partition }
+              }.foreach: committing =>
+                val now = dispatcher.unsafeRunSync(leases.held)
+                if committing.exists(key => waiting.get(key).exists(lease => lease.isEmpty || now(key) != lease)) then
+                  throw AssignmentLeases.revokedAssignment
           def leasing(listener: ConsumerRebalanceListener): ConsumerRebalanceListener =
             new ConsumerRebalanceListener:
               override def onPartitionsRevoked(partitions: JavaCollection[JavaTopicPartition]): Unit =
@@ -260,6 +277,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
                 Option(arguments).getOrElse(Array.empty[AnyRef]).map:
                   case listener: ConsumerRebalanceListener => leasing(listener)
                   case other                               => other
+              if method.getName == "commitSync" then refuseRevoked(passed.headOption)
               val result =
                 try method.invoke(consumer, passed*)
                 catch case error: InvocationTargetException => throw error.getCause
@@ -373,6 +391,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       settings: ConsumerSettings[F, K, V],
       leases: AssignmentLeases[F, (String, Int)],
       membership: AtomicReference[JavaConsumerGroupMetadata],
+      expected: AtomicReference[Map[LeaseKey, Option[Lease[LeaseKey]]]],
+      plainCommits: Mutex[F],
       random: Random[F]
   ) extends KafkaConsumer[F, K, V]:
 
@@ -385,6 +405,14 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
                 case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
                     new OffsetAndMetadata(offset.value)
             ))
+
+          /** Each attempt names the leases its offsets were read under, which the consumer checks on its own thread just before it commits. */
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+            val plain = commit(offsets.view.mapValues(_._1).toMap)
+            if !settings.assignmentFencing then plain
+            else
+              val named = offsets.map((topicPartition, entry) => (topicPartition.topic.value -> topicPartition.partition.value) -> entry._2)
+              plainCommits.lock.surround(F.bracket(F.delay(expected.set(named)))(_ => plain)(_ => F.delay(expected.set(Map.empty))))
 
           override private[xkafka] val membership: GroupMembership[F] =
             GroupMembership.Backend(backend(underlying.groupMetadata).map(Fs2GroupHandle(_)), _ => F.unit)
@@ -506,6 +534,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
               override val nextOffset: Offset = portableNextOffset
 
               override val committer: OffsetCommitter[F] = offsetCommitter
+
+              override private[xkafka] val lease: Option[Lease[LeaseKey]] = source.value.held(source.topic -> source.partition)
 
               override private[xkafka] val membership: GroupMembership[F] =
                 leases.membership(Fs2KafkaConsumerAdapter.this, source.value.held(source.topic -> source.partition), current, _ => F.unit)

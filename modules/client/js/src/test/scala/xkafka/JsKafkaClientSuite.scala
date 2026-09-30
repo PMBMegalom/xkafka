@@ -337,7 +337,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       settings =
         ConsumerSettings
           .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.wait.max.ms" -> "10"))
-          .toOption.get
+          .toOption.get.withAssignmentFencing(false)
       record <-
         KafkaClientPlatform
           .fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10", DefaultIsolationLevel)))
@@ -378,7 +378,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               submitted.push(offsets): Unit
               if submitted.length == 2 then dispatcher.unsafeRunAndForget(secondSubmitted.complete(()).void)
           )
-        settings = consumerSettings.withCommitTimeout(100.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+        settings = unleasedSettings.withCommitTimeout(100.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
         outcomes <-
           KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
             .use: value =>
@@ -421,7 +421,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             if submitted.length == 1 then throw new RuntimeException("commit exploded")
             else listeners.foreach(_(null, offsets.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
         )
-      settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+      settings = unleasedSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
       outcomes <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
           .use: value =>
@@ -444,7 +444,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           listener => listeners.push(listener): Unit,
           _ => listeners.foreach(_(null, null.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
         )
-      settings = consumerSettings.withCommitTimeout(200.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+      settings = unleasedSettings.withCommitTimeout(200.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
       outcome <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
           // Committing inside the stream means the second record arrives only if the first unreadable report left the
@@ -467,7 +467,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           // The client omits `offset` whenever librdkafka reports a negative one, so the event names only its partition.
           _ => listeners.foreach(_(null, js.Array(partitionOnlyReport)))
         )
-      settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+      settings = unleasedSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
       outcome <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
           .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
@@ -478,7 +478,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       delivered <- IO(js.Array(commitMessage(0d)))
       listeners <- IO(js.Array[CommitListener]())
       consumer = commitConsumer(delivered, listener => listeners.push(listener): Unit, _ => listeners.foreach(_(null, js.Array(commitReport(1.5)))))
-      settings = consumerSettings.withCommitTimeout(100.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+      settings = unleasedSettings.withCommitTimeout(100.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
       outcome <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
           .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
@@ -500,7 +500,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
                 .asInstanceOf[confluent.RdError]
             listeners.foreach(_(refused, js.Array(partitionOnlyReport)))
         )
-      settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+      settings = unleasedSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
       outcome <-
         KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
           .use(_.records.head.compile.lastOrError.flatMap(_.offset.commit)).attempt
@@ -527,7 +527,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
               val observed = if submitted.length == 1 then firstSubmitted else secondSubmitted
               dispatcher.unsafeRunAndForget(observed.complete(()).void)
           )
-        settings = consumerSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
+        settings = unleasedSettings.withCommitTimeout(1.second).toOption.get.withCommitRecovery(CommitRecovery.none)
         pendingAfterLate <-
           KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
             .use: value =>
@@ -649,6 +649,62 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     yield
       assertEquals(outcome, Right(()))
       assertEquals(sent.length, 1)
+
+  test("a plain commit of an offset read under a revoked assignment is refused before it reaches the client"):
+    for
+      calls      <- IO(js.Array[String]())
+      delivered  <- IO(js.Array[confluent.RdMessage]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      committed  <- IO(js.Array[js.Array[confluent.RdTopicPartitionOffset]]())
+      rd = committing(rebalancingConsumer(delivered, calls), committed, js.Array(), hold = false)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = rd, rebalances = rebalances))
+          .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))).use: consumer =>
+            def read(offset: Double) = IO(delivered.push(commitMessage(offset))) *> consumer.records.take(1).compile.lastOrError
+            for
+              _       <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.count(_ == "assign") == 1)
+              earlier <- read(0d)
+              _       <- IO(rebalance(rebalances(0), rd, RevokePartitions, 0)) *> until(calls.contains("unassign"))
+              revoked <- earlier.offset.commit.attempt
+              _       <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.count(_ == "assign") == 2)
+              later   <- read(1d)
+              current <- later.offset.commit.attempt
+            yield (revoked, current)
+          .timeout(10.seconds)
+    yield
+      val (revoked, current) = outcome
+      assert(illegalGeneration(revoked), s"a plain commit from a revoked assignment should be refused, got $revoked")
+      assertEquals(current, Right(()))
+      assertEquals(committed.length, 1, "only the offset read under the current assignment should reach the client")
+
+  test("a revocation waits for a plain commit the client has not reported yet"):
+    for
+      calls      <- IO(js.Array[String]())
+      delivered  <- IO(js.Array[confluent.RdMessage]())
+      rebalances <- IO(js.Array[confluent.RdRebalance]())
+      committed  <- IO(js.Array[js.Array[confluent.RdTopicPartitionOffset]]())
+      held       <- IO(js.Array[js.Function0[Unit]]())
+      rd = committing(rebalancingConsumer(delivered, calls), committed, held, hold = true)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = rd, rebalances = rebalances))
+          .consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic("events")))).use: consumer =>
+            for
+              _          <- IO(rebalance(rebalances(0), rd, AssignPartitions, 0)) *> until(calls.contains("assign"))
+              record     <- IO(delivered.push(commitMessage(0d))) *> consumer.records.take(1).compile.lastOrError
+              committing <- record.offset.commit.attempt.start
+              _          <- until(held.length == 1)
+              _          <- IO(rebalance(rebalances(0), rd, RevokePartitions, 0))
+              _          <- IO.sleep(200.millis)
+              early      <- IO(calls.contains("unassign"))
+              _          <- IO(held(0)())
+              outcome    <- committing.joinWithNever
+              _          <- until(calls.contains("unassign"))
+            yield (early, outcome)
+          .timeout(10.seconds)
+    yield
+      val (early, reported) = outcome
+      assert(!early, "the partition was unassigned while its commit had not been reported")
+      assertEquals(reported, Right(()))
 
   test("a revocation waits for a transaction recording one of its offsets before it unassigns"):
     for
@@ -888,6 +944,28 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
         ): js.Function0[js.Array[confluent.RdTopicPartition]]
     ).asInstanceOf[confluent.RdConsumer]
 
+  /** Gives `consumer` a commit the way the client has one: it takes no callback and reports on the `offset.commit` event. With `hold` the report is
+    * put in `held` and waits until the test runs it.
+    */
+  private def committing(
+      consumer: confluent.RdConsumer,
+      committed: js.Array[js.Array[confluent.RdTopicPartitionOffset]],
+      held: js.Array[js.Function0[Unit]],
+      hold: Boolean
+  ): confluent.RdConsumer =
+    val listeners = js.Array[CommitListener]()
+    dynamic(consumer).updateDynamic("on")(
+      (
+          (event: String, listener: CommitListener) => if event == "offset.commit" then listeners.push(listener): Unit
+      ): js.Function2[String, CommitListener, Unit]
+    )
+    dynamic(consumer).updateDynamic("commit")(((offsets: js.Array[confluent.RdTopicPartitionOffset]) =>
+      committed.push(offsets): Unit
+      val report: js.Function0[Unit] = () => listeners.foreach(_(null, offsets.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+      if hold then held.push(report): Unit else report()
+    ): js.Function1[js.Array[confluent.RdTopicPartitionOffset], Unit])
+    consumer
+
   /** A transactional producer whose every call succeeds. Each offset send is kept, and with `hold` it completes only when the test calls it. */
   private def transactionalProducer(sent: js.Array[js.Function1[confluent.RdError | Null, Unit]], hold: Boolean): confluent.RdProducer =
     val succeed: js.Function1[js.Function1[confluent.RdError | Null, Unit], Unit] = (done: js.Function1[confluent.RdError | Null, Unit]) => done(null)
@@ -1012,6 +1090,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private val group = ConsumerGroup.from("workers").fold(error => fail(error.toString), identity)
 
   private val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
+
+  /** For the cases about commit reporting, whose stubs hand over records without ever assigning a partition, so no record carries a lease. */
+  private val unleasedSettings = consumerSettings.withAssignmentFencing(false)
 
   private def uint8(value: String): Uint8Array =
     val bytes  = value.getBytes("UTF-8")

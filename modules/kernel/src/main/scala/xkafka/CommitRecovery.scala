@@ -90,14 +90,20 @@ object CommitRecovery:
     if policy.maxAttempts == 0 then committer
     else
       new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = attempt(offsets, 1)
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = retrying(offsets, committer.commit(offsets), 1)
+
+        /** Each attempt goes through the committer's own check, so a partition revoked during a backoff fails the next attempt instead of being held
+          * across every retry.
+          */
+        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+          retrying(offsets.view.mapValues(_._1).toMap, committer.commitLeased(offsets), 1)
 
         /** The membership travels with the committer, so a transaction still reaches the group these offsets came from. */
         override private[xkafka] def membership: GroupMembership[F] = committer.membership
 
-        private def attempt(offsets: Map[TopicPartition, Offset], number: Int): F[Unit] =
-          committer.commit(offsets).handleErrorWith:
+        private def retrying(offsets: Map[TopicPartition, Offset], once: F[Unit], number: Int): F[Unit] =
+          once.handleErrorWith:
             case failure: KafkaException.BackendFailure if failure.code.exists(_.retriable) =>
               if number > policy.maxAttempts then F.raiseError(new KafkaException.CommitFailed(number, offsets, failure))
-              else random.nextDouble.flatMap(sample => F.sleep(policy.delayFor(number, sample))) >> attempt(offsets, number + 1)
+              else random.nextDouble.flatMap(sample => F.sleep(policy.delayFor(number, sample))) >> retrying(offsets, once, number + 1)
             case other => F.raiseError(other)
