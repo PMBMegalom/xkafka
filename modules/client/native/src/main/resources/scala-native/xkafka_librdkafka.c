@@ -1340,6 +1340,43 @@ void xkafka_consumer_group_metadata_destroy(void *metadata) {
             (rd_kafka_consumer_group_metadata_t *)metadata);
 }
 
+/* A record keeps the membership it was read under as these bytes, which need
+ * no release and compare by value. librdkafka reads them back only within
+ * this process, which is the only place a record lives. */
+int xkafka_consumer_group_metadata_write(rd_kafka_t *consumer,
+                                         void **buffer,
+                                         size_t *size) {
+        rd_kafka_consumer_group_metadata_t *metadata =
+            rd_kafka_consumer_group_metadata(consumer);
+        rd_kafka_error_t *failure;
+
+        if (metadata == NULL)
+                return -1;
+        failure = rd_kafka_consumer_group_metadata_write(metadata, buffer, size);
+        rd_kafka_consumer_group_metadata_destroy(metadata);
+        if (failure != NULL) {
+                rd_kafka_error_destroy(failure);
+                return -1;
+        }
+        return 0;
+}
+
+void xkafka_buffer_destroy(void *buffer) {
+        rd_kafka_mem_free(NULL, buffer);
+}
+
+void *xkafka_group_metadata_read(const void *buffer, size_t size) {
+        rd_kafka_consumer_group_metadata_t *metadata = NULL;
+        rd_kafka_error_t *failure =
+            rd_kafka_consumer_group_metadata_read(&metadata, buffer, size);
+
+        if (failure != NULL) {
+                rd_kafka_error_destroy(failure);
+                return NULL;
+        }
+        return metadata;
+}
+
 int xkafka_producer_send_offsets(rd_kafka_t *producer,
                                  void *metadata,
                                  const char *const *topics,

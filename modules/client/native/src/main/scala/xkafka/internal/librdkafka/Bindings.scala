@@ -358,6 +358,12 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_group_metadata_destroy(metadata: CVoidPtr): Unit = extern
 
+  def xkafka_consumer_group_metadata_write(consumer: CVoidPtr, buffer: Ptr[CVoidPtr], size: Ptr[CSize]): CInt = extern
+
+  def xkafka_buffer_destroy(buffer: CVoidPtr): Unit = extern
+
+  def xkafka_group_metadata_read(buffer: CVoidPtr, size: CSize): CVoidPtr = extern
+
   def xkafka_producer_send_offsets(
       producer: CVoidPtr,
       metadata: CVoidPtr,

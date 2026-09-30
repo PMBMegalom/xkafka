@@ -637,6 +637,12 @@ trait CommittableOffset[F[_]]:
 
   def committer: OffsetCommitter[F]
 
+  /** The group membership this offset was read under, which is what a transaction records it against.
+    *
+    * A backend that cannot name that membership falls back to its committer's, which is the consumer's current one.
+    */
+  private[xkafka] def membership: GroupMembership[F] = committer.membership
+
   final def commit: F[Unit] = committer.commit(Map(topicPartition -> nextOffset))
 
   final def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffset[G] =
@@ -647,13 +653,21 @@ trait CommittableOffset[F[_]]:
 
       override def committer: OffsetCommitter[G] = self.committer.mapK(fk)
 
+      override private[xkafka] def membership: GroupMembership[G] = self.membership.mapK(fk)
+
 object CommittableOffset:
   given FunctorK[CommittableOffset] with
     override def mapK[F[_], G[_]](offset: CommittableOffset[F])(fk: FunctionK[F, G]): CommittableOffset[G] = offset.mapK(fk)
 
-opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, Offset]]
+/** The offsets to commit, at most one per topic-partition for each committer.
+  *
+  * Each offset keeps the membership it was read under, so a transaction can record it against that membership rather than a later one.
+  */
+opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, CommittableOffsetBatch.Entry[F]]]
 
 object CommittableOffsetBatch:
+  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F])
+
   def empty[F[_]]: CommittableOffsetBatch[F] = Map.empty
 
   def fromFoldable[F[_], G[_]: Foldable](offsets: G[CommittableOffset[F]]): CommittableOffsetBatch[F] =
@@ -661,33 +675,43 @@ object CommittableOffsetBatch:
 
   extension [F[_]](batch: CommittableOffsetBatch[F])
     def updated(offset: CommittableOffset[F]): CommittableOffsetBatch[F] =
-      batch.updated(offset.committer, include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, offset.nextOffset))
+      batch.updated(
+        offset.committer,
+        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.nextOffset, offset.membership))
+      )
 
     def updated(other: CommittableOffsetBatch[F]): CommittableOffsetBatch[F] =
       other.foldLeft(batch):
-        case (result, (committer, offsets)) => result.updated(
+        case (result, (committer, entries)) => result.updated(
             committer,
-            offsets.foldLeft(result.getOrElse(committer, Map.empty)):
-              case (committerOffsets, (topicPartition, offset)) => include(committerOffsets, topicPartition, offset)
+            entries.foldLeft(result.getOrElse(committer, Map.empty)):
+              case (committerEntries, (topicPartition, entry)) => include(committerEntries, topicPartition, entry)
           )
 
-    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch
+    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch.view.mapValues(_.view.mapValues(_.offset).toMap).toMap
+
+    /** The offsets grouped by the membership each was read under, which is how a transaction records them. */
+    private[xkafka] def memberships: Map[GroupMembership[F], Map[TopicPartition, Offset]] =
+      batch.valuesIterator.flatten.toList.groupMap(_._2.membership)((topicPartition, entry) => topicPartition -> entry.offset).view.mapValues(_.toMap)
+        .toMap
 
     def size: Int = batch.valuesIterator.map(_.size).sum
 
     def commit(using F: Applicative[F]): F[Unit] =
-      batch.foldLeft(F.unit):
+      offsets.foldLeft(F.unit):
         case (result, (committer, offsets)) => F.productR(result)(committer.commit(offsets))
 
-    def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.map((committer, offsets) => committer.mapK(fk) -> offsets)
+    def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffsetBatch[G] =
+      batch.map((committer, entries) => committer.mapK(fk) -> entries.view.mapValues(entry => Entry(entry.offset, entry.membership.mapK(fk))).toMap)
 
   given FunctorK[CommittableOffsetBatch] with
     override def mapK[F[_], G[_]](batch: CommittableOffsetBatch[F])(fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.mapK(fk)
 
-  private def include(offsets: Map[TopicPartition, Offset], topicPartition: TopicPartition, offset: Offset): Map[TopicPartition, Offset] =
-    offsets.updatedWith(topicPartition):
-      case current @ Some(value) if value.value >= offset.value => current
-      case Some(_) | None                                       => Some(offset)
+  /** Keeps the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the earlier. */
+  private def include[F[_]](entries: Map[TopicPartition, Entry[F]], topicPartition: TopicPartition, entry: Entry[F]): Map[TopicPartition, Entry[F]] =
+    entries.updatedWith(topicPartition):
+      case current @ Some(existing) if existing.offset.value > entry.offset.value => current
+      case Some(_) | None                                                         => Some(entry)
 
 /** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
 def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =

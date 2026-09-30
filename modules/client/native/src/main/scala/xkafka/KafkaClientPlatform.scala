@@ -142,7 +142,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     for
       client      <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
       _           <- Resource.eval(client(select(client.handle, selection)))
-      polled      <- Resource.eval(Channel.bounded[F, NativeRecord](RecordQueueSize))
+      polled      <- Resource.eval(Channel.bounded[F, ReadRecord](RecordQueueSize))
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](initialAssignment(selection)))
       // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
       stopping <- Resource.eval(Deferred[F, Unit])
@@ -766,10 +766,19 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       headers: Headers
   )
 
+  /** The group membership a consumer held when it read a record, as librdkafka serialises it.
+    *
+    * Bytes need nothing released, so a record can keep them for as long as its offset lives, and they compare by value, so every record read under
+    * one membership names the same one.
+    */
+  private final case class NativeMembership(serialized: Chunk[Byte])
+
+  private final case class ReadRecord(record: NativeRecord, membership: NativeMembership)
+
   private final class LibrdkafkaConsumer[K, V](
       client: NativeClient,
       settings: ConsumerSettings[F, K, V],
-      polled: Channel[F, NativeRecord],
+      polled: Channel[F, ReadRecord],
       assignments: SignallingRef[F, Set[TopicPartition]],
       stopping: Deferred[F, Unit],
       random: Random[F],
@@ -803,9 +812,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       * generation counter the rebalance callback bumps says when the assignment is worth reading again.
       */
     val pollLoop: Stream[F, Nothing] =
-      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => client((poll(), Bindings.xkafka_consumer_generation(client.handle))))
+      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
+        .evalMapAccumulate(Option.empty[(Int, NativeMembership)])((read, _) => client(pollUnder(read)))
         // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
-        .evalMap((record, generation) => record.traverse_(polled.send(_).void).as(generation)).changes
+        .evalMap((_, outcome) => outcome._1.traverse_(polled.send(_).void).as(outcome._2)).changes
         .evalMap(_ => client(readAssignment()).flatMap(assignments.set)).drain.onFinalize(polled.close.void)
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
@@ -841,6 +851,38 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] = client(topicPartitions.foreach(seekTo(_, EndOffset)))
 
     override def position(topicPartition: TopicPartition): F[Option[Offset]] = client(readPosition(topicPartition))
+
+    /** Polls once, and labels a record with the membership it was read under.
+      *
+      * The rebalance callback runs inside the poll and moves the generation counter, so the membership is read again, in the same permit as the poll,
+      * once that counter has moved. A membership read after the record can therefore be no newer than the one it arrived under. librdkafka can move
+      * to a newer generation without the callback, and a record then keeps the older one, which the broker rejects rather than accepts.
+      */
+    private def pollUnder(read: Option[(Int, NativeMembership)]): (Option[(Int, NativeMembership)], (Option[ReadRecord], Int)) =
+      val record     = poll()
+      val generation = Bindings.xkafka_consumer_generation(client.handle)
+      val current    = if record.isEmpty then read else read.filter(_._1 == generation).orElse(Some(generation -> readMembership()))
+      (current, (record.flatMap(value => current.map((_, membership) => ReadRecord(value, membership))), generation))
+
+    private def readMembership(): NativeMembership =
+      val buffer = stackalloc[CVoidPtr]()
+      val size   = stackalloc[CSize]()
+      if Bindings.xkafka_consumer_group_metadata_write(client.handle, buffer, size) != 0 then
+        throw backendFailure("could not read the consumer's group membership")
+      try NativeMembership(chunk(!buffer, !size))
+      finally Bindings.xkafka_buffer_destroy(!buffer)
+
+    /** What a transaction records an offset against: the membership it was read under, restored for as long as the transaction needs it. */
+    private def membershipOf(read: NativeMembership): GroupMembership[F] =
+      new GroupMembership.Backend(read, F.delay(LibrdkafkaGroupHandle(restore(read))), releaseGroupMetadata)
+
+    private def restore(read: NativeMembership): CVoidPtr =
+      Zone.acquire: zone =>
+        given Zone            = zone
+        val (pointer, length) = cBytes(Some(read.serialized))
+        val metadata          = Bindings.xkafka_group_metadata_read(pointer, length)
+        if metadata == null then throw backendFailure("could not restore the group membership an offset was read under")
+        metadata
 
     private def poll(): Option[NativeRecord] =
       Zone.acquire: zone =>
@@ -887,7 +929,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           Header(fromCString(!name), Option.when(!hasValue != 0)(chunk(!value, !valueSize)))
       Headers.fromVector(values)
 
-    private def decode(source: NativeRecord): F[CommittableConsumerRecord[F, K, V]] =
+    private def decode(read: ReadRecord): F[CommittableConsumerRecord[F, K, V]] =
+      val source = read.record
       for
         topic     <- F.fromEither(Topic.from(source.topic).leftMap(error => invalidBackendValue("topic", source.topic, error)))
         partition <- F.fromEither(Partition.from(source.partition).leftMap(error => invalidBackendValue("partition", source.partition, error)))
@@ -905,6 +948,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
             override val nextOffset: Offset = portableNextOffset
 
             override val committer: OffsetCommitter[F] = offsetCommitter
+
+            override private[xkafka] val membership: GroupMembership[F] = membershipOf(read.membership)
 
         CommittableConsumerRecord(record, committable)
 
