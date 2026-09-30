@@ -28,7 +28,7 @@ import scala.scalanative.unsigned.*
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Mutex, Random, Semaphore, Supervisor}
+import cats.effect.std.{Mutex, Queue, Random, Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.concurrent.{Channel, SignallingRef}
@@ -140,9 +140,16 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      client      <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
-      _           <- Resource.eval(client(select(client.handle, selection)))
+      client <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
+      leases <- Resource.eval(AssignmentLeases[F, (String, Int)](settings.assignmentFencing))
+      _      <- Resource.eval(client(select(client.handle, selection)))
+      // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
+      _ <-
+        Resource.eval(
+          initialAssignment(selection).toList.traverse_(value => leases.assign(List(value.topic.value -> value.partition.value), replacing = false))
+        )
       polled      <- Resource.eval(Channel.bounded[F, ReadRecord](RecordQueueSize))
+      rebalances  <- Resource.eval(Queue.unbounded[F, NativeRebalance])
       assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](initialAssignment(selection)))
       // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
       stopping <- Resource.eval(Deferred[F, Unit])
@@ -151,8 +158,9 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       failure <- Resource.eval(Deferred[F, Throwable])
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
-      consumer = new LibrdkafkaConsumer(client, settings, polled, assignments, stopping, random, failure)
-      // Started after the client and cancelled before it, so no poll is in flight when the handle is destroyed.
+      consumer = new LibrdkafkaConsumer(client, settings, leases, polled, rebalances, assignments, stopping, random, failure)
+      // Both are started after the client and cancelled before it, so neither is using the handle when it is destroyed.
+      _ <- consumer.rebalancing.compile.drain.onError(failure.complete(_).void).background
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
     yield consumer
 
@@ -766,19 +774,17 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       headers: Headers
   )
 
-  /** The group membership a consumer held when it read a record, as librdkafka serialises it.
-    *
-    * Bytes need nothing released, so a record can keep them for as long as its offset lives, and they compare by value, so every record read under
-    * one membership names the same one.
-    */
-  private final case class NativeMembership(serialized: Chunk[Byte])
+  private final case class ReadRecord(record: NativeRecord, lease: Option[Lease[(String, Int)]])
 
-  private final case class ReadRecord(record: NativeRecord, membership: NativeMembership)
+  /** A rebalance the callback left for the consumer to apply, which holds the group until it is. `event` is owned until it is applied. */
+  private final case class NativeRebalance(event: CVoidPtr, kind: Int, partitions: List[(String, Int)])
 
   private final class LibrdkafkaConsumer[K, V](
       client: NativeClient,
       settings: ConsumerSettings[F, K, V],
+      leases: AssignmentLeases[F, (String, Int)],
       polled: Channel[F, ReadRecord],
+      rebalances: Queue[F, NativeRebalance],
       assignments: SignallingRef[F, Set[TopicPartition]],
       stopping: Deferred[F, Unit],
       random: Random[F],
@@ -806,17 +812,52 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         case LibrdkafkaGroupHandle(metadata) => F.blocking(Bindings.xkafka_consumer_group_metadata_destroy(metadata))
         case _                               => F.unit
 
-    /** The consumer's single poll, which both its records and its assignment come from.
+    /** The consumer's single poll, which both its records and its rebalances come from.
       *
-      * librdkafka advances group membership only from this call, so it belongs to the consumer and not to whoever happens to be reading records. The
-      * generation counter the rebalance callback bumps says when the assignment is worth reading again.
+      * librdkafka advances group membership only from this call, so it belongs to the consumer and not to whoever happens to be reading records. Each
+      * record is labelled with the lease it was read under, and each rebalance the poll raised is handed to `rebalancing`.
       */
     val pollLoop: Stream[F, Nothing] =
-      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
-        .evalMapAccumulate(Option.empty[(Int, NativeMembership)])((read, _) => client(pollUnder(read)))
+      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => leases.reading(pollOnce)(record => record.topic -> record.partition))
         // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
-        .evalMap((_, outcome) => outcome._1.traverse_(polled.send(_).void).as(outcome._2)).changes
-        .evalMap(_ => client(readAssignment()).flatMap(assignments.set)).drain.onFinalize(polled.close.void)
+        .evalMap(_.traverse_((record, lease) => polled.send(ReadRecord(record, lease)).void)).drain.onFinalize(polled.close.void)
+
+    private def pollOnce: F[List[NativeRecord]] =
+      client((poll(), takeRebalances())).flatMap((record, taken) => taken.traverse_(rebalances.offer).as(record.toList))
+
+    /** Applies each rebalance in the order the poll raised it.
+      *
+      * A revocation ends its leases and waits for any transaction still recording an offset under one of them before it is applied, and until then
+      * the group cannot hand those partitions to another member. Polling carries on meanwhile. Whatever is cancelled or left is still applied,
+      * because the close cannot finish while a rebalance is waiting.
+      */
+    val rebalancing: Stream[F, Nothing] =
+      Stream.fromQueueUnterminated(rebalances).evalMap(rebalanced).drain.onFinalize(rebalances.tryTakeN(None).flatMap(_.traverse_(taken =>
+        client(Bindings.xkafka_consumer_apply_rebalance(client.handle, taken.event))
+      )))
+
+    private def rebalanced(taken: NativeRebalance): F[Unit] =
+      val leasing =
+        taken.kind match
+          case 1 => client(Bindings.xkafka_consumer_cooperative(client.handle) != 0)
+              .flatMap(cooperative => leases.assign(taken.partitions, replacing = !cooperative))
+          case 0 => leases.revoke(taken.partitions)
+          // Anything else clears the assignment to resynchronise, which ends every lease with it.
+          case _ => leases.assign(Nil, replacing = true)
+      F.uncancelable(poll => poll(leasing).guarantee(client(Bindings.xkafka_consumer_apply_rebalance(client.handle, taken.event)))) *>
+        client(readAssignment()).flatMap(assignments.set)
+
+    private def takeRebalances(): List[NativeRebalance] =
+      Iterator.continually(Bindings.xkafka_consumer_take_rebalance(client.handle)).takeWhile(_ != null).map: event =>
+        val partitions = Bindings.xkafka_rebalance_partitions(event)
+        NativeRebalance(
+          event,
+          Bindings.xkafka_rebalance_kind(event),
+          List.tabulate(Bindings.xkafka_assignment_count(partitions).toInt): index =>
+            fromCString(Bindings.xkafka_assignment_topic_at(partitions, index.toUSize)) ->
+              Bindings.xkafka_assignment_partition_at(partitions, index.toUSize)
+        )
+      .toList
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
@@ -851,38 +892,6 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
     override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] = client(topicPartitions.foreach(seekTo(_, EndOffset)))
 
     override def position(topicPartition: TopicPartition): F[Option[Offset]] = client(readPosition(topicPartition))
-
-    /** Polls once, and labels a record with the membership it was read under.
-      *
-      * The rebalance callback runs inside the poll and moves the generation counter, so the membership is read again, in the same permit as the poll,
-      * once that counter has moved. A membership read after the record can therefore be no newer than the one it arrived under. librdkafka can move
-      * to a newer generation without the callback, and a record then keeps the older one, which the broker rejects rather than accepts.
-      */
-    private def pollUnder(read: Option[(Int, NativeMembership)]): (Option[(Int, NativeMembership)], (Option[ReadRecord], Int)) =
-      val record     = poll()
-      val generation = Bindings.xkafka_consumer_generation(client.handle)
-      val current    = if record.isEmpty then read else read.filter(_._1 == generation).orElse(Some(generation -> readMembership()))
-      (current, (record.flatMap(value => current.map((_, membership) => ReadRecord(value, membership))), generation))
-
-    private def readMembership(): NativeMembership =
-      val buffer = stackalloc[CVoidPtr]()
-      val size   = stackalloc[CSize]()
-      if Bindings.xkafka_consumer_group_metadata_write(client.handle, buffer, size) != 0 then
-        throw backendFailure("could not read the consumer's group membership")
-      try NativeMembership(chunk(!buffer, !size))
-      finally Bindings.xkafka_buffer_destroy(!buffer)
-
-    /** What a transaction records an offset against: the membership it was read under, restored for as long as the transaction needs it. */
-    private def membershipOf(read: NativeMembership): GroupMembership[F] =
-      new GroupMembership.Backend(read, F.delay(LibrdkafkaGroupHandle(restore(read))), releaseGroupMetadata)
-
-    private def restore(read: NativeMembership): CVoidPtr =
-      Zone.acquire: zone =>
-        given Zone            = zone
-        val (pointer, length) = cBytes(Some(read.serialized))
-        val metadata          = Bindings.xkafka_group_metadata_read(pointer, length)
-        if metadata == null then throw backendFailure("could not restore the group membership an offset was read under")
-        metadata
 
     private def poll(): Option[NativeRecord] =
       Zone.acquire: zone =>
@@ -949,7 +958,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
             override val committer: OffsetCommitter[F] = offsetCommitter
 
-            override private[xkafka] val membership: GroupMembership[F] = membershipOf(read.membership)
+            override private[xkafka] val membership: GroupMembership[F] =
+              leases.membership(
+                LibrdkafkaConsumer.this,
+                read.lease,
+                client(LibrdkafkaGroupHandle(Bindings.xkafka_consumer_group_metadata(client.handle))),
+                releaseGroupMetadata
+              )
 
         CommittableConsumerRecord(record, committable)
 

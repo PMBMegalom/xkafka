@@ -103,7 +103,15 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_destroy(consumer: CVoidPtr): Unit = extern
 
-  def xkafka_consumer_generation(consumer: CVoidPtr): CInt = extern
+  def xkafka_consumer_take_rebalance(consumer: CVoidPtr): CVoidPtr = extern
+
+  def xkafka_rebalance_kind(event: CVoidPtr): CInt = extern
+
+  def xkafka_rebalance_partitions(event: CVoidPtr): CVoidPtr = extern
+
+  def xkafka_consumer_cooperative(consumer: CVoidPtr): CInt = extern
+
+  def xkafka_consumer_apply_rebalance(consumer: CVoidPtr, event: CVoidPtr): Unit = extern
 
   def xkafka_subscription_new(count: CSize): CVoidPtr = extern
 
@@ -357,12 +365,6 @@ private[xkafka] object Bindings:
   def xkafka_consumer_group_metadata(consumer: CVoidPtr): CVoidPtr = extern
 
   def xkafka_consumer_group_metadata_destroy(metadata: CVoidPtr): Unit = extern
-
-  def xkafka_consumer_group_metadata_write(consumer: CVoidPtr, buffer: Ptr[CVoidPtr], size: Ptr[CSize]): CInt = extern
-
-  def xkafka_buffer_destroy(buffer: CVoidPtr): Unit = extern
-
-  def xkafka_group_metadata_read(buffer: CVoidPtr, size: CSize): CVoidPtr = extern
 
   def xkafka_producer_send_offsets(
       producer: CVoidPtr,

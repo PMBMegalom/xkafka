@@ -820,6 +820,46 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(lost, None, "a rejected transaction should leave the revoked partition where it was")
         assertEquals(moved, Some(current.nextOffset), "an offset read after the rebalance should still commit")
 
+  test(conformance("with assignment fencing off, a transaction records an offset from a partition its consumer has lost", divergent = Set("jvm"))):
+    withBroker: server =>
+      val input  = validTopic(partitionedTopic)
+      val output = uniqueTopic("unfenced-output")
+      val group  = uniqueGroup("unfenced")
+      val seeded = NonEmptyList.of(0, 1).map(value => record(input, Some("k"), Some("seed"), validPartition(value)))
+
+      for
+        _        <- produce(server, seeded)
+        settings <- transactionalSettings(server, uniqueTransactionalId("unfenced"))
+        reading  <- committedConsumerSettings(server, group).map(_.withAssignmentFencing(false))
+        read     <- Ref[IO].of(Map.empty[TopicPartition, CommittableOffset[IO]])
+        outcome  <-
+          PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: first =>
+            first.records.evalMap(next =>
+              read.update(held => if held.contains(next.record.topicPartition) then held else held.updated(next.record.topicPartition, next.offset))
+            ).compile.drain.background.surround:
+              for
+                before  <- read.get.iterateUntil(_.size == 2)
+                outcome <-
+                  PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+                    PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: second =>
+                      second.records.compile.drain.background.surround:
+                        for
+                          kept    <- (assignmentOf(first, 1), assignmentOf(second, 1)).parTupled.map(_._1)
+                          revoked <- IO.fromOption(before.keySet.find(!kept.contains(_)))(new AssertionError(s"nothing was revoked from $kept"))
+                          _       <-
+                            producer.transactionally(transaction =>
+                              transaction.produce(NonEmptyList.one(record(output, Some("k"), Some("out"), validPartition(0)))) *>
+                                transaction.commitOffsets(CommittableOffsetBatch.empty[IO].updated(before(revoked)))
+                            )
+                          lost <- first.committed(Set(revoked))
+                        yield (before(revoked).nextOffset, lost.get(revoked).flatten)
+              yield outcome
+          .timeout(90.seconds)
+      yield
+        val (recorded, lost) = outcome
+        // Without fencing the offset goes out under the consumer's current membership, which the broker accepts, as it did before fencing existed.
+        assertEquals(lost, Some(recorded))
+
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)

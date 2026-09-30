@@ -30,6 +30,13 @@ typedef struct xkafka_batch_s {
         xkafka_delivery_t *slots;
 } xkafka_batch_t;
 
+/* A rebalance the callback received and left for the consumer to apply. */
+typedef struct xkafka_rebalance_s {
+        rd_kafka_resp_err_t err;
+        rd_kafka_topic_partition_list_t *partitions;
+        struct xkafka_rebalance_s *next;
+} xkafka_rebalance_t;
+
 /* Per-client state reached through the librdkafka opaque.
  *
  * A refused certificate or a rejected credential is reported to the error
@@ -38,7 +45,12 @@ typedef struct xkafka_batch_s {
  * waiting can report the cause. librdkafka runs the callback on its own
  * thread, so the slot is guarded. */
 typedef struct xkafka_client_s {
-        int generation;
+        /* Rebalances waiting to be taken, oldest first. The callback that adds
+         * them and the call that takes them both run under the consumer's
+         * permit, so they are never touched at once. */
+        xkafka_rebalance_t *pending;
+        xkafka_rebalance_t *last;
+        int closing;
         pthread_mutex_t lock;
         int32_t security_error;
         char security_message[512];
@@ -422,26 +434,23 @@ void xkafka_batch_free(xkafka_batch_t *batch) {
 
 /* Registering a rebalance callback turns off librdkafka's own assignment, so this
  * has to reproduce it, including the split between the eager and cooperative
- * protocols. The generation counter lives in the client's opaque, so it belongs
- * to one consumer and is only ever touched while its permit is held. */
-static void xkafka_rebalance_callback(rd_kafka_t *client,
-                                      rd_kafka_resp_err_t err,
-                                      rd_kafka_topic_partition_list_t *partitions,
-                                      void *opaque) {
-        xkafka_client_t *state = (xkafka_client_t *)opaque;
+ * protocols. */
+static void xkafka_rebalance_apply(rd_kafka_t *client,
+                                   rd_kafka_resp_err_t err,
+                                   rd_kafka_topic_partition_list_t *partitions) {
         int cooperative =
             strcmp(rd_kafka_rebalance_protocol(client), "COOPERATIVE") == 0;
 
         switch (err) {
         case RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS:
                 if (cooperative)
-                        rd_kafka_incremental_assign(client, partitions);
+                        rd_kafka_error_destroy(rd_kafka_incremental_assign(client, partitions));
                 else
                         rd_kafka_assign(client, partitions);
                 break;
         case RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS:
                 if (cooperative)
-                        rd_kafka_incremental_unassign(client, partitions);
+                        rd_kafka_error_destroy(rd_kafka_incremental_unassign(client, partitions));
                 else
                         rd_kafka_assign(client, NULL);
                 break;
@@ -450,16 +459,87 @@ static void xkafka_rebalance_callback(rd_kafka_t *client,
                 rd_kafka_assign(client, NULL);
                 break;
         }
-
-        if (state != NULL)
-                state->generation++;
 }
 
-/* Bumped once per rebalance, so the consumer can notice one without comparing
- * assignments. Reading it costs nothing, so the poll loop can check every time. */
-int xkafka_consumer_generation(rd_kafka_t *consumer) {
+static void xkafka_rebalance_free(xkafka_rebalance_t *event) {
+        rd_kafka_topic_partition_list_destroy(event->partitions);
+        free(event);
+}
+
+/* librdkafka waits for the assignment to change before it lets the group move
+ * on, so leaving a revocation queued here holds its partitions until the
+ * consumer applies it. While the consumer closes, nothing is left to take it,
+ * so it applies at once. */
+static void xkafka_rebalance_callback(rd_kafka_t *client,
+                                      rd_kafka_resp_err_t err,
+                                      rd_kafka_topic_partition_list_t *partitions,
+                                      void *opaque) {
+        xkafka_client_t *state = (xkafka_client_t *)opaque;
+        xkafka_rebalance_t *event;
+
+        if (state == NULL || state->closing) {
+                xkafka_rebalance_apply(client, err, partitions);
+                return;
+        }
+        event = (xkafka_rebalance_t *)calloc(1, sizeof(xkafka_rebalance_t));
+        if (event == NULL) {
+                xkafka_rebalance_apply(client, err, partitions);
+                return;
+        }
+        event->err = err;
+        event->partitions = rd_kafka_topic_partition_list_copy(partitions);
+        if (state->last == NULL)
+                state->pending = event;
+        else
+                state->last->next = event;
+        state->last = event;
+}
+
+/* The oldest rebalance the callback left, or NULL. The caller owns it until it
+ * is applied. */
+void *xkafka_consumer_take_rebalance(rd_kafka_t *consumer) {
         xkafka_client_t *state = (xkafka_client_t *)rd_kafka_opaque(consumer);
-        return state == NULL ? 0 : state->generation;
+        xkafka_rebalance_t *event;
+
+        if (state == NULL || state->pending == NULL)
+                return NULL;
+        event = state->pending;
+        state->pending = event->next;
+        if (state->pending == NULL)
+                state->last = NULL;
+        event->next = NULL;
+        return event;
+}
+
+/* 1 for an assignment, 0 for a revocation, and -1 for anything else. */
+int xkafka_rebalance_kind(const void *event) {
+        switch (((const xkafka_rebalance_t *)event)->err) {
+        case RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS:
+                return 1;
+        case RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS:
+                return 0;
+        default:
+                return -1;
+        }
+}
+
+/* Read with the xkafka_assignment accessors, and freed with the rebalance. */
+const void *xkafka_rebalance_partitions(const void *event) {
+        return ((const xkafka_rebalance_t *)event)->partitions;
+}
+
+/* Whether the group hands over only the partitions a rebalance names, rather
+ * than replacing the whole assignment. */
+int xkafka_consumer_cooperative(rd_kafka_t *consumer) {
+        return strcmp(rd_kafka_rebalance_protocol(consumer), "COOPERATIVE") == 0;
+}
+
+/* Applies a taken rebalance, and frees it. */
+void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer, void *event) {
+        xkafka_rebalance_t *taken = (xkafka_rebalance_t *)event;
+
+        xkafka_rebalance_apply(consumer, taken->err, taken->partitions);
+        xkafka_rebalance_free(taken);
 }
 
 rd_kafka_t *xkafka_consumer_new(const char *brokers,
@@ -484,9 +564,9 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
                 return NULL;
         }
 
-        /* The opaque travels with the client, so the callbacks,
-         * xkafka_consumer_generation and the calls that report a security
-         * failure all reach the same state. */
+        /* The opaque travels with the client, so the callbacks, the queued
+         * rebalances and the calls that report a security failure all reach the
+         * same state. */
         rd_kafka_conf_set_opaque(conf, state);
         rd_kafka_conf_set_error_cb(conf, xkafka_error_callback);
         rd_kafka_conf_set_rebalance_cb(conf, xkafka_rebalance_callback);
@@ -545,6 +625,14 @@ void xkafka_consumer_destroy(rd_kafka_t *consumer) {
 
         /* Read before destroying, since the opaque is unreachable afterwards. */
         state = (xkafka_client_t *)rd_kafka_opaque(consumer);
+        /* A rebalance nobody took is applied before the close, which cannot
+         * finish while one is still waiting. */
+        if (state != NULL) {
+                state->closing = 1;
+                for (xkafka_rebalance_t *event = (xkafka_rebalance_t *)xkafka_consumer_take_rebalance(consumer); event != NULL;
+                     event = (xkafka_rebalance_t *)xkafka_consumer_take_rebalance(consumer))
+                        xkafka_consumer_apply_rebalance(consumer, event);
+        }
         rd_kafka_consumer_close(consumer);
         rd_kafka_destroy(consumer);
         xkafka_client_free(state);
@@ -1338,43 +1426,6 @@ void xkafka_consumer_group_metadata_destroy(void *metadata) {
                 return;
         rd_kafka_consumer_group_metadata_destroy(
             (rd_kafka_consumer_group_metadata_t *)metadata);
-}
-
-/* A record keeps the membership it was read under as these bytes, which need
- * no release and compare by value. librdkafka reads them back only within
- * this process, which is the only place a record lives. */
-int xkafka_consumer_group_metadata_write(rd_kafka_t *consumer,
-                                         void **buffer,
-                                         size_t *size) {
-        rd_kafka_consumer_group_metadata_t *metadata =
-            rd_kafka_consumer_group_metadata(consumer);
-        rd_kafka_error_t *failure;
-
-        if (metadata == NULL)
-                return -1;
-        failure = rd_kafka_consumer_group_metadata_write(metadata, buffer, size);
-        rd_kafka_consumer_group_metadata_destroy(metadata);
-        if (failure != NULL) {
-                rd_kafka_error_destroy(failure);
-                return -1;
-        }
-        return 0;
-}
-
-void xkafka_buffer_destroy(void *buffer) {
-        rd_kafka_mem_free(NULL, buffer);
-}
-
-void *xkafka_group_metadata_read(const void *buffer, size_t size) {
-        rd_kafka_consumer_group_metadata_t *metadata = NULL;
-        rd_kafka_error_t *failure =
-            rd_kafka_consumer_group_metadata_read(&metadata, buffer, size);
-
-        if (failure != NULL) {
-                rd_kafka_error_destroy(failure);
-                return NULL;
-        }
-        return metadata;
 }
 
 int xkafka_producer_send_offsets(rd_kafka_t *producer,
