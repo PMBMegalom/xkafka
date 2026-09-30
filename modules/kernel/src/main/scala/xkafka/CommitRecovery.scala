@@ -95,7 +95,7 @@ object CommitRecovery:
         /** Each attempt goes through the committer's own check, so a partition revoked during a backoff fails the next attempt instead of being held
           * across every retry.
           */
-        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
           retrying(offsets.view.mapValues(_._1).toMap, committer.commitLeased(offsets), 1)
 
         /** The membership travels with the committer, so a transaction still reaches the group these offsets came from. */

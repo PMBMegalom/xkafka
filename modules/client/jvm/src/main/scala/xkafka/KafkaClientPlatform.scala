@@ -69,7 +69,7 @@ private[xkafka] object KafkaClientPlatform:
 private[xkafka] final case class Fs2GroupHandle(metadata: JavaConsumerGroupMetadata) extends GroupHandle
 
 /** A value as it reaches the consumer adapter, with the lease each partition held when its poll returned, which names the one it was read under. */
-private final case class Polled[V](value: V, held: ((String, Int)) => Option[Lease[(String, Int)]])
+private final case class Polled[V](value: V, held: LeaseKey => Option[Lease])
 
 private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkProducer: MkProducer[F], mkConsumer: MkConsumer[F])
     extends KafkaClient[F]:
@@ -78,10 +78,10 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      leases     <- Resource.eval(AssignmentLeases[F, (String, Int)](settings.assignmentFencing))
+      leases     <- Resource.eval(AssignmentLeases[F](settings.assignmentFencing))
       membership <- Resource.eval(F.delay(new AtomicReference[JavaConsumerGroupMetadata]))
       // The leases the plain commit in progress was read under, which the consumer checks on its own thread before committing.
-      expected <- Resource.eval(F.delay(new AtomicReference(Map.empty[LeaseKey, Option[Lease[LeaseKey]]])))
+      expected <- Resource.eval(F.delay(new AtomicReference(Map.empty[LeaseKey, Option[Lease]])))
       // Acquired before the consumer, so it is still running when closing the consumer revokes its assignment.
       rebalancing <- Dispatcher.sequential[F]
       consumer    <-
@@ -155,13 +155,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     private def javaNewTopic(value: NewTopic): JavaNewTopic =
       new JavaNewTopic(value.topic.value, value.partitions, value.replicationFactor).configs(value.configuration.asJava)
 
-  private def select[K, V](consumer: Fs2KafkaConsumer[F, K, V], selection: Selection, leases: AssignmentLeases[F, (String, Int)]): F[Unit] =
+  private def select[K, V](consumer: Fs2KafkaConsumer[F, K, V], selection: Selection, leases: AssignmentLeases[F]): F[Unit] =
     selection match
       case Selection.Topics(topics)              => backend(consumer.subscribe(topics.toNonEmptyList.map(_.value)))
       case Selection.Pattern(pattern)            => F.delay(pattern.anchored.r).flatMap(value => backend(consumer.subscribe(value)))
       case Selection.Partitions(topicPartitions) =>
         // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
-        leases.assign(topicPartitions.toSortedSet.toList.map(value => value.topic.value -> value.partition.value), replacing = false) *>
+        leases.assign(topicPartitions.toSortedSet.toList.map(value => LeaseKey(value.topic.value, value.partition.value)), replacing = false) *>
           backend(consumer.assign(topicPartitions.map(value => new JavaTopicPartition(value.topic.value, value.partition.value))))
 
   private val handleBackendErrors: FunctionK[F, F] =
@@ -235,8 +235,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     */
   private def fencing(
       membership: AtomicReference[JavaConsumerGroupMetadata],
-      expected: AtomicReference[Map[LeaseKey, Option[Lease[LeaseKey]]]],
-      leases: AssignmentLeases[F, (String, Int)],
+      expected: AtomicReference[Map[LeaseKey, Option[Lease]]],
+      leases: AssignmentLeases[F],
       dispatcher: Dispatcher[F]
   ): MkConsumer[F] =
     new MkConsumer[F]:
@@ -250,7 +250,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
             val waiting = expected.get
             if waiting.nonEmpty then
               offsets.collect { case committed: JavaMap[?, ?] =>
-                committed.keySet.asScala.toList.collect { case value: JavaTopicPartition => value.topic -> value.partition }
+                committed.keySet.asScala.toList.collect { case value: JavaTopicPartition => LeaseKey(value.topic, value.partition) }
               }.foreach: committing =>
                 val now = dispatcher.unsafeRunSync(leases.held)
                 if committing.exists(key => waiting.get(key).exists(lease => lease.isEmpty || now(key) != lease)) then
@@ -286,16 +286,13 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           Proxy.newProxyInstance(classOf[JavaConsumer[?, ?]].getClassLoader, Array(classOf[JavaConsumer[?, ?]]), handler)
             .asInstanceOf[KafkaByteConsumer]
 
-  private def keys(partitions: JavaCollection[JavaTopicPartition]): List[(String, Int)] =
-    partitions.asScala.toList.map(value => value.topic -> value.partition)
+  private def keys(partitions: JavaCollection[JavaTopicPartition]): List[LeaseKey] =
+    partitions.asScala.toList.map(value => LeaseKey(value.topic, value.partition))
 
   /** fs2-kafka deserializes a poll's records before it polls again, and leases change only inside a poll, so what the deserializer reads is what each
     * partition held when the record's poll returned.
     */
-  private def consumerSettings[K, V](
-      settings: ConsumerSettings[F, K, V],
-      leases: AssignmentLeases[F, (String, Int)]
-  ): Fs2ConsumerSettings[F, K, Polled[V]] =
+  private def consumerSettings[K, V](settings: ConsumerSettings[F, K, V], leases: AssignmentLeases[F]): Fs2ConsumerSettings[F, K, Polled[V]] =
     val polled =
       Fs2Deserializer.instance[F, Polled[V]]: (topic, headers, bytes) =>
         (deserializer(settings.valueDeserializer).deserialize(topic, headers, bytes), leases.held).mapN(Polled.apply)
@@ -389,9 +386,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
   private final class Fs2KafkaConsumerAdapter[K, V](
       underlying: Fs2KafkaConsumer[F, K, Polled[V]],
       settings: ConsumerSettings[F, K, V],
-      leases: AssignmentLeases[F, (String, Int)],
+      leases: AssignmentLeases[F],
       membership: AtomicReference[JavaConsumerGroupMetadata],
-      expected: AtomicReference[Map[LeaseKey, Option[Lease[LeaseKey]]]],
+      expected: AtomicReference[Map[LeaseKey, Option[Lease]]],
       plainCommits: Mutex[F],
       random: Random[F]
   ) extends KafkaConsumer[F, K, V]:
@@ -407,11 +404,11 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
             ))
 
           /** Each attempt names the leases its offsets were read under, which the consumer checks on its own thread just before it commits. */
-          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
             val plain = commit(offsets.view.mapValues(_._1).toMap)
             if !settings.assignmentFencing then plain
             else
-              val named = offsets.map((topicPartition, entry) => (topicPartition.topic.value -> topicPartition.partition.value) -> entry._2)
+              val named = offsets.map((topicPartition, entry) => LeaseKey(topicPartition.topic.value, topicPartition.partition.value) -> entry._2)
               plainCommits.lock.surround(F.bracket(F.delay(expected.set(named)))(_ => plain)(_ => F.delay(expected.set(Map.empty))))
 
           override private[xkafka] val membership: GroupMembership[F] =
@@ -535,10 +532,10 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
               override val committer: OffsetCommitter[F] = offsetCommitter
 
-              override private[xkafka] val lease: Option[Lease[LeaseKey]] = source.value.held(source.topic -> source.partition)
+              override private[xkafka] val lease: Option[Lease] = source.value.held(LeaseKey(source.topic, source.partition))
 
               override private[xkafka] val membership: GroupMembership[F] =
-                leases.membership(Fs2KafkaConsumerAdapter.this, source.value.held(source.topic -> source.partition), current, _ => F.unit)
+                leases.membership(Fs2KafkaConsumerAdapter.this, source.value.held(LeaseKey(source.topic, source.partition)), current, _ => F.unit)
 
           CommittableConsumerRecord(portableRecord, portableOffset)
 

@@ -145,7 +145,7 @@ final class CommitRecoverySuite extends CatsEffectSuite:
         new OffsetCommitter[IO]:
           override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.raiseError(retriableFailure)
 
-          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): IO[Unit] =
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): IO[Unit] =
             checks.update(_ + 1) *> commit(offsets.view.mapValues(_._1).toMap)
       outcome  <- CommitRecovery.recovering(checking, policy, random).commitLeased(offsets.view.mapValues(_ -> None).toMap).attempt
       observed <- checks.get

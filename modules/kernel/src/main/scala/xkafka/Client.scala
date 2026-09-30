@@ -645,8 +645,7 @@ trait OffsetCommitter[F[_]]:
     *
     * `CommittableOffset.commit` and `CommittableOffsetBatch.commit` come through here. A committer that does not fence commits the offsets alone.
     */
-  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
-    commit(offsets.view.mapValues(_._1).toMap)
+  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] = commit(offsets.view.mapValues(_._1).toMap)
 
   /** How a transaction names the consumer group these offsets belong to.
     *
@@ -667,8 +666,7 @@ object OffsetCommitter:
   private final case class TransformedOffsetCommitter[F[_], G[_]](underlying: OffsetCommitter[F], fk: FunctionK[F, G]) extends OffsetCommitter[G]:
     override def commit(offsets: Map[TopicPartition, Offset]): G[Unit] = fk(underlying.commit(offsets))
 
-    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): G[Unit] =
-      fk(underlying.commitLeased(offsets))
+    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): G[Unit] = fk(underlying.commitLeased(offsets))
 
     override private[xkafka] def membership: GroupMembership[G] = underlying.membership.mapK(fk)
 
@@ -689,7 +687,7 @@ trait CommittableOffset[F[_]]:
   private[xkafka] def membership: GroupMembership[F] = committer.membership
 
   /** The lease this offset was read under, where its consumer fences its assignment and could name one. */
-  private[xkafka] def lease: Option[Lease[LeaseKey]] = None
+  private[xkafka] def lease: Option[Lease] = None
 
   final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (nextOffset, lease)))
 
@@ -703,7 +701,7 @@ trait CommittableOffset[F[_]]:
 
       override private[xkafka] def membership: GroupMembership[G] = self.membership.mapK(fk)
 
-      override private[xkafka] def lease: Option[Lease[LeaseKey]] = self.lease
+      override private[xkafka] def lease: Option[Lease] = self.lease
 
 object CommittableOffset:
   given FunctorK[CommittableOffset] with
@@ -716,7 +714,7 @@ object CommittableOffset:
 opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, CommittableOffsetBatch.Entry[F]]]
 
 object CommittableOffsetBatch:
-  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F], lease: Option[Lease[LeaseKey]])
+  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F], lease: Option[Lease])
 
   def empty[F[_]]: CommittableOffsetBatch[F] = Map.empty
 

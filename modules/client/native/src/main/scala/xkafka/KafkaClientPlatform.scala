@@ -141,12 +141,13 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
       client <- nativeClient(createConsumer(settings), Bindings.xkafka_consumer_destroy)
-      leases <- Resource.eval(AssignmentLeases[F, (String, Int)](settings.assignmentFencing))
+      leases <- Resource.eval(AssignmentLeases[F](settings.assignmentFencing))
       _      <- Resource.eval(client(select(client.handle, selection)))
       // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
       _ <-
         Resource.eval(
-          initialAssignment(selection).toList.traverse_(value => leases.assign(List(value.topic.value -> value.partition.value), replacing = false))
+          initialAssignment(selection).toList
+            .traverse_(value => leases.assign(List(LeaseKey(value.topic.value, value.partition.value)), replacing = false))
         )
       polled      <- Resource.eval(Channel.bounded[F, ReadRecord](RecordQueueSize))
       rebalances  <- Resource.eval(Queue.unbounded[F, NativeRebalance])
@@ -774,15 +775,15 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       headers: Headers
   )
 
-  private final case class ReadRecord(record: NativeRecord, lease: Option[Lease[(String, Int)]])
+  private final case class ReadRecord(record: NativeRecord, lease: Option[Lease])
 
   /** A rebalance the callback left for the consumer to apply, which holds the group until it is. `event` is owned until it is applied. */
-  private final case class NativeRebalance(event: CVoidPtr, kind: Int, partitions: List[(String, Int)])
+  private final case class NativeRebalance(event: CVoidPtr, kind: Int, partitions: List[LeaseKey])
 
   private final class LibrdkafkaConsumer[K, V](
       client: NativeClient,
       settings: ConsumerSettings[F, K, V],
-      leases: AssignmentLeases[F, (String, Int)],
+      leases: AssignmentLeases[F],
       polled: Channel[F, ReadRecord],
       rebalances: Queue[F, NativeRebalance],
       assignments: SignallingRef[F, Set[TopicPartition]],
@@ -800,7 +801,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = client(commitOffsets(offsets))
 
           /** Each attempt holds the offsets' leases while it runs, so a revocation waits for a commit already sent. */
-          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease[LeaseKey]])]): F[Unit] =
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
             leases.holding(offsets.values.map(_._2).toList)(commit(offsets.view.mapValues(_._1).toMap))
 
           /** librdkafka names a group by freshly allocated metadata, which also fences a member the group has already replaced. */
@@ -822,7 +823,8 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       * record is labelled with the lease it was read under, and each rebalance the poll raised is handed to `rebalancing`.
       */
     val pollLoop: Stream[F, Nothing] =
-      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => leases.reading(pollOnce)(record => record.topic -> record.partition))
+      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
+        .evalMap(_ => leases.reading(pollOnce)(record => LeaseKey(record.topic, record.partition)))
         // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
         .evalMap(_.traverse_((record, lease) => polled.send(ReadRecord(record, lease)).void)).drain.onFinalize(polled.close.void)
 
@@ -858,8 +860,10 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
           event,
           Bindings.xkafka_rebalance_kind(event),
           List.tabulate(Bindings.xkafka_assignment_count(partitions).toInt): index =>
-            fromCString(Bindings.xkafka_assignment_topic_at(partitions, index.toUSize)) ->
+            LeaseKey(
+              fromCString(Bindings.xkafka_assignment_topic_at(partitions, index.toUSize)),
               Bindings.xkafka_assignment_partition_at(partitions, index.toUSize)
+            )
         )
       .toList
 
@@ -962,7 +966,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
             override val committer: OffsetCommitter[F] = offsetCommitter
 
-            override private[xkafka] val lease: Option[Lease[LeaseKey]] = read.lease
+            override private[xkafka] val lease: Option[Lease] = read.lease
 
             override private[xkafka] val membership: GroupMembership[F] =
               leases.membership(
