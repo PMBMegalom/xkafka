@@ -31,32 +31,83 @@ import cats.syntax.all.*
   * raise on their own. `Other` carries a code that has no portable meaning.
   */
 enum ErrorCode derives CanEqual:
-  case OffsetOutOfRange           // the requested offset is outside the partition's log
-  case UnknownTopicOrPartition    // the topic or partition does not exist
-  case LeaderNotAvailable         // the partition has no leader right now, such as during an election
-  case NotLeaderOrFollower        // the broker no longer leads or follows the partition
-  case RequestTimedOut            // a request got no answer in time
-  case BrokerNotAvailable         // the broker cannot be reached
-  case MessageTooLarge            // a record is larger than the broker or topic accepts
-  case NetworkException           // the connection to the broker failed
-  case CoordinatorLoadInProgress  // the group or transaction coordinator is still loading its state
-  case CoordinatorNotAvailable    // the group or transaction coordinator is not available
-  case NotCoordinator             // the broker is not the coordinator for this group or transaction
-  case IllegalGeneration          // the group has moved on to a newer generation
-  case UnknownMemberId            // the group does not know this member
-  case RebalanceInProgress        // the group is rebalancing
-  case InvalidGroupId             // the group id is not valid
-  case InvalidTopic               // the topic name is not valid
-  case TopicAuthorizationFailed   // the client is not authorized for the topic
-  case GroupAuthorizationFailed   // the client is not authorized for the group
-  case ClusterAuthorizationFailed // the client is not authorized for the cluster operation
-  case UnsupportedVersion         // the broker does not support the request
-  case SaslAuthenticationFailed   // SASL authentication failed
-  case SslAuthenticationFailed    // the TLS handshake failed
-  case InvalidProducerEpoch       // the broker refuses the producer's epoch as out of date
-  case Fenced                     // a newer client with the same identity, such as the same transactional id, has taken over
-  case Purged                     // the client discarded a record before sending it, such as one waiting when its transaction aborted
-  case Other(value: Int)          // a code with no portable meaning
+  /** The requested offset is outside the partition's log. */
+  case OffsetOutOfRange
+
+  /** The topic or partition does not exist. */
+  case UnknownTopicOrPartition
+
+  /** The partition has no leader right now, such as during an election. */
+  case LeaderNotAvailable
+
+  /** The broker no longer leads or follows the partition. */
+  case NotLeaderOrFollower
+
+  /** A request got no answer in time. */
+  case RequestTimedOut
+
+  /** The broker cannot be reached. */
+  case BrokerNotAvailable
+
+  /** A record is larger than the broker or topic accepts. */
+  case MessageTooLarge
+
+  /** The connection to the broker failed. */
+  case NetworkException
+
+  /** The group or transaction coordinator is still loading its state. */
+  case CoordinatorLoadInProgress
+
+  /** The group or transaction coordinator is not available. */
+  case CoordinatorNotAvailable
+
+  /** The broker is not the coordinator for this group or transaction. */
+  case NotCoordinator
+
+  /** The group has moved on to a newer generation. */
+  case IllegalGeneration
+
+  /** The group does not know this member. */
+  case UnknownMemberId
+
+  /** The group is rebalancing. */
+  case RebalanceInProgress
+
+  /** The group id is not valid. */
+  case InvalidGroupId
+
+  /** The topic name is not valid. */
+  case InvalidTopic
+
+  /** The client is not authorized for the topic. */
+  case TopicAuthorizationFailed
+
+  /** The client is not authorized for the group. */
+  case GroupAuthorizationFailed
+
+  /** The client is not authorized for the cluster operation. */
+  case ClusterAuthorizationFailed
+
+  /** The broker does not support the request. */
+  case UnsupportedVersion
+
+  /** SASL authentication failed. */
+  case SaslAuthenticationFailed
+
+  /** The TLS handshake failed. */
+  case SslAuthenticationFailed
+
+  /** The broker refuses the producer's epoch as out of date. */
+  case InvalidProducerEpoch
+
+  /** A newer client with the same identity, such as the same transactional id, has taken over. */
+  case Fenced
+
+  /** The client discarded a record before sending it, such as one waiting when its transaction aborted. */
+  case Purged
+
+  /** A code with no portable meaning. */
+  case Other(value: Int)
 
 object ErrorCode:
   /** The conditions worth trying again, which are the ones a broker reports while it is moving rather than refusing.
@@ -73,30 +124,30 @@ object ErrorCode:
 
   private val protocol: Map[Int, ErrorCode] =
     Map(
-      1  -> OffsetOutOfRange,
-      3  -> UnknownTopicOrPartition,
-      5  -> LeaderNotAvailable,
-      6  -> NotLeaderOrFollower,
-      7  -> RequestTimedOut,
-      8  -> BrokerNotAvailable,
-      10 -> MessageTooLarge,
-      13 -> NetworkException,
-      14 -> CoordinatorLoadInProgress,
-      15 -> CoordinatorNotAvailable,
-      16 -> NotCoordinator,
-      17 -> InvalidTopic,
-      22 -> IllegalGeneration,
-      24 -> InvalidGroupId,
-      25 -> UnknownMemberId,
-      27 -> RebalanceInProgress,
-      29 -> TopicAuthorizationFailed,
-      30 -> GroupAuthorizationFailed,
-      31 -> ClusterAuthorizationFailed,
-      35 -> UnsupportedVersion,
-      47 -> InvalidProducerEpoch,
-      58 -> SaslAuthenticationFailed,
-      82 -> Fenced, // FENCED_INSTANCE_ID
-      90 -> Fenced  // PRODUCER_FENCED
+      1  -> OffsetOutOfRange,           // OFFSET_OUT_OF_RANGE
+      3  -> UnknownTopicOrPartition,    // UNKNOWN_TOPIC_OR_PARTITION
+      5  -> LeaderNotAvailable,         // LEADER_NOT_AVAILABLE
+      6  -> NotLeaderOrFollower,        // NOT_LEADER_OR_FOLLOWER
+      7  -> RequestTimedOut,            // REQUEST_TIMED_OUT
+      8  -> BrokerNotAvailable,         // BROKER_NOT_AVAILABLE
+      10 -> MessageTooLarge,            // MESSAGE_TOO_LARGE
+      13 -> NetworkException,           // NETWORK_EXCEPTION
+      14 -> CoordinatorLoadInProgress,  // COORDINATOR_LOAD_IN_PROGRESS
+      15 -> CoordinatorNotAvailable,    // COORDINATOR_NOT_AVAILABLE
+      16 -> NotCoordinator,             // NOT_COORDINATOR
+      17 -> InvalidTopic,               // INVALID_TOPIC_EXCEPTION
+      22 -> IllegalGeneration,          // ILLEGAL_GENERATION
+      24 -> InvalidGroupId,             // INVALID_GROUP_ID
+      25 -> UnknownMemberId,            // UNKNOWN_MEMBER_ID
+      27 -> RebalanceInProgress,        // REBALANCE_IN_PROGRESS
+      29 -> TopicAuthorizationFailed,   // TOPIC_AUTHORIZATION_FAILED
+      30 -> GroupAuthorizationFailed,   // GROUP_AUTHORIZATION_FAILED
+      31 -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
+      35 -> UnsupportedVersion,         // UNSUPPORTED_VERSION
+      47 -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
+      58 -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
+      82 -> Fenced,                     // FENCED_INSTANCE_ID
+      90 -> Fenced                      // PRODUCER_FENCED
     )
 
   /** Classifies a Kafka protocol error code, which the JVM and librdkafka both report from the same table. */
@@ -111,10 +162,8 @@ object ErrorCode:
       case -181               => SslAuthenticationFailed  // _SSL
       case -144               => Fenced                   // _FENCED
       case -152 | -151        => Purged                   // _PURGE_QUEUE, _PURGE_INFLIGHT
-      // librdkafka normalizes _UNKNOWN_TOPIC to the protocol code before a consumer sees it, and these carry the same
-      // meaning wherever it does not.
-      case -188 | -190 => UnknownTopicOrPartition // _UNKNOWN_TOPIC, _UNKNOWN_PARTITION
-      case other       => fromProtocol(other)
+      case -188 | -190        => UnknownTopicOrPartition  // _UNKNOWN_TOPIC, _UNKNOWN_PARTITION
+      case other              => fromProtocol(other)
 
 sealed abstract class KafkaException(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
 
