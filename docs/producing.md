@@ -93,10 +93,11 @@ val program =
 ## Acknowledgements
 
 `acks` sets how many replicas must hold a record before the broker acknowledges
-it. It defaults to `Acks.AllReplicas`:
+it. It defaults to `Acks.AllReplicas`. Any other value needs
+[idempotence](#idempotence) turned off first:
 
 ```scala
-settings.withAcks(Acks.Leader)
+settings.withoutIdempotence.withAcks(Acks.Leader)
 ```
 
 | value | when delivery can complete | a record is lost if |
@@ -104,6 +105,22 @@ settings.withAcks(Acks.Leader)
 | `Acks.NoAcknowledgement` | the producer sends it without waiting for a broker response | delivery fails without the caller knowing |
 | `Acks.Leader` | the partition leader has it | the leader fails before a follower copies it |
 | `Acks.AllReplicas` | every in-sync replica has it | every in-sync replica fails |
+
+## Idempotence
+
+A producer is idempotent by default: it turns on Kafka's idempotent producer,
+`enable.idempotence`, on every backend. Kafka's documentation describes what that
+guarantees.
+
+An idempotent producer needs `Acks.AllReplicas`. Settings that ask for idempotence
+with any other `acks` value are rejected with
+`SettingsError.IdempotenceRequiresAllReplicas`, so `withAcks` and
+`withIdempotence` revalidate and return
+`ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. `withoutIdempotence`
+turns it off.
+
+A [transactional producer](transactions.md) is always idempotent, because Kafka
+requires it of transactions.
 
 ## Releasing a producer
 

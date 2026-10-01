@@ -68,6 +68,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           assertEquals(settings.properties.get("compression.type"), Some("lz4"))
           // A value other than the default, so this proves the mapping rather than agreeing with it by chance.
           assertEquals(settings.properties.get("acks"), Some("1"))
+          assertEquals(settings.properties.get("enable.idempotence"), Some("false"))
           mock
 
     val topic         = Topic.from("events").toOption.get
@@ -79,8 +80,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       Serializer.instance[IO, String]: (_, _, value) =>
         IO.pure(Some(Chunk.array(value.getBytes("UTF-8"))))
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip")).toOption.get
-    val settings = ProducerSettings.from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4")).toOption.get.withAcks(Acks.Leader)
-    val record   =
+    val settings =
+      ProducerSettings.from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4")).toOption.get.withoutIdempotence
+        .withAcks(Acks.Leader).toOption.get
+    val record =
       ProducerRecord(
         topic = topic,
         key = "key",
@@ -199,19 +202,21 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             assert(outcomes.take(2).forall(illegalGeneration), s"offsets read before the revocation should be rejected, got $outcomes")
             assertEquals(outcomes.lift(2), Some(Right(())))
 
-  test("a transactional producer reaches fs2-kafka with its close timeout and every replica acknowledging"):
+  test("a transactional producer reaches fs2-kafka with its close timeout, every replica acknowledging, and idempotence"):
     val captured = new java.util.concurrent.atomic.AtomicReference[Option[(scala.concurrent.duration.FiniteDuration, Option[String])]](None)
     given MkProducer[IO] with
       override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] =
-        IO(captured.set(Some(settings.closeTimeout -> settings.properties.get("acks")))) *>
-          IO.pure(new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer))
+        IO(
+          captured
+            .set(Some(settings.closeTimeout -> settings.properties.get("acks").zip(settings.properties.get("enable.idempotence")).map(_ + "," + _)))
+        ) *> IO.pure(new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer))
     val serializer = Serializer.utf8[IO]
     val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
     val settings   =
       TransactionalProducerSettings.from(client, TransactionalId.from("writer").toOption.get, serializer, serializer, closeTimeout = 5.seconds)
         .toOption.get
 
-    KafkaClientPlatform.fromFs2[IO].transactionalProducer(settings).use_.map(_ => assertEquals(captured.get, Some(5.seconds -> Some("all"))))
+    KafkaClientPlatform.fromFs2[IO].transactionalProducer(settings).use_.map(_ => assertEquals(captured.get, Some(5.seconds -> Some("all,true"))))
 
   test("a plain commit of an offset read under a revoked assignment is refused before it reaches the consumer"):
     val (consumer, partition) = subscribedMock()

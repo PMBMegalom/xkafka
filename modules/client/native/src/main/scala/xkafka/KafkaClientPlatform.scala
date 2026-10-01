@@ -134,7 +134,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     producerHandle(
-      createProducer(settings.client, settings.properties.updated("acks", settings.acks.property)),
+      createProducer(settings.client, settings.properties ++ settings.managedProperties),
       handle => Bindings.xkafka_producer_destroy(handle, settings.closeTimeout.toMillis.toInt)
     ).map(handle => new LibrdkafkaProducer(handle.client, handle.supervisor, handle.batches, handle.owned, settings))
 
@@ -235,7 +235,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         producerHandle(
           createProducer(
             settings.producer.client,
-            settings.producer.properties.updated("acks", settings.producer.acks.property) ++
+            settings.producer.properties ++ settings.producer.managedProperties + TransactionalIdempotence ++
               Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString)
           ),
           handle => Bindings.xkafka_producer_destroy(handle, settings.producer.closeTimeout.toMillis.toInt)

@@ -149,7 +149,8 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
           )
         settings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "5")).toOption.get
         result <-
-          KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5", DefaultAcks)))
+          KafkaClientPlatform
+            .fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = Map("linger.ms" -> "5", DefaultAcks, DefaultIdempotence)))
             .producer(settings).use: underlying =>
               for
                 acknowledgement <- underlying.produce(NonEmptyList.one(record))
@@ -786,12 +787,12 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   test("the acks setting reaches the backend as the property it spells"):
     val serializer = Serializer.const[IO, String](None)
-    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get.withAcks(Acks.Leader)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get.withoutIdempotence.withAcks(Acks.Leader).toOption.get
 
     for
       captured <- IO(js.Array[Map[String, String]]())
       _        <- KafkaClientPlatform.fromDriver[IO](collectingDriver(captured)).producer(settings).use_.attempt
-    yield assertEquals(captured.toList, List(Map("acks" -> "1")))
+    yield assertEquals(captured.toList, List(Map("acks" -> "1", "enable.idempotence" -> "false")))
 
   test("the transactional settings reach the backend as the properties Kafka reads"):
     val serializer      = Serializer.const[IO, String](None)
@@ -828,7 +829,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             Unit
           ]
       ).asInstanceOf[confluent.RdProducer]
-    val expected = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "30000", DefaultAcks)
+    val expected = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "30000", DefaultAcks, DefaultIdempotence)
 
     // Releasing the producer bounds its delivery wait by the close timeout, so the disconnect is given it.
     KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = expected)).transactionalProducer(settings).use_
@@ -839,6 +840,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
 
   /** Likewise every producer, which asks every replica for an answer unless told otherwise. */
   private val DefaultAcks = "acks" -> "all"
+
+  /** Likewise idempotence, which every producer asks for unless told otherwise and every transactional one asks for always. */
+  private val DefaultIdempotence = "enable.idempotence" -> "true"
 
   private type CommitListener = js.Function2[confluent.RdError | Null, js.Array[confluent.RdTopicPartition], Unit]
 
@@ -1018,7 +1022,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     driver(
       producerValue = producer,
       consumerValue = consumer,
-      expectedProducerProperties = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "60000", DefaultAcks),
+      expectedProducerProperties = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "60000", DefaultAcks, DefaultIdempotence),
       rebalances = rebalances
     )
 
@@ -1060,7 +1064,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private def driver(
       producerValue: confluent.RdProducer = null,
       consumerValue: confluent.RdConsumer = null,
-      expectedProducerProperties: Map[String, String] = Map(DefaultAcks),
+      expectedProducerProperties: Map[String, String] = Map(DefaultAcks, DefaultIdempotence),
       expectedConsumerProperties: Map[String, String] = Map(DefaultIsolationLevel),
       rebalances: js.Array[confluent.RdRebalance] = js.Array()
   ): ConfluentKafkaDriver =

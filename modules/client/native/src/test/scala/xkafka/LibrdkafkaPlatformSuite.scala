@@ -66,6 +66,34 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
     interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))
 
+  test("idempotence reaches librdkafka, which refuses more than five requests in flight with it on"):
+    val serializer = Serializer.const[IO, String](None)
+    val client     = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
+    val settings   = ProducerSettings.from(client, serializer, serializer, Map("max.in.flight.requests.per.connection" -> "6")).toOption.get
+
+    for
+      idempotent <- KafkaClient[IO].producer(settings).use_.attempt
+      plain      <- KafkaClient[IO].producer(settings.withoutIdempotence).use_.attempt
+    yield
+      assert(refusedForIdempotence(idempotent), s"librdkafka should refuse the idempotent producer, got $idempotent")
+      assertEquals(plain, Right(()))
+
+  test("a transactional producer reaches librdkafka idempotent, which refuses more than five requests in flight"):
+    val serializer = Serializer.const[IO, String](None)
+    val client     = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
+    val settings   =
+      TransactionalProducerSettings.from(
+        client,
+        TransactionalId.from("native-idempotence").toOption.get,
+        serializer,
+        serializer,
+        properties = Map("max.in.flight.requests.per.connection" -> "6")
+      ).toOption.get
+
+    // librdkafka checks its configuration when the client is created, before the transactions it would need a broker for.
+    KafkaClient[IO].transactionalProducer(settings).use_.attempt.timeout(5.seconds).map: outcome =>
+      assert(refusedForIdempotence(outcome), s"librdkafka should refuse the transactional producer as idempotent, got $outcome")
+
   test("producer release bounds an unavailable record by its close timeout"):
     val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
     val client     = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
@@ -90,3 +118,9 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
     KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).attempt).timeout(5.seconds).map: outcome =>
       assert(outcome.isLeft, s"the second record should exceed the one-message local queue, got $outcome")
+
+  /** librdkafka names idempotence as the reason it refuses too many requests in flight. */
+  private def refusedForIdempotence(outcome: Either[Throwable, Unit]): Boolean =
+    outcome.left.exists:
+      case failure: KafkaException.BackendFailure => failure.getMessage.contains("enable.idempotence")
+      case _                                      => false

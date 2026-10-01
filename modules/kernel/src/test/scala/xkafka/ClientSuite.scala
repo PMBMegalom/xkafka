@@ -550,14 +550,42 @@ final class ClientSuite extends FunSuite:
       IsolationLevel.ReadCommitted
     )
 
+  test("a producer is idempotent unless it is turned off, and an idempotent one waits for every replica"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val rejected   = SettingsError.IdempotenceRequiresAllReplicas(Acks.Leader)
+
+    assert(settings.idempotence)
+    assertEquals(settings.managedProperties, Map("acks" -> "all", "enable.idempotence" -> "true"))
+    assertEquals(settings.withAcks(Acks.Leader).toEither, Left(NonEmptyList.one(rejected)))
+    assertEquals(ProducerSettings.from(clientSettings, serializer, serializer, acks = Acks.Leader).toEither, Left(NonEmptyList.one(rejected)))
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, acks = Acks.Leader, idempotence = false).toOption.map(_.managedProperties),
+      Some(Map("acks" -> "1", "enable.idempotence" -> "false"))
+    )
+    val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
+    assertEquals(leader.withIdempotence.toEither, Left(NonEmptyList.one(rejected)))
+    assert(settings.withoutIdempotence.withIdempotence.toOption.exists(_.idempotence))
+    // The withers that revalidate keep idempotence off.
+    assertEquals(
+      List(leader.withCloseTimeout(1.second), leader.withProperty("linger.ms", "5"), leader.withAcks(Acks.NoAcknowledgement))
+        .map(_.toOption.map(_.idempotence)),
+      List.fill(3)(Some(false))
+    )
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, properties = Map("enable.idempotence" -> "false")).toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("enable.idempotence", SettingsError.PropertyScope.Producer)))
+    )
+
   test("the acks setting defaults, carries through its wither, and reads as Kafka reads it"):
     val serializer = Serializer.const[IO, String](None)
     val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
 
     assertEquals(settings.acks, ProducerSettings.DefaultAcks)
     assertEquals(settings.acks, Acks.AllReplicas)
-    assertEquals(settings.withAcks(Acks.Leader).acks, Acks.Leader)
-    assertEquals(settings.withAcks(Acks.Leader).withProperty("linger.ms", "5").toOption.get.acks, Acks.Leader)
+    val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
+    assertEquals(leader.acks, Acks.Leader)
+    assertEquals(leader.withProperty("linger.ms", "5").toOption.get.acks, Acks.Leader)
     // The three values Kafka itself accepts, which both backends read from the same property.
     assertEquals(Acks.values.toList.map(_.property), List("0", "1", "all"))
 

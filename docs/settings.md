@@ -121,6 +121,7 @@ Beyond the serializers, `ProducerSettings` carries:
 | --- | --- | --- |
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
 | `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
+| `idempotence` | `true` | whether the producer is idempotent, Kafka's `enable.idempotence`, which needs `acks` to be `AllReplicas` |
 
 See [Producing](producing.md) for both.
 

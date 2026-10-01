@@ -115,7 +115,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private def ignore(value: js.Any): Unit = ()
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
-    producerHandle(settings.client, settings.properties.updated("acks", settings.acks.property), settings.closeTimeout).map(_.adapter(settings))
+    producerHandle(settings.client, settings.properties ++ settings.managedProperties, settings.closeTimeout).map(_.adapter(settings))
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     val timeoutMillis = settings.transactionTimeout.toMillis.toInt
@@ -123,7 +123,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       handle <-
         producerHandle(
           settings.producer.client,
-          settings.producer.properties.updated("acks", settings.producer.acks.property) ++
+          settings.producer.properties ++ settings.producer.managedProperties + TransactionalIdempotence ++
             Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString),
           settings.producer.closeTimeout
         )

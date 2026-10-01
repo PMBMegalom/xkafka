@@ -45,6 +45,7 @@ val ManagedProperties: Set[String] =
     "enable.auto.offset.store",
     "acks",
     "request.required.acks",
+    "enable.idempotence",
     "isolation.level",
     "transactional.id",
     "transaction.timeout.ms",
@@ -75,6 +76,7 @@ enum SettingsError derives CanEqual:
   case BlankSaslPassword
   case NonPositiveDuration(field: SettingsError.DurationField, value: FiniteDuration)
   case DurationExceedsMaximum(field: SettingsError.DurationField, value: FiniteDuration)
+  case IdempotenceRequiresAllReplicas(acks: Acks)
 
   def message: String =
     this match
@@ -87,6 +89,7 @@ enum SettingsError derives CanEqual:
       case BlankSaslPassword                    => "SASL password must not be blank"
       case NonPositiveDuration(field, value)    => s"${field.label} must be positive, was $value"
       case DurationExceedsMaximum(field, value) => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
+      case IdempotenceRequiresAllReplicas(acks) => s"an idempotent producer needs acks AllReplicas, was $acks"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -184,29 +187,42 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     valueSerializer: Serializer[F, V],
     properties: Map[String, String],
     acks: Acks,
-    closeTimeout: FiniteDuration
+    closeTimeout: FiniteDuration,
+    idempotence: Boolean
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
-    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, acks, closeTimeout) {}
+    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, acks, closeTimeout, idempotence) {}
 
   def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
-    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout) {}
+    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence) {}
 
-  /** How many replicas must have a record before the broker answers for it. */
-  def withAcks(value: Acks): ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, value, closeTimeout) {}
+  /** How many replicas must have a record before the broker answers for it. Anything short of `AllReplicas` needs idempotence turned off first. */
+  def withAcks(value: Acks): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence)
+
+  /** Turns on Kafka's idempotent producer, `enable.idempotence`, which is the default. It needs `acks` to be `AllReplicas`. */
+  def withIdempotence: ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence = true)
+
+  /** Turns off Kafka's idempotent producer, `enable.idempotence`, which any `acks` short of `AllReplicas` needs. */
+  def withoutIdempotence: ProducerSettings[F, K, V] =
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, false) {}
 
   /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value, idempotence)
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout)
+    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence)
 
-  override def toString: String = s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$acks,$closeTimeout)"
+  /** The Kafka properties these settings own, spelled the same for both clients. */
+  private[xkafka] def managedProperties: Map[String, String] = Map("acks" -> acks.property, "enable.idempotence" -> idempotence.toString)
+
+  override def toString: String =
+    s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$acks,$closeTimeout,$idempotence)"
 
 object ProducerSettings:
   /** What both backends already ask for, and the only setting that survives losing a leader. */
@@ -221,14 +237,19 @@ object ProducerSettings:
       valueSerializer: Serializer[F, V],
       properties: Map[String, String] = Map.empty,
       acks: Acks = ProducerSettings.DefaultAcks,
-      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
+      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout,
+      idempotence: Boolean = true
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     val errors =
-      propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout)
-    validateSettings(errors).map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout) {})
+      propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
+        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks))
+    validateSettings(errors).map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
+
+/** Kafka requires idempotence of every transactional producer, so each backend asks for it outright. */
+private[xkafka] val TransactionalIdempotence: (String, String) = "enable.idempotence" -> "true"
 
 /** A producer that writes inside transactions, which is all it writes, so these settings build a producer of their own. */
 sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (

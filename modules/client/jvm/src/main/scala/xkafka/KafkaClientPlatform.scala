@@ -96,7 +96,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     Fs2KafkaProducer.transactional(
-      producerSettings(settings.producer).withTransactionalId(settings.transactionalId.value).withTransactionTimeout(settings.transactionTimeout)
+      producerSettings(settings.producer).withProperties(Map(TransactionalIdempotence)).withTransactionalId(settings.transactionalId.value)
+        .withTransactionTimeout(settings.transactionTimeout)
     ).mapK(handleBackendErrors).map(new Fs2TransactionalProducerAdapter(_))
 
   private final class Fs2TransactionalProducerAdapter[K, V](underlying: Fs2KafkaProducer[F, K, V]) extends KafkaTransactionalProducer[F, K, V]:
@@ -222,7 +223,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
         settings.client.properties ++ settings.properties ++ SecurityProperties.javaClient(settings.client.security) ++
           ClientProperties(settings.client)
       ).withBootstrapServers(settings.client.bootstrapServers.toList.mkString(",")).withCloseTimeout(settings.closeTimeout)
-        .withProperty("acks", settings.acks.property)
+        .withProperties(settings.managedProperties)
 
     settings.client.clientId.fold(base)(base.withClientId)
 
