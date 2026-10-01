@@ -142,8 +142,9 @@
         classifications. A <code>None</code> for any of those means the backend did not make that
         classification available.</p>
         <p>The classifications preserve what a backend reports. When a backend supplies
-        only a code, <code>retriable</code> falls back to the portable <code>ErrorCode.retriable</code> answer;
-        <code>fatal</code> and <code>transactionAbortRequired</code> remain <code>None</code> when unavailable. Code that
+        only a code, <code>retriable</code> falls back to the portable <code>ErrorCode.retriable</code> answer.
+        <code>fatal</code> is always <code>true</code> for <code>ErrorCode.Fenced</code>; otherwise it, like
+        <code>transactionAbortRequired</code>, remains <code>None</code> when unavailable. Code that
         needs one portable retry decision should use <code>ErrorCode.retriable</code>; commit
         recovery does so as well:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span>.</span><span class="identifier">exists</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">retriable</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
@@ -160,6 +161,29 @@
   </span><span class="keyword">case</span><span> </span><span class="identifier">_</span><span>                                        =&gt; </span><span class="identifier">giveUp</span></code></pre>
         <p>Matching on a protocol error such as <code>OffsetOutOfRange</code> behaves the same on all
         three platforms.</p>
+        <p>Three codes cover failures around transactional producers:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>code</th>
+              <th>raised when</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>ErrorCode.Fenced</code></td>
+              <td>a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way</td>
+            </tr>
+            <tr>
+              <td><code>ErrorCode.InvalidProducerEpoch</code></td>
+              <td>the broker refuses the producer&#39;s epoch as out of date</td>
+            </tr>
+            <tr>
+              <td><code>ErrorCode.Purged</code></td>
+              <td>the client discarded a record before sending it, such as one still waiting when its transaction aborted</td>
+            </tr>
+          </tbody>
+        </table>
 
         
 <hr class="footer-rule"/>
