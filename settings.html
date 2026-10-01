@@ -223,13 +223,18 @@
               <td>15s</td>
               <td>how long a commit waits before failing as a timed out request</td>
             </tr>
+            <tr>
+              <td><code>assignmentFencing</code></td>
+              <td><code>true</code></td>
+              <td>whether offsets from a partition this consumer no longer owns are refused</td>
+            </tr>
           </tbody>
         </table>
         <p><code>requestTimeout</code> bounds <code>committed</code>, <code>beginningOffsets</code>, <code>endOffsets</code>,
         <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, and <code>seek</code>. Its default matches
         what Kafka&#39;s own clients use.</p>
-        <p>See <a href="offsets.html">Offsets</a> for commit recovery and the commit timeout, and
-        <a href="transactions.html">Transactions</a> for the isolation level.</p>
+        <p>See <a href="offsets.html">Offsets</a> for commit recovery, the commit timeout, and assignment
+        fencing, and <a href="transactions.html">Transactions</a> for the isolation level.</p>
         
         <h2 id="producer-settings" class="section"><a class="anchor-link left" href="#producer-settings"><i class="icofont-laika link">&#xef71;</i></a>Producer settings</h2>
         <p>Beyond the serializers, <code>ProducerSettings</code> carries:</p>
@@ -252,9 +257,14 @@
               <td>60s</td>
               <td>maximum flush wait for records already accepted by a producer</td>
             </tr>
+            <tr>
+              <td><code>idempotence</code></td>
+              <td><code>true</code></td>
+              <td>whether Kafka&#39;s <code>enable.idempotence</code> is on, which requires <code>Acks.AllReplicas</code></td>
+            </tr>
           </tbody>
         </table>
-        <p>See <a href="producing.html">Producing</a> for both.</p>
+        <p>See <a href="producing.html">Producing</a> for all three.</p>
         
         <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
         <p><code>ClientSettings</code> applies to producers and consumers alike:</p>

@@ -159,6 +159,14 @@
         wrong group.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
+          <p>If a partition is revoked after its records were read, their offsets can no longer
+          be committed. <code>commitOffsets</code> fails with <code>ErrorCode.IllegalGeneration</code>, and
+          <code>transactionally</code> aborts the transaction, so none of it becomes visible. Read the
+          records again and process them in a new transaction. See
+          <a href="offsets.html#offsets-and-rebalances">Offsets and rebalances</a>.</p>
+        </div>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
           <p>The pipeline is only atomic end to end if whatever reads the output topic also
           sets <code>IsolationLevel.ReadCommitted</code>. A reader left on the default sees records
           from transactions that have not committed, including ones that later abort.</p>
@@ -171,13 +179,14 @@
         </div>
         
         <h2 id="settings" class="section"><a class="anchor-link left" href="#settings"><i class="icofont-laika link">&#xef71;</i></a>Settings</h2>
-        <p><code>TransactionalProducerSettings</code> wraps <code>ProducerSettings</code> and adds two values.</p>
+        <p><code>TransactionalProducerSettings</code> takes the producer&#39;s client, serializers, and
+        properties, along with these values:</p>
         <table>
           <thead>
             <tr>
               <th>setting</th>
               <th>default</th>
-              <th>maps to</th>
+              <th>meaning</th>
             </tr>
           </thead>
           <tbody>
@@ -191,8 +200,15 @@
               <td>60s</td>
               <td>Kafka&#39;s <code>transaction.timeout.ms</code></td>
             </tr>
+            <tr>
+              <td><code>closeTimeout</code></td>
+              <td>60s</td>
+              <td>how long releasing the producer waits for records it has not delivered</td>
+            </tr>
           </tbody>
         </table>
+        <p>A transactional producer always uses <code>Acks.AllReplicas</code> and idempotence, because
+        Kafka requires both for transactions, so neither can be changed.</p>
         <p>Give each producer that runs alongside another its own <code>transactionalId</code>.
         Creating a second producer with an id already in use fences the first, and its
         open transaction can then no longer commit. That is the intended behaviour when a

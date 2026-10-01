@@ -92,6 +92,7 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#batches">Batches</a></li>
+    <li class="level1 nav-leaf"><a href="#offsets-and-rebalances">Offsets and rebalances</a></li>
     <li class="level1 nav-leaf"><a href="#committing-on-a-schedule">Committing on a schedule</a></li>
     <li class="level1 nav-leaf"><a href="#retrying-a-failed-commit">Retrying a failed commit</a></li>
     <li class="level1 nav-leaf"><a href="#how-long-a-commit-waits">How long a commit waits</a></li>
@@ -117,6 +118,33 @@
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">offsets</span><span>).</span><span class="identifier">commit</span></code></pre>
         <p>A batch keeps only the greatest next offset for each topic-partition, and makes
         one backend commit per originating consumer.</p>
+        
+        <h2 id="offsets-and-rebalances" class="section"><a class="anchor-link left" href="#offsets-and-rebalances"><i class="icofont-laika link">&#xef71;</i></a>Offsets and rebalances</h2>
+        <p>By default, an offset can only be committed while the consumer that read it still
+        owns its partition. This is called assignment fencing.</p>
+        <p>When the group moves a partition to another consumer, offsets read from it before
+        the move can no longer be committed, whether on their own, in a batch, or in a
+        <a href="transactions.html">transaction</a>. The commit fails with a
+        <code>KafkaException.BackendFailure</code> whose code is <code>ErrorCode.IllegalGeneration</code>, and
+        nothing is committed for that partition. This holds even if the partition later
+        comes back to the same consumer.</p>
+        <p><code>IllegalGeneration</code> is not retriable. Read the records again after the rebalance,
+        and commit those offsets.</p>
+        <p>How many offsets a rebalance affects depends on the partition assignment strategy:</p>
+        <ul>
+          <li>With the default strategy, every rebalance revokes all partitions and assigns
+          them again, so offsets read before any rebalance are refused, even for the
+          partitions the consumer keeps.</li>
+          <li>With a cooperative strategy, only the partitions that move are revoked, so
+          offsets for the partitions a consumer keeps can still be committed.</li>
+        </ul>
+        <p><code>committer.commit(offsets)</code> takes offsets that did not come from a record, so it
+        can only check that the consumer owns each partition at the time of the commit.</p>
+        <p>To turn fencing off:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withoutAssignmentFencing</span></code></pre>
+        <p>Without fencing, an offset read before a rebalance can still be committed after its
+        partition has moved to another consumer, which moves that partition back to an
+        earlier position.</p>
         
         <h2 id="committing-on-a-schedule" class="section"><a class="anchor-link left" href="#committing-on-a-schedule"><i class="icofont-laika link">&#xef71;</i></a>Committing on a schedule</h2>
         <p><code>commitBatchWithin</code> is an FS2 pipe which commits whenever it collects <code>n</code>

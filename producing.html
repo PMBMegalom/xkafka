@@ -96,6 +96,7 @@
     <li class="level1 nav-leaf"><a href="#records">Records</a></li>
     <li class="level1 nav-leaf"><a href="#partitions">Partitions</a></li>
     <li class="level1 nav-leaf"><a href="#acknowledgements">Acknowledgements</a></li>
+    <li class="level1 nav-leaf"><a href="#idempotence">Idempotence</a></li>
     <li class="level1 nav-leaf"><a href="#releasing-a-producer">Releasing a producer</a></li>
   </ul>
 
@@ -177,8 +178,9 @@
         
         <h2 id="acknowledgements" class="section"><a class="anchor-link left" href="#acknowledgements"><i class="icofont-laika link">&#xef71;</i></a>Acknowledgements</h2>
         <p><code>acks</code> sets how many replicas must hold a record before the broker acknowledges
-        it. It defaults to <code>Acks.AllReplicas</code>:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withAcks</span><span>(</span><span class="type-name">Acks</span><span>.</span><span class="type-name">Leader</span><span>)</span></code></pre>
+        it. It defaults to <code>Acks.AllReplicas</code>. To use any other value, turn
+        <a href="#idempotence">idempotence</a> off first:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withoutIdempotence</span><span>.</span><span class="identifier">withAcks</span><span>(</span><span class="type-name">Acks</span><span>.</span><span class="type-name">Leader</span><span>)</span></code></pre>
         <table>
           <thead>
             <tr>
@@ -205,6 +207,17 @@
             </tr>
           </tbody>
         </table>
+        
+        <h2 id="idempotence" class="section"><a class="anchor-link left" href="#idempotence"><i class="icofont-laika link">&#xef71;</i></a>Idempotence</h2>
+        <p>Producers are idempotent by default: xkafka turns on Kafka&#39;s
+        <code>enable.idempotence</code> on every backend. See Kafka&#39;s documentation of that setting
+        for what it guarantees.</p>
+        <p>Idempotence requires <code>Acks.AllReplicas</code>. Settings that combine it with another
+        <code>acks</code> value are rejected with <code>SettingsError.IdempotenceRequiresAllReplicas</code>,
+        which is why <code>withAcks</code> and <code>withIdempotence</code> return a <code>ValidatedNel</code>. Call
+        <code>withoutIdempotence</code> to turn it off.</p>
+        <p><a href="transactions.html">Transactional producers</a> are always idempotent, because Kafka
+        requires it for transactions.</p>
         
         <h2 id="releasing-a-producer" class="section"><a class="anchor-link left" href="#releasing-a-producer"><i class="icofont-laika link">&#xef71;</i></a>Releasing a producer</h2>
         <p>Releasing the resource first waits for records the producer has already accepted,

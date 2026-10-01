@@ -150,8 +150,8 @@
         </table>
         <p>Scala.js and Scala Native also accept a directory of certificates as a
         <code>PemFile</code>.</p>
-        <p><code>TlsSettings</code> verifies the broker hostname unless
-        <code>withHostnameVerification(false)</code> says otherwise.</p>
+        <p><code>TlsSettings</code> verifies the broker hostname by default. Call
+        <code>withoutHostnameVerification</code> to turn that off.</p>
         
         <h2 id="credentials" class="section"><a class="anchor-link left" href="#credentials"><i class="icofont-laika link">&#xef71;</i></a>Credentials</h2>
         <p><code>SaslSettings</code> accepts <code>SaslMechanism.Plain</code>, <code>ScramSha256</code>, and <code>ScramSha512</code>,
