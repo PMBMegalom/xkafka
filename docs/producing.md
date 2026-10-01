@@ -93,8 +93,8 @@ val program =
 ## Acknowledgements
 
 `acks` sets how many replicas must hold a record before the broker acknowledges
-it. It defaults to `Acks.AllReplicas`. Any other value needs
-[idempotence](#idempotence) turned off first:
+it. It defaults to `Acks.AllReplicas`. To use any other value, turn
+[idempotence](#idempotence) off first:
 
 ```scala
 settings.withoutIdempotence.withAcks(Acks.Leader)
@@ -108,19 +108,17 @@ settings.withoutIdempotence.withAcks(Acks.Leader)
 
 ## Idempotence
 
-A producer is idempotent by default: it turns on Kafka's idempotent producer,
-`enable.idempotence`, on every backend. Kafka's documentation describes what that
-guarantees.
+Producers are idempotent by default: xkafka turns on Kafka's
+`enable.idempotence` on every backend. See Kafka's documentation of that setting
+for what it guarantees.
 
-An idempotent producer needs `Acks.AllReplicas`. Settings that ask for idempotence
-with any other `acks` value are rejected with
-`SettingsError.IdempotenceRequiresAllReplicas`, so `withAcks` and
-`withIdempotence` revalidate and return
-`ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. `withoutIdempotence`
-turns it off.
+Idempotence requires `Acks.AllReplicas`. Settings that combine it with another
+`acks` value are rejected with `SettingsError.IdempotenceRequiresAllReplicas`,
+which is why `withAcks` and `withIdempotence` return a `ValidatedNel`. Call
+`withoutIdempotence` to turn it off.
 
-A [transactional producer](transactions.md) is always idempotent, because Kafka
-requires it of transactions.
+[Transactional producers](transactions.md) are always idempotent, because Kafka
+requires it for transactions.
 
 ## Releasing a producer
 

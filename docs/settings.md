@@ -104,7 +104,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `pollTimeout` | 100ms | how long one poll waits for records before returning empty |
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for an answer |
 | `commitTimeout` | 15s | how long a commit waits before failing as a timed out request |
-| `assignmentFencing` | `true` | whether an offset commits only while this consumer still holds the partition it was read from |
+| `assignmentFencing` | `true` | whether offsets from a partition this consumer no longer owns are refused |
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default matches
@@ -121,9 +121,9 @@ Beyond the serializers, `ProducerSettings` carries:
 | --- | --- | --- |
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
 | `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
-| `idempotence` | `true` | whether the producer is idempotent, Kafka's `enable.idempotence`, which needs `acks` to be `AllReplicas` |
+| `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
 
-See [Producing](producing.md) for both.
+See [Producing](producing.md) for all three.
 
 ## Client settings
 

@@ -37,8 +37,8 @@ A `CertificateAuthority` is one of:
 Scala.js and Scala Native also accept a directory of certificates as a
 `PemFile`.
 
-`TlsSettings` verifies the broker hostname unless
-`withoutHostnameVerification` says otherwise.
+`TlsSettings` verifies the broker hostname by default. Call
+`withoutHostnameVerification` to turn that off.
 
 ## Credentials
 

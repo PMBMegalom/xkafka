@@ -89,7 +89,7 @@ enum SettingsError derives CanEqual:
       case BlankSaslPassword                    => "SASL password must not be blank"
       case NonPositiveDuration(field, value)    => s"${field.label} must be positive, was $value"
       case DurationExceedsMaximum(field, value) => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
-      case IdempotenceRequiresAllReplicas(acks) => s"an idempotent producer needs acks AllReplicas, was $acks"
+      case IdempotenceRequiresAllReplicas(acks) => s"acks must be AllReplicas while idempotence is on, was $acks"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -458,10 +458,10 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       assignmentFencing
     ) {}
 
-  /** Commits an offset only while this consumer still holds the partition assignment it was read under, which is the default.
+  /** Refuses offsets from a partition this consumer no longer owns, which is the default.
     *
-    * An offset read before its partition was revoked then fails to commit with `ErrorCode.IllegalGeneration`, whether it is committed on its own, in
-    * a batch, or in a transaction.
+    * An offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, whether it is committed on its own, in a
+    * batch, or in a transaction.
     */
   def withAssignmentFencing: ConsumerSettings[F, K, V] =
     new ConsumerSettings(
@@ -479,9 +479,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       true
     ) {}
 
-  /** Commits an offset against whatever membership the consumer holds when the commit runs, including after its partition has moved to another
-    * consumer.
-    */
+  /** Commits offsets even after their partition has moved to another consumer, which can move that partition back to an earlier position. */
   def withoutAssignmentFencing: ConsumerSettings[F, K, V] =
     new ConsumerSettings(
       client,
@@ -683,6 +681,7 @@ object KafkaAdminClient:
 trait OffsetCommitter[F[_]]:
   self =>
 
+  /** Commits these offsets. With assignment fencing on, it commits only for partitions the consumer owns when the commit runs. */
   def commit(offsets: Map[TopicPartition, Offset]): F[Unit]
 
   /** Commits offsets together with the lease each was read under, which a consumer that fences its assignment checks before committing.
@@ -751,10 +750,7 @@ object CommittableOffset:
   given FunctorK[CommittableOffset] with
     override def mapK[F[_], G[_]](offset: CommittableOffset[F])(fk: FunctionK[F, G]): CommittableOffset[G] = offset.mapK(fk)
 
-/** The offsets to commit, at most one per topic-partition for each committer.
-  *
-  * Each offset keeps the membership it was read under, so a transaction can record it against that membership rather than a later one.
-  */
+/** The offsets to commit, keeping the greatest one per topic-partition for each consumer. */
 opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, CommittableOffsetBatch.Entry[F]]]
 
 object CommittableOffsetBatch:

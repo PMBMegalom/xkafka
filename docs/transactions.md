@@ -72,10 +72,10 @@ The batch already identifies the consumer its offsets came from, so
 wrong group.
 
 @:callout(warning)
-Offsets read before their partition was revoked cannot be recorded.
-`commitOffsets` fails with `ErrorCode.IllegalGeneration`, and `transactionally`
-aborts the transaction, so none of it becomes visible. Read the records again and
-process them in a new transaction. See
+If a partition is revoked after its records were read, their offsets can no longer
+be committed. `commitOffsets` fails with `ErrorCode.IllegalGeneration`, and
+`transactionally` aborts the transaction, so none of it becomes visible. Read the
+records again and process them in a new transaction. See
 [Offsets and rebalances](offsets.md#offsets-and-rebalances).
 @:@
 
@@ -102,9 +102,8 @@ properties, along with these values:
 | `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms` |
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
 
-A transactional producer always waits for every in-sync replica to hold a record,
-Kafka's `acks=all`, because Kafka requires it of transactions. It has no `acks`
-setting.
+A transactional producer always uses `Acks.AllReplicas` and idempotence, because
+Kafka requires both for transactions, so neither can be changed.
 
 Give each producer that runs alongside another its own `transactionalId`.
 Creating a second producer with an id already in use fences the first, and its

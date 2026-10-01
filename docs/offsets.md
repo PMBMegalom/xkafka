@@ -21,36 +21,39 @@ one backend commit per originating consumer.
 
 ## Offsets and rebalances
 
-An offset belongs to the assignment it was read under. Once the group revokes
-its partition, the offset can no longer be committed, whether on its own, in a
-batch, or in a [transaction](transactions.md). The commit fails with a
+By default, an offset can only be committed while the consumer that read it still
+owns its partition. This is called assignment fencing.
+
+When the group moves a partition to another consumer, offsets read from it before
+the move can no longer be committed, whether on their own, in a batch, or in a
+[transaction](transactions.md). The commit fails with a
 `KafkaException.BackendFailure` whose code is `ErrorCode.IllegalGeneration`, and
-nothing is committed for that partition, so the consumer that holds it now keeps
-its position.
+nothing is committed for that partition. This holds even if the partition later
+comes back to the same consumer.
 
-This still applies when the partition later comes back to the same consumer.
+`IllegalGeneration` is not retriable. Read the records again after the rebalance,
+and commit those offsets.
 
-With the default partition assignment, a rebalance revokes every partition before
-assigning them again. Offsets read before any rebalance are then refused, including
-those of partitions the consumer keeps. `IllegalGeneration` is not retriable: read
-the records again after the rebalance and commit their offsets.
+How many offsets a rebalance affects depends on the partition assignment strategy:
 
-With a cooperative assignment strategy, a rebalance revokes only the partitions
-that move, so the offsets of the partitions a consumer keeps stay committable.
+- With the default strategy, every rebalance revokes all partitions and assigns
+  them again, so offsets read before any rebalance are refused, even for the
+  partitions the consumer keeps.
+- With a cooperative strategy, only the partitions that move are revoked, so
+  offsets for the partitions a consumer keeps can still be committed.
 
-Offsets passed to a committer's own `commit` carry no record, so they commit only
-for partitions the consumer holds when the commit runs.
+`committer.commit(offsets)` takes offsets that did not come from a record, so it
+can only check that the consumer owns each partition at the time of the commit.
 
-Fencing is on by default, and can be turned off:
+To turn fencing off:
 
 ```scala
 settings.withoutAssignmentFencing
 ```
 
-Without it, an offset is committed against whatever group membership the
-consumer holds when the commit runs. An offset read before a rebalance can then be
-committed after its partition has moved to another consumer, and move that
-partition back to an earlier position.
+Without fencing, an offset read before a rebalance can still be committed after its
+partition has moved to another consumer, which moves that partition back to an
+earlier position.
 
 ## Committing on a schedule
 
