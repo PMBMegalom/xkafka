@@ -862,27 +862,44 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
 
   test(conformance("a plain commit cannot move a partition back to an offset its consumer read before losing it")):
     withBroker: server =>
-      rolledBack(server, fencing = true).map: (stale, earlier, ahead, after) =>
-        def rejected(outcome: Either[Throwable, Unit], clue: String): Unit =
-          outcome match
-            case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.IllegalGeneration), failure.getMessage)
-            case other                                        => fail(s"$clue, got $other")
-        rejected(stale, "the first consumer's offset for the partition it lost was committed")
-        rejected(earlier, "an offset read before the rebalance was committed for a partition the consumer kept")
-        assertEquals(after, Some(ahead), "the partition should stay where its new owner committed it")
+      rolledBack(server, fencing = true).map: outcome =>
+        rejected(outcome.stale, "the first consumer's offset for the partition it lost was committed")
+        rejected(outcome.earlier, "an offset read before the rebalance was committed for a partition the consumer kept")
+        rejected(outcome.direct, "the first consumer's committer committed a partition it no longer holds")
+        // A committer's own commit names no lease, so it is held to the partitions the consumer holds now, which includes the one it kept.
+        assertEquals(outcome.owned, Right(()))
+        assertEquals(outcome.after, Some(outcome.ahead), "the partition should stay where its new owner committed it")
 
   test(conformance("with assignment fencing off, a plain commit moves a partition back to an offset its consumer read before losing it")):
     withBroker: server =>
-      rolledBack(server, fencing = false).map: (stale, _, ahead, after) =>
-        assertEquals(stale, Right(()))
+      rolledBack(server, fencing = false).map: outcome =>
+        assertEquals(outcome.stale, Right(()))
+        assertEquals(outcome.direct, Right(()))
         // Without fencing the old offset goes out under the consumer's current membership, which the broker accepts, as it did before fencing.
-        assert(after.exists(_.value < ahead.value), s"the stale commit should have moved the partition back from $ahead, got $after")
+        assert(
+          outcome.after.exists(_.value < outcome.ahead.value),
+          s"the stale commit should have moved the partition back from ${outcome.ahead}, got ${outcome.after}"
+        )
+
+  /** What each commit came to, where the second consumer committed, and where the partition it took ended up. */
+  private final case class RolledBack(
+      stale: Either[Throwable, Unit],
+      earlier: Either[Throwable, Unit],
+      direct: Either[Throwable, Unit],
+      owned: Either[Throwable, Unit],
+      ahead: Offset,
+      after: Option[Offset]
+  )
+
+  private def rejected(outcome: Either[Throwable, Unit], clue: String): Unit =
+    outcome match
+      case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.IllegalGeneration), failure.getMessage)
+      case other                                        => fail(s"$clue, got $other")
 
   /** The first consumer reads one record from each partition and keeps it. Once a second consumer has taken one partition and committed past that
-    * record, the first plain-commits both records it kept. Answers both outcomes, where the second consumer committed, and where the partition it
-    * took ended up.
+    * record, the first plain-commits both records it kept, then commits each partition directly through its committer.
     */
-  private def rolledBack(server: String, fencing: Boolean): IO[(Either[Throwable, Unit], Either[Throwable, Unit], Offset, Option[Offset])] =
+  private def rolledBack(server: String, fencing: Boolean): IO[RolledBack] =
     val input  = validTopic(partitionedTopic)
     val group  = uniqueGroup(if fencing then "rollback-fenced" else "rollback-unfenced")
     val seeded = NonEmptyList.of(0, 0, 1, 1).map(value => record(input, Some("k"), Some("seed"), validPartition(value)))
@@ -915,11 +932,63 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                       _       <- latest.offset.commit
                       stale   <- before(revoked).commit.attempt
                       earlier <- before(kept.head).commit.attempt
+                      direct  <- before(revoked).committer.commit(Map(revoked -> before(revoked).nextOffset)).attempt
+                      owned   <- before(kept.head).committer.commit(Map(kept.head -> before(kept.head).nextOffset)).attempt
                       after   <- first.committed(Set(revoked))
-                    yield (stale, earlier, latest.offset.nextOffset, after.get(revoked).flatten)
+                    yield RolledBack(stale, earlier, direct, owned, latest.offset.nextOffset, after.get(revoked).flatten)
             yield outcome
         .timeout(90.seconds)
     yield outcome
+
+  test(conformance("under cooperative rebalancing, offsets read before a rebalance stay committable for the partitions a consumer keeps")):
+    withBroker: server =>
+      val input  = validTopic(partitionedTopic)
+      val output = uniqueTopic("cooperative-output")
+      val group  = uniqueGroup("cooperative")
+      val seeded = NonEmptyList.of(0, 1).map(value => record(input, Some("k"), Some("seed"), validPartition(value)))
+      // The Java client names its assignors by class, and librdkafka by name.
+      val strategy = if backend == "jvm" then "org.apache.kafka.clients.consumer.CooperativeStickyAssignor" else "cooperative-sticky"
+
+      for
+        _        <- produce(server, seeded)
+        settings <- transactionalSettings(server, uniqueTransactionalId("cooperative"))
+        reading  <-
+          committedConsumerSettings(server, group).flatMap(value =>
+            IO.fromOption(value.withProperty("partition.assignment.strategy", strategy).toOption)(new AssertionError("strategy rejected"))
+          )
+        held    <- Ref[IO].of(Map.empty[TopicPartition, CommittableOffset[IO]])
+        outcome <-
+          PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: first =>
+            first.records.evalMap(next =>
+              held.update(kept => if kept.contains(next.record.topicPartition) then kept else kept.updated(next.record.topicPartition, next.offset))
+            ).compile.drain.background.surround:
+              for
+                before  <- held.get.iterateUntil(_.size == 2)
+                outcome <-
+                  PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+                    PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: second =>
+                      second.records.compile.drain.background.surround:
+                        for
+                          kept     <- (assignmentOf(first, 1), assignmentOf(second, 1)).parTupled.map(_._1)
+                          revoked  <- IO.fromOption(before.keySet.find(!kept.contains(_)))(new AssertionError(s"nothing was revoked from $kept"))
+                          lost     <- before(revoked).commit.attempt
+                          recorded <-
+                            producer.transactionally(transaction =>
+                              transaction.produce(NonEmptyList.one(record(output, Some("k"), Some("out"), validPartition(0)))) *>
+                                transaction.commitOffsets(CommittableOffsetBatch.empty[IO].updated(before(kept.head)))
+                            ).attempt
+                          plain <- before(kept.head).commit.attempt
+                          moved <- first.committed(Set(kept.head))
+                        yield (lost, recorded, plain, before(kept.head).nextOffset, moved.get(kept.head).flatten)
+              yield outcome
+          .timeout(90.seconds)
+      yield
+        val (lost, recorded, plain, expected, moved) = outcome
+        rejected(lost, "the offset of the partition the consumer lost was committed")
+        // The cooperative protocol revokes only the partition that moves, so the one the consumer kept keeps its lease.
+        assertEquals(recorded, Right(()))
+        assertEquals(plain, Right(()))
+        assertEquals(moved, Some(expected))
 
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =

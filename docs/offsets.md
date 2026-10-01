@@ -35,6 +35,12 @@ assigning them again. Offsets read before any rebalance are then refused, includ
 those of partitions the consumer keeps. `IllegalGeneration` is not retriable: read
 the records again after the rebalance and commit their offsets.
 
+With a cooperative assignment strategy, a rebalance revokes only the partitions
+that move, so the offsets of the partitions a consumer keeps stay committable.
+
+Offsets passed to a committer's own `commit` carry no record, so they commit only
+for partitions the consumer holds when the commit runs.
+
 Fencing is on by default, and can be turned off:
 
 ```scala

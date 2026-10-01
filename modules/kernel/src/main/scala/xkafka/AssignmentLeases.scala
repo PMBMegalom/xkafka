@@ -91,6 +91,12 @@ private[xkafka] sealed trait AssignmentLeases[F[_]]:
   /** The lease each partition holds right now, for a backend whose reads cannot overlap a rebalance. */
   def held: F[LeaseKey => Option[Lease]]
 
+  /** Offsets that came with no lease of their own, paired with each partition's current lease, so they commit only for a partition held now. */
+  final def current(offsets: Map[TopicPartition, Offset])(using cats.Functor[F]): F[Map[TopicPartition, (Offset, Option[Lease])]] =
+    held.map(now =>
+      offsets.map((topicPartition, offset) => topicPartition -> (offset, now(LeaseKey(topicPartition.topic.value, topicPartition.partition.value))))
+    )
+
   /** What a transaction records an offset read under `lease` against. `owner` tells one consumer's leases from another's, and `handle` names the
     * consumer's current membership, which is what the backend sends.
     */

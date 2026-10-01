@@ -397,7 +397,10 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     private val offsetCommitter: OffsetCommitter[F] =
       CommitRecovery.recovering(
         new OffsetCommitter[F]:
-          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+          /** Offsets with no lease of their own commit only for a partition this consumer holds now. */
+          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = leases.current(offsets).flatMap(commitLeased)
+
+          private def send(offsets: Map[TopicPartition, Offset]): F[Unit] =
             backend(underlying.commitSync(
               offsets.map:
                 case (topicPartition, offset) => new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value) ->
@@ -406,7 +409,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
           /** Each attempt names the leases its offsets were read under, which the consumer checks on its own thread just before it commits. */
           override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
-            val plain = commit(offsets.view.mapValues(_._1).toMap)
+            val plain = send(offsets.view.mapValues(_._1).toMap)
             if !settings.assignmentFencing then plain
             else
               val named = offsets.map((topicPartition, entry) => LeaseKey(topicPartition.topic.value, topicPartition.partition.value) -> entry._2)

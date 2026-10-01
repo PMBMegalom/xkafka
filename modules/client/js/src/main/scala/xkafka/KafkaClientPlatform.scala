@@ -596,7 +596,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
     private val reportingOffsetCommitter: OffsetCommitter[F] =
       new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] =
+        /** Offsets with no lease of their own commit only for a partition this consumer holds now. */
+        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = leases.current(offsets).flatMap(commitLeased)
+
+        private def send(offsets: Map[TopicPartition, Offset]): F[Unit] =
           Deferred[F, Either[Throwable, Unit]].flatMap: outcome =>
             val pending = PendingCommit(offsets, outcome)
             F.uncancelable: poll =>
@@ -611,7 +614,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
         /** Each attempt holds the offsets' leases until the client reports it, so a revocation waits for a commit already sent. */
         override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
-          leases.holding(offsets.values.map(_._2).toList)(commit(offsets.view.mapValues(_._1).toMap))
+          leases.holding(offsets.values.map(_._2).toList)(send(offsets.view.mapValues(_._1).toMap))
 
         /** The client names a group by the consumer holding it, so a transaction recording these offsets is handed that consumer. */
         override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(F.pure(ConfluentGroupHandle(underlying)), _ => F.unit)
