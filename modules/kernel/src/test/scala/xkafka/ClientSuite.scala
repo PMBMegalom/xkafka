@@ -508,6 +508,23 @@ final class ClientSuite extends FunSuite:
     assertEquals(updated.withProperty("linger.ms", "5").toOption.get.transactionTimeout, 5.seconds)
     assertEquals(settings.withProperty("linger.ms", "5").toOption.get.producer.properties, Map("linger.ms" -> "5"))
 
+  test("transactional producer settings carry a close timeout, which the other withers keep"):
+    val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
+    val settings   = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer).toOption.get
+    val shorter    = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, closeTimeout = 5.seconds).toOption.get
+    val updated    = settings.withCloseTimeout(5.seconds).toOption.get
+
+    assertEquals(settings.producer.closeTimeout, ProducerSettings.DefaultCloseTimeout)
+    assertEquals(shorter.producer.closeTimeout, 5.seconds)
+    assertEquals(updated.producer.closeTimeout, 5.seconds)
+    assertEquals(updated.withTransactionTimeout(10.seconds).toOption.get.producer.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.producer.closeTimeout, 5.seconds)
+    assertEquals(
+      settings.withCloseTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.CloseTimeout, Duration.Zero)))
+    )
+
   test("settings reject the transaction properties the typed model owns"):
     val serializer = Serializer.const[IO, String](None)
     val id         = TransactionalId.from("writer").toOption.get

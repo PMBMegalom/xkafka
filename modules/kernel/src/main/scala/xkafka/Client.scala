@@ -247,6 +247,10 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, value))
       .map(_ => new TransactionalProducerSettings(producer, transactionalId, value) {})
 
+  /** How long releasing the producer waits for records it has not delivered yet. */
+  def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withCloseTimeout(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     withProperties(producer.properties.updated(name, value))
 
@@ -263,10 +267,11 @@ object TransactionalProducerSettings:
       keySerializer: Serializer[F, K],
       valueSerializer: Serializer[F, V],
       transactionTimeout: FiniteDuration = TransactionalProducerSettings.DefaultTransactionTimeout,
-      properties: Map[String, String] = Map.empty
+      properties: Map[String, String] = Map.empty,
+      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
   ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     (
-      ProducerSettings.from(client, keySerializer, valueSerializer, properties),
+      ProducerSettings.from(client, keySerializer, valueSerializer, properties, closeTimeout = closeTimeout),
       validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, transactionTimeout))
     ).mapN((producer, _) => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})
 

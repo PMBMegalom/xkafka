@@ -199,6 +199,20 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             assert(outcomes.take(2).forall(illegalGeneration), s"offsets read before the revocation should be rejected, got $outcomes")
             assertEquals(outcomes.lift(2), Some(Right(())))
 
+  test("a transactional producer reaches fs2-kafka with its close timeout and every replica acknowledging"):
+    val captured = new java.util.concurrent.atomic.AtomicReference[Option[(scala.concurrent.duration.FiniteDuration, Option[String])]](None)
+    given MkProducer[IO] with
+      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] =
+        IO(captured.set(Some(settings.closeTimeout -> settings.properties.get("acks")))) *>
+          IO.pure(new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer))
+    val serializer = Serializer.utf8[IO]
+    val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings   =
+      TransactionalProducerSettings.from(client, TransactionalId.from("writer").toOption.get, serializer, serializer, closeTimeout = 5.seconds)
+        .toOption.get
+
+    KafkaClientPlatform.fromFs2[IO].transactionalProducer(settings).use_.map(_ => assertEquals(captured.get, Some(5.seconds -> Some("all"))))
+
   test("a plain commit of an offset read under a revoked assignment is refused before it reaches the consumer"):
     val (consumer, partition) = subscribedMock()
     val reassigned            = new CountDownLatch(1)

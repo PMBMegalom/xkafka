@@ -93,12 +93,18 @@ has not acknowledged, so the call waits for them.
 
 ## Settings
 
-`TransactionalProducerSettings` wraps `ProducerSettings` and adds two values.
+`TransactionalProducerSettings` takes the producer's client, serializers, and
+properties, along with these values:
 
-| setting | default | maps to |
+| setting | default | meaning |
 | --- | --- | --- |
 | `transactionalId` | required | Kafka's `transactional.id` |
 | `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms` |
+| `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
+
+A transactional producer always waits for every in-sync replica to hold a record,
+Kafka's `acks=all`, because Kafka requires it of transactions. It has no `acks`
+setting.
 
 Give each producer that runs alongside another its own `transactionalId`.
 Creating a second producer with an id already in use fences the first, and its

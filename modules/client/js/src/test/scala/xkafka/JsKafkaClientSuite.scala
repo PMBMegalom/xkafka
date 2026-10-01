@@ -797,7 +797,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
     val serializer      = Serializer.const[IO, String](None)
     val transactionalId = TransactionalId.from("writer").toOption.get
     val settings        =
-      TransactionalProducerSettings.from(clientSettings, transactionalId, serializer, serializer, transactionTimeout = 30.seconds).toOption.get
+      TransactionalProducerSettings
+        .from(clientSettings, transactionalId, serializer, serializer, transactionTimeout = 30.seconds, closeTimeout = 5.seconds).toOption.get
+    val closed   = js.Array[Int]()
     val producer =
       js.Dynamic.literal(
         connect =
@@ -807,11 +809,11 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
             Unit
           ],
         disconnect =
-          ((_: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) => done(null, ())): js.Function2[
-            Int,
-            js.Function2[confluent.RdError | Null, js.Any, Unit],
-            Unit
-          ],
+          (
+              (timeout: Int, done: js.Function2[confluent.RdError | Null, js.Any, Unit]) =>
+                closed.push(timeout): Unit
+                done(null, ())
+          ): js.Function2[Int, js.Function2[confluent.RdError | Null, js.Any, Unit], Unit],
         setPollInterval = ((_: Int) => ()): js.Function1[Int, Unit],
         on =
           ((_: String, _: js.Function2[confluent.RdError | Null, confluent.RdDeliveryReport, Unit]) => ()): js.Function2[
@@ -828,7 +830,9 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       ).asInstanceOf[confluent.RdProducer]
     val expected = Map("transactional.id" -> "writer", "transaction.timeout.ms" -> "30000", DefaultAcks)
 
+    // Releasing the producer bounds its delivery wait by the close timeout, so the disconnect is given it.
     KafkaClientPlatform.fromDriver[IO](driver(producerValue = producer, expectedProducerProperties = expected)).transactionalProducer(settings).use_
+      .map(_ => assertEquals(closed.toList, List(5000)))
 
   /** Every consumer carries one, so a driver that is not given an expectation is given this. */
   private val DefaultIsolationLevel = "isolation.level" -> "read_uncommitted"
