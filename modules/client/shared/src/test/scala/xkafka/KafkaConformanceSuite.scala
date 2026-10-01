@@ -830,7 +830,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       for
         _        <- produce(server, seeded)
         settings <- transactionalSettings(server, uniqueTransactionalId("unfenced"))
-        reading  <- committedConsumerSettings(server, group).map(_.withAssignmentFencing(false))
+        reading  <- committedConsumerSettings(server, group).map(_.withoutAssignmentFencing)
         read     <- Ref[IO].of(Map.empty[TopicPartition, CommittableOffset[IO]])
         outcome  <-
           PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: first =>
@@ -889,7 +889,9 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
 
     for
       _       <- produce(server, seeded)
-      reading <- committedConsumerSettings(server, group).map(_.withAssignmentFencing(fencing))
+      reading <-
+        committedConsumerSettings(server, group)
+          .map(settings => if fencing then settings.withAssignmentFencing else settings.withoutAssignmentFencing)
       held    <- Ref[IO].of(Map.empty[TopicPartition, CommittableOffset[IO]])
       taken   <- Ref[IO].of(Vector.empty[CommittableConsumerRecord[IO, Option[String], Option[String]]])
       outcome <-

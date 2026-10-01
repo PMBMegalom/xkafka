@@ -77,7 +77,7 @@ final class SecurityPropertiesSuite extends FunSuite:
     assertEquals(SecurityProperties.librdkafka(SecuritySettings.Tls(system)).get("ssl.ca.location"), None)
 
   test("hostname verification is turned off with the value each backend expects"):
-    val unverified = TlsSettings.from(authority).toOption.get.withHostnameVerification(false)
+    val unverified = TlsSettings.from(authority).toOption.get.withoutHostnameVerification
 
     assertEquals(SecurityProperties.javaClient(SecuritySettings.Tls(unverified)).get("ssl.endpoint.identification.algorithm"), Some(""))
     assertEquals(SecurityProperties.librdkafka(SecuritySettings.Tls(unverified)).get("ssl.endpoint.identification.algorithm"), Some("none"))

@@ -7,7 +7,7 @@ import scala.sys.process.ProcessLogger
 import laika.helium.config.{HeliumIcon, IconLink}
 
 ThisBuild / scalaVersion     := "3.3.8"
-ThisBuild / tlBaseVersion    := "0.1"
+ThisBuild / tlBaseVersion    := "0.2"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
 ThisBuild / homepage         := Some(url("https://github.com/PMBMegalom/xkafka"))

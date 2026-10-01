@@ -432,13 +432,12 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       assignmentFencing
     ) {}
 
-  /** Whether an offset commits only while this consumer still holds the partition assignment it was read under.
+  /** Commits an offset only while this consumer still holds the partition assignment it was read under, which is the default.
     *
-    * On, which is the default, an offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, whether it is
-    * committed on its own, in a batch, or in a transaction. Off, an offset is committed against whatever membership the consumer holds when the
-    * commit runs.
+    * An offset read before its partition was revoked then fails to commit with `ErrorCode.IllegalGeneration`, whether it is committed on its own, in
+    * a batch, or in a transaction.
     */
-  def withAssignmentFencing(enabled: Boolean): ConsumerSettings[F, K, V] =
+  def withAssignmentFencing: ConsumerSettings[F, K, V] =
     new ConsumerSettings(
       client,
       groupId,
@@ -451,7 +450,26 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       pollTimeout,
       requestTimeout,
       properties,
-      enabled
+      true
+    ) {}
+
+  /** Commits an offset against whatever membership the consumer holds when the commit runs, including after its partition has moved to another
+    * consumer.
+    */
+  def withoutAssignmentFencing: ConsumerSettings[F, K, V] =
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      commitTimeout,
+      pollTimeout,
+      requestTimeout,
+      properties,
+      false
     ) {}
 
   /** How long one poll waits for records before it returns empty.

@@ -38,7 +38,7 @@ the records again after the rebalance and commit their offsets.
 Fencing is on by default, and can be turned off:
 
 ```scala
-settings.withAssignmentFencing(false)
+settings.withoutAssignmentFencing
 ```
 
 Without it, an offset is committed against whatever group membership the

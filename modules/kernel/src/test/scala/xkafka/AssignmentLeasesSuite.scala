@@ -32,7 +32,25 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
     val group    = ConsumerGroup.from("workers").toOption.get
     val settings = ConsumerSettings.from(client, group, Deserializer.utf8[IO], Deserializer.utf8[IO]).toOption.get
     assert(settings.assignmentFencing)
-    assert(!settings.withAssignmentFencing(false).assignmentFencing)
+    assert(!settings.withoutAssignmentFencing.assignmentFencing)
+    assert(settings.withoutAssignmentFencing.withAssignmentFencing.assignmentFencing)
+    assert(
+      !ConsumerSettings.from(client, group, Deserializer.utf8[IO], Deserializer.utf8[IO], assignmentFencing = false).toOption.get.assignmentFencing
+    )
+
+  test("the withers that revalidate keep fencing off"):
+    val client      = ClientSettings.from(cats.data.NonEmptyList.one("localhost:9092")).toOption.get
+    val group       = ConsumerGroup.from("workers").toOption.get
+    val unfenced    = ConsumerSettings.from(client, group, Deserializer.utf8[IO], Deserializer.utf8[IO]).toOption.get.withoutAssignmentFencing
+    val revalidated =
+      List(
+        unfenced.withCommitTimeout(1.second),
+        unfenced.withPollTimeout(1.second),
+        unfenced.withRequestTimeout(1.second),
+        unfenced.withProperty("fetch.min.bytes", "1"),
+        unfenced.withProperties(Map("fetch.min.bytes" -> "1"))
+      )
+    assertEquals(revalidated.map(_.toOption.map(_.assignmentFencing)), List.fill(5)(Some(false)))
 
   test("an offset read under a lease is recorded while the lease is held, and rejected once it is revoked, even after the partition returns"):
     for

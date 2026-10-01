@@ -337,7 +337,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       settings =
         ConsumerSettings
           .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.wait.max.ms" -> "10"))
-          .toOption.get.withAssignmentFencing(false)
+          .toOption.get.withoutAssignmentFencing
       record <-
         KafkaClientPlatform
           .fromDriver[IO](driver(consumerValue = consumer, expectedConsumerProperties = Map("fetch.wait.max.ms" -> "10", DefaultIsolationLevel)))
@@ -635,7 +635,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       sent       <- IO(js.Array[js.Function1[confluent.RdError | Null, Unit]]())
       rd       = rebalancingConsumer(delivered, calls)
       client   = KafkaClientPlatform.fromDriver[IO](transactionalDriver(transactionalProducer(sent, hold = false), rd, rebalances))
-      unfenced = consumerSettings.withAssignmentFencing(false)
+      unfenced = consumerSettings.withoutAssignmentFencing
       outcome <-
         (client.transactionalProducer(transactionalSettings), client.consumer(unfenced, Selection.Topics(NonEmptySet.one(topic("events"))))).tupled
           .use: (producer, consumer) =>
@@ -1092,7 +1092,7 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
   private val consumerSettings = ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer).toOption.get
 
   /** For the cases about commit reporting, whose stubs hand over records without ever assigning a partition, so no record carries a lease. */
-  private val unleasedSettings = consumerSettings.withAssignmentFencing(false)
+  private val unleasedSettings = consumerSettings.withoutAssignmentFencing
 
   private def uint8(value: String): Uint8Array =
     val bytes  = value.getBytes("UTF-8")

@@ -43,7 +43,11 @@ enum SaslMechanism(val name: String) derives CanEqual:
 sealed abstract case class TlsSettings private (certificateAuthority: CertificateAuthority, verifyHostname: Boolean):
   def withCertificateAuthority(value: CertificateAuthority): ValidatedNel[SettingsError, TlsSettings] = TlsSettings.from(value, verifyHostname)
 
-  def withHostnameVerification(value: Boolean): TlsSettings = new TlsSettings(certificateAuthority, value) {}
+  /** Checks that the broker's certificate names the host the client connected to, which is the default. */
+  def withHostnameVerification: TlsSettings = new TlsSettings(certificateAuthority, true) {}
+
+  /** Accepts a broker certificate that is otherwise trusted, whatever host it names. */
+  def withoutHostnameVerification: TlsSettings = new TlsSettings(certificateAuthority, false) {}
 
 object TlsSettings:
   def from(

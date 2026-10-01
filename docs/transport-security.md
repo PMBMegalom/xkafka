@@ -38,7 +38,7 @@ Scala.js and Scala Native also accept a directory of certificates as a
 `PemFile`.
 
 `TlsSettings` verifies the broker hostname unless
-`withHostnameVerification(false)` says otherwise.
+`withoutHostnameVerification` says otherwise.
 
 ## Credentials
 
