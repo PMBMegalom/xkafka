@@ -31,29 +31,32 @@ import cats.syntax.all.*
   * raise on their own. `Other` carries a code that has no portable meaning.
   */
 enum ErrorCode derives CanEqual:
-  case OffsetOutOfRange
-  case UnknownTopicOrPartition
-  case LeaderNotAvailable
-  case NotLeaderOrFollower
-  case RequestTimedOut
-  case BrokerNotAvailable
-  case MessageTooLarge
-  case NetworkException
-  case CoordinatorLoadInProgress
-  case CoordinatorNotAvailable
-  case NotCoordinator
-  case IllegalGeneration
-  case UnknownMemberId
-  case RebalanceInProgress
-  case InvalidGroupId
-  case InvalidTopic
-  case TopicAuthorizationFailed
-  case GroupAuthorizationFailed
-  case ClusterAuthorizationFailed
-  case UnsupportedVersion
-  case SaslAuthenticationFailed
-  case SslAuthenticationFailed
-  case Other(value: Int)
+  case OffsetOutOfRange           // the requested offset is outside the partition's log
+  case UnknownTopicOrPartition    // the topic or partition does not exist
+  case LeaderNotAvailable         // the partition has no leader right now, such as during an election
+  case NotLeaderOrFollower        // the broker no longer leads or follows the partition
+  case RequestTimedOut            // a request got no answer in time
+  case BrokerNotAvailable         // the broker cannot be reached
+  case MessageTooLarge            // a record is larger than the broker or topic accepts
+  case NetworkException           // the connection to the broker failed
+  case CoordinatorLoadInProgress  // the group or transaction coordinator is still loading its state
+  case CoordinatorNotAvailable    // the group or transaction coordinator is not available
+  case NotCoordinator             // the broker is not the coordinator for this group or transaction
+  case IllegalGeneration          // the group has moved on to a newer generation
+  case UnknownMemberId            // the group does not know this member
+  case RebalanceInProgress        // the group is rebalancing
+  case InvalidGroupId             // the group id is not valid
+  case InvalidTopic               // the topic name is not valid
+  case TopicAuthorizationFailed   // the client is not authorized for the topic
+  case GroupAuthorizationFailed   // the client is not authorized for the group
+  case ClusterAuthorizationFailed // the client is not authorized for the cluster operation
+  case UnsupportedVersion         // the broker does not support the request
+  case SaslAuthenticationFailed   // SASL authentication failed
+  case SslAuthenticationFailed    // the TLS handshake failed
+  case InvalidProducerEpoch       // the broker refuses the producer's epoch as out of date
+  case Fenced                     // a newer client with the same identity, such as the same transactional id, has taken over
+  case Purged                     // the client discarded a record before sending it, such as one waiting when its transaction aborted
+  case Other(value: Int)          // a code with no portable meaning
 
 object ErrorCode:
   /** The conditions worth trying again, which are the ones a broker reports while it is moving rather than refusing.
@@ -90,7 +93,10 @@ object ErrorCode:
       30 -> GroupAuthorizationFailed,
       31 -> ClusterAuthorizationFailed,
       35 -> UnsupportedVersion,
-      58 -> SaslAuthenticationFailed
+      47 -> InvalidProducerEpoch,
+      58 -> SaslAuthenticationFailed,
+      82 -> Fenced, // FENCED_INSTANCE_ID
+      90 -> Fenced  // PRODUCER_FENCED
     )
 
   /** Classifies a Kafka protocol error code, which the JVM and librdkafka both report from the same table. */
@@ -103,6 +109,8 @@ object ErrorCode:
       case -185 | -192        => RequestTimedOut          // _TIMED_OUT, _MSG_TIMED_OUT
       case -169               => SaslAuthenticationFailed // _AUTHENTICATION
       case -181               => SslAuthenticationFailed  // _SSL
+      case -144               => Fenced                   // _FENCED
+      case -152 | -151        => Purged                   // _PURGE_QUEUE, _PURGE_INFLIGHT
       // librdkafka normalizes _UNKNOWN_TOPIC to the protocol code before a consumer sees it, and these carry the same
       // meaning wherever it does not.
       case -188 | -190 => UnknownTopicOrPartition // _UNKNOWN_TOPIC, _UNKNOWN_PARTITION

@@ -228,7 +228,8 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       error.message,
       Some(code),
       error.isRetriable.toOption.orElse(Some(code.retriable)),
-      error.isFatal.toOption,
+      // Not every call after fencing carries the flag, and a fenced client never recovers, whichever call reports it.
+      error.isFatal.toOption.orElse(Option.when(code == ErrorCode.Fenced)(true)),
       error.isTxnRequiresAbort.toOption
     )
 

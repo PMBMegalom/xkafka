@@ -50,6 +50,11 @@ final class ErrorSuite extends FunSuite:
     assertEquals(ErrorCode.fromProtocol(1), ErrorCode.OffsetOutOfRange)
     assertEquals(ErrorCode.fromProtocol(27), ErrorCode.RebalanceInProgress)
     assertEquals(ErrorCode.fromProtocol(999), ErrorCode.Other(999))
+    assertEquals(ErrorCode.fromProtocol(47), ErrorCode.InvalidProducerEpoch)
+    // PRODUCER_FENCED and FENCED_INSTANCE_ID both say a newer client with the same identity took over.
+    assertEquals(ErrorCode.fromProtocol(90), ErrorCode.Fenced)
+    assertEquals(ErrorCode.fromProtocol(82), ErrorCode.Fenced)
+    assert(!ErrorCode.Fenced.retriable && !ErrorCode.Purged.retriable && !ErrorCode.InvalidProducerEpoch.retriable)
 
   test("librdkafka client-side codes map onto the portable ones"):
     assertEquals(ErrorCode.fromLibrdkafka(-195), ErrorCode.NetworkException)
@@ -61,6 +66,9 @@ final class ErrorSuite extends FunSuite:
     assertEquals(ErrorCode.fromLibrdkafka(-181), ErrorCode.SslAuthenticationFailed)
     assertEquals(ErrorCode.fromLibrdkafka(-188), ErrorCode.UnknownTopicOrPartition)
     assertEquals(ErrorCode.fromLibrdkafka(-190), ErrorCode.UnknownTopicOrPartition)
+    assertEquals(ErrorCode.fromLibrdkafka(-144), ErrorCode.Fenced)
+    assertEquals(ErrorCode.fromLibrdkafka(-152), ErrorCode.Purged)
+    assertEquals(ErrorCode.fromLibrdkafka(-151), ErrorCode.Purged)
     // _OUTDATED and _FAIL have no portable meaning, so they stay raw.
     assertEquals(ErrorCode.fromLibrdkafka(-167), ErrorCode.Other(-167))
     assertEquals(ErrorCode.fromLibrdkafka(-196), ErrorCode.Other(-196))

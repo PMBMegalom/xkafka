@@ -706,15 +706,25 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               _      <- PlatformKafkaClient().transactionalProducer(settings).use_.timeout(60.seconds)
               _      <- release.complete(())
               result <- running.joinWithNever.timeout(60.seconds)
-            yield result
+              // A fenced producer stays fenced, so its next transaction fails the same way.
+              next <- first.transactionally(transaction => transaction.produce(produced)).attempt.timeout(60.seconds)
+            yield (result, next)
           .timeout(120.seconds)
-      yield outcome match
-        case Left(failure: KafkaException.BackendFailure) =>
-          assertEquals(failure.retriable, Some(false), failure.getMessage)
-          assertEquals(failure.fatal, Some(true), failure.getMessage)
-          if backend == "jvm" then assertEquals(failure.transactionAbortRequired, None, failure.getMessage)
-          else assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
-        case other => fail(s"a fenced producer should report a backend failure, got $other")
+      yield
+        val (fenced, next) = outcome
+        fenced match
+          case Left(failure: KafkaException.BackendFailure) =>
+            assertEquals(failure.code, Some(ErrorCode.Fenced), failure.getMessage)
+            assertEquals(failure.retriable, Some(false), failure.getMessage)
+            assertEquals(failure.fatal, Some(true), failure.getMessage)
+            if backend == "jvm" then assertEquals(failure.transactionAbortRequired, None, failure.getMessage)
+            else assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
+          case other => fail(s"a fenced producer should report a backend failure, got $other")
+        next match
+          case Left(failure: KafkaException.BackendFailure) =>
+            assertEquals(failure.code, Some(ErrorCode.Fenced), failure.getMessage)
+            assertEquals(failure.fatal, Some(true), failure.getMessage)
+          case other => fail(s"a fenced producer's next transaction should report a backend failure, got $other")
 
   test(conformance("a transaction opened inside another one cannot proceed")):
     withBroker: server =>
@@ -989,6 +999,26 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(recorded, Right(()))
         assertEquals(plain, Right(()))
         assertEquals(moved, Some(expected))
+
+  test(conformance("a record still waiting to be sent when its transaction aborts fails as purged")):
+    withBroker: server =>
+      val topic = uniqueTopic("purged")
+      for
+        base <- transactionalSettings(server, uniqueTransactionalId("purged"))
+        // Held back long enough that the transaction aborts before the record is sent.
+        settings <- IO.fromOption(base.withProperty("linger.ms", "5000").toOption)(new AssertionError("linger.ms was rejected"))
+        waiting  <- Deferred[IO, Either[Throwable, ProducerResult[Option[String], Option[String]]]]
+        outcome  <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            producer.transactionally(transaction =>
+              transaction.produce(NonEmptyList.one(record(topic, Some("k"), Some("held"), validPartition(0)))).attempt.flatMap(waiting.complete)
+                .start *> IO.sleep(500.millis) *> IO.raiseError[Unit](new RuntimeException("the body failed"))
+            ).attempt *> waiting.get.timeout(30.seconds)
+      yield outcome match
+        case Left(failure: KafkaException.BackendFailure) =>
+          assertEquals(failure.code, Some(ErrorCode.Purged), failure.getMessage)
+          assertEquals(failure.retriable, Some(false), failure.getMessage)
+        case other => fail(s"the held record should have been purged, got $other")
 
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =

@@ -52,7 +52,8 @@ import org.apache.kafka.clients.consumer.{
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
 import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.{
-  AuthenticationException, InvalidPidMappingException, ProducerFencedException, SaslAuthenticationException, SslAuthenticationException
+  AuthenticationException, InvalidPidMappingException, ProducerFencedException, SaslAuthenticationException, SslAuthenticationException,
+  TransactionAbortedException
 }
 import org.apache.kafka.common.protocol.Errors
 import internal.ClientProperties
@@ -206,6 +207,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       case _: SaslAuthenticationException => Some(ErrorCode.SaslAuthenticationFailed)
       case _: AuthenticationException     => None
       case failed: CommitFailedException  => rejectedMembership(failed).orElse(tabled(error))
+      // The Java client fails a record its aborted transaction never sent with this, and Kafka's table has no entry for it.
+      case _: TransactionAbortedException => Some(ErrorCode.Purged)
       case _                              => tabled(error)
 
   private def tabled(error: JavaKafkaException): Option[ErrorCode] =

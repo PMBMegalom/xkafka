@@ -24,8 +24,9 @@ classifications. A `None` for any of those means the backend did not make that
 classification available.
 
 The classifications preserve what a backend reports. When a backend supplies
-only a code, `retriable` falls back to the portable `ErrorCode.retriable` answer;
-`fatal` and `transactionAbortRequired` remain `None` when unavailable. Code that
+only a code, `retriable` falls back to the portable `ErrorCode.retriable` answer.
+`fatal` is always `true` for `ErrorCode.Fenced`; otherwise it, like
+`transactionAbortRequired`, remains `None` when unavailable. Code that
 needs one portable retry decision should use `ErrorCode.retriable`; commit
 recovery does so as well:
 
@@ -51,3 +52,11 @@ failure.code match
 
 Matching on a protocol error such as `OffsetOutOfRange` behaves the same on all
 three platforms.
+
+Three codes cover failures around transactional producers:
+
+| code | raised when |
+| --- | --- |
+| `ErrorCode.Fenced` | a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way |
+| `ErrorCode.InvalidProducerEpoch` | the broker refuses the producer's epoch as out of date |
+| `ErrorCode.Purged` | the client discarded a record before sending it, such as one still waiting when its transaction aborted |
