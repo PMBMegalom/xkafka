@@ -38,11 +38,10 @@ private[xkafka] object PollQueue:
     polls.evalMap(queue.send(_).void).drain.handleErrorWith(error => Stream.exec(failure.complete(error).void) ++ Stream.raiseError[F](error))
       .onFinalize(queue.close.void)
 
-  /** The queued values, failing once a failure is recorded.
+  /** The queued values, failing once with a recorded failure.
     *
-    * `concurrently` stops watching for the failure when the queue ends, so a failure recorded just before the end can go unreported by it alone. The
-    * reader therefore also looks for one at the end.
+    * Watching for the failure stops when the queue ends, so a failure recorded just before the end could be missed by the watcher alone, and the
+    * reader also looks for one at the end. Only one of the two can raise it, since an interrupted queue never reaches the end.
     */
   def read[F[_], A](queue: Channel[F, A], failure: Deferred[F, Throwable])(using F: Concurrent[F]): Stream[F, A] =
-    (queue.stream ++ Stream.exec(failure.tryGet.flatMap(_.traverse_(F.raiseError[Unit]))))
-      .concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+    queue.stream.interruptWhen(failure.get.map(_.asLeft[Unit])) ++ Stream.exec(failure.tryGet.flatMap(_.traverse_(F.raiseError[Unit])))
