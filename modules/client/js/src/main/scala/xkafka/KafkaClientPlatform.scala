@@ -646,8 +646,14 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
             F.uncancelable: poll =>
               reported.set(Some(pending)) *>
                 poll(
-                  (F.delay(underlying.commit(committedOffsets(offsets))).void *> outcome.get)
-                    .timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut))).flatMap(F.fromEither)
+                  F.monotonic.flatMap: started =>
+                    (F.delay(underlying.commit(committedOffsets(offsets))).void *> outcome.get)
+                      .timeoutTo(settings.commitTimeout, F.pure(Left(commitTimedOut)))
+                      // A report can arrive after the deadline but before the event loop runs its timer. The other backends stop waiting
+                      // at the deadline and never see such a report, so it counts as timed out here too.
+                      .flatMap(answer =>
+                        F.monotonic.map(finished => if finished - started > settings.commitTimeout then Left(commitTimedOut) else answer)
+                      ).flatMap(F.fromEither)
                 )
                   // This covers cancellation and a synchronous throw from `commit`, not only the wait itself. It removes
                   // this attempt only, since its event may already have removed it before completing the Deferred.

@@ -435,6 +435,28 @@ final class JsKafkaClientSuite extends CatsEffectSuite:
       assertEquals(outcomes._1.leftMap(_.getMessage), Left("commit exploded"))
       assertEquals(outcomes._2, Right(()))
 
+  test("a commit report that arrives after the commit timeout fails as a timed out request"):
+    for
+      delivered <- IO(js.Array(commitMessage(0d)))
+      listeners <- IO(js.Array[CommitListener]())
+      consumer =
+        commitConsumer(
+          delivered,
+          listener => listeners.push(listener): Unit,
+          offsets =>
+            // Holding the event loop past the deadline means the report always arrives before the timer can run.
+            val until = js.Date.now() + 50
+            while js.Date.now() < until do ()
+            listeners.foreach(_(null, offsets.asInstanceOf[js.Array[confluent.RdTopicPartition]]))
+        )
+      settings = unleasedSettings.withCommitTimeout(5.millis).toOption.get.withCommitRecovery(CommitRecovery.none)
+      outcome <-
+        KafkaClientPlatform.fromDriver[IO](driver(consumerValue = consumer)).consumer(settings, Selection.Topics(NonEmptySet.one(topic("events"))))
+          .use(_.records.take(1).evalMap(_.offset.commit).compile.drain.attempt)
+    yield outcome match
+      case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), failure.getMessage)
+      case other                                        => fail(s"a report after the deadline should time the commit out, got $other")
+
   test("a commit report the client cannot read answers no commit and leaves the consumer running"):
     for
       delivered <- IO(js.Array(commitMessage(0d), commitMessage(1d)))
