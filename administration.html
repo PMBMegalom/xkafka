@@ -92,6 +92,8 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#what-it-does">What it does</a></li>
+    <li class="level1 nav-leaf"><a href="#deleting-records">Deleting records</a></li>
+    <li class="level1 nav-leaf"><a href="#topic-configuration">Topic configuration</a></li>
     <li class="level1 nav-leaf"><a href="#what-it-does-not-do">What it does not do</a></li>
   </ul>
 
@@ -102,8 +104,8 @@
       <main class="content">
 
         <h1 id="administration" class="title">Administration</h1>
-        <p><code>KafkaClient[F].admin</code> is a <code>Resource</code> over the topic operations. It reads and
-        changes cluster metadata only, and neither produces nor consumes.</p>
+        <p><code>KafkaClient[F].admin</code> is a <code>Resource</code> over the topic operations, record
+        deletion, and topic configuration. It neither produces nor consumes.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -123,6 +125,8 @@
           <li><code>deleteTopics</code> deletes each topic.</li>
           <li><code>createPartitions</code> requests the topic&#39;s new total partition count, which Kafka allows only as an increase.</li>
           <li><code>describeTopics</code> reports the partitions of each requested topic.</li>
+          <li><code>deleteRecords</code> deletes each partition&#39;s records below an offset. See <a href="#deleting-records">Deleting records</a>.</li>
+          <li><code>describeTopicConfigurations</code> reports each topic&#39;s effective configuration. See <a href="#topic-configuration">Topic configuration</a>.</li>
         </ul>
         <p><code>NewTopic.from</code> rejects a partition count or replication factor that is not
         positive. <code>createPartitions</code> likewise rejects a non-positive count before
@@ -132,7 +136,7 @@
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
           <p>Kafka reports an outcome for each topic, but the backends do not agree on whether
-          that detail survives. These operations therefore report only the first failure. A
+          that detail survives. The topic operations therefore report only the first failure. A
           request covering several topics may already have changed the cluster before the
           failure it reports.</p>
         </div>
@@ -144,10 +148,91 @@
           request before it.</p>
         </div>
         
+        <h2 id="deleting-records" class="section"><a class="anchor-link left" href="#deleting-records"><i class="icofont-laika link">&#xef71;</i></a>Deleting records</h2>
+        <p><code>deleteRecords</code> takes an offset for each partition and deletes the records below
+        it, so a cut at 3 removes offsets 0 to 2 and keeps 3 onwards. Each partition
+        answers on its own: with its new low watermark, the offset the partition now
+        begins at, or with the failure that refused the cut.</p>
+        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptyMap</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">syntax</span><span>.</span><span class="identifier">all</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">client</span><span>    &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">topic</span><span>     &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;journal&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">partition</span><span> &lt;- </span><span class="type-name">Partition</span><span>.</span><span class="identifier">from</span><span>(</span><span class="number-literal">0</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">cut</span><span>       &lt;- </span><span class="type-name">Offset</span><span>.</span><span class="identifier">from</span><span>(</span><span class="number-literal">1000L</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">answers</span><span>   &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">deleteRecords</span><span>(</span><span class="type-name">NonEmptyMap</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">TopicPartition</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">partition</span><span>), </span><span class="identifier">cut</span><span>)))
+    </span><span class="identifier">_</span><span>         &lt;- </span><span class="identifier">answers</span><span>.</span><span class="identifier">toList</span><span>.</span><span class="identifier">traverse_</span><span> :
+                   </span><span class="keyword">case</span><span> (</span><span class="identifier">topicPartition</span><span>, </span><span class="type-name">Right</span><span>(</span><span class="identifier">lowWatermark</span><span>)) =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${topicPartition.show}</span><span class="string-literal"> begins at </span><span class="substitution">${lowWatermark.show}</span><span class="string-literal">&quot;</span><span>)
+                   </span><span class="keyword">case</span><span> (</span><span class="identifier">topicPartition</span><span>, </span><span class="type-name">Left</span><span>(</span><span class="identifier">failure</span><span>))       =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${topicPartition.show}</span><span class="string-literal"> was refused: </span><span class="substitution">${failure.getMessage}</span><span class="string-literal">&quot;</span><span>)
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <ul>
+          <li>A cut at or below the partition&#39;s current start deletes nothing and answers
+          with the current low watermark, so repeating a cut is safe.</li>
+          <li>A cut at the end of the partition deletes all of its records. A cut past the end
+          is refused as <code>ErrorCode.OffsetOutOfRange</code>, and the other partitions in the same
+          call are still answered.</li>
+          <li>A topic or partition the cluster does not have answers with
+          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other partitions in the call are
+          still answered.</li>
+          <li>The call itself fails only where nothing is known about any partition, such as
+          when the cluster cannot be reached in time. It then fails with that failure,
+          which is retriable.</li>
+          <li>Deleting records moves no consumer group&#39;s offsets. A group whose committed
+          offset is now below the start of the partition resumes as its
+          <code>autoOffsetReset</code> says. See <a href="consuming.html#where-a-consumer-starts">Where a consumer starts</a>.</li>
+        </ul>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>A cut can reach any record written to the partition, including records of a
+          transaction that has not committed yet. Consumers reading committed records never
+          see the records such a cut deletes, even after their transaction commits.</p>
+        </div>
+        
+        <h2 id="topic-configuration" class="section"><a class="anchor-link left" href="#topic-configuration"><i class="icofont-laika link">&#xef71;</i></a>Topic configuration</h2>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p><code>describeTopicConfigurations</code> is not available on Scala.js. It raises
+          <code>KafkaException.Unsupported</code> there, because <code>@confluentinc/kafka-javascript</code>
+          does not offer the operation. It works on the JVM and Scala Native.</p>
+        </div>
+        <p><code>describeTopicConfigurations</code> reports the configuration each topic has in
+        effect, including the values it inherits from the broker or from Kafka&#39;s
+        defaults. Each topic answers on its own, as with <code>deleteRecords</code>: a topic the
+        cluster does not have answers with <code>ErrorCode.UnknownTopicOrPartition</code>, and the
+        call itself fails only where nothing is known about any topic, such as when the
+        cluster cannot be reached in time.</p>
+        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">client</span><span>  &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">topic</span><span>   &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;journal&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">answers</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeTopicConfigurations</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))
+    </span><span class="identifier">policy</span><span>   = </span><span class="identifier">answers</span><span>.</span><span class="identifier">get</span><span>(</span><span class="identifier">topic</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">toOption</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;cleanup.policy&quot;</span><span>))
+    </span><span class="identifier">_</span><span>       &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="identifier">policy</span><span>.</span><span class="identifier">fold</span><span>(</span><span class="string-literal">&quot;no cleanup.policy reported&quot;</span><span>)(</span><span class="identifier">entry</span><span> =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">${entry.value}</span><span class="string-literal"> from </span><span class="substitution">${entry.source}</span><span class="string-literal">&quot;</span><span>))
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <p>Each <code>ConfigurationEntry</code> carries:</p>
+        <ul>
+          <li><code>value</code>: <code>Present</code> with the value, <code>Absent</code> where the property has none, or
+          <code>Redacted</code> where the value is sensitive and the broker withheld it.</li>
+          <li><code>source</code>: where the value comes from. <code>TopicOverride</code> is set on the topic
+          itself; <code>DynamicBroker</code>, <code>DynamicClusterDefault</code>, and <code>StaticBroker</code> are
+          inherited from broker configuration; <code>Default</code> is Kafka&#39;s own default.</li>
+          <li><code>readOnly</code>: whether the property can be changed.</li>
+        </ul>
+        <p>A property the broker did not report has no entry, so <code>get</code> answers <code>None</code>.</p>
+        
         <h2 id="what-it-does-not-do" class="section"><a class="anchor-link left" href="#what-it-does-not-do"><i class="icofont-laika link">&#xef71;</i></a>What it does not do</h2>
-        <p>Access control, quotas, configuration, consumer group administration, delegation
-        tokens, and log directories are not covered. The topic operations above are the
-        ones every backend supports with the same meaning.</p>
+        <p>Access control, quotas, changing configuration, consumer group administration,
+        delegation tokens, and log directories are not covered.</p>
 
         
 <hr class="footer-rule"/>

@@ -92,6 +92,7 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#what-a-consumer-reads">What a consumer reads</a></li>
+    <li class="level1 nav-leaf"><a href="#where-a-consumer-starts">Where a consumer starts</a></li>
     <li class="level1 nav-leaf"><a href="#inspecting-the-consumer">Inspecting the consumer</a></li>
     <li class="level1 nav-leaf"><a href="#processing-every-record">Processing every record</a></li>
     <li class="level1 nav-leaf"><a href="#stopping">Stopping</a></li>
@@ -157,6 +158,37 @@
         <p>By default a consumer delivers records from transactions that have not
         committed. Set <code>isolationLevel</code> to change that. See
         <a href="transactions.html">Transactions</a>.</p>
+        
+        <h2 id="where-a-consumer-starts" class="section"><a class="anchor-link left" href="#where-a-consumer-starts"><i class="icofont-laika link">&#xef71;</i></a>Where a consumer starts</h2>
+        <p>A consumer resumes each partition from its group&#39;s committed offset. Where the
+        group has none, <code>autoOffsetReset</code> decides:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>value</th>
+              <th>where the consumer starts</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Earliest</code></td>
+              <td>at the first record still in the partition</td>
+            </tr>
+            <tr>
+              <td><code>Latest</code></td>
+              <td>at the end of the partition, reading only records written from then on</td>
+            </tr>
+            <tr>
+              <td><code>Fail</code></td>
+              <td>nowhere: the record stream fails as <code>ErrorCode.OffsetResetRequired</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>A committed offset that is no longer in the partition, because the records it
+        pointed at were deleted, is handled by the same setting. <code>Earliest</code> starts at the
+        first record still there, and <code>Fail</code> fails the record stream.</p>
+        <p>Choose <code>Fail</code> where skipping or replaying records would be wrong, such as for a
+        replica rebuilt from a snapshot and the log written after it.</p>
         
         <h2 id="inspecting-the-consumer" class="section"><a class="anchor-link left" href="#inspecting-the-consumer"><i class="icofont-laika link">&#xef71;</i></a>Inspecting the consumer</h2>
         <p>Within the consumer resource:</p>

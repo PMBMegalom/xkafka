@@ -149,6 +149,9 @@
         null header value. Producing <code>Header(name, None)</code> therefore raises
         <code>KafkaException.Unsupported</code>; it is never changed into empty bytes. The JVM and
         Native backends preserve null header values.</p>
+        <p>It cannot describe topic configurations. <code>describeTopicConfigurations</code> raises
+        <code>KafkaException.Unsupported</code> on this backend, because
+        <code>@confluentinc/kafka-javascript</code> does not offer the operation.</p>
         
         <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
         <p>Serializers, deserializers, producer and consumer settings, committable offsets

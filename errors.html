@@ -184,6 +184,10 @@
             </tr>
           </tbody>
         </table>
+        <p><code>ErrorCode.OffsetResetRequired</code> fails a consumer&#39;s record stream when its
+        <code>autoOffsetReset</code> is <code>Fail</code> and a partition has no committed offset, or one that
+        is no longer in the partition. See
+        <a href="consuming.html#where-a-consumer-starts">Where a consumer starts</a>.</p>
 
         
 <hr class="footer-rule"/>
