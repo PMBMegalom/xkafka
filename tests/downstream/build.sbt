@@ -41,6 +41,12 @@ lazy val smoke = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       // Valgrind cannot run Scala Native 0.5.12: the runtime grows its guard region by probing below the stack
       // pointer, which Memcheck deliberately treats as inaccessible. Standalone LeakSanitizer observes the same
       // malloc/free traffic without changing that stack model and exits unsuccessfully when it finds a leak.
-      if (sys.env.contains("XKAFKA_NATIVE_LEAK_CHECK")) linked.withLinkingOptions(_ :+ "-fsanitize=leak") else linked
+      //
+      // Under LeakSanitizer, Scala Native 0.5.12's collector can scan into a thread's stack guard page and crash
+      // (scala-native/scala-native#4958, fixed by #4934 after 0.5.12). The check only concerns malloc'd memory, which
+      // the collector never owns, so this build runs without one. Drop GC.none once a release carries the fix.
+      if (sys.env.contains("XKAFKA_NATIVE_LEAK_CHECK"))
+        linked.withLinkingOptions(_ :+ "-fsanitize=leak").withGC(scala.scalanative.build.GC.none)
+      else linked
     }
   )
