@@ -60,3 +60,8 @@ Three codes cover failures around transactional producers:
 | `ErrorCode.Fenced` | a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way |
 | `ErrorCode.InvalidProducerEpoch` | the broker refuses the producer's epoch as out of date |
 | `ErrorCode.Purged` | the client discarded a record before sending it, such as one still waiting when its transaction aborted |
+
+`ErrorCode.OffsetResetRequired` fails a consumer's record stream when its
+`autoOffsetReset` is `Fail` and a partition has no committed offset, or one that
+is no longer in the partition. See
+[Where a consumer starts](consuming.md#where-a-consumer-starts).

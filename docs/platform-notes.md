@@ -60,6 +60,10 @@ null header value. Producing `Header(name, None)` therefore raises
 `KafkaException.Unsupported`; it is never changed into empty bytes. The JVM and
 Native backends preserve null header values.
 
+It cannot describe topic configurations. `describeTopicConfigurations` raises
+`KafkaException.Unsupported` on this backend, because
+`@confluentinc/kafka-javascript` does not offer the operation.
+
 ## Transformations
 
 Serializers, deserializers, producer and consumer settings, committable offsets

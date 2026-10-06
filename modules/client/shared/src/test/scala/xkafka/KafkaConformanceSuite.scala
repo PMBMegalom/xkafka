@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.{NonEmptyList, NonEmptySet}
+import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -1020,6 +1020,255 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           assertEquals(failure.retriable, Some(false), failure.getMessage)
         case other => fail(s"the held record should have been purged, got $other")
 
+  test(conformance("deleting records removes those below each offset and answers each partition on its own")):
+    withBroker: server =>
+      val topic = uniqueTopic("delete-records")
+      val first = TopicPartition(topic, validPartition(0))
+      val other = TopicPartition(topic, validPartition(1))
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 2, replicationFactor = 1).liftTo[IO]
+        answers  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 2) *> produceValues(server, first, 5) *>
+              produceValues(server, other, 2) *> admin.deleteRecords(NonEmptyMap.of(first -> validOffset(3), other -> validOffset(100)))
+          .timeout(90.seconds)
+        beginnings <- beginningsOf(server, Set(first, other))
+        remaining  <- consumePartition(server, first, 2)
+      yield
+        assertEquals(answers.get(first).map(_.leftMap(_.getMessage)), Some(Right(validOffset(3))))
+        answers.get(other) match
+          case Some(Left(failure: KafkaException.BackendFailure)) => assertEquals(failure.code, Some(ErrorCode.OffsetOutOfRange), failure.getMessage)
+          case refused                                            => fail(s"a cut past the end of a partition should be refused, got $refused")
+        assertEquals(beginnings, Map(first -> validOffset(3), other -> validOffset(0)), "only the accepted cut should move a beginning")
+        assertEquals(remaining, List(3L, 4L), "the records at and above the cut should remain")
+
+  test(conformance("a cut at or below the start of a partition answers with its current low watermark")):
+    withBroker: server =>
+      val partition = TopicPartition(uniqueTopic("delete-again"), validPartition(0))
+
+      for
+        _       <- produceValues(server, partition, 4)
+        client  <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        answers <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            List(3L, 3L, 1L, 4L).traverse(offset => admin.deleteRecords(NonEmptyMap.one(partition, validOffset(offset))))
+          .timeout(90.seconds)
+        beginnings <- beginningsOf(server, Set(partition))
+      yield
+        assertEquals(answers.map(_.get(partition).map(_.leftMap(_.getMessage))), List(3L, 3L, 3L, 4L).map(value => Some(Right(validOffset(value)))))
+        assertEquals(beginnings, Map(partition -> validOffset(4)), "a cut at the end should leave the partition empty")
+
+  test(conformance("deleting records moves no consumer group's offsets")):
+    withBroker: server =>
+      val topic     = uniqueTopic("delete-committed")
+      val partition = TopicPartition(topic, validPartition(0))
+      val group     = uniqueGroup("delete-committed")
+
+      for
+        _      <- produceValues(server, partition, 3)
+        _      <- consumerSettings(server, group).flatMap(settings => commitFirst(settings, topic))
+        client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        _      <- PlatformKafkaClient().admin(client).use(_.deleteRecords(NonEmptyMap.one(partition, validOffset(3)))).timeout(90.seconds)
+        stays  <-
+          consumerSettings(server, group).flatMap: settings =>
+            PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(partition))).use(_.committed(Set(partition)))
+              .timeout(60.seconds)
+      yield assertEquals(stays, Map(partition -> Some(validOffset(1))))
+
+  test(conformance("deleting records against a cluster that cannot be reached fails as a timed out request")):
+    val partitions =
+      NonEmptyMap.of(
+        TopicPartition(uniqueTopic("delete-unreachable"), validPartition(0)) -> validOffset(1),
+        TopicPartition(uniqueTopic("delete-unreachable"), validPartition(1)) -> validOffset(1)
+      )
+    ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
+      PlatformKafkaClient().admin(client).use(_.deleteRecords(partitions)).attempt.timeout(150.seconds).map(unreachable)
+
+  test(conformance("deleting records answers a topic or partition the cluster does not have as unknown, beside the ones it has")):
+    withBroker: server =>
+      val known           = TopicPartition(uniqueTopic("delete-known"), validPartition(0))
+      val absentPartition = TopicPartition(known.topic, validPartition(5))
+      val absentTopic     = TopicPartition(uniqueTopic("delete-unknown"), validPartition(0))
+      for
+        _       <- produceValues(server, known, 2)
+        client  <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        answers <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            // The Java client would otherwise retry an unknown topic for a whole minute, which this bound rules out.
+            admin.deleteRecords(NonEmptyMap.of(known -> validOffset(1), absentPartition -> validOffset(1), absentTopic -> validOffset(1)))
+              .timeout(30.seconds)
+      yield
+        assertEquals(answers.get(known).map(_.leftMap(_.getMessage)), Some(Right(validOffset(1))))
+        List(absentPartition, absentTopic).foreach(partition => unknownAnswer(answers.get(partition), partition.show))
+
+  test(conformance("deleting records of topics the cluster has none of answers each partition as unknown")):
+    withBroker: server =>
+      val partitions =
+        NonEmptyMap.of(
+          TopicPartition(uniqueTopic("delete-none"), validPartition(0)) -> validOffset(1),
+          TopicPartition(uniqueTopic("delete-none"), validPartition(0)) -> validOffset(1)
+        )
+      ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+        PlatformKafkaClient().admin(client).use(_.deleteRecords(partitions)).timeout(30.seconds).map: answers =>
+          assertEquals(answers.keySet, partitions.keys.toSortedSet.toSet)
+          answers.foreach((partition, answer) => unknownAnswer(Some(answer), partition.show))
+
+  /** A cut is bounded by what has been written, not by what has committed, so it reaches into a transaction still open. */
+  test(conformance("deleting records can remove those of a transaction that has not committed yet")):
+    withBroker: server =>
+      val topic     = uniqueTopic("delete-transaction")
+      val partition = TopicPartition(topic, validPartition(0))
+
+      for
+        _        <- produceValues(server, partition, 2)
+        settings <- transactionalSettings(server, uniqueTransactionalId("delete-transaction"))
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        answers  <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            producer.transactionally: transaction =>
+              val pending = NonEmptyList.of("pending-0", "pending-1").map(value => record(topic, Some("k"), Some(value), partition.partition))
+              // Records two and three belong to the open transaction, so a cut at four covers all of it.
+              transaction.produce(pending) *> PlatformKafkaClient().admin(client).use(_.deleteRecords(NonEmptyMap.one(partition, validOffset(4))))
+          .timeout(90.seconds)
+        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("after"), partition.partition)))
+        consumed <- consumeCommitted(server, topic, 1)
+      yield
+        assertEquals(answers.get(partition).map(_.leftMap(_.getMessage)), Some(Right(validOffset(4))))
+        assertEquals(consumed.map(_.record.value), List(Some("after")), "the committed transaction should have lost its deleted records")
+
+  test(conformance("with offset reset set to fail, a group without a committed offset fails as needing a reset")):
+    withBroker: server =>
+      val topic = uniqueTopic("reset-fail-none")
+      for
+        _        <- produceValues(server, TopicPartition(topic, validPartition(0)), 1)
+        settings <- consumerSettings(server, uniqueGroup("reset-fail-none")).map(_.withAutoOffsetReset(AutoOffsetReset.Fail))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.drain).attempt
+            .timeout(60.seconds)
+      yield resetRequired(outcome)
+
+  test(conformance("a group whose committed offset was deleted fails with offset reset set to fail and starts at the first record with earliest")):
+    withBroker: server =>
+      val topic                            = uniqueTopic("reset-deleted")
+      val partition                        = TopicPartition(topic, validPartition(0))
+      val group                            = uniqueGroup("reset-deleted")
+      def starting(reset: AutoOffsetReset) = consumerSettings(server, group).map(_.withAutoOffsetReset(reset))
+      for
+        _ <- produceValues(server, partition, 3)
+        _ <- consumerSettings(server, group).flatMap(settings => commitFirst(settings, topic))
+        // The group's committed offset is one, which this cut leaves outside the partition.
+        client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        _      <- PlatformKafkaClient().admin(client).use(_.deleteRecords(NonEmptyMap.one(partition, validOffset(2)))).timeout(90.seconds)
+        failed <-
+          starting(AutoOffsetReset.Fail).flatMap: settings =>
+            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.drain).attempt
+              .timeout(60.seconds)
+        earliest <-
+          starting(AutoOffsetReset.Earliest).flatMap: settings =>
+            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
+              .use(_.records.take(1).map(_.record.offset.value).compile.toList).timeout(60.seconds)
+      yield
+        resetRequired(failed)
+        assertEquals(earliest, List(2L), "Earliest should start at the first record still in the partition")
+
+  test(conformance("a topic's configuration reports its own settings and the values it inherits", divergent = Set("js"))):
+    withBroker: server =>
+      val topic = uniqueTopic("configuration")
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1, configuration = Map("retention.ms" -> "123456789")).liftTo[IO]
+        answers  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 1) *> admin.describeTopicConfigurations(NonEmptySet.one(topic))
+          .timeout(90.seconds)
+        configuration <- IO.fromEither(answers.get(topic).toRight(new AssertionError(s"no answer for the topic: $answers")).flatten)
+      yield
+        assertEquals(
+          configuration.get("retention.ms"),
+          Some(ConfigurationEntry(ConfigurationValue.Present("123456789"), ConfigurationSource.TopicOverride, readOnly = false))
+        )
+        assertEquals(
+          configuration.get("cleanup.policy").map(entry => (entry.value, entry.source)),
+          Some((ConfigurationValue.Present("delete"), ConfigurationSource.Default))
+        )
+        assertEquals(
+          configuration.get("message.timestamp.type").map(entry => (entry.value, entry.source)),
+          Some((ConfigurationValue.Present("CreateTime"), ConfigurationSource.Default))
+        )
+        List("retention.bytes", "delete.retention.ms").foreach(name => assert(configuration.get(name).isDefined, s"$name should be reported"))
+        assertEquals(configuration.get("no.such.property"), None)
+
+  test(conformance("a topic the cluster does not have answers with its own failure", divergent = Set("js"))):
+    withBroker: server =>
+      val present = uniqueTopic("configuration-present")
+      val missing = uniqueTopic("configuration-missing")
+      for
+        _       <- produceValues(server, TopicPartition(present, validPartition(0)), 1)
+        client  <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        answers <- PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(NonEmptySet.of(present, missing))).timeout(90.seconds)
+      yield
+        assert(answers.get(present).exists(_.isRight), s"an existing topic should be described, got ${answers.get(present)}")
+        answers.get(missing) match
+          case Some(Left(failure: KafkaException.BackendFailure)) =>
+            assertEquals(failure.code, Some(ErrorCode.UnknownTopicOrPartition), failure.getMessage)
+          case other => fail(s"a topic the cluster does not have should fail, got $other")
+
+  test(conformance("describing topic configurations against a cluster that cannot be reached fails as a timed out request", divergent = Set("js"))):
+    val topics = NonEmptySet.of(uniqueTopic("configuration-unreachable"), uniqueTopic("configuration-unreachable"))
+    ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
+      PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(topics)).attempt.timeout(150.seconds).map(unreachable)
+
+  test(conformance("only the JavaScript backend refuses to describe topic configurations")):
+    withBroker: server =>
+      ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+        PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(uniqueTopic("configuration-support")))).attempt
+          .timeout(90.seconds).map:
+            case Left(_: KafkaException.Unsupported) => assertEquals(backend, "js")
+            case Left(other)                         => fail(s"expected an answer or Unsupported, got $other")
+            case Right(_)                            => assertNotEquals(backend, "js")
+
+  private def unreachable(outcome: Either[Throwable, ?]): Unit =
+    outcome match
+      case Left(failure: KafkaException.BackendFailure) =>
+        assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), failure.getMessage)
+        assertEquals(failure.retriable, Some(true), failure.getMessage)
+      case other => fail(s"a cluster that cannot be reached should fail the call, got $other")
+
+  private def unknownAnswer(answer: Option[Either[KafkaException, ?]], clue: String): Unit =
+    answer match
+      case Some(Left(failure: KafkaException.BackendFailure)) =>
+        assertEquals(failure.code, Some(ErrorCode.UnknownTopicOrPartition), s"$clue: ${failure.getMessage}")
+      case other => fail(s"$clue should answer as unknown, got $other")
+
+  private def resetRequired(outcome: Either[Throwable, Unit]): Unit =
+    outcome match
+      case Left(failure: KafkaException.BackendFailure) =>
+        assertEquals(failure.code, Some(ErrorCode.OffsetResetRequired), failure.getMessage)
+        assertEquals(failure.retriable, Some(false), failure.getMessage)
+      case other => fail(s"the record stream should have failed as needing a reset, got $other")
+
+  private def produceValues(server: String, partition: TopicPartition, count: Int): IO[Unit] =
+    val values =
+      NonEmptyList.fromListUnsafe(List.tabulate(count)(index => record(partition.topic, Some("k"), Some(s"value-$index"), partition.partition)))
+    produce(server, values).void
+
+  /** Commits the offset after the first record of the topic, which is one. */
+  private def commitFirst(settings: ConsumerSettings[IO, Option[String], Option[String]], topic: Topic): IO[Unit] =
+    PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).evalMap(_.offset.commit).compile.drain)
+      .timeout(60.seconds)
+
+  private def beginningsOf(server: String, partitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]] =
+    consumerSettings(server, uniqueGroup("beginnings")).flatMap: settings =>
+      PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptyList.fromListUnsafe(partitions.toList).toNes))
+        .use(_.beginningOffsets(partitions)).timeout(60.seconds)
+
+  private def consumePartition(server: String, partition: TopicPartition, count: Int): IO[List[Long]] =
+    consumerSettings(server, uniqueGroup("partition")).flatMap: settings =>
+      PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(partition))).use(_.records.take(count.toLong).compile.toList)
+        .map(_.map(_.record.offset.value)).timeout(60.seconds)
+
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)
@@ -1094,3 +1343,5 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     ConsumerGroup.from(value).fold(error => fail(s"invalid test consumer group: ${error.message}"), identity)
 
   private def validPartition(value: Int): Partition = Partition.from(value).fold(error => fail(s"invalid test partition: ${error.message}"), identity)
+
+  private def validOffset(value: Long): Offset = Offset.from(value).fold(error => fail(s"invalid test offset: ${error.message}"), identity)

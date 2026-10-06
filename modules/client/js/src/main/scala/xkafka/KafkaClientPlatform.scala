@@ -26,7 +26,7 @@ import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array, Uint8Array}
 
-import cats.data.{NonEmptyList, NonEmptySet}
+import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Dispatcher, Mutex, Random}
@@ -105,6 +105,9 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
   private val MaxExactInteger = 9007199254740991d
   // Admin calls are metadata round trips, so they are bounded well below the metadata refresh interval.
   private val AdminTimeoutMillis = 30000
+
+  // _NOENT, which librdkafka reports when deleting records finds no leader for any requested partition.
+  private val NoLeadersFound = -156
   // librdkafka's sentinels for the ends of a partition's log.
   private val BeginningOffset = -2d
   private val EndOffset       = -1d
@@ -232,6 +235,10 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       error.isFatal.toOption.orElse(Option.when(code == ErrorCode.Fenced)(true)),
       error.isTxnRequiresAbort.toOption
     )
+
+  /** A partition librdkafka found no leader for, which it reports for a topic or partition the cluster does not have. */
+  private def unknownPartition(error: confluent.RdError): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(error.message, Some(ErrorCode.UnknownTopicOrPartition), Some(ErrorCode.UnknownTopicOrPartition.retriable))
 
   /** For the calls that report only whether they failed. */
   private def outcome(register: js.Function1[confluent.RdError | Null, Unit] => Unit): F[Unit] =
@@ -436,6 +443,39 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
                 partitions    <- value.partitions.toList.traverse(info => partition(info.partition))
               yield portableTopic -> partitions.toSet
         .map(_.toMap)
+
+    override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]] =
+      val requested =
+        before.toSortedMap.toList.map((topicPartition, offset) =>
+          confluent.Values.rdTopicPartitionOffset(topicPartition.topic.value, topicPartition.partition.value, offset.value.toDouble)
+        ).toJSArray
+      F.async_[Either[confluent.RdError, js.Array[confluent.RdDeleteRecordsResult]]]: resume =>
+        underlying.deleteRecords(
+          requested,
+          js.Dictionary("timeout" -> requestTimeoutMillis, "operationTimeout" -> requestTimeoutMillis),
+          (error, answers) => resume(Right(rdError(error).toLeft(answers)))
+        )
+      .flatMap:
+        // librdkafka fails the whole call where no requested partition exists, and answers each one where only some do.
+        case Left(failure) if failure.code == NoLeadersFound => F.pure(before.keys.toList.map(_ -> Left(unknownPartition(failure))).toMap)
+        case Left(failure)                                   => F.raiseError(rdFailure(failure))
+        case Right(answers)                                  => answered(before, answers)
+
+    override def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+      F.raiseError(new KafkaException.Unsupported("the JavaScript backend cannot describe topic configurations, because its Kafka client does not"))
+
+    private def answered(
+        before: NonEmptyMap[TopicPartition, Offset],
+        answers: js.Array[confluent.RdDeleteRecordsResult]
+    ): F[Map[TopicPartition, Either[KafkaException, Offset]]] =
+      before.keys.toList.traverse: topicPartition =>
+        answers.find(answer => answer.topic == topicPartition.topic.value && answer.partition == topicPartition.partition.value) match
+          case None => F.raiseError(new KafkaException.InvalidBackendResponse(s"no answer for partition ${topicPartition.show}"))
+          // A partition the broker refused carries the refusal in its own answer.
+          case Some(answer) => answer.error.toOption match
+              case Some(failure) => F.pure(topicPartition -> Left(rdFailure(failure)))
+              case None          => F.fromEither(exactOffset("low watermark", answer.lowWatermark)).map(topicPartition -> Right(_))
+      .map(_.toMap)
 
   private def select(consumer: confluent.RdConsumer, selection: Selection, leases: AssignmentLeases[F]): F[Unit] =
     selection match

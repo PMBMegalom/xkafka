@@ -25,7 +25,7 @@ import scala.concurrent.duration.{FiniteDuration, *}
 
 import cats.{Applicative, FlatMap, Foldable, Functor, Order, Show}
 import cats.arrow.FunctionK
-import cats.data.{NonEmptyList, NonEmptySet, Validated, ValidatedNel}
+import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet, Validated, ValidatedNel}
 import cats.effect.{Async, Concurrent, Temporal}
 import cats.syntax.all.*
 import cats.tagless.FunctorK
@@ -318,8 +318,16 @@ enum Acks:
   /** Every in-sync replica, which is the only one of the three that survives losing the leader. */
   case AllReplicas
 
+/** Where a consumer starts in a partition where its group has no committed offset, or where that offset is no longer in the partition's log. */
 enum AutoOffsetReset:
-  case Earliest, Latest
+  /** At the first record still in the partition. */
+  case Earliest
+
+  /** After the last record, reading only what arrives from then on. */
+  case Latest
+
+  /** Nowhere: its record stream fails as `ErrorCode.OffsetResetRequired`. */
+  case Fail
 
 /** Whether a consumer reads records written by transactions that have not committed. */
 enum IsolationLevel:
@@ -641,10 +649,65 @@ object NewTopic:
   given Order[NewTopic] = Order.by(_.topic)
   given Show[NewTopic]  = Show.show(value => s"${value.topic.value}(partitions=${value.partitions}, replication=${value.replicationFactor})")
 
+/** A topic's effective configuration, by property name, holding every entry the broker reported. */
+final case class TopicConfiguration(entries: Map[String, ConfigurationEntry]):
+  /** The entry for this property, or `None` where the broker reported none. */
+  def get(name: String): Option[ConfigurationEntry] = entries.get(name)
+
+/** One configuration property of a topic, with where its value comes from. */
+final case class ConfigurationEntry(value: ConfigurationValue, source: ConfigurationSource, readOnly: Boolean)
+
+object ConfigurationEntry:
+  /** Builds an entry from what a backend reports, where a sensitive value always arrives without its value. */
+  private[xkafka] def reported(value: Option[String], sensitive: Boolean, source: ConfigurationSource, readOnly: Boolean): ConfigurationEntry =
+    val portable = if sensitive then ConfigurationValue.Redacted else value.fold(ConfigurationValue.Absent)(ConfigurationValue.Present(_))
+    ConfigurationEntry(portable, source, readOnly)
+
+enum ConfigurationValue derives CanEqual:
+  /** The broker reported this value. */
+  case Present(value: String)
+
+  /** The property has no value. */
+  case Absent
+
+  /** The value is sensitive, so the broker withheld it. */
+  case Redacted
+
+/** Where a topic's configuration value comes from. */
+enum ConfigurationSource derives CanEqual:
+  /** Set on the topic itself. */
+  case TopicOverride
+
+  /** Set dynamically on the broker that answered. */
+  case DynamicBroker
+
+  /** Set dynamically as the default for every broker in the cluster. */
+  case DynamicClusterDefault
+
+  /** Set in the broker's own configuration file. */
+  case StaticBroker
+
+  /** Kafka's default, set nowhere. */
+  case Default
+
+  /** A source with no portable meaning. */
+  case Unknown
+
+object ConfigurationSource:
+  /** Classifies librdkafka's `rd_kafka_ConfigSource_t`. */
+  private[xkafka] def fromLibrdkafka(value: Int): ConfigurationSource =
+    value match
+      case 1 => TopicOverride         // DYNAMIC_TOPIC_CONFIG
+      case 2 => DynamicBroker         // DYNAMIC_BROKER_CONFIG
+      case 3 => DynamicClusterDefault // DYNAMIC_DEFAULT_BROKER_CONFIG
+      case 4 => StaticBroker          // STATIC_BROKER_CONFIG
+      case 5 => Default               // DEFAULT_CONFIG
+      case _ => Unknown
+
 /** Topic administration.
   *
-  * Kafka reports an outcome for each topic, and the backends do not agree on whether that detail survives, so these report the first failure and
-  * nothing more.
+  * Kafka reports an outcome for each topic, and the backends do not agree on whether that detail survives when creating, deleting, or growing topics,
+  * so those report the first failure and nothing more. Deleting records and describing topic configurations answer for each partition or topic.
   */
 trait KafkaAdminClient[F[_]]:
   self =>
@@ -661,6 +724,23 @@ trait KafkaAdminClient[F[_]]:
   /** Reports the partitions of each requested topic, failing where the cluster does not have one of them. */
   def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]]
 
+  /** Deletes each partition's records below its offset, answering for each one its new low watermark or the reason the broker refused it.
+    *
+    * Every requested partition gets an answer, including a topic or partition the cluster does not have, which answers as
+    * `ErrorCode.UnknownTopicOrPartition`. The call fails only where nothing is known about any partition, such as when the cluster cannot be reached
+    * in time. A partition already beginning at or after its offset keeps its records and answers with its current low watermark. An offset past the
+    * end of the partition is refused as `ErrorCode.OffsetOutOfRange`. Deleting records moves no consumer group's offsets.
+    */
+  def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]]
+
+  /** Reports each topic's effective configuration, including the values it inherits, or the reason the broker would not describe it.
+    *
+    * Every requested topic gets an answer, including one the cluster does not have, which answers as `ErrorCode.UnknownTopicOrPartition`. The call
+    * fails only where nothing is known about any topic, such as when the cluster cannot be reached in time. The JavaScript backend cannot describe
+    * configuration and fails with `KafkaException.Unsupported`.
+    */
+  def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]]
+
   final def mapK[G[_]](fk: FunctionK[F, G]): KafkaAdminClient[G] =
     new KafkaAdminClient[G]:
       override def createTopics(topics: NonEmptySet[NewTopic]): G[Unit] = fk(self.createTopics(topics))
@@ -670,6 +750,12 @@ trait KafkaAdminClient[F[_]]:
       override def createPartitions(topic: Topic, count: Int): G[Unit] = fk(self.createPartitions(topic, count))
 
       override def describeTopics(topics: NonEmptySet[Topic]): G[Map[Topic, Set[Partition]]] = fk(self.describeTopics(topics))
+
+      override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): G[Map[TopicPartition, Either[KafkaException, Offset]]] =
+        fk(self.deleteRecords(before))
+
+      override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+        fk(self.describeTopicConfigurations(topics))
 
 object KafkaAdminClient:
   private[xkafka] def validatePartitionCount(value: Int): Either[KafkaException.InvalidValue, Int] =

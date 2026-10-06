@@ -106,6 +106,9 @@ enum ErrorCode derives CanEqual:
   /** The client discarded a record before sending it, such as one waiting when its transaction aborted. */
   case Purged
 
+  /** A consumer has no committed offset for a partition, or one outside its log, and its `AutoOffsetReset` is `Fail`. */
+  case OffsetResetRequired
+
   /** A code with no portable meaning. */
   case Other(value: Int)
 
@@ -162,6 +165,7 @@ object ErrorCode:
       case -181               => SslAuthenticationFailed  // _SSL
       case -144               => Fenced                   // _FENCED
       case -152 | -151        => Purged                   // _PURGE_QUEUE, _PURGE_INFLIGHT
+      case -140               => OffsetResetRequired      // _AUTO_OFFSET_RESET
       case -188 | -190        => UnknownTopicOrPartition  // _UNKNOWN_TOPIC, _UNKNOWN_PARTITION
       case other              => fromProtocol(other)
 

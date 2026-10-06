@@ -278,6 +278,54 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  def xkafka_admin_delete_records(
+      client: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      offsets: Ptr[CLongLong],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      lowWatermarks: Ptr[CLongLong],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_error_string(code: CInt): CString = extern
+
+  def xkafka_admin_describe_topic_configs(
+      client: CVoidPtr,
+      names: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_configs_resource_count(configs: CVoidPtr): CSize = extern
+
+  def xkafka_configs_resource_name(configs: CVoidPtr, resourceIndex: CSize): CString = extern
+
+  def xkafka_configs_resource_error(configs: CVoidPtr, resourceIndex: CSize): CInt = extern
+
+  def xkafka_configs_resource_error_string(configs: CVoidPtr, resourceIndex: CSize): CString = extern
+
+  def xkafka_configs_entry_count(configs: CVoidPtr, resourceIndex: CSize): CSize = extern
+
+  def xkafka_configs_entry_name(configs: CVoidPtr, resourceIndex: CSize, entryIndex: CSize): CString = extern
+
+  def xkafka_configs_entry_value(configs: CVoidPtr, resourceIndex: CSize, entryIndex: CSize): CString = extern
+
+  def xkafka_configs_entry_source(configs: CVoidPtr, resourceIndex: CSize, entryIndex: CSize): CInt = extern
+
+  def xkafka_configs_entry_is_sensitive(configs: CVoidPtr, resourceIndex: CSize, entryIndex: CSize): CInt = extern
+
+  def xkafka_configs_entry_is_read_only(configs: CVoidPtr, resourceIndex: CSize, entryIndex: CSize): CInt = extern
+
+  def xkafka_configs_destroy(configs: CVoidPtr): Unit = extern
+
   def xkafka_consumer_assign(
       consumer: CVoidPtr,
       topics: Ptr[CString],

@@ -30,7 +30,7 @@ import scala.util.Try
 
 import cats.Parallel
 import cats.arrow.FunctionK
-import cats.data.{NonEmptyList, NonEmptySet}
+import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Dispatcher, Mutex, Random}
@@ -42,15 +42,20 @@ import fs2.kafka.{
   KafkaAdminClient as Fs2KafkaAdminClient, KafkaByteConsumer, KafkaConsumer as Fs2KafkaConsumer, KafkaProducer as Fs2KafkaProducer,
   ProducerRecord as Fs2ProducerRecord, ProducerSettings as Fs2ProducerSettings, Serializer as Fs2Serializer
 }
+import fs2.kafka.admin.MkAdminClient
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.instances.*
 import fs2.kafka.producer.MkProducer
-import org.apache.kafka.clients.admin.{NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic}
+import org.apache.kafka.clients.admin.{
+  AdminClient as JavaAdminClient, ConfigEntry as JavaConfigEntry, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete
+}
 import org.apache.kafka.clients.consumer.{
-  CommitFailedException, Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, ConsumerRebalanceListener, OffsetAndMetadata
+  CommitFailedException, Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, ConsumerRebalanceListener,
+  InvalidOffsetException, OffsetAndMetadata
 }
 import org.apache.kafka.clients.producer.RecordMetadata as JavaRecordMetadata
-import org.apache.kafka.common.{KafkaException as JavaKafkaException, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.{KafkaException as JavaKafkaException, KafkaFuture, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.errors.{
   AuthenticationException, InvalidPidMappingException, ProducerFencedException, SaslAuthenticationException, SslAuthenticationException,
   TransactionAbortedException
@@ -63,6 +68,20 @@ private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new Fs2KafkaClient[F]
 
   private[xkafka] def fromFs2[F[_]](using Async[F], Parallel[F], MkProducer[F], MkConsumer[F]): KafkaClient[F] = new Fs2KafkaClient[F]
+
+/** Reads the Java client's configuration entries into the portable ones. */
+private[xkafka] object JavaConfiguration:
+  def portableEntry(entry: JavaConfigEntry): ConfigurationEntry =
+    ConfigurationEntry.reported(Option(entry.value), entry.isSensitive, portableSource(entry.source), entry.isReadOnly)
+
+  private def portableSource(source: JavaConfigEntry.ConfigSource): ConfigurationSource =
+    source match
+      case JavaConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG          => ConfigurationSource.TopicOverride
+      case JavaConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG         => ConfigurationSource.DynamicBroker
+      case JavaConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG => ConfigurationSource.DynamicClusterDefault
+      case JavaConfigEntry.ConfigSource.STATIC_BROKER_CONFIG          => ConfigurationSource.StaticBroker
+      case JavaConfigEntry.ConfigSource.DEFAULT_CONFIG                => ConfigurationSource.Default
+      case _                                                          => ConfigurationSource.Unknown
 
 /** What a transaction on this backend needs to record a consumer's offsets. The Java client names a group by the metadata its consumer carries, which
   * also fences a member the group has already replaced.
@@ -124,8 +143,19 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
                 backend(underlying.sendOffsetsToTransaction(committed, metadata))
               case (other, _) => F.raiseError(GroupMembership.unrecognised(other))
 
+  /** fs2-kafka reports deleting records and describing configurations as a single outcome, so the adapter keeps the Java client it builds to read
+    * each partition's or topic's own.
+    */
   override def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]] =
-    Fs2KafkaAdminClient.resource(adminSettings(settings)).mapK(handleBackendErrors).map(new Fs2KafkaAdminClientAdapter(_))
+    for
+      created <- Resource.eval(F.delay(new AtomicReference[JavaAdminClient]))
+      keeping =
+        new MkAdminClient[F]:
+          override def apply(settings: Fs2AdminClientSettings): F[JavaAdminClient] =
+            MkAdminClient.mkAdminClientForSync[F].apply(settings).flatTap(client => F.delay(created.set(client)))
+      admin <- Fs2KafkaAdminClient.resource(adminSettings(settings))(using F, keeping).mapK(handleBackendErrors)
+      java  <- Resource.eval(F.delay(created.get))
+    yield new Fs2KafkaAdminClientAdapter(admin, java)
 
   private def adminSettings(settings: ClientSettings): Fs2AdminClientSettings =
     val base =
@@ -134,7 +164,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
     settings.clientId.fold(base)(base.withClientId)
 
-  private final class Fs2KafkaAdminClientAdapter(underlying: Fs2KafkaAdminClient[F]) extends KafkaAdminClient[F]:
+  private final class Fs2KafkaAdminClientAdapter(underlying: Fs2KafkaAdminClient[F], java: JavaAdminClient) extends KafkaAdminClient[F]:
     override def createTopics(topics: NonEmptySet[NewTopic]): F[Unit] = backend(underlying.createTopics(topics.toSortedSet.toList.map(javaNewTopic)))
 
     override def deleteTopics(topics: NonEmptySet[Topic]): F[Unit] = backend(underlying.deleteTopics(topics.map(_.value)))
@@ -153,6 +183,79 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
                 .traverse(value => F.fromEither(Partition.from(value.partition).leftMap(error => invalidBackendValue("partition", error))))
           yield topic -> partitions.toSet
         .map(_.toMap)
+
+    /** The Java client retries a topic or partition the cluster does not have until the request times out, so the partitions are looked up first and
+      * only those the cluster has are submitted, which is how librdkafka answers the same request.
+      */
+    override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]] =
+      val cuts = before.toSortedMap.toList
+      for
+        held <- partitionsHeld(cuts.map(_._1.topic).distinct)
+        submitted = cuts.filter((topicPartition, _) => held.get(topicPartition.topic).exists(_.exists(_.contains(topicPartition.partition))))
+        answers <- if submitted.isEmpty then F.pure(Nil) else delete(submitted)
+      yield
+        val deleted = answers.toMap
+        cuts.map: (topicPartition, _) =>
+          topicPartition -> deleted.getOrElse(
+            topicPartition,
+            held.get(topicPartition.topic).flatMap(_.left.toOption).fold(Left(missingPartition(topicPartition)))(Left(_))
+          )
+        .toMap
+
+    private def delete(cuts: List[(TopicPartition, Offset)]): F[List[(TopicPartition, Either[KafkaException, Offset])]] =
+      val requested = cuts.map((topicPartition, offset) => javaTopicPartition(topicPartition) -> RecordsToDelete.beforeOffset(offset.value)).toMap
+      F.delay(java.deleteRecords(requested.asJava).lowWatermarks.asScala.toMap).flatMap: answers =>
+        eachAnswered(cuts.map((topicPartition, _) => topicPartition -> answers.get(javaTopicPartition(topicPartition))), _.show).flatMap:
+          _.traverse:
+            case (topicPartition, Right(deleted)) => F
+                .fromEither(Offset.from(deleted.lowWatermark).leftMap(error => invalidBackendValue("low watermark", error)))
+                .map(topicPartition -> Right(_))
+            case (topicPartition, Left(failure)) => F.pure(topicPartition -> Left(failure))
+
+    /** The partitions of each topic, or the reason the cluster would not describe the topic. */
+    private def partitionsHeld(topics: List[Topic]): F[Map[Topic, Either[KafkaException, Set[Partition]]]] =
+      F.delay(java.describeTopics(topics.map(_.value).asJava).topicNameValues.asScala.toMap).flatMap: answers =>
+        eachAnswered(topics.map(topic => topic -> answers.get(topic.value)), _.value).map:
+          _.map((topic, answer) => topic -> answer.map(_.partitions.asScala.flatMap(value => Partition.from(value.partition).toOption).toSet)).toMap
+
+    private def missingPartition(topicPartition: TopicPartition): KafkaException.BackendFailure =
+      new KafkaException.BackendFailure(
+        s"the cluster has no partition ${topicPartition.show}",
+        Some(ErrorCode.UnknownTopicOrPartition),
+        retriable = Some(ErrorCode.UnknownTopicOrPartition.retriable)
+      )
+
+    override def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+      def resource(topic: Topic) = new ConfigResource(ConfigResource.Type.TOPIC, topic.value)
+      F.delay(java.describeConfigs(topics.toSortedSet.toList.map(resource).asJava).values.asScala.toMap).flatMap: answers =>
+        eachAnswered(topics.toSortedSet.toList.map(topic => topic -> answers.get(resource(topic))), _.value)
+          .map(_.map((topic, answer) => topic -> answer.map(config => portableConfiguration(config.entries.asScala))).toMap)
+
+    /** Waits for each entry's answer, keeping a refusal as that entry's own.
+      *
+      * The Java client fails every entry's answer where the request as a whole failed, such as when the cluster cannot be reached in time. Nothing is
+      * then known about any entry, so the call fails with that failure, as librdkafka's does.
+      */
+    private def eachAnswered[K, A](entries: List[(K, Option[KafkaFuture[A]])], name: K => String): F[List[(K, Either[KafkaException, A])]] =
+      entries.traverse:
+        case (key, None)         => F.raiseError(new KafkaException.InvalidBackendResponse(s"no answer for ${name(key)}"))
+        case (key, Some(answer)) => backend(F.fromCompletionStage(F.delay(answer.toCompletionStage))).attempt.flatMap:
+            case Right(value)                  => F.pure(key -> Right(value))
+            case Left(failure: KafkaException) => F.pure(key -> Left(failure))
+            case Left(other)                   => F.raiseError(other)
+      .flatMap: answers =>
+        val failures = answers.collect { case (_, Left(failure)) => failure }
+        failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(F.pure(answers))(F.raiseError)
+
+    /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
+    private def unreached(failure: KafkaException): Boolean =
+      failure match
+        case backendFailure: KafkaException.BackendFailure => backendFailure.code
+            .exists(code => code == ErrorCode.RequestTimedOut || code == ErrorCode.NetworkException || code == ErrorCode.BrokerNotAvailable)
+        case _ => false
+
+    private def portableConfiguration(entries: Iterable[JavaConfigEntry]): TopicConfiguration =
+      TopicConfiguration(entries.map(entry => entry.name -> JavaConfiguration.portableEntry(entry)).toMap)
 
     private def javaNewTopic(value: NewTopic): JavaNewTopic =
       new JavaNewTopic(value.topic.value, value.partitions, value.replicationFactor).configs(value.configuration.asJava)
@@ -209,7 +312,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       case failed: CommitFailedException  => rejectedMembership(failed).orElse(tabled(error))
       // The Java client fails a record its aborted transaction never sent with this, and Kafka's table has no entry for it.
       case _: TransactionAbortedException => Some(ErrorCode.Purged)
-      case _                              => tabled(error)
+      // The consumer raises these itself, for a partition its reset policy leaves without a position.
+      case _: InvalidOffsetException => Some(ErrorCode.OffsetResetRequired)
+      case _                         => tabled(error)
 
   private def tabled(error: JavaKafkaException): Option[ErrorCode] =
     Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
@@ -310,6 +415,7 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           settings.autoOffsetReset match
             case AutoOffsetReset.Earliest => Fs2AutoOffsetReset.Earliest
             case AutoOffsetReset.Latest   => Fs2AutoOffsetReset.Latest
+            case AutoOffsetReset.Fail     => Fs2AutoOffsetReset.None
         )
 
     settings.client.clientId.fold(base)(base.withClientId)
@@ -335,6 +441,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
 
   private def invalidBackendValue(field: String, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field: $error")
+
+  private def javaTopicPartition(topicPartition: TopicPartition): JavaTopicPartition =
+    new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value)
 
   private def portablePartitions(values: Iterable[org.apache.kafka.common.PartitionInfo]): F[Set[Partition]] =
     values.toList.traverse(value => F.fromEither(Partition.from(value.partition).leftMap(error => invalidBackendValue("partition", error))))
@@ -547,9 +656,6 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
           CommittableConsumerRecord(portableRecord, portableOffset)
 
       F.fromEither(validated)
-
-    private def javaTopicPartition(topicPartition: TopicPartition): JavaTopicPartition =
-      new JavaTopicPartition(topicPartition.topic.value, topicPartition.partition.value)
 
     /** The membership a transaction sends. With fencing a revocation may be holding the consumer's only thread, so it is the one the last poll or
       * rebalance left behind; without it, the consumer is asked, as it was before fencing existed.

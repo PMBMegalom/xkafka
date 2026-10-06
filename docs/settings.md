@@ -98,7 +98,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 
 | setting | default | meaning |
 | --- | --- | --- |
-| `autoOffsetReset` | `Latest` | where to start when the group has no committed offset |
+| `autoOffsetReset` | `Latest` | where to start when the group has no committed offset, or one no longer in the partition |
 | `isolationLevel` | `ReadUncommitted` | whether records from uncommitted transactions are delivered |
 | `commitRecovery` | `CommitRecovery.Default` | how a failed commit is retried |
 | `pollTimeout` | 100ms | how long one poll waits for records before returning empty |

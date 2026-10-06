@@ -35,6 +35,7 @@ import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, Ka
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
+import org.apache.kafka.clients.admin.ConfigEntry as JavaConfigEntry
 import org.apache.kafka.clients.consumer.{
   CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp
 }
@@ -45,6 +46,36 @@ import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.serialization.ByteArraySerializer
 
 final class JvmKafkaClientSuite extends CatsEffectSuite:
+  test("reads Java configuration entries, withholding sensitive values and naming their sources"):
+    def entry(value: String | Null, source: JavaConfigEntry.ConfigSource, sensitive: Boolean = false, readOnly: Boolean = false) =
+      JavaConfiguration
+        .portableEntry(new JavaConfigEntry("name", value, source, sensitive, readOnly, JavaList.of(), JavaConfigEntry.ConfigType.STRING, null))
+    assertEquals(
+      entry("delete", JavaConfigEntry.ConfigSource.DYNAMIC_TOPIC_CONFIG),
+      ConfigurationEntry(ConfigurationValue.Present("delete"), ConfigurationSource.TopicOverride, readOnly = false)
+    )
+    assertEquals(entry(null, JavaConfigEntry.ConfigSource.STATIC_BROKER_CONFIG, sensitive = true).value, ConfigurationValue.Redacted)
+    assertEquals(entry(null, JavaConfigEntry.ConfigSource.DEFAULT_CONFIG, readOnly = true).value, ConfigurationValue.Absent)
+    assert(entry("v", JavaConfigEntry.ConfigSource.DEFAULT_CONFIG, readOnly = true).readOnly)
+    assertEquals(
+      List(
+        JavaConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG,
+        JavaConfigEntry.ConfigSource.DYNAMIC_DEFAULT_BROKER_CONFIG,
+        JavaConfigEntry.ConfigSource.STATIC_BROKER_CONFIG,
+        JavaConfigEntry.ConfigSource.DEFAULT_CONFIG,
+        JavaConfigEntry.ConfigSource.DYNAMIC_BROKER_LOGGER_CONFIG,
+        JavaConfigEntry.ConfigSource.UNKNOWN
+      ).map(entry("v", _).source),
+      List(
+        ConfigurationSource.DynamicBroker,
+        ConfigurationSource.DynamicClusterDefault,
+        ConfigurationSource.StaticBroker,
+        ConfigurationSource.Default,
+        ConfigurationSource.Unknown,
+        ConfigurationSource.Unknown
+      )
+    )
+
   test("wraps Kafka client failures"):
     val cause = new TimeoutException("timed out")
     given MkProducer[IO] with

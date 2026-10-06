@@ -156,6 +156,12 @@ private[xkafka] trait RdAdmin extends js.Object:
   def describeTopics(topics: js.Array[String], options: js.Any, callback: js.Function2[RdError | Null, js.Array[RdTopicDescription], Unit]): Unit =
     js.native
 
+  def deleteRecords(
+      records: js.Array[RdTopicPartitionOffset],
+      options: js.Any,
+      callback: js.Function2[RdError | Null, js.Array[RdDeleteRecordsResult], Unit]
+  ): Unit = js.native
+
   def disconnect(): Unit = js.native
 
 private[xkafka] type RdNewTopic = js.Dictionary[js.Any]
@@ -166,6 +172,13 @@ private[xkafka] trait RdTopicDescription extends js.Object:
   val partitions: js.Array[RdTopicPartitionInfo] = js.native
 
   /** Present where the cluster could not describe this topic, such as when it does not exist. */
+  val error: js.UndefOr[RdError] = js.native
+
+@js.native
+private[xkafka] trait RdDeleteRecordsResult extends RdTopicPartition:
+  val lowWatermark: Double = js.native
+
+  /** Present where the broker refused to delete this partition's records. */
   val error: js.UndefOr[RdError] = js.native
 
 @js.native
@@ -263,6 +276,7 @@ private[xkafka] object Values:
       autoOffsetReset match
         case AutoOffsetReset.Earliest => "earliest"
         case AutoOffsetReset.Latest   => "latest"
+        case AutoOffsetReset.Fail     => "error"
     )
     result
 

@@ -1237,6 +1237,201 @@ int xkafka_admin_create_partitions(rd_kafka_t *client,
         return outcome;
 }
 
+/* Answers for each requested partition separately: codes[i] and low_watermarks[i] hold the broker's
+ * answer for the i-th partition, and a partition the result does not mention keeps
+ * XKAFKA_NO_ANSWER. The call fails only where the request as a whole did. */
+#define XKAFKA_NO_ANSWER INT32_MIN
+
+int xkafka_admin_delete_records(rd_kafka_t *client,
+                                const char *const *topics,
+                                const int32_t *partitions,
+                                const int64_t *offsets,
+                                size_t count,
+                                int timeout_ms,
+                                int32_t *codes,
+                                int64_t *low_watermarks,
+                                char *error,
+                                size_t error_size,
+                                int32_t *error_code) {
+        rd_kafka_topic_partition_list_t *before = rd_kafka_topic_partition_list_new((int)count);
+        rd_kafka_DeleteRecords_t *request;
+        rd_kafka_queue_t *queue;
+        rd_kafka_AdminOptions_t *options;
+        rd_kafka_event_t *event;
+        const rd_kafka_topic_partition_list_t *answers;
+        size_t index;
+        int outcome = 0;
+
+        for (index = 0; index < count; index++) {
+                rd_kafka_topic_partition_list_add(before, topics[index], partitions[index])->offset = offsets[index];
+                codes[index] = XKAFKA_NO_ANSWER;
+        }
+        request = rd_kafka_DeleteRecords_new(before);
+        rd_kafka_topic_partition_list_destroy(before);
+
+        queue = rd_kafka_queue_new(client);
+        options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_DELETERECORDS);
+        if (rd_kafka_AdminOptions_set_request_timeout(options, timeout_ms, error, error_size) != RD_KAFKA_RESP_ERR_NO_ERROR ||
+            rd_kafka_AdminOptions_set_operation_timeout(options, timeout_ms, error, error_size) != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                /* The setter already populated error. */
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
+                rd_kafka_AdminOptions_destroy(options);
+                rd_kafka_queue_destroy(queue);
+                rd_kafka_DeleteRecords_destroy(request);
+                return -1;
+        }
+
+        rd_kafka_DeleteRecords(client, &request, 1, options, queue);
+        /* librdkafka ends the request with its own timed out result, so this waits a little longer than
+         * the request may take. */
+        event = rd_kafka_queue_poll(queue, timeout_ms + timeout_ms / 2);
+
+        if (event == NULL) {
+                xkafka_set_error_at(error, error_size, error_code, "timed out waiting for the admin result", RD_KAFKA_RESP_ERR__TIMED_OUT);
+                outcome = -1;
+        } else if (rd_kafka_event_error(event) != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_event_error_string(event), rd_kafka_event_error(event));
+                outcome = -1;
+        } else {
+                answers = rd_kafka_DeleteRecords_result_offsets(rd_kafka_event_DeleteRecords_result(event));
+                for (index = 0; answers != NULL && index < count; index++) {
+                        const rd_kafka_topic_partition_t *answer =
+                            rd_kafka_topic_partition_list_find(answers, topics[index], partitions[index]);
+                        if (answer != NULL) {
+                                codes[index] = answer->err;
+                                low_watermarks[index] = answer->offset;
+                        }
+                }
+        }
+
+        if (event != NULL)
+                rd_kafka_event_destroy(event);
+        rd_kafka_DeleteRecords_destroy(request);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(queue);
+        return outcome;
+}
+
+/* Describes the configuration of each named topic. The result event is returned as an opaque handle
+ * that the accessors below read and xkafka_configs_destroy releases; NULL means the request as a whole
+ * failed, with error populated. */
+void *xkafka_admin_describe_topic_configs(rd_kafka_t *client,
+                                          const char *const *names,
+                                          size_t count,
+                                          int timeout_ms,
+                                          char *error,
+                                          size_t error_size,
+                                          int32_t *error_code) {
+        rd_kafka_ConfigResource_t **resources = (rd_kafka_ConfigResource_t **)calloc(count, sizeof(rd_kafka_ConfigResource_t *));
+        rd_kafka_queue_t *queue;
+        rd_kafka_AdminOptions_t *options;
+        rd_kafka_event_t *event;
+        size_t index;
+
+        if (resources == NULL) {
+                xkafka_set_error(error, error_size, error_code, "could not allocate the topics to describe");
+                return NULL;
+        }
+        for (index = 0; index < count; index++)
+                resources[index] = rd_kafka_ConfigResource_new(RD_KAFKA_RESOURCE_TOPIC, names[index]);
+
+        queue = rd_kafka_queue_new(client);
+        options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_DESCRIBECONFIGS);
+        if (rd_kafka_AdminOptions_set_request_timeout(options, timeout_ms, error, error_size) != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                /* The setter already populated error. */
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
+                event = NULL;
+        } else {
+                rd_kafka_DescribeConfigs(client, resources, count, options, queue);
+                /* librdkafka ends the request with its own timed out result, so this waits a little longer than
+                 * the request may take. */
+                event = rd_kafka_queue_poll(queue, timeout_ms + timeout_ms / 2);
+                if (event == NULL) {
+                        xkafka_set_error_at(error, error_size, error_code, "timed out waiting for the admin result", RD_KAFKA_RESP_ERR__TIMED_OUT);
+                } else if (rd_kafka_event_error(event) != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error_at(error, error_size, error_code, rd_kafka_event_error_string(event), rd_kafka_event_error(event));
+                        rd_kafka_event_destroy(event);
+                        event = NULL;
+                }
+        }
+
+        rd_kafka_ConfigResource_destroy_array(resources, count);
+        free(resources);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(queue);
+        return event;
+}
+
+static const rd_kafka_ConfigResource_t *xkafka_configs_resource(void *configs, size_t resource_index) {
+        size_t count = 0;
+        const rd_kafka_ConfigResource_t **resources =
+            rd_kafka_DescribeConfigs_result_resources(rd_kafka_event_DescribeConfigs_result((rd_kafka_event_t *)configs), &count);
+        return resource_index < count ? resources[resource_index] : NULL;
+}
+
+static const rd_kafka_ConfigEntry_t *xkafka_configs_entry(void *configs, size_t resource_index, size_t entry_index) {
+        size_t count = 0;
+        const rd_kafka_ConfigEntry_t **entries = rd_kafka_ConfigResource_configs(xkafka_configs_resource(configs, resource_index), &count);
+        return entry_index < count ? entries[entry_index] : NULL;
+}
+
+size_t xkafka_configs_resource_count(void *configs) {
+        size_t count = 0;
+        rd_kafka_DescribeConfigs_result_resources(rd_kafka_event_DescribeConfigs_result((rd_kafka_event_t *)configs), &count);
+        return count;
+}
+
+const char *xkafka_configs_resource_name(void *configs, size_t resource_index) {
+        return rd_kafka_ConfigResource_name(xkafka_configs_resource(configs, resource_index));
+}
+
+int32_t xkafka_configs_resource_error(void *configs, size_t resource_index) {
+        return rd_kafka_ConfigResource_error(xkafka_configs_resource(configs, resource_index));
+}
+
+const char *xkafka_configs_resource_error_string(void *configs, size_t resource_index) {
+        const char *detail = rd_kafka_ConfigResource_error_string(xkafka_configs_resource(configs, resource_index));
+        return detail != NULL ? detail : rd_kafka_err2str(rd_kafka_ConfigResource_error(xkafka_configs_resource(configs, resource_index)));
+}
+
+size_t xkafka_configs_entry_count(void *configs, size_t resource_index) {
+        size_t count = 0;
+        rd_kafka_ConfigResource_configs(xkafka_configs_resource(configs, resource_index), &count);
+        return count;
+}
+
+const char *xkafka_configs_entry_name(void *configs, size_t resource_index, size_t entry_index) {
+        return rd_kafka_ConfigEntry_name(xkafka_configs_entry(configs, resource_index, entry_index));
+}
+
+/* NULL where the entry has no value, which is also how a sensitive value arrives. */
+const char *xkafka_configs_entry_value(void *configs, size_t resource_index, size_t entry_index) {
+        return rd_kafka_ConfigEntry_value(xkafka_configs_entry(configs, resource_index, entry_index));
+}
+
+int32_t xkafka_configs_entry_source(void *configs, size_t resource_index, size_t entry_index) {
+        return (int32_t)rd_kafka_ConfigEntry_source(xkafka_configs_entry(configs, resource_index, entry_index));
+}
+
+int32_t xkafka_configs_entry_is_sensitive(void *configs, size_t resource_index, size_t entry_index) {
+        return rd_kafka_ConfigEntry_is_sensitive(xkafka_configs_entry(configs, resource_index, entry_index));
+}
+
+int32_t xkafka_configs_entry_is_read_only(void *configs, size_t resource_index, size_t entry_index) {
+        return rd_kafka_ConfigEntry_is_read_only(xkafka_configs_entry(configs, resource_index, entry_index));
+}
+
+void xkafka_configs_destroy(void *configs) {
+        if (configs != NULL)
+                rd_kafka_event_destroy((rd_kafka_event_t *)configs);
+}
+
+const char *xkafka_error_string(int32_t code) {
+        return rd_kafka_err2str((rd_kafka_resp_err_t)code);
+}
+
 /* Names the partitions to read directly, joining no consumer group. */
 int xkafka_consumer_assign(rd_kafka_t *consumer,
                            const char *const *topics,

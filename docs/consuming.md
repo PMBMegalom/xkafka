@@ -61,6 +61,24 @@ By default a consumer delivers records from transactions that have not
 committed. Set `isolationLevel` to change that. See
 [Transactions](transactions.md).
 
+## Where a consumer starts
+
+A consumer resumes each partition from its group's committed offset. Where the
+group has none, `autoOffsetReset` decides:
+
+| value | where the consumer starts |
+| --- | --- |
+| `Earliest` | at the first record still in the partition |
+| `Latest` | at the end of the partition, reading only records written from then on |
+| `Fail` | nowhere: the record stream fails as `ErrorCode.OffsetResetRequired` |
+
+A committed offset that is no longer in the partition, because the records it
+pointed at were deleted, is handled by the same setting. `Earliest` starts at the
+first record still there, and `Fail` fails the record stream.
+
+Choose `Fail` where skipping or replaying records would be wrong, such as for a
+replica rebuilt from a snapshot and the log written after it.
+
 ## Inspecting the consumer
 
 Within the consumer resource:

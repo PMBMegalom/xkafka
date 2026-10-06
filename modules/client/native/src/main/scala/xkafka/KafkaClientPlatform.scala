@@ -25,7 +25,7 @@ import scala.scalanative.libc.string.memcpy
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
 
-import cats.data.{NonEmptyList, NonEmptySet}
+import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Mutex, Queue, Random, Semaphore, Supervisor}
@@ -64,6 +64,16 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
   private val UnassignedPartition       = -1
   // Admin calls are metadata round trips against the controller, so they are bounded on their own.
   private val AdminTimeoutMillis = 30000
+
+  // What the shim leaves in place of a code for a partition its result does not mention.
+  private val NoAnswer = Int.MinValue
+
+  // _NOENT, which librdkafka reports when deleting records finds no leader for any requested partition.
+  private val NoLeadersFound = -156
+
+  /** A partition librdkafka found no leader for, which it reports for a topic or partition the cluster does not have. */
+  private def unknownPartition(detail: String): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(detail, Some(ErrorCode.UnknownTopicOrPartition), Some(ErrorCode.UnknownTopicOrPartition.retriable))
   // librdkafka's sentinels for the ends of a partition's log.
   private val BeginningOffset = -2L
   private val EndOffset       = -1L
@@ -205,6 +215,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
               settings.autoOffsetReset match
                 case AutoOffsetReset.Earliest => "earliest"
                 case AutoOffsetReset.Latest   => "latest"
+                case AutoOffsetReset.Fail     => "error"
             ),
             names,
             values,
@@ -403,6 +414,109 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
         topics.find(topic => !described.contains(topic)) match
           case Some(missing) => F.raiseError(unknownTopic(missing))
           case None          => F.pure(described)
+
+    override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]] =
+      client(deleteBefore(before.toSortedMap.toVector)).map(_.toMap)
+
+    private def deleteBefore(cuts: Vector[(TopicPartition, Offset)]): Vector[(TopicPartition, Either[KafkaException, Offset])] =
+      Zone.acquire: zone =>
+        given Zone        = zone
+        val topics        = alloc[CString](cuts.size)
+        val partitions    = alloc[CInt](cuts.size)
+        val offsets       = alloc[CLongLong](cuts.size)
+        val codes         = alloc[CInt](cuts.size)
+        val lowWatermarks = alloc[CLongLong](cuts.size)
+        cuts.iterator.zipWithIndex.foreach:
+          case ((topicPartition, offset), index) =>
+            topics(index) = toCString(topicPartition.topic.value)
+            partitions(index) = topicPartition.partition.value
+            offsets(index) = offset.value
+        val (error, errorCode) = errorSlots
+        val result             =
+          Bindings.xkafka_admin_delete_records(
+            client.handle,
+            topics,
+            partitions,
+            offsets,
+            cuts.size.toUSize,
+            requestTimeoutMillis,
+            codes,
+            lowWatermarks,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        // librdkafka fails the whole call where no requested partition exists, and answers each one where only some do.
+        if result != 0 && !errorCode == NoLeadersFound then
+          val failure = unknownPartition(fromCString(error))
+          cuts.map((topicPartition, _) => topicPartition -> Left(failure))
+        else if result != 0 then throw nativeError(error, errorCode)
+        else
+          cuts.zipWithIndex.map:
+            case ((topicPartition, _), index) => codes(index) match
+                case NoAnswer => throw new KafkaException.InvalidBackendResponse(s"no answer for partition ${topicPartition.show}")
+                case 0        =>
+                  val low = lowWatermarks(index)
+                  topicPartition -> Right(Offset.from(low).fold(error => throw invalidBackendValue("low watermark", low, error), identity))
+                case code =>
+                  val classified = ErrorCode.fromLibrdkafka(code)
+                  val failure    =
+                    new KafkaException.BackendFailure(fromCString(Bindings.xkafka_error_string(code)), Some(classified), Some(classified.retriable))
+                  topicPartition -> Left(failure)
+
+    override def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+      client(describeConfigurations(topics.toSortedSet.toVector)).map(_.toMap)
+
+    private def describeConfigurations(topics: Vector[Topic]): Vector[(Topic, Either[KafkaException, TopicConfiguration])] =
+      Zone.acquire: zone =>
+        given Zone = zone
+        val names  = alloc[CString](topics.size)
+        topics.iterator.zipWithIndex.foreach((value, index) => names(index) = toCString(value.value))
+        val (error, errorCode) = errorSlots
+        val configs            =
+          Bindings.xkafka_admin_describe_topic_configs(
+            client.handle,
+            names,
+            topics.size.toUSize,
+            requestTimeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if configs == null then throw nativeError(error, errorCode)
+        else
+          try
+            val answers =
+              Vector.tabulate(Bindings.xkafka_configs_resource_count(configs).toInt)(index =>
+                fromCString(Bindings.xkafka_configs_resource_name(configs, index.toUSize)) -> index
+              ).toMap
+            topics.map: topic =>
+              answers.get(topic.value) match
+                case None        => throw new KafkaException.InvalidBackendResponse(s"no answer for topic ${topic.value}")
+                case Some(index) => topic -> configuration(configs, index.toUSize)
+          finally Bindings.xkafka_configs_destroy(configs)
+
+    private def configuration(configs: CVoidPtr, resource: CSize): Either[KafkaException, TopicConfiguration] =
+      Bindings.xkafka_configs_resource_error(configs, resource) match
+        case 0 =>
+          val entries =
+            Vector.tabulate(Bindings.xkafka_configs_entry_count(configs, resource).toInt): index =>
+              val entry = index.toUSize
+              val value = Bindings.xkafka_configs_entry_value(configs, resource, entry)
+              fromCString(Bindings.xkafka_configs_entry_name(configs, resource, entry)) -> ConfigurationEntry.reported(
+                Option(value).map(fromCString(_)),
+                Bindings.xkafka_configs_entry_is_sensitive(configs, resource, entry) != 0,
+                ConfigurationSource.fromLibrdkafka(Bindings.xkafka_configs_entry_source(configs, resource, entry)),
+                Bindings.xkafka_configs_entry_is_read_only(configs, resource, entry) != 0
+              )
+          Right(TopicConfiguration(entries.toMap))
+        case code =>
+          val classified = ErrorCode.fromLibrdkafka(code)
+          Left(new KafkaException.BackendFailure(
+            fromCString(Bindings.xkafka_configs_resource_error_string(configs, resource)),
+            Some(classified),
+            Some(classified.retriable)
+          ))
 
     private def unknownTopic(topic: Topic): KafkaException.BackendFailure =
       new KafkaException.BackendFailure(

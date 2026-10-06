@@ -22,7 +22,7 @@
 package xkafka
 
 import cats.arrow.FunctionK
-import cats.data.{EitherT, NonEmptyList, NonEmptySet}
+import cats.data.{EitherT, NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -84,13 +84,18 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     val producerSettings = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
     val consumerSettings = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
     val record           = ProducerRecord(topic, "key", "value")
+    val cut              = NonEmptyMap.one(TopicPartition(topic, Partition.from(0).toOption.get), Offset.from(3L).toOption.get)
 
     for
-      produced <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
-      consumed <- client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.compile.drain).value
+      produced  <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
+      consumed  <- client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.compile.drain).value
+      deleted   <- client.admin(clientSettings).use(_.deleteRecords(cut)).value
+      inspected <- client.admin(clientSettings).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).value
     yield
       assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record -> None))))
       assertEquals(consumed, Right(()))
+      assertEquals(deleted, Right(cut.toSortedMap.view.mapValues(Right(_)).toMap))
+      assertEquals(inspected, Right(Map(topic -> Right(TopicConfiguration(Map.empty)))))
 
   private val source: KafkaClient[IO] = sourceRecording(_ => IO.unit)
 
@@ -131,6 +136,10 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def deleteTopics(topics: NonEmptySet[Topic]): IO[Unit]                         = IO.unit
             override def createPartitions(topic: Topic, count: Int): IO[Unit]                       = IO.unit
             override def describeTopics(topics: NonEmptySet[Topic]): IO[Map[Topic, Set[Partition]]] = IO.pure(Map.empty)
+            override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): IO[Map[TopicPartition, Either[KafkaException, Offset]]] =
+              IO.pure(before.toSortedMap.view.mapValues(Right(_)).toMap)
+            override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+              IO.pure(topics.toSortedSet.toList.map(_ -> Right(TopicConfiguration(Map.empty))).toMap)
 
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], selection: Selection): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:

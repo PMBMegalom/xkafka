@@ -69,12 +69,43 @@ final class ErrorSuite extends FunSuite:
     assertEquals(ErrorCode.fromLibrdkafka(-144), ErrorCode.Fenced)
     assertEquals(ErrorCode.fromLibrdkafka(-152), ErrorCode.Purged)
     assertEquals(ErrorCode.fromLibrdkafka(-151), ErrorCode.Purged)
+    assertEquals(ErrorCode.fromLibrdkafka(-140), ErrorCode.OffsetResetRequired)
+    assert(!ErrorCode.OffsetResetRequired.retriable)
     // _OUTDATED and _FAIL have no portable meaning, so they stay raw.
     assertEquals(ErrorCode.fromLibrdkafka(-167), ErrorCode.Other(-167))
     assertEquals(ErrorCode.fromLibrdkafka(-196), ErrorCode.Other(-196))
     // Positive librdkafka codes are protocol codes, so they classify identically.
     assertEquals(ErrorCode.fromLibrdkafka(3), ErrorCode.UnknownTopicOrPartition)
     assertEquals(ErrorCode.fromLibrdkafka(-1), ErrorCode.Other(-1))
+
+  test("a reported configuration entry withholds a sensitive value and keeps an absent one absent"):
+    assertEquals(
+      ConfigurationEntry.reported(Some("x"), sensitive = true, ConfigurationSource.Default, readOnly = false).value,
+      ConfigurationValue.Redacted
+    )
+    assertEquals(
+      ConfigurationEntry.reported(None, sensitive = true, ConfigurationSource.Default, readOnly = false).value,
+      ConfigurationValue.Redacted
+    )
+    assertEquals(ConfigurationEntry.reported(None, sensitive = false, ConfigurationSource.Default, readOnly = false).value, ConfigurationValue.Absent)
+    assertEquals(
+      ConfigurationEntry.reported(Some("x"), sensitive = false, ConfigurationSource.TopicOverride, readOnly = true),
+      ConfigurationEntry(ConfigurationValue.Present("x"), ConfigurationSource.TopicOverride, readOnly = true)
+    )
+
+  test("librdkafka configuration sources map onto the portable ones"):
+    assertEquals(
+      List(0, 1, 2, 3, 4, 5, 8).map(ConfigurationSource.fromLibrdkafka),
+      List(
+        ConfigurationSource.Unknown,
+        ConfigurationSource.TopicOverride,
+        ConfigurationSource.DynamicBroker,
+        ConfigurationSource.DynamicClusterDefault,
+        ConfigurationSource.StaticBroker,
+        ConfigurationSource.Default,
+        ConfigurationSource.Unknown
+      )
+    )
 
   test("a rejected value carries its reason into the effect"):
     val raised = Topic.from("").liftTo[Either[Throwable, *]].swap.toOption
