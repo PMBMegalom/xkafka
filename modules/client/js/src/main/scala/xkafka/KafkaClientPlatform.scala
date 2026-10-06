@@ -33,7 +33,7 @@ import cats.effect.std.{Dispatcher, Mutex, Random}
 import fs2.concurrent.{Channel, SignallingRef}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
-import internal.{confluent, ClientProperties}
+import internal.{confluent, ClientProperties, PollQueue}
 import internal.security.SecurityProperties
 
 private[xkafka] object KafkaClientPlatform:
@@ -684,8 +684,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
       * records.
       */
     val pollLoop: Stream[F, Nothing] =
-      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => leased).flatMap(Stream.emits).evalMap(polled.send(_).void).drain
-        .onFinalize(polled.close.void)
+      PollQueue.feed(Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => leased).flatMap(Stream.emits), polled, failure)
 
     /** A consume, with the lease each of its records was read under. */
     private def leased: F[List[Polled]] =
@@ -699,8 +698,7 @@ private final class ConfluentKafkaClient[F[_]](driver: ConfluentKafkaDriver)(usi
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      polled.stream.evalMap(consumerRecord).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = PollQueue.read(polled, failure).evalMap(consumerRecord)
 
     private def fetch: F[js.Array[confluent.RdMessage]] =
       callback[js.Array[confluent.RdMessage]](done => underlying.consume(ConsumeBatchSize, done)).recover:

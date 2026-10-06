@@ -32,7 +32,7 @@ import cats.effect.std.{Mutex, Queue, Random, Semaphore, Supervisor}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.concurrent.{Channel, SignallingRef}
-import internal.ClientProperties
+import internal.{ClientProperties, PollQueue}
 import internal.librdkafka.Bindings
 import internal.security.SecurityProperties
 
@@ -938,10 +938,14 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
       * record is labelled with the lease it was read under, and each rebalance the poll raised is handed to `rebalancing`.
       */
     val pollLoop: Stream[F, Nothing] =
-      Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
-        .evalMap(_ => leases.reading(pollOnce)(record => LeaseKey(record.topic, record.partition)))
-        // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
-        .evalMap(_.traverse_((record, lease) => polled.send(ReadRecord(record, lease)).void)).drain.onFinalize(polled.close.void)
+      // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
+      PollQueue.feed(
+        Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
+          .evalMap(_ => leases.reading(pollOnce)(record => LeaseKey(record.topic, record.partition))).flatMap(Stream.emits)
+          .map((record, lease) => ReadRecord(record, lease)),
+        polled,
+        failure
+      )
 
     private def pollOnce: F[List[NativeRecord]] =
       client((poll(), takeRebalances())).flatMap((record, taken) => taken.traverse_(rebalances.offer).as(record.toList))
@@ -984,8 +988,7 @@ private final class LibrdkafkaClient[F[_]](using F: Async[F]) extends KafkaClien
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      polled.stream.evalMap(decode).concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = PollQueue.read(polled, failure).evalMap(decode)
 
     override def assignment: F[Set[TopicPartition]] = client(readAssignment())
 
