@@ -29,7 +29,8 @@ import fs2.concurrent.Channel
 
 /** The queue between a librdkafka consumer's single poll and whoever reads its records.
   *
-  * A poll that fails records its failure before it closes the queue, so a reader never takes a failed poll for a stream that simply ended.
+  * A poll that fails records its failure before it closes the queue, and a reader that reaches the end of the queue raises a recorded failure, so a
+  * reader never takes a failed poll for a stream that simply ended.
   */
 private[xkafka] object PollQueue:
   /** Sends every polled value to the queue and closes it once polling ends, recording a failure first. */
@@ -37,6 +38,11 @@ private[xkafka] object PollQueue:
     polls.evalMap(queue.send(_).void).drain.handleErrorWith(error => Stream.exec(failure.complete(error).void) ++ Stream.raiseError[F](error))
       .onFinalize(queue.close.void)
 
-  /** The queued values, failing once a failure is recorded. */
+  /** The queued values, failing once a failure is recorded.
+    *
+    * `concurrently` stops watching for the failure when the queue ends, so a failure recorded just before the end can go unreported by it alone. The
+    * reader therefore also looks for one at the end.
+    */
   def read[F[_], A](queue: Channel[F, A], failure: Deferred[F, Throwable])(using F: Concurrent[F]): Stream[F, A] =
-    queue.stream.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+    (queue.stream ++ Stream.exec(failure.tryGet.flatMap(_.traverse_(F.raiseError[Unit]))))
+      .concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))

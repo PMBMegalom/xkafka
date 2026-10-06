@@ -37,20 +37,21 @@ final class PollQueueSuite extends CatsEffectSuite:
     queued.flatMap: (queue, failure) =>
       PollQueue.feed(Stream(1, 2), queue, failure).compile.drain *> PollQueue.read(queue, failure).compile.toList.map(assertEquals(_, List(1, 2)))
 
-  // Each ordering problem below only shows up on some schedules, so every case runs many times.
+  // Each ordering problem below only shows up on some schedules, so every case runs many times in parallel, which is what exposes it on one machine.
   test("a failed poll records its failure before its queue closes"):
     queued.flatMap: (queue, failure) =>
       PollQueue.feed(Stream(1) ++ Stream.raiseError[IO](boom), queue, failure).compile.drain.attempt.start *> queue.closed *> failure.tryGet
-    .replicateA(200).map(recorded => assert(recorded.forall(_.contains(boom)), s"some queues closed before their failure was recorded: $recorded"))
+    .parReplicateA(2000)
+      .map(recorded => assert(recorded.forall(_.contains(boom)), s"some queues closed before their failure was recorded: $recorded"))
 
   test("a reader reaching the end of a failed poll's queue fails with that failure"):
     queued.flatMap: (queue, failure) =>
       PollQueue.feed(Stream(1, 2) ++ Stream.raiseError[IO](boom), queue, failure).compile.drain.attempt *> PollQueue.read(queue, failure)
         .compile.toList.attempt
-    .replicateA(200).map(outcomes => assert(outcomes.forall(_ == Left(boom)), s"some readers finished without the failure: ${outcomes.distinct}"))
+    .parReplicateA(2000).map(outcomes => assert(outcomes.forall(_ == Left(boom)), s"some readers finished without the failure: ${outcomes.distinct}"))
 
   test("a reader running alongside a failing poll fails with that failure"):
     queued.flatMap: (queue, failure) =>
       PollQueue.read(queue, failure).compile.toList.attempt
         .both(PollQueue.feed(Stream(1) ++ Stream.raiseError[IO](boom), queue, failure).compile.drain.attempt).map(_._1)
-    .replicateA(200).map(outcomes => assert(outcomes.forall(_ == Left(boom)), s"some readers finished without the failure: ${outcomes.distinct}"))
+    .parReplicateA(2000).map(outcomes => assert(outcomes.forall(_ == Left(boom)), s"some readers finished without the failure: ${outcomes.distinct}"))
