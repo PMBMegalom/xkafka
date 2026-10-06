@@ -2,3 +2,10 @@
 # shutdown unless the full AddressSanitizer mode is active. Suppress only its
 # allocation site; allocations made by xkafka and librdkafka remain visible.
 leak:_SM35scala.scalanative.unsafe.MemoryPoolD13allocateChunk
+
+# OpenSSL keeps a per-thread random generator that librdkafka creates when it
+# asks for random bytes, such as for a consumer group's id, and frees it when
+# that thread exits. The check reports it at exit on some runs and not on
+# others. Suppress only what is allocated under librdkafka's call into
+# OpenSSL's generator.
+leak:rd_rand_bytes_by_ossl
