@@ -334,7 +334,15 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       // the system libraries it was built against. GNU ld resolves archives left to right and drops members
       // nothing has referenced yet, so librdkafka has to precede them; ld64 resolves across all inputs and
       // does not care, which is why this only shows up on Linux.
-      val systemLinkFlags = librdkafkaSearchFlags ++ Seq("-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd")
+      //
+      // Homebrew also links OpenSSL 4 into its shared library directory, which the link searches first, and OpenSSL 4 lacks the engine API
+      // librdkafka calls. On macOS the OpenSSL librdkafka was built against is therefore named by path.
+      val prefixes = homebrewPrefixes
+      val openSsl  = prefixes.find(_.getName == "openssl@3") match {
+        case Some(prefix) => Seq("libssl", "libcrypto").map(name => s"${prefix.getAbsolutePath}/lib/$name.dylib")
+        case None         => Seq("-lssl", "-lcrypto")
+      }
+      val systemLinkFlags = prefixes.map(prefix => s"-L${prefix.getAbsolutePath}/lib") ++ ("-lrdkafka" +: openSsl) ++ Seq("-lz", "-lzstd")
       config
         .withCompileOptions(_ :+ s"-I${prefix.getAbsolutePath}/include")
         .withLinkingOptions(_ ++ (s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}" +: systemLinkFlags))
