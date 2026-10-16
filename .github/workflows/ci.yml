@@ -67,7 +67,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: modules/client/js/package-lock.json
+          cache-dependency-path: build.sbt
 
       - name: Install librdkafka system dependencies
         if: matrix.project == 'rootNative' && startsWith(matrix.os, 'ubuntu')
@@ -78,6 +78,15 @@ jobs:
       - name: Install librdkafka system dependencies
         if: matrix.project == 'rootNative' && startsWith(matrix.os, 'macos')
         run: brew install openssl@3 zstd zlib
+
+      - name: Cache the librdkafka library build
+        if: matrix.project == 'rootJS'
+        uses: actions/cache@v4
+        with:
+          path: |
+            modules/client/js/target/librdkafka-shared-build
+            modules/client/js/target/librdkafka-musl-build
+          key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Check that workflows are up to date
         run: sbt githubWorkflowCheck
@@ -122,7 +131,7 @@ jobs:
 
   publish:
     name: Publish Artifacts
-    needs: [build, integration, native-leaks]
+    needs: [build, integration, native-leaks, npm-publish]
     if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
     strategy:
       matrix:
@@ -266,12 +275,15 @@ jobs:
 
       - run: scala-steward validate-repo-config .scala-steward.conf
 
-  integration:
-    name: Broker-backed integration tests
+  npm-librdkafka:
+    name: Prebuilt librdkafka libraries
     strategy:
       matrix:
-        os: [ubuntu-24.04]
-        scala: [3]
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-latest
+          - macos-15-intel
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -302,13 +314,111 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: modules/client/js/package-lock.json
+          cache-dependency-path: build.sbt
+
+      - name: Cache the librdkafka library build
+        uses: actions/cache@v4
+        with:
+          path: |
+            modules/client/js/target/librdkafka-shared-build
+            modules/client/js/target/librdkafka-musl-build
+          key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
+
+      - name: Build this platform's library and load it through its npm package
+        run: sbt 'clientJS/testOnly xkafka.LibrdkafkaPlatformSuite'
+
+      - name: Build the musl library in Alpine and check that it loads there
+        if: runner.os == 'Linux'
+        run: sbt clientJS/npmLibrdkafkaMusl
+
+      - name: Keep the packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: npm-librdkafka-${{ matrix.os }}
+          path: modules/client/js/target/npm/librdkafka*
+
+  npm-publish:
+    name: Publish the prebuilt librdkafka libraries
+    needs: [npm-librdkafka]
+    if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+        java: [temurin@17]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout current branch (fast)
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Collect the packages
+        uses: actions/download-artifact@v6
+        with:
+          pattern: npm-librdkafka-*
+          merge-multiple: true
+          path: npm-packages
+
+      - name: Publish the versions npm does not have yet
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: scripts/publish-npm-librdkafka.sh npm-packages
+
+  integration:
+    name: Broker-backed integration tests
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+        java: [temurin@17]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout current branch (full)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Setup Java (temurin@17)
+        id: setup-java-temurin-17
+        if: matrix.java == 'temurin@17'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: sbt
+
+      - name: sbt update
+        if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
+        run: sbt +update
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: build.sbt
 
       - name: Install librdkafka system dependencies
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
+
+      - name: Cache the librdkafka library build
+        uses: actions/cache@v4
+        with:
+          path: |
+            modules/client/js/target/librdkafka-shared-build
+            modules/client/js/target/librdkafka-musl-build
+          key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Test all three backends against Kafka, including TLS and SASL
         run: scripts/integration-test.sh
@@ -318,7 +428,6 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04]
-        scala: [3]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -349,7 +458,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: modules/client/js/package-lock.json
+          cache-dependency-path: build.sbt
 
       - name: Install librdkafka system dependencies
         if: startsWith(matrix.os, 'ubuntu')
@@ -370,7 +479,6 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-24.04]
-        scala: [3]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -401,7 +509,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-          cache-dependency-path: modules/client/js/package-lock.json
+          cache-dependency-path: build.sbt
 
       - name: Install librdkafka system dependencies
         if: startsWith(matrix.os, 'ubuntu')

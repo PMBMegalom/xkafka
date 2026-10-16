@@ -76,6 +76,14 @@ static void xkafka_client_free(xkafka_client_t *state) {
 
 const char *xkafka_version_str(void) { return rd_kafka_version_str(); }
 
+/* The build's identity, which the JavaScript backend compares with the one it
+ * was compiled against, so a library built from other shim sources is refused
+ * when it loads. Builds that do not set it have none. */
+#ifndef XKAFKA_SHIM_ID
+#define XKAFKA_SHIM_ID ""
+#endif
+const char *xkafka_shim_id(void) { return XKAFKA_SHIM_ID; }
+
 /* Failures report their librdkafka code alongside their text, both written
  * through the caller's own out-parameters. Nothing is shared between clients,
  * so concurrent failures on separate handles cannot overwrite each other. */

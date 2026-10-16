@@ -52,9 +52,10 @@ platform. The platform's runtime dependencies are described below.
 
 ## Scala.js
 
-The backend is `@confluentinc/kafka-javascript`, which is installed through
-sbt-scalajs-bundler and runs on Node.js. Use the Node version recorded in
-`.nvmrc`:
+The backend is librdkafka, the same release Scala Native uses, called through
+koffi. sbt-scalajs-bundler installs it from npm as `@xkafka/librdkafka`, which
+brings a prebuilt library for the platform it runs on. Use the Node version
+recorded in `.nvmrc`:
 
 ```sh
 nvm use

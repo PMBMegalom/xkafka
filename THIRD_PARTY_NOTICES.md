@@ -8,18 +8,19 @@ their respective licenses and are not relicensed as part of xkafka.
 | Component | Version | License | Use |
 | --- | --- | --- | --- |
 | [fs2-kafka](https://github.com/typelevel/fs2-kafka) | 4.1.1 | MIT | JVM Kafka backend |
-| [Confluent Kafka JavaScript](https://github.com/confluentinc/confluent-kafka-javascript) | 1.10.1 | MIT | Scala.js Kafka backend |
-| [librdkafka](https://github.com/confluentinc/librdkafka) | 2.15.1 | BSD-2-Clause | Native backend and the native layer used by the JavaScript backend |
+| [librdkafka](https://github.com/confluentinc/librdkafka) | 2.15.1 | BSD-2-Clause | Kafka backend for Scala Native and Scala.js |
+| [koffi](https://koffi.dev) | 3.3.3 | MIT | Calls librdkafka from Node.js for the Scala.js backend |
+| [OpenSSL](https://www.openssl.org) | 3.5.7 | Apache-2.0 | TLS and SASL in the prebuilt Scala.js libraries |
+| [Zstandard](https://github.com/facebook/zstd) | 1.5.7 | BSD-3-Clause | Compression in the prebuilt Scala.js libraries |
+| [zlib](https://zlib.net) | 1.3.2 | Zlib | Compression in the prebuilt Scala.js libraries |
 
-The Confluent Kafka JavaScript distribution includes MIT-licensed work derived
-from node-rdkafka and KafkaJS. Its bundled librdkafka source also contains
-third-party components under permissive licenses; their complete notices are
-provided in librdkafka's `LICENSES.txt` and in the license files shipped with
-the Confluent package.
+The `@xkafka/librdkafka-*` npm packages hold librdkafka with OpenSSL, zlib and
+zstd linked in. Each package's `LICENSES.txt` carries the notices of everything
+in its library, including the third-party components librdkafka bundles.
 
-The JavaScript dependency graph and its declared licenses are recorded in
-`modules/client/js/package-lock.json`. Build-only dependencies are not part of
-xkafka's published runtime API.
+On Node.js, xkafka depends only on koffi, which brings its own prebuilt binary
+for the platform, and on `@xkafka/librdkafka`. The npm tooling the build itself
+uses, such as webpack, is not part of xkafka's published runtime API.
 
 Published xkafka library artifacts declare or download these dependencies; the
 repository does not relicense their source or binaries. Anyone distributing an

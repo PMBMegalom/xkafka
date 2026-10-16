@@ -25,20 +25,11 @@ import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
-import munit.{CatsEffectSuite, TestOptions}
+import munit.CatsEffectSuite
 
-/** Behaviour every backend is expected to share against a TLS and SASL broker.
-  *
-  * A case listed in `divergent` is marked as expected to fail on the named backends. Fixing the backend makes the marked case fail, so a marker
-  * cannot outlive the divergence it records.
-  */
+/** Behaviour every backend is expected to share against a TLS and SASL broker. */
 final class KafkaSecuritySuite extends CatsEffectSuite:
   override val munitIOTimeout: Duration = 3.minutes
-
-  private val backend = PlatformKafkaClient.name
-
-  private def secure(name: String, divergent: Set[String]): TestOptions =
-    if divergent.contains(backend) then TestOptions(name).fail else TestOptions(name)
 
   private val configuration =
     for
@@ -69,13 +60,9 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
         roundTrip(saslServer, SecuritySettings.SaslTls(tls, sasl))
       // The test authority is not one the runtime already trusts, so reaching the broker with the
       // default authorities would mean the certificate is never verified.
-      //
-      // The JavaScript backend reports both refusals as a transport failure. Its client collapses
-      // librdkafka's SSL and authentication codes into one before they reach the callback, and
-      // leaves the cause only in the text of a log event.
-      test(secure("refuse a broker certificate from an unknown authority", Set("js"))):
+      test("refuse a broker certificate from an unknown authority"):
         refuse(tlsServer, SecuritySettings.Tls(validTls(CertificateAuthority.SystemDefault)), ErrorCode.SslAuthenticationFailed)
-      test(secure("refuse incorrect SASL credentials", Set("js"))):
+      test("refuse incorrect SASL credentials"):
         refuse(saslServer, SecuritySettings.SaslTls(tls, validSasl(user, s"$secret-wrong")), ErrorCode.SaslAuthenticationFailed)
 
   private def roundTrip(bootstrapServer: String, security: SecuritySettings): IO[Unit] =

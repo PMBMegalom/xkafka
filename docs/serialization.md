@@ -49,11 +49,8 @@ Reading returns `Either[ValidationError, A]`. A header with no value fails as
 `InvalidHeaderLength` rather than being truncated.
 
 Kafka permits a header to have no value, represented as `Header(name, None)`.
-The JVM and Native backends preserve it. Confluent Kafka JavaScript accepts only
-strings and buffers in its producer binding, so the Scala.js backend raises
-`KafkaException.Unsupported` instead of silently changing a missing value into
-empty bytes. `Header(name, Some(Chunk.empty))` remains a distinct, supported
-empty value on every backend.
+Every backend preserves it, and `Header(name, Some(Chunk.empty))` stays a
+distinct empty value.
 
 `contramap` and `map` adapt a codec to another type, and `emap` rejects values
 the bytes can carry but the type cannot.
