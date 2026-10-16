@@ -259,16 +259,16 @@ ThisBuild / githubWorkflowGeneratedCI := {
 // librdkafka links TLS, SASL SCRAM/OAUTHBEARER, and gzip/zstd decompression against system libraries rather than
 // vendoring them, so both its build and the Scala Native link need to find them. Linux distributions install them
 // where the toolchain already looks; Homebrew keeps them keg-only, so on macOS their prefixes have to be discovered
-// and passed explicitly. pkg-config is deliberately not used: it is absent from stock macOS, and librdkafka's own
-// configure falls back to compile checks.
+// and passed explicitly. Where pkg-config is installed, librdkafka's configure asks it too, and on macOS it adds
+// Homebrew's default OpenSSL to the search path, so the prefixes found here are put ahead of it.
 def homebrewPrefixes: Seq[File] = {
   def prefix(formula: String): Option[String] =
     scala.util.Try(Process(Seq("brew", "--prefix", formula)).!!(ProcessLogger(_ => (), _ => ())).trim).toOption.filter(_.nonEmpty)
   if (!isMacOs) Nil else Seq("openssl@3", "zstd", "zlib").flatMap(prefix).map(file).filter(_.isDirectory)
 }
 
-def runCommand(log: Logger, command: Seq[String], directory: File): Unit = {
-  val exitCode = Process(command, directory).!(ProcessLogger(log.info(_), log.error(_)))
+def runCommand(log: Logger, command: Seq[String], directory: File, environment: (String, String)*): Unit = {
+  val exitCode = Process(command, directory, environment: _*).!(ProcessLogger(log.info(_), log.error(_)))
   if (exitCode != 0)
     sys.error(s"command failed (${command.mkString(" ")})")
 }
@@ -551,10 +551,14 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
         IO.delete(source)
         IO.createDirectory(source)
         run(Seq("tar", "-xzf", fetchLibrdkafka(log, buildRoot).getAbsolutePath, "--strip-components=1", "-C", source.getAbsolutePath), buildRoot)
-        val includeFlags = homebrewPrefixes.map(prefix => s"-I${prefix.getAbsolutePath}/include")
-        val libraryFlags = homebrewPrefixes.map(prefix => s"-L${prefix.getAbsolutePath}/lib")
+        val prefixes      = homebrewPrefixes
+        val includeFlags  = prefixes.map(prefix => s"-I${prefix.getAbsolutePath}/include")
+        val libraryFlags  = prefixes.map(prefix => s"-L${prefix.getAbsolutePath}/lib")
+        val pkgConfigPath = prefixes.map(prefix => s"${prefix.getAbsolutePath}/lib/pkgconfig") ++ sys.env.get("PKG_CONFIG_PATH")
 
-        run(
+        // Homebrew's default OpenSSL is 4, which lacks the engine API librdkafka calls, so OpenSSL 3's pkg-config files have to come first.
+        runCommand(
+          log,
           Seq(
             "./configure",
             s"--prefix=${prefix.getAbsolutePath}",
@@ -567,7 +571,8 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
             "--disable-lz4-ext",
             ("--CPPFLAGS=-Drwlock_init=xkafka_librdkafka_rwlock_init" +: includeFlags).mkString(" ")
           ) ++ (if (libraryFlags.isEmpty) Nil else Seq(s"--LDFLAGS=${libraryFlags.mkString(" ")}")),
-          source
+          source,
+          (if (pkgConfigPath.isEmpty) Nil else Seq("PKG_CONFIG_PATH" -> pkgConfigPath.mkString(":"))): _*
         )
         run(
           Seq(
