@@ -31,7 +31,8 @@ val catsTaglessVersion     = "0.16.5"
 val fs2Version             = "3.14.0"
 val fs2KafkaVersion        = "4.1.3"
 val koffiVersion           = "3.3.3"
-val nodeVersion            = "24" // The Node.js release the JavaScript backend targets, matching .nvmrc.
+val lz4JavaVersion         = "1.11.4" // kafka-clients asks for 1.10.2, which has a JVM crash advisory fixed in 1.11.1.
+val nodeVersion            = "24"     // The Node.js release the JavaScript backend targets, matching .nvmrc.
 val librdkafkaVersion      = "2.15.1"
 val librdkafkaSha256       = "23c8575c7d1ced07246cb9cf200c11325b72201fd4134a02414ca869fbdd8ed3"
 val munitVersion           = "1.3.6"
@@ -613,6 +614,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .jvmSettings(
     libraryDependencies ++= Seq(
       "org.typelevel" %% "fs2-kafka" % fs2KafkaVersion,
+      "at.yawk.lz4"    % "lz4-java"  % lz4JavaVersion,
       "org.slf4j"      % "slf4j-nop" % slf4jVersion % Test
     )
   )
