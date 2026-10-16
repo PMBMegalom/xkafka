@@ -7,7 +7,7 @@ Native while using the established Kafka client for each runtime.
 | Platform | Backend | Runtime |
 | --- | --- | --- |
 | JVM | [fs2-kafka](https://github.com/typelevel/fs2-kafka) | Java 17 or newer |
-| Scala.js | [Confluent Kafka JavaScript](https://github.com/confluentinc/confluent-kafka-javascript) | Node.js 24 |
+| Scala.js | [librdkafka](https://github.com/confluentinc/librdkafka), called through [koffi](https://koffi.dev) | Node.js 24 |
 | Scala Native | [librdkafka](https://github.com/confluentinc/librdkafka) | Scala Native 0.5 or newer |
 
 The API uses `Resource` for producer and consumer lifecycles, `Stream` for
@@ -24,7 +24,8 @@ KafkaClient[IO]
 
 The selected JVM, Scala.js, or Scala Native artifact supplies the corresponding
 adapter automatically. Producer and consumer settings use the same portable
-model everywhere. The Native adapter links to an installed librdkafka; see the
+model everywhere. The Scala.js adapter installs a prebuilt librdkafka from npm,
+and the Native adapter links to an installed librdkafka; see the
 [platform notes](https://pmbmegalom.github.io/xkafka/platform-notes.html) for
 runtime requirements. For example:
 

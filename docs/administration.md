@@ -97,12 +97,6 @@ see the records such a cut deletes, even after their transaction commits.
 
 ## Topic configuration
 
-@:callout(warning)
-`describeTopicConfigurations` is not available on Scala.js. It raises
-`KafkaException.Unsupported` there, because `@confluentinc/kafka-javascript`
-does not offer the operation. It works on the JVM and Scala Native.
-@:@
-
 `describeTopicConfigurations` reports the configuration each topic has in
 effect, including the values it inherits from the broker or from Kafka's
 defaults. Each topic answers on its own, as with `deleteRecords`: a topic the

@@ -29,7 +29,7 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 
 final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
-  test("loads librdkafka through the native shim"):
+  test("loads librdkafka through the shim"):
     assert(LibrdkafkaPlatform.version.nonEmpty)
 
   test("allocates and releases a native producer"):

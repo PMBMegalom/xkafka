@@ -52,17 +52,25 @@ On macOS add a `-L` for the OpenSSL installation as well.
 
 ## Scala.js
 
-The backend is `@confluentinc/kafka-javascript`, reached through its librdkafka
-configuration keys. It targets Node.js rather than browsers.
+The backend is librdkafka, the same release and the same C shim Scala Native
+uses, called from Node.js through koffi. It targets Node.js rather than
+browsers.
 
-Its producer binding accepts string and buffer header values but not a Kafka
-null header value. Producing `Header(name, None)` therefore raises
-`KafkaException.Unsupported`; it is never changed into empty bytes. The JVM and
-Native backends preserve null header values.
+The library comes from npm as `@xkafka/librdkafka`, which sbt-scalajs-bundler
+installs. npm adds the prebuilt library for the platform it runs on:
 
-It cannot describe topic configurations. `describeTopicConfigurations` raises
-`KafkaException.Unsupported` on this backend, because
-`@confluentinc/kafka-javascript` does not offer the operation.
+| Platform | Package |
+| --- | --- |
+| macOS on Apple silicon | `@xkafka/librdkafka-darwin-arm64` |
+| macOS on Intel | `@xkafka/librdkafka-darwin-x64` |
+| Linux x64 with glibc | `@xkafka/librdkafka-linux-x64-gnu` |
+| Linux arm64 with glibc | `@xkafka/librdkafka-linux-arm64-gnu` |
+| Linux x64 with musl, such as Alpine | `@xkafka/librdkafka-linux-x64-musl` |
+| Linux arm64 with musl | `@xkafka/librdkafka-linux-arm64-musl` |
+
+Nothing else needs installing: each library carries its own OpenSSL, zlib and
+zstd. Each xkafka release depends on the library built from its own shim, and
+refuses to start with any other.
 
 ## Transformations
 

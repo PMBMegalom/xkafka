@@ -8,3 +8,5 @@ target/
 project/project/
 project/target/
 **/target/
+# scalajs-bundler copies each npm install's lock file back beside the build, where it records only the last install on this machine.
+package-lock.json

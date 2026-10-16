@@ -102,18 +102,16 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         val expected = List[(String, Option[List[Byte]])](("a", Some(List[Byte](1))), ("b", Some(List[Byte](2))), ("a", Some(List[Byte](3))))
         assertEquals(observed, expected)
 
-  test(conformance("a header without a value is preserved or rejected explicitly")):
+  test(conformance("a header without a value stays distinct from one with an empty value")):
     withBroker: server =>
       val topic   = uniqueTopic("null-header")
       val headers = Headers(Header("missing", None), Header("empty", Some(Chunk.empty)))
       val headed  = record(topic, Some("key"), Some("value"), validPartition(0), headers)
 
-      produce(server, NonEmptyList.one(headed)).attempt.flatMap:
-        case Left(_: KafkaException.Unsupported) => IO(assertEquals(backend, "js"))
-        case Left(error)                         => IO(fail(s"unexpected error: $error"))
-        case Right(_)                            => consume(server, topic, 1).map: consumed =>
-            assert(backend != "js", "the JavaScript backend must reject the value its wrapper cannot represent")
-            assertEquals(consumed.head.record.headers.values, headers.values)
+      for
+        _        <- produce(server, NonEmptyList.one(headed))
+        consumed <- consume(server, topic, 1)
+      yield assertEquals(consumed.head.record.headers.values, headers.values)
 
   test(conformance("producing reports metadata for every record")):
     withBroker: server =>
@@ -1173,7 +1171,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         resetRequired(failed)
         assertEquals(earliest, List(2L), "Earliest should start at the first record still in the partition")
 
-  test(conformance("a topic's configuration reports its own settings and the values it inherits", divergent = Set("js"))):
+  test(conformance("a topic's configuration reports its own settings and the values it inherits")):
     withBroker: server =>
       val topic = uniqueTopic("configuration")
       for
@@ -1200,7 +1198,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         List("retention.bytes", "delete.retention.ms").foreach(name => assert(configuration.get(name).isDefined, s"$name should be reported"))
         assertEquals(configuration.get("no.such.property"), None)
 
-  test(conformance("a topic the cluster does not have answers with its own failure", divergent = Set("js"))):
+  test(conformance("a topic the cluster does not have answers with its own failure")):
     withBroker: server =>
       val present = uniqueTopic("configuration-present")
       val missing = uniqueTopic("configuration-missing")
@@ -1215,19 +1213,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             assertEquals(failure.code, Some(ErrorCode.UnknownTopicOrPartition), failure.getMessage)
           case other => fail(s"a topic the cluster does not have should fail, got $other")
 
-  test(conformance("describing topic configurations against a cluster that cannot be reached fails as a timed out request", divergent = Set("js"))):
+  test(conformance("describing topic configurations against a cluster that cannot be reached fails as a timed out request")):
     val topics = NonEmptySet.of(uniqueTopic("configuration-unreachable"), uniqueTopic("configuration-unreachable"))
     ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
       PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(topics)).attempt.timeout(150.seconds).map(unreachable)
-
-  test(conformance("only the JavaScript backend refuses to describe topic configurations")):
-    withBroker: server =>
-      ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
-        PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(uniqueTopic("configuration-support")))).attempt
-          .timeout(90.seconds).map:
-            case Left(_: KafkaException.Unsupported) => assertEquals(backend, "js")
-            case Left(other)                         => fail(s"expected an answer or Unsupported, got $other")
-            case Right(_)                            => assertNotEquals(backend, "js")
 
   private def unreachable(outcome: Either[Throwable, ?]): Unit =
     outcome match

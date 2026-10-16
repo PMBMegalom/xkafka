@@ -17,9 +17,8 @@ lazy val smoke = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .jsSettings(
     scalaJSUseMainModuleInitializer := true,
     Compile / additionalNpmConfig += "license"      -> scalajsbundler.util.JSON.str("MIT"),
-    Compile / additionalNpmConfig += "allowScripts" -> scalajsbundler.util.JSON.obj(
-      "@confluentinc/kafka-javascript@1.10.1" -> scalajsbundler.util.JSON.bool(true)
-    )
+    // koffi's install script only compiles koffi where no prebuilt binary matches, which never happens on the platforms xkafka supports.
+    Compile / additionalNpmConfig += "allowScripts" -> scalajsbundler.util.JSON.obj("koffi@3.3.3" -> scalajsbundler.util.JSON.bool(false))
   )
   .jvmSettings(Compile / run / fork := true)
   .nativeSettings(
