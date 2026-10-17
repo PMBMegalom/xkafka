@@ -194,12 +194,6 @@
         </div>
         
         <h2 id="topic-configuration" class="section"><a class="anchor-link left" href="#topic-configuration"><i class="icofont-laika link">&#xef71;</i></a>Topic configuration</h2>
-        <div class="callout warning">
-          <i class="icofont-laika warning">&#xf026;</i>
-          <p><code>describeTopicConfigurations</code> is not available on Scala.js. It raises
-          <code>KafkaException.Unsupported</code> there, because <code>@confluentinc/kafka-javascript</code>
-          does not offer the operation. It works on the JVM and Scala Native.</p>
-        </div>
         <p><code>describeTopicConfigurations</code> reports the configuration each topic has in
         effect, including the values it inherits from the broker or from Kafka&#39;s
         defaults. Each topic answers on its own, as with <code>deleteRecords</code>: a topic the

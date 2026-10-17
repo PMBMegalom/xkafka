@@ -142,9 +142,10 @@
         platform. The platform&#39;s runtime dependencies are described below.</p>
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>The backend is <code>@confluentinc/kafka-javascript</code>, which is installed through
-        sbt-scalajs-bundler and runs on Node.js. Use the Node version recorded in
-        <code>.nvmrc</code>:</p>
+        <p>The backend is librdkafka, the same release Scala Native uses, called through
+        koffi. sbt-scalajs-bundler installs it from npm as <code>@xkafka/librdkafka</code>, which
+        brings a prebuilt library for the platform it runs on. Use the Node version
+        recorded in <code>.nvmrc</code>:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>nvm use</span></code></pre>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>

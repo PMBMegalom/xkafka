@@ -143,15 +143,48 @@
         <p>On macOS add a <code>-L</code> for the OpenSSL installation as well.</p>
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>The backend is <code>@confluentinc/kafka-javascript</code>, reached through its librdkafka
-        configuration keys. It targets Node.js rather than browsers.</p>
-        <p>Its producer binding accepts string and buffer header values but not a Kafka
-        null header value. Producing <code>Header(name, None)</code> therefore raises
-        <code>KafkaException.Unsupported</code>; it is never changed into empty bytes. The JVM and
-        Native backends preserve null header values.</p>
-        <p>It cannot describe topic configurations. <code>describeTopicConfigurations</code> raises
-        <code>KafkaException.Unsupported</code> on this backend, because
-        <code>@confluentinc/kafka-javascript</code> does not offer the operation.</p>
+        <p>The backend is librdkafka, the same release and the same C shim Scala Native
+        uses, called from Node.js through koffi. It targets Node.js rather than
+        browsers.</p>
+        <p>The library comes from npm as <code>@xkafka/librdkafka</code>, which sbt-scalajs-bundler
+        installs. npm adds the prebuilt library for the platform it runs on:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Platform</th>
+              <th>Package</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>macOS on Apple silicon</td>
+              <td><code>@xkafka/librdkafka-darwin-arm64</code></td>
+            </tr>
+            <tr>
+              <td>macOS on Intel</td>
+              <td><code>@xkafka/librdkafka-darwin-x64</code></td>
+            </tr>
+            <tr>
+              <td>Linux x64 with glibc</td>
+              <td><code>@xkafka/librdkafka-linux-x64-gnu</code></td>
+            </tr>
+            <tr>
+              <td>Linux arm64 with glibc</td>
+              <td><code>@xkafka/librdkafka-linux-arm64-gnu</code></td>
+            </tr>
+            <tr>
+              <td>Linux x64 with musl, such as Alpine</td>
+              <td><code>@xkafka/librdkafka-linux-x64-musl</code></td>
+            </tr>
+            <tr>
+              <td>Linux arm64 with musl</td>
+              <td><code>@xkafka/librdkafka-linux-arm64-musl</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Nothing else needs installing: each library carries its own OpenSSL, zlib and
+        zstd. Each xkafka release depends on the library built from its own shim, and
+        refuses to start with any other.</p>
         
         <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
         <p>Serializers, deserializers, producer and consumer settings, committable offsets
