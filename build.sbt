@@ -298,11 +298,16 @@ val librdkafkaShim =
   Seq("xkafka_librdkafka.c", "xkafka_librdkafka_async.c").map(repositoryRoot / "modules" / "client" / "native" / "src" / "main" / "resources" /
     "scala-native" / _)
 
-// The library's identity: the librdkafka release and the shim sources it was built from. It versions the npm packages, so each xkafka build depends
-// on a library built from its own shim, and the library reports it, so the JavaScript backend refuses one built from anything else.
+// The library's identity: the librdkafka release and everything the npm packages are made from, the shim sources, the script that builds them into
+// the library and the umbrella package's loader. It versions the npm packages, so a change to any of them publishes new ones and each xkafka build
+// depends on the packages made from its own sources, and the library reports it, so the JavaScript backend refuses one built from anything else.
 val librdkafkaShimId = {
   val digest = MessageDigest.getInstance("SHA-256")
-  librdkafkaShim.foreach(source => digest.update(IO.readBytes(source)))
+  val inputs = librdkafkaShim ++ Seq(
+    repositoryRoot / "scripts" / "build-librdkafka-library.sh",
+    repositoryRoot / "modules" / "client" / "js" / "npm" / "librdkafka" / "index.js"
+  )
+  inputs.foreach(source => digest.update(IO.readBytes(source)))
   s"$librdkafkaVersion-${digest.digest().iterator.map(byte => f"${byte & 0xff}%02x").mkString.take(12)}"
 }
 
