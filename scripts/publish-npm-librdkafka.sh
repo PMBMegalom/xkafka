@@ -11,7 +11,7 @@ directory="$1"
 expected_platforms=6
 
 field() {
-  node -p "require('$1/package.json').$2"
+  node -p 'require(require("path").resolve(process.argv[1], "package.json"))[process.argv[2]]' "$1" "$2"
 }
 
 publish() {
