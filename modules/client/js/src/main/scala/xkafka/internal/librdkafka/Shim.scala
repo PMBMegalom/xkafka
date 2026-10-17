@@ -183,30 +183,25 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val configsDestroy        = f("void xkafka_configs_destroy(void *configs)")
 
 private[librdkafka] object Shim:
-  /** A library to use in place of the prebuilt one, by path. */
-  private val LibraryVariable = "XKAFKA_LIBRDKAFKA_LIBRARY"
-
   /** The callback type every `async` function reports through. */
   val DoneType = "xkafka_done_t"
 
   /** The shim, loaded once for the whole process, or why it could not be.
     *
-    * A library named by the environment is taken as it is. The prebuilt one must report the identity this build was made with, since the functions it
-    * offers are declared from that build's shim.
+    * The library must report the identity this build was made with, since the functions it offers are declared from that build's shim.
     */
   lazy val loaded: Either[Throwable, Shim] =
-    val chosen = js.Dynamic.global.process.env.selectDynamic(LibraryVariable).asInstanceOf[js.UndefOr[String]].toOption
     for
       path <-
-        chosen.orElse(Option(PrebuiltLibrary.library)).toRight(new KafkaException.BackendFailure(s"${Option(PrebuiltLibrary.error)
-            .getOrElse("@xkafka/librdkafka found no library")}; set $LibraryVariable to the path of one built for it"))
+        Option(PrebuiltLibrary.library)
+          .toRight(new KafkaException.BackendFailure(Option(PrebuiltLibrary.error).getOrElse("@xkafka/librdkafka found no library")))
       shim <-
         Either.catchNonFatal { Koffi.proto(s"void $DoneType(int64_t token)"): Unit; new Shim(Koffi.load(path)) }
           .leftMap(error => new KafkaException.BackendFailure(s"could not load the xkafka librdkafka library from $path: ${error.getMessage}"))
       reported = shim.shimId().asInstanceOf[String]
       _ <-
         Either.cond(
-          chosen.isDefined || reported == LibraryIdentity.shim,
+          reported == LibraryIdentity.shim,
           (),
           new KafkaException.BackendFailure(s"the xkafka librdkafka library at $path is $reported, but this xkafka needs ${LibraryIdentity.shim}")
         )
