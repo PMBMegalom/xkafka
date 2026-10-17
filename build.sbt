@@ -51,6 +51,7 @@ val npmLibrdkafkaPackages  = settingKey[File]("Where the @xkafka/librdkafka npm 
 val npmLibrdkafkaLocal     = settingKey[File]("The umbrella package the tests install, which names this platform's package by path")
 val sharedLibrdkafka       = taskKey[File]("Builds the C shim and the pinned librdkafka, with its own OpenSSL, zlib and zstd, as one shared library")
 val npmLibrdkafka          = taskKey[File]("Assembles the @xkafka/librdkafka npm package and the package for this platform")
+val forgetStaleLibrdkafka  = taskKey[Unit]("Removes the tests' installed library and npm locks when they come from an earlier library identity")
 val npmLibrdkafkaMusl      =
   taskKey[File]("Builds the library for musl on this machine's architecture in an Alpine container, checks it loads there, and packages it")
 
@@ -504,6 +505,14 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       sharedLibrdkafka.value: Unit
       writePlatformPackage(npmLibrdkafkaPackages.value, hostNpmPlatform.replace("-gnu", "-musl"), output, buildRoot / "source")
     },
+    forgetStaleLibrdkafka := {
+      val workspace = (Test / npmUpdate / crossTarget).value
+      val locks = Seq(baseDirectory.value / "package-lock.json", workspace / "package-lock.json", workspace / "node_modules" / ".package-lock.json")
+      def installed(lock: File): Option[String] =
+        (play.api.libs.json.Json.parse(IO.read(lock)) \ "packages" \ "node_modules/@xkafka/librdkafka" \ "resolved").asOpt[String]
+      if (locks.exists(lock => lock.isFile && installed(lock).exists(!_.contains(s"/local/$librdkafkaShimId/"))))
+        IO.delete(locks :+ (workspace / "node_modules" / "@xkafka"))
+    },
     // The tests ask for the local copy beside the published version, and the resolution settles that conflict in its favour.
     Test / npmDependencies += "@xkafka/librdkafka" -> s"file:${npmLibrdkafkaLocal.value.getAbsolutePath}",
     Test / npmResolutions                          := Map("@xkafka/librdkafka" -> s"file:${npmLibrdkafkaLocal.value.getAbsolutePath}"),
@@ -523,7 +532,9 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
         case other => other
       }
     },
-    Test / npmUpdate := (Test / npmUpdate).dependsOn(npmLibrdkafka).value,
+    // npm keeps an installed local package, through its locks, even after the path it is asked for changes, so one from an earlier library
+    // identity is removed along with the locks that name it.
+    Test / npmUpdate := (Test / npmUpdate).dependsOn(npmLibrdkafka, forgetStaleLibrdkafka).value,
     // The identity of the library this build was made with, which the loaded library must report.
     buildInfoPackage := "xkafka.internal.librdkafka",
     buildInfoObject  := "LibraryIdentity",
