@@ -47,6 +47,9 @@ import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.serialization.ByteArraySerializer
 
 final class JvmKafkaClientSuite extends CatsEffectSuite:
+  // Checking that no failed poll is lost takes 80,000 consumers, which a CI runner needs more than munit's default 30 seconds for.
+  override val munitIOTimeout: Duration = 3.minutes
+
   test("reads Java configuration entries, withholding sensitive values and naming their sources"):
     def entry(value: String | Null, source: JavaConfigEntry.ConfigSource, sensitive: Boolean = false, readOnly: Boolean = false) =
       JavaConfiguration
@@ -220,7 +223,6 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       List("records" -> records, "partitionedRecords" -> partitioned).foreach: (name, results) =>
         val missed = results.filterNot(resetRequired)
         assert(missed.isEmpty, s"$name ended ${missed.size} of ${results.size} runs without the poll's failure, first ${missed.head}")
-    .timeout(2.minutes)
 
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after the partition returns can"):
     val (consumer, partition) = subscribedMock()
