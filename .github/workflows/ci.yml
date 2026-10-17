@@ -346,6 +346,19 @@ jobs:
         os: [ubuntu-24.04]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
+    permissions:
+      actions: none
+      checks: none
+      contents: read
+      deployments: none
+      id-token: write
+      issues: none
+      packages: none
+      pages: none
+      pull-requests: none
+      repository-projects: none
+      security-events: none
+      statuses: none
     timeout-minutes: 15
     steps:
       - name: Checkout current branch (fast)
@@ -355,7 +368,6 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          registry-url: 'https://registry.npmjs.org'
 
       - name: Collect the packages
         uses: actions/download-artifact@v6
@@ -365,8 +377,6 @@ jobs:
           path: npm-packages
 
       - name: Publish the versions npm does not have yet
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: scripts/publish-npm-librdkafka.sh npm-packages
 
   integration:

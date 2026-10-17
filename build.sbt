@@ -5,6 +5,7 @@ import scala.sys.process.Process
 import scala.sys.process.ProcessLogger
 
 import laika.helium.config.{HeliumIcon, IconLink}
+import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
 ThisBuild / scalaVersion     := "3.3.8"
 ThisBuild / tlBaseVersion    := "0.4"
@@ -157,7 +158,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     WorkflowStep.Use(
       UseRef.Public("actions", "setup-node", "v7"),
       name = Some("Setup Node.js"),
-      params = Map("node-version-file" -> ".nvmrc", "registry-url" -> "https://registry.npmjs.org")
+      params = Map("node-version-file" -> ".nvmrc")
     ),
     WorkflowStep.Use(
       UseRef.Public("actions", "download-artifact", "v6"),
@@ -166,11 +167,27 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     ),
     WorkflowStep.Run(
       List("scripts/publish-npm-librdkafka.sh npm-packages"),
-      name = Some("Publish the versions npm does not have yet"),
-      env = Map("NODE_AUTH_TOKEN" -> "${{ secrets.NPM_TOKEN }}")
+      name = Some("Publish the versions npm does not have yet")
     )
   ),
   cond = Some(publishedArtifactCondition),
+  // npm trusts this workflow to publish the packages, so the job proves which workflow it is with a GitHub identity token and holds no npm token.
+  permissions = Some(
+    Permissions.Specify(
+      actions = PermissionValue.None,
+      checks = PermissionValue.None,
+      contents = PermissionValue.Read,
+      deployments = PermissionValue.None,
+      idToken = PermissionValue.Write,
+      issues = PermissionValue.None,
+      packages = PermissionValue.None,
+      pages = PermissionValue.None,
+      pullRequests = PermissionValue.None,
+      repositoryProjects = PermissionValue.None,
+      securityEvents = PermissionValue.None,
+      statuses = PermissionValue.None
+    )
+  ),
   oses = List("ubuntu-24.04"),
   scalas = Nil,
   javas = List(JavaSpec.temurin("17")),
