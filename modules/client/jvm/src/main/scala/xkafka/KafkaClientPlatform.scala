@@ -31,7 +31,7 @@ import scala.util.Try
 import cats.Parallel
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
-import cats.effect.{Async, Resource}
+import cats.effect.{Async, Deferred, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Dispatcher, Mutex, Random}
 import cats.syntax.all.*
@@ -112,7 +112,9 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       random <- Resource.eval(Random.scalaUtilRandom[F])
       // One plain commit at a time, so the leases the consumer checks are the ones of the commit it is running.
       plainCommits <- Resource.eval(Mutex[F])
-    yield new Fs2KafkaConsumerAdapter(consumer, settings, leases, membership, expected, plainCommits, random)
+      // Completed by `stopConsuming`, so a record stream that ends can tell a requested stop from a failed poll.
+      stopping <- Resource.eval(Deferred[F, Unit])
+    yield new Fs2KafkaConsumerAdapter(consumer, settings, leases, membership, expected, plainCommits, random, stopping)
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
     Fs2KafkaProducer.transactional(
@@ -273,27 +275,32 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     new FunctionK[F, F]:
       override def apply[A](value: F[A]): F[A] = backend(value)
 
-  private def backend[A](value: F[A]): F[A] =
-    value.adaptError:
-      // Classified the way the broker would classify a request that ran out of time, so every backend agrees and the
-      // recovery policy retries it.
-      case error: CommitTimeoutException => new KafkaException.BackendFailure(
-          "the commit did not complete within its timeout",
-          code = Some(ErrorCode.RequestTimedOut),
-          retriable = Some(true),
-          fatal = Some(false),
-          cause = error
-        )
-      case error: JavaKafkaException =>
-        val code = protocolCode(error)
-        new KafkaException.BackendFailure(
-          Option(error.getMessage).getOrElse(error.getClass.getName),
-          code = code,
-          // Derived from the portable code, so the same condition is retriable on every backend.
-          retriable = code.map(_.retriable),
-          fatal = Some(error.isInstanceOf[InvalidPidMappingException] || error.isInstanceOf[ProducerFencedException]),
-          cause = error
-        )
+  private def backend[A](value: F[A]): F[A] = value.adaptError(backendFailure)
+
+  /** The portable failure for a Java client exception. Consumer streams apply it with `adaptErr`, because over a stream `translate` can let
+    * fs2-kafka's interruption skip whatever follows that stream.
+    */
+  private val backendFailure: PartialFunction[Throwable, Throwable] = {
+    // Classified the way the broker would classify a request that ran out of time, so every backend agrees and the
+    // recovery policy retries it.
+    case error: CommitTimeoutException => new KafkaException.BackendFailure(
+        "the commit did not complete within its timeout",
+        code = Some(ErrorCode.RequestTimedOut),
+        retriable = Some(true),
+        fatal = Some(false),
+        cause = error
+      )
+    case error: JavaKafkaException =>
+      val code = protocolCode(error)
+      new KafkaException.BackendFailure(
+        Option(error.getMessage).getOrElse(error.getClass.getName),
+        code = code,
+        // Derived from the portable code, so the same condition is retriable on every backend.
+        retriable = code.map(_.retriable),
+        fatal = Some(error.isInstanceOf[InvalidPidMappingException] || error.isInstanceOf[ProducerFencedException]),
+        cause = error
+      )
+  }
 
   /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports.
     *
@@ -503,7 +510,8 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       membership: AtomicReference[JavaConsumerGroupMetadata],
       expected: AtomicReference[Map[LeaseKey, Option[Lease]]],
       plainCommits: Mutex[F],
-      random: Random[F]
+      random: Random[F],
+      stopping: Deferred[F, Unit]
   ) extends KafkaConsumer[F, K, V]:
 
     private val offsetCommitter: OffsetCommitter[F] =
@@ -535,15 +543,20 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
       )
 
     override val records: fs2.Stream[F, CommittableConsumerRecord[F, K, V]] =
-      underlying.records.translate(handleBackendErrors).evalMap(consumerRecord)
+      untilStopped(underlying.records).adaptErr(backendFailure).evalMap(consumerRecord)
+
+    /** fs2-kafka signals its streams to end when its poll fails, and the signal can interrupt the failure on its way to the reader. Short of
+      * `stopConsuming`, a stream ends only once the poll has stopped, so whatever failure stopped it is raised here.
+      */
+    private def untilStopped[A](stream: Stream[F, A]): Stream[F, A] = stream ++ Stream.exec(F.race(stopping.get, underlying.awaitTermination).void)
 
     override def assignment: F[Set[TopicPartition]] = backend(underlying.assignment).flatMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
-    override def stopConsuming: F[Unit] = backend(underlying.stopConsuming)
+    override def stopConsuming: F[Unit] = stopping.complete(()) >> backend(underlying.stopConsuming)
 
     /** fs2-kafka reports assignments as the group rebalances, so nothing is polled. */
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
-      underlying.assignmentStream.translate(handleBackendErrors).evalMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
+      underlying.assignmentStream.adaptErr(backendFailure).evalMap(_.toList.traverse(portableTopicPartition).map(_.toSet))
 
     /** Delegates to fs2-kafka, whose partition streams are fed independently, so `maxQueuedRecords` does not apply and one slow partition cannot
       * stall another.
@@ -551,10 +564,10 @@ private final class Fs2KafkaClient[F[_]](using F: Async[F], P: Parallel[F], mkPr
     override def partitionedRecords(maxQueuedRecords: Int)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
       PartitionRecords.validateMaxQueuedRecords(maxQueuedRecords) match
         case Left(error) => Stream.raiseError(error)
-        case Right(_)    => underlying.partitionsMapStream.translate(handleBackendErrors).flatMap: partitions =>
+        case Right(_)    => untilStopped(underlying.partitionsMapStream).adaptErr(backendFailure).flatMap: partitions =>
             Stream.emits(partitions.toList).evalMap: (javaTopicPartition, records) =>
               portableTopicPartition(javaTopicPartition)
-                .map(topicPartition => PartitionRecords(topicPartition, records.translate(handleBackendErrors).evalMap(consumerRecord)))
+                .map(topicPartition => PartitionRecords(topicPartition, records.adaptErr(backendFailure).evalMap(consumerRecord)))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)

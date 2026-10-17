@@ -30,14 +30,15 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import cats.syntax.all.*
-import fs2.Chunk
+import fs2.{Chunk, Stream}
 import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, KafkaByteProducer, ProducerSettings as Fs2ProducerSettings}
 import fs2.kafka.consumer.MkConsumer
 import fs2.kafka.producer.MkProducer
 import munit.CatsEffectSuite
 import org.apache.kafka.clients.admin.ConfigEntry as JavaConfigEntry
 import org.apache.kafka.clients.consumer.{
-  CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp
+  CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, NoOffsetForPartitionException, OffsetAndMetadata,
+  OffsetAndTimestamp
 }
 import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
 import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
@@ -203,6 +204,23 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(topics.get(topic), Some(partitions))
         assertEquals(position, 0L)
     .timeout(5.seconds)
+
+  test("a failed poll fails the record stream and the partitioned one on every run"):
+    // fs2-kafka signals its streams to end when the poll fails, and about one run in two thousand the signal wins and the failure is lost.
+    def outcomes(read: KafkaConsumer[IO, String, String] => Stream[IO, Any]): IO[List[Either[Throwable, Unit]]] =
+      val failing =
+        IO:
+          val (consumer, partition) = subscribedMock()
+          // As with a broker, the poll that assigns the partition is the one that finds it has no position, so its record stream already exists.
+          consumer.schedulePollTask(() => consumer.rebalance(JavaList.of(partition)))
+          consumer.setPollException(new NoOffsetForPartitionException(partition))
+          consumer
+      failing.flatMap(consumer => consuming(consumer)(read(_).compile.drain).attempt).parReplicateA(500).replicateA(40).map(_.flatten)
+    (outcomes(_.records), outcomes(_.partitionedRecords(1))).tupled.map: (records, partitioned) =>
+      List("records" -> records, "partitionedRecords" -> partitioned).foreach: (name, results) =>
+        val missed = results.filterNot(resetRequired)
+        assert(missed.isEmpty, s"$name ended ${missed.size} of ${results.size} runs without the poll's failure, first ${missed.head}")
+    .timeout(2.minutes)
 
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after the partition returns can"):
     val (consumer, partition) = subscribedMock()
@@ -388,6 +406,20 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val backend    = KafkaClientPlatform.fromFs2[IO]
     (backend.transactionalProducer(writing), backend.consumer(reading, Selection.Topics(NonEmptySet.one(topic)))).tupled.use(use.tupled)
       .timeout(10.seconds)
+
+  /** A consumer the client builds over the given mock, reading UTF-8 from the shared topic. */
+  private def consuming[A](consumer: MockConsumer[Array[Byte], Array[Byte]])(use: KafkaConsumer[IO, String, String] => IO[A]): IO[A] =
+    given MkConsumer[IO] with
+      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO.pure(consumer)
+    val client  = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val utf8    = Deserializer.utf8[IO]
+    val reading = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Fail).toOption.get
+    KafkaClientPlatform.fromFs2[IO].consumer(reading, Selection.Topics(NonEmptySet.one(topic))).use(use)
+
+  private def resetRequired(outcome: Either[Throwable, Unit]): Boolean =
+    outcome.left.exists:
+      case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.OffsetResetRequired)
+      case _                                      => false
 
   private def illegalGeneration(outcome: Either[Throwable, Unit]): Boolean =
     outcome.left.exists:

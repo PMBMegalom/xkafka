@@ -1143,8 +1143,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         _        <- produceValues(server, TopicPartition(topic, validPartition(0)), 1)
         settings <- consumerSettings(server, uniqueGroup("reset-fail-none")).map(_.withAutoOffsetReset(AutoOffsetReset.Fail))
         outcome  <-
-          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.drain).attempt
-            .timeout(60.seconds)
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
+            .use(_.records.take(1).map(_.record.offset.value).compile.toList).attempt.timeout(60.seconds)
       yield resetRequired(outcome)
 
   test(conformance("a group whose committed offset was deleted fails with offset reset set to fail and starts at the first record with earliest")):
@@ -1161,8 +1161,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         _      <- PlatformKafkaClient().admin(client).use(_.deleteRecords(NonEmptyMap.one(partition, validOffset(2)))).timeout(90.seconds)
         failed <-
           starting(AutoOffsetReset.Fail).flatMap: settings =>
-            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.drain).attempt
-              .timeout(60.seconds)
+            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
+              .use(_.records.take(1).map(_.record.offset.value).compile.toList).attempt.timeout(60.seconds)
         earliest <-
           starting(AutoOffsetReset.Earliest).flatMap: settings =>
             PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
@@ -1231,12 +1231,15 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(failure.code, Some(ErrorCode.UnknownTopicOrPartition), s"$clue: ${failure.getMessage}")
       case other => fail(s"$clue should answer as unknown, got $other")
 
-  private def resetRequired(outcome: Either[Throwable, Unit]): Unit =
+  /** The offsets read show whether the stream ended without its failure or ignored the reset policy. */
+  private def resetRequired(outcome: Either[Throwable, List[Long]]): Unit =
     outcome match
       case Left(failure: KafkaException.BackendFailure) =>
         assertEquals(failure.code, Some(ErrorCode.OffsetResetRequired), failure.getMessage)
         assertEquals(failure.retriable, Some(false), failure.getMessage)
-      case other => fail(s"the record stream should have failed as needing a reset, got $other")
+      case Right(Nil)     => fail("the record stream should have failed as needing a reset, but it ended without records")
+      case Right(offsets) => fail(s"the record stream should have failed as needing a reset, but it read offsets $offsets")
+      case other          => fail(s"the record stream should have failed as needing a reset, got $other")
 
   private def produceValues(server: String, partition: TopicPartition, count: Int): IO[Unit] =
     val values =
