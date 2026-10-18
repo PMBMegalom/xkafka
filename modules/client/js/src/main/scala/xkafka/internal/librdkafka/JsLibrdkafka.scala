@@ -52,8 +52,6 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   private def shim: F[Shim] = F.fromEither(Shim.loaded)
 
-  override def version: String = JsLibrdkafka.version
-
   override val deliveriesShareQueue: Boolean = true
 
   /** Starts a shim call on a thread of its own and completes once it has reported. Its results are in the buffers passed to it. */

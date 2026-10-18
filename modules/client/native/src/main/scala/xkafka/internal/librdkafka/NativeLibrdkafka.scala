@@ -45,7 +45,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
   private val ErrorBufferSize     = 512
   private val UnassignedPartition = -1
 
-  override def version: String = fromCString(Bindings.xkafka_version_str())
+  def version: String = fromCString(Bindings.xkafka_version_str())
 
   override val deliveriesShareQueue: Boolean = true
 

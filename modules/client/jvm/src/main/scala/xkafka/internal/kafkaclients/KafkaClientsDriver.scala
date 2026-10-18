@@ -50,7 +50,6 @@ import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import org.apache.kafka.common.utils.AppInfoParser
 import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
@@ -107,8 +106,6 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   type Batch         = DeliveryBatch
   type Event         = ConsumerThread.Rebalancing
   type GroupMetadata = JavaGroupMetadata
-
-  override def version: String = AppInfoParser.getVersion
 
   override val deliveriesShareQueue: Boolean = false
 
