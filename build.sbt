@@ -229,6 +229,19 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "js-leaks",
+  name = "Scala.js leak check",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    cacheLibrdkafkaLibrary.value,
+    WorkflowStep.Run(List("scripts/js-leak-check.sh"), name = Some("Check the Scala.js library's asynchronous calls for leaks"))
+  ),
+  oses = List("ubuntu-24.04"),
+  scalas = Nil,
+  javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(45)
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "downstream",
   name = "Published artifact smoke tests",
   steps = githubWorkflowJobSetup.value.toList ++ List(
@@ -268,7 +281,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "npm-publish")).distinct)
+    if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
     else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
     else job
   }

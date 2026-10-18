@@ -54,8 +54,16 @@ scripts/native-leak-check.sh
 ```
 
 Runs the Native smoke binary against a broker under `leaks` on macOS or
-`valgrind` on Linux, so the shim's allocations are exercised through a real
+LeakSanitizer on Linux, so the shim's allocations are exercised through a real
 round trip.
+
+```sh
+scripts/js-leak-check.sh
+```
+
+Runs every asynchronous call of the Scala.js library against a broker under the
+same leak checkers, through a small C program linked against the library the
+npm package ships.
 
 ## Published artifacts
 
