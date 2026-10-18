@@ -9,9 +9,9 @@ their respective licenses and are not relicensed as part of xkafka.
 | --- | --- | --- | --- |
 | [Apache Kafka Java client](https://kafka.apache.org) (`kafka-clients`) | 4.4.0 | Apache-2.0 | JVM Kafka backend |
 | [lz4-java](https://github.com/yawkat/lz4-java) | 1.12.0 | Apache-2.0 | LZ4 compression for the JVM backend |
-| [librdkafka](https://github.com/confluentinc/librdkafka) | 2.15.1 | BSD-2-Clause | Kafka backend for Scala Native and Scala.js |
+| [librdkafka](https://github.com/confluentinc/librdkafka) | 2.16.0 | BSD-2-Clause | Kafka backend for Scala Native and Scala.js |
 | [koffi](https://koffi.dev) | 3.3.3 | MIT | Calls librdkafka from Node.js for the Scala.js backend |
-| [OpenSSL](https://www.openssl.org) | 3.5.7 | Apache-2.0 | TLS and SASL in the prebuilt Scala.js libraries |
+| [OpenSSL](https://www.openssl.org) | 3.5.8 | Apache-2.0 | TLS and SASL in the prebuilt Scala.js libraries |
 | [Zstandard](https://github.com/facebook/zstd) | 1.5.7 | BSD-3-Clause | Compression in the prebuilt Scala.js libraries |
 | [zlib](https://zlib.net) | 1.3.2 | Zlib | Compression in the prebuilt Scala.js libraries |
 
