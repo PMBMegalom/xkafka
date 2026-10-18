@@ -30,6 +30,7 @@ import cats.data.NonEmptyList
 import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Chunk
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class JsGroupMetadata(pointer: js.Any) extends GroupHandle
@@ -40,7 +41,7 @@ private[xkafka] final case class JsGroupMetadata(pointer: js.Any) extends GroupH
   * while librdkafka waits, and no call holds one of the few worker threads Node shares between file, DNS and crypto work. Calls that only read or
   * update memory run directly.
   */
-private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdkafka[F]:
+private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaDriver[F]:
   type Client        = js.Any
   type Batch         = js.Any
   type Event         = js.Any
@@ -52,6 +53,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdk
   private def shim: F[Shim] = F.fromEither(Shim.loaded)
 
   override def version: String = JsLibrdkafka.version
+
+  override val deliveriesShareQueue: Boolean = true
 
   /** Starts a shim call on a thread of its own and completes once it has reported. Its results are in the buffers passed to it. */
   private def background(function: Shim => js.Dynamic)(arguments: js.Any*): F[Unit] =
@@ -211,17 +214,17 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdk
         if shim.subscribe(consumer, subscription, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then throw error.failure
       finally shim.subscriptionDestroy(subscription): Unit
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[Option[PolledRecord]] =
+  override def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]] =
     val error  = ErrorSlot()
     val status = Buffers.alloc(4)
     val result = Result()
     background(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
       status.readInt32LE(0) match
         case negative if negative < 0 => F.raiseError(error.failure)
-        case 0                        => F.pure(None)
+        case 0                        => F.pure(Nil)
         case _                        => direct: shim =>
             val message = result.pointer
-            try Some(copyMessage(shim, message))
+            try List(copyMessage(shim, message))
             finally shim.messageDestroy(message): Unit
 
   private def copyMessage(shim: Shim, message: js.Any): PolledRecord =
@@ -429,7 +432,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdk
     background(_.createPartitions)(admin, topic.value, count, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *>
       error.checked(result)
 
-  override def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[DeletedRecords] =
+  override def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Vector[Either[KafkaException, Offset]]] =
     val (topics, partitions) = partitionArrays(cuts.map(_._1))
     val codes                = Buffers.alloc(4 * cuts.size.max(1))
     val lowWatermarks        = Buffers.alloc(8 * cuts.size.max(1))
@@ -449,10 +452,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdk
       error.code,
       result.value
     ) *> F.delay:
-      if result.int != 0 then DeletedRecords.Refused(error.failure, error.codeValue)
-      else DeletedRecords.Answered(Vector.tabulate(cuts.size)(index => (codes.readInt32LE(4 * index), readLongs(lowWatermarks, cuts.size)(index))))
+      val answer =
+        if result.int != 0 then DeletedRecords.Refused(error.failure, error.codeValue)
+        else DeletedRecords.Answered(Vector.tabulate(cuts.size)(index => (codes.readInt32LE(4 * index), readLongs(lowWatermarks, cuts.size)(index))))
+      LibrdkafkaAnswers.deleted(cuts, answer, errorString)
 
-  override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[ConfigResource]] =
+  override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]] =
     val error  = ErrorSlot()
     val result = Result()
     background(_.describeConfigs)(
@@ -469,7 +474,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdk
       if configs == null then F.raiseError(error.failure)
       else
         direct: shim =>
-          try Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _))
+          try LibrdkafkaAnswers
+              .configurations(topics, Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _)))
           finally shim.configsDestroy(configs): Unit
 
   private def resource(shim: Shim, configs: js.Any, index: Int): ConfigResource =
@@ -490,7 +496,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends Librdk
           )
     )
 
-  override def errorString(code: Int): String = Shim.loaded.fold(_ => s"librdkafka error $code", _.errorString(code).asInstanceOf[String])
+  /** librdkafka's description of an error code. */
+  private def errorString(code: Int): String = Shim.loaded.fold(_ => s"librdkafka error $code", _.errorString(code).asInstanceOf[String])
 
   private def partitionCall(function: Shim => js.Dynamic, consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
     val (topics, values) = partitionArrays(partitions)

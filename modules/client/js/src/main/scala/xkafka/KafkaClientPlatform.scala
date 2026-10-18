@@ -25,7 +25,7 @@ import cats.effect.Async
 import internal.librdkafka.JsLibrdkafka
 
 private[xkafka] object KafkaClientPlatform:
-  def apply[F[_]: Async]: KafkaClient[F] = new LibrdkafkaClient[F](new JsLibrdkafka[F])
+  def apply[F[_]: Async]: KafkaClient[F] = new DriverClient[F](new JsLibrdkafka[F])
 
 private[xkafka] object LibrdkafkaPlatform:
   def version: String = JsLibrdkafka.version

@@ -30,12 +30,13 @@ import scala.scalanative.unsigned.*
 import cats.data.NonEmptyList
 import cats.effect.Sync
 import fs2.Chunk
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class NativeGroupMetadata(pointer: CVoidPtr) extends GroupHandle
 
 /** The shim reached through Scala Native's C interface. Every call runs as a blocking call, since librdkafka may wait inside any of them. */
-private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Librdkafka[F]:
+private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends KafkaDriver[F]:
   type Client        = CVoidPtr
   type Batch         = CVoidPtr
   type Event         = CVoidPtr
@@ -45,6 +46,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
   private val UnassignedPartition = -1
 
   override def version: String = fromCString(Bindings.xkafka_version_str())
+
+  override val deliveriesShareQueue: Boolean = true
 
   override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
     F.blocking:
@@ -261,7 +264,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
           if result != 0 then throw nativeError(error, errorCode)
         finally Bindings.xkafka_subscription_destroy(nativeSubscription)
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[Option[PolledRecord]] =
+  override def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone             = zone
@@ -270,9 +273,9 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
         val message            = Bindings.xkafka_consumer_poll(consumer, timeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
 
         if !status < 0 then throw nativeError(error, errorCode)
-        else if !status == 0 then None
+        else if !status == 0 then Nil
         else
-          try Some(copyMessage(message))
+          try List(copyMessage(message))
           finally Bindings.xkafka_message_destroy(message)
 
   private def copyMessage(message: CVoidPtr): PolledRecord =
@@ -536,7 +539,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
           Bindings.xkafka_admin_create_partitions(admin, toCString(topic.value), count, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
         if result != 0 then throw nativeError(error, errorCode)
 
-  override def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[DeletedRecords] =
+  override def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Vector[Either[KafkaException, Offset]]] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone                        = zone
@@ -558,10 +561,12 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
             ErrorBufferSize.toUSize,
             errorCode
           )
-        if result != 0 then DeletedRecords.Refused(nativeError(error, errorCode), !errorCode)
-        else DeletedRecords.Answered(Vector.tabulate(cuts.size)(index => (codes(index), lowWatermarks(index))))
+        val answer =
+          if result != 0 then DeletedRecords.Refused(nativeError(error, errorCode), !errorCode)
+          else DeletedRecords.Answered(Vector.tabulate(cuts.size)(index => (codes(index), lowWatermarks(index))))
+        LibrdkafkaAnswers.deleted(cuts, answer, errorString)
 
-  override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[ConfigResource]] =
+  override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone = zone
@@ -572,7 +577,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
           Bindings.xkafka_admin_describe_topic_configs(admin, names, topics.size.toUSize, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
         if configs == null then throw nativeError(error, errorCode)
 
-        try Vector.tabulate(Bindings.xkafka_configs_resource_count(configs).toInt)(index => resource(configs, index.toUSize))
+        try LibrdkafkaAnswers
+            .configurations(topics, Vector.tabulate(Bindings.xkafka_configs_resource_count(configs).toInt)(index => resource(configs, index.toUSize)))
         finally Bindings.xkafka_configs_destroy(configs)
 
   private def resource(configs: CVoidPtr, index: CSize): ConfigResource =
@@ -594,7 +600,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Lib
           )
     )
 
-  override def errorString(code: Int): String = fromCString(Bindings.xkafka_error_string(code))
+  /** librdkafka's description of an error code. */
+  private def errorString(code: Int): String = fromCString(Bindings.xkafka_error_string(code))
 
   private def nativeProperties(properties: Map[String, String])(using Zone): (Ptr[CString], Ptr[CString], CSize) =
     val entries = properties.toVector

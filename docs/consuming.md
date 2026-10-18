@@ -162,8 +162,8 @@ consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>
 ```
 
 Every emitted stream must be consumed concurrently. `maxQueuedRecords` is the
-point at which a shared-source backend pauses a partition. Records already in
-flight can temporarily take its buffer past that threshold.
+point at which the backend pauses a partition. Records already in flight can
+temporarily take its buffer past that threshold.
 
 @:callout(warning)
 A consumer that subscribes to a topic before that topic exists sees it once the

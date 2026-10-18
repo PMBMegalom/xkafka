@@ -22,7 +22,20 @@
 package xkafka
 package internal
 
-/** Backend property names for the client settings that are not security. */
+/** Backend property names for the client settings. */
 private[xkafka] object ClientProperties:
   /** The Java client refreshes when its metadata cache reaches this age, so the age is also the refresh period. */
   def apply(settings: ClientSettings): Map[String, String] = Map("metadata.max.age.ms" -> settings.metadataRefreshInterval.toMillis.toString)
+
+  /** The Java consumer bounds the calls given no timeout of their own, such as reading a position, by its default API timeout. */
+  def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] =
+    Map("default.api.timeout.ms" -> settings.requestTimeout.toMillis.toString)
+
+  def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.javaClient(settings)
+
+  /** The Java client names the policy that refuses to reset `none`. */
+  def autoOffsetReset(value: AutoOffsetReset): String =
+    value match
+      case AutoOffsetReset.Earliest => "earliest"
+      case AutoOffsetReset.Latest   => "latest"
+      case AutoOffsetReset.Fail     => "none"

@@ -26,16 +26,15 @@ import java.util.{List as JavaList, Map as JavaMap}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
-import fs2.kafka.{ConsumerSettings as Fs2ConsumerSettings, KafkaByteConsumer, KafkaByteProducer, ProducerSettings as Fs2ProducerSettings}
-import fs2.kafka.consumer.MkConsumer
-import fs2.kafka.producer.MkProducer
+import internal.kafkaclients.{JavaClients, JavaGroupMetadata}
 import munit.CatsEffectSuite
-import org.apache.kafka.clients.admin.ConfigEntry as JavaConfigEntry
+import org.apache.kafka.clients.admin.{Admin, ConfigEntry as JavaConfigEntry}
 import org.apache.kafka.clients.consumer.{
   CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, NoOffsetForPartitionException, OffsetAndMetadata,
   OffsetAndTimestamp
@@ -82,29 +81,28 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
   test("wraps Kafka client failures"):
     val cause = new TimeoutException("timed out")
-    given MkProducer[IO] with
-      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.raiseError(cause)
 
     val serializer = Serializer.const[IO, String](None)
     val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
     val settings   = ProducerSettings.from(client, serializer, serializer).toOption.get
 
-    interceptIO[KafkaException.BackendFailure](KafkaClientPlatform.fromFs2[IO].producer(settings).use(_ => IO.unit)).map: error =>
+    interceptIO[KafkaException.BackendFailure](mocked(producer = _ => throw cause).producer(settings).use(_ => IO.unit)).map: error =>
       assertEquals(error.retriable, Some(true))
       assertEquals(error.getCause, cause)
 
-  test("producer delegates serialization and production to fs2-kafka"):
-    val mock = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
-    given MkProducer[IO] with
-      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] =
-        IO:
-          assertEquals(settings.properties.get("bootstrap.servers"), Some("unused:9092"))
-          assertEquals(settings.properties.get("client.id"), Some("client"))
-          assertEquals(settings.properties.get("compression.type"), Some("lz4"))
+  test("producer delegates serialization and production to the Java producer"):
+    val mock    = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+    val backend =
+      mocked(producer =
+        properties =>
+          assertEquals(properties.get("bootstrap.servers"), Some("unused:9092"))
+          assertEquals(properties.get("client.id"), Some("client"))
+          assertEquals(properties.get("compression.type"), Some("lz4"))
           // A value other than the default, so this proves the mapping rather than agreeing with it by chance.
-          assertEquals(settings.properties.get("acks"), Some("1"))
-          assertEquals(settings.properties.get("enable.idempotence"), Some("false"))
+          assertEquals(properties.get("acks"), Some("1"))
+          assertEquals(properties.get("enable.idempotence"), Some("false"))
           mock
+      )
 
     val topic         = Topic.from("events").toOption.get
     val partition     = Partition.from(0).toOption.get
@@ -127,7 +125,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         headers = Headers(Header("trace", Some(Chunk.array(Array[Byte](1)))), Header("trace", None))
       )
 
-    KafkaClientPlatform.fromFs2[IO].producer(settings).use(_.produceAndAwait(NonEmptyList.one(record))).map: result =>
+    backend.producer(settings).use(_.produceAndAwait(NonEmptyList.one(record))).map: result =>
       val produced = mock.history().get(0)
 
       assertEquals(new String(produced.key(), StandardCharsets.UTF_8), "key")
@@ -139,15 +137,21 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(result.records.size, 1)
       assert(result.records.forall((_, metadata) => metadata.isDefined))
 
-  test("consumer delegates streaming and offset commits to fs2-kafka"):
+  test("consumer delegates streaming and offset commits to the Java consumer"):
     val topic              = Topic.from("events").toOption.get
     val group              = ConsumerGroup.from("workers").toOption.get
     val javaTopicPartition = new JavaTopicPartition(topic.value, 0)
+    val pollTimeouts       = new java.util.concurrent.ConcurrentLinkedQueue[java.time.Duration]
     val mock               =
       new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
         override def offsetsForTimes(
-            timestampsToSearch: java.util.Map[JavaTopicPartition, java.lang.Long]
+            timestampsToSearch: java.util.Map[JavaTopicPartition, java.lang.Long],
+            timeout: java.time.Duration
         ): java.util.Map[JavaTopicPartition, OffsetAndTimestamp] = JavaMap.of(javaTopicPartition, new OffsetAndTimestamp(0L, 1234L))
+
+        override def poll(timeout: java.time.Duration) =
+          pollTimeouts.add(timeout)
+          super.poll(timeout)
     mock.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
     mock.schedulePollTask(() =>
       mock.rebalance(JavaList.of(javaTopicPartition))
@@ -155,19 +159,18 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       mock.updateEndOffsets(JavaMap.of(javaTopicPartition, Long.box(1L)))
       mock.addRecord(new JavaConsumerRecord(topic.value, 0, 0L, "key".getBytes(StandardCharsets.UTF_8), "value".getBytes(StandardCharsets.UTF_8)))
     )
-    given MkConsumer[IO] with
-      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] =
-        IO:
-          assertEquals(settings.properties.get("bootstrap.servers"), Some("unused:9092"))
-          assertEquals(settings.properties.get("group.id"), Some("workers"))
-          assertEquals(settings.properties.get("fetch.min.bytes"), Some("2"))
-          assertEquals(settings.properties.get("enable.auto.commit"), Some("false"))
-          assertEquals(settings.properties.get("auto.offset.reset"), Some("earliest"))
-          // The consumer poll timeout has to reach fs2-kafka, which is the only place it takes effect.
-          assertEquals(settings.pollTimeout, ConsumerSettings.DefaultPollTimeout)
-          // The request timeout has to reach fs2-kafka, which reads it as default.api.timeout.ms.
-          assertEquals(settings.properties.get("default.api.timeout.ms"), Some(ConsumerSettings.DefaultRequestTimeout.toMillis.toString))
+    val backend =
+      mocked(consumer =
+        properties =>
+          assertEquals(properties.get("bootstrap.servers"), Some("unused:9092"))
+          assertEquals(properties.get("group.id"), Some("workers"))
+          assertEquals(properties.get("fetch.min.bytes"), Some("2"))
+          assertEquals(properties.get("enable.auto.commit"), Some("false"))
+          assertEquals(properties.get("auto.offset.reset"), Some("earliest"))
+          // The request timeout bounds the calls that take no timeout of their own, which the Java consumer reads as default.api.timeout.ms.
+          assertEquals(properties.get("default.api.timeout.ms"), Some(ConsumerSettings.DefaultRequestTimeout.toMillis.toString))
           mock
+      )
 
     val keyDeserializer =
       Deserializer.instance[IO, String]: (_, _, bytes) =>
@@ -180,7 +183,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "2"))
         .toOption.get
 
-    KafkaClientPlatform.fromFs2[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+    backend.consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
       for
         consumed   <- consumer.records.take(1).compile.lastOrError
         assignment <- consumer.assignment
@@ -206,10 +209,15 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(partitions, Set(consumed.record.topicPartition.partition))
         assertEquals(topics.get(topic), Some(partitions))
         assertEquals(position, 0L)
+        // The consumer polls in slices within the poll timeout.
+        assert(
+          pollTimeouts.asScala.nonEmpty && pollTimeouts.asScala.forall(_.toMillis <= ConsumerSettings.DefaultPollTimeout.toMillis),
+          pollTimeouts.toString
+        )
     .timeout(5.seconds)
 
   test("a failed poll fails the record stream and the partitioned one on every run"):
-    // fs2-kafka signals its streams to end when the poll fails, and about one run in two thousand the signal wins and the failure is lost.
+    // fs2-kafka, which this backend used to delegate to, lost the failure about once in two thousand runs.
     def outcomes(read: KafkaConsumer[IO, String, String] => Stream[IO, Any]): IO[List[Either[Throwable, Unit]]] =
       val failing =
         IO:
@@ -253,21 +261,27 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             assert(outcomes.take(2).forall(illegalGeneration), s"offsets read before the revocation should be rejected, got $outcomes")
             assertEquals(outcomes.lift(2), Some(Right(())))
 
-  test("a transactional producer reaches fs2-kafka with its close timeout, every replica acknowledging, and idempotence"):
-    val captured = new java.util.concurrent.atomic.AtomicReference[Option[(scala.concurrent.duration.FiniteDuration, Option[String])]](None)
-    given MkProducer[IO] with
-      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] =
-        IO(
-          captured
-            .set(Some(settings.closeTimeout -> settings.properties.get("acks").zip(settings.properties.get("enable.idempotence")).map(_ + "," + _)))
-        ) *> IO.pure(new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer))
+  test("a transactional producer reaches the Java client with its close timeout, every replica acknowledging, and idempotence"):
+    val properties = new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
+    val closedWith = new java.util.concurrent.atomic.AtomicReference[Option[java.time.Duration]](None)
+    val backend    =
+      mocked(producer =
+        received =>
+          properties.set(received.get("acks").zip(received.get("enable.idempotence")).map(_.toString + "," + _.toString))
+          new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+            override def close(timeout: java.time.Duration): Unit =
+              closedWith.set(Some(timeout))
+              super.close(timeout)
+      )
     val serializer = Serializer.utf8[IO]
     val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
     val settings   =
       TransactionalProducerSettings.from(client, TransactionalId.from("writer").toOption.get, serializer, serializer, closeTimeout = 5.seconds)
         .toOption.get
 
-    KafkaClientPlatform.fromFs2[IO].transactionalProducer(settings).use_.map(_ => assertEquals(captured.get, Some(5.seconds -> Some("all,true"))))
+    backend.transactionalProducer(settings).use_.map: _ =>
+      assertEquals(properties.get, Some("all,true"))
+      assertEquals(closedWith.get, Some(java.time.Duration.ofSeconds(5)))
 
   test("a plain commit of an offset read under a revoked assignment is refused before it reaches the consumer"):
     val (consumer, partition) = subscribedMock()
@@ -299,7 +313,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           assertEquals(current, Right(()))
           assertEquals(moved, Some(3L))
 
-  test("a revocation waits for a transaction recording one of its offsets before fs2-kafka hears of it"):
+  test("a revocation waits for a transaction recording one of its offsets before the group hears of it"):
     val (consumer, partition) = subscribedMock()
     val sending               = new CountDownLatch(1)
     val release               = new CountDownLatch(1)
@@ -309,12 +323,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       consumer.updateBeginningOffsets(JavaMap.of(partition, Long.box(0L)))
       addRecord(consumer, 0L)
     )
-    // The next poll revokes the partition once the transaction is sending, and says when the revocation has gone through.
-    consumer.schedulePollTask(() =>
-      sending.await(): Unit
-      consumer.rebalance(JavaList.of())
-      revoked.countDown()
-    )
+    // The first poll after the transaction starts sending revokes the partition, and says when the revocation has gone through. Polls before it
+    // only look, since a poll that waited would hold the thread the transaction reads the group's membership on.
+    def revokeOnceSending(): Unit =
+      if sending.getCount == 0L then
+        consumer.rebalance(JavaList.of())
+        revoked.countDown()
+      else consumer.schedulePollTask(() => revokeOnceSending())
+    consumer.schedulePollTask(() => revokeOnceSending())
     val producer =
       new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
         override def sendOffsetsToTransaction(offsets: JavaMap[JavaTopicPartition, OffsetAndMetadata], metadata: ConsumerGroupMetadata): Unit =
@@ -357,12 +373,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     cases.traverse: (failure, expected) =>
       val mock = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
       mock.sendOffsetsToTransactionException = failure
-      given MkProducer[IO] with
-        override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.pure(mock)
       val readUnder =
         new GroupMembership.Backend[IO](
           "group",
-          IO(Fs2GroupHandle(new MockConsumer[Array[Byte], Array[Byte]]("earliest").groupMetadata())),
+          IO(JavaGroupMetadata(new MockConsumer[Array[Byte], Array[Byte]]("earliest").groupMetadata())),
           _ => IO.unit
         )
       val offset =
@@ -373,7 +387,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             new OffsetCommitter[IO]:
               override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
           override private[xkafka] def membership: GroupMembership[IO] = readUnder
-      KafkaClientPlatform.fromFs2[IO].transactionalProducer(settings)
+      mocked(producer = _ => mock).transactionalProducer(settings)
         .use(_.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(offset)))).attempt.map:
           case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, expected, failure.getMessage)
           case other                                      => fail(s"expected a backend failure, got $other")
@@ -396,27 +410,28 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
   private def withMocks[A](consumer: MockConsumer[Array[Byte], Array[Byte]], producer: MockProducer[Array[Byte], Array[Byte]])(
       use: (KafkaTransactionalProducer[IO, String, String], KafkaConsumer[IO, String, String]) => IO[A]
   ): IO[A] =
-    given MkConsumer[IO] with
-      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO.pure(consumer)
-    given MkProducer[IO] with
-      override def apply[G[_]](settings: Fs2ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.pure(producer)
     val utf8       = Deserializer.utf8[IO]
     val serializer = Serializer.utf8[IO]
     val client     = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
     val reading    = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).toOption.get
     val writing    = TransactionalProducerSettings.from(client, TransactionalId.from("writer").toOption.get, serializer, serializer).toOption.get
-    val backend    = KafkaClientPlatform.fromFs2[IO]
+    val backend    = mocked(producer = _ => producer, consumer = _ => consumer)
     (backend.transactionalProducer(writing), backend.consumer(reading, Selection.Topics(NonEmptySet.one(topic)))).tupled.use(use.tupled)
       .timeout(10.seconds)
 
   /** A consumer the client builds over the given mock, reading UTF-8 from the shared topic. */
   private def consuming[A](consumer: MockConsumer[Array[Byte], Array[Byte]])(use: KafkaConsumer[IO, String, String] => IO[A]): IO[A] =
-    given MkConsumer[IO] with
-      override def apply[G[_]](settings: Fs2ConsumerSettings[G, ?, ?]): IO[KafkaByteConsumer] = IO.pure(consumer)
     val client  = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
     val utf8    = Deserializer.utf8[IO]
     val reading = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Fail).toOption.get
-    KafkaClientPlatform.fromFs2[IO].consumer(reading, Selection.Topics(NonEmptySet.one(topic))).use(use)
+    mocked(consumer = _ => consumer).consumer(reading, Selection.Topics(NonEmptySet.one(topic))).use(use)
+
+  /** The client over the given mocks; a client of a kind the test does not expect fails the test. */
+  private def mocked(
+      producer: Map[String, AnyRef] => org.apache.kafka.clients.producer.Producer[Array[Byte], Array[Byte]] = _ => fail("no producer expected"),
+      consumer: Map[String, AnyRef] => org.apache.kafka.clients.consumer.Consumer[Array[Byte], Array[Byte]] = _ => fail("no consumer expected"),
+      admin: Map[String, AnyRef] => Admin = _ => fail("no administration client expected")
+  ): KafkaClient[IO] = KafkaClientPlatform.fromJava[IO](JavaClients(producer, consumer, admin))
 
   private def resetRequired(outcome: Either[Throwable, Unit]): Boolean =
     outcome.left.exists:

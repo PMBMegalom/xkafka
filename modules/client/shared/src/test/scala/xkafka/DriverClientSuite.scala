@@ -27,11 +27,11 @@ import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
-import internal.librdkafka.*
+import internal.driver.*
 import munit.CatsEffectSuite
 
-/** The client both librdkafka backends share, against bindings that stand in for librdkafka, so each ordering it promises can be forced. */
-final class LibrdkafkaClientSuite extends CatsEffectSuite:
+/** The client every backend shares, against a driver that stands in for the platform's Kafka client, so each ordering it promises can be forced. */
+final class DriverClientSuite extends CatsEffectSuite:
   private val events    = Topic.from("events").toOption.get
   private val partition = LeaseKey("events", 0)
 
@@ -44,7 +44,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
     TransactionalProducerSettings.from(client, TransactionalId.from("fake").toOption.get, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get
 
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
-    FakeLibrdkafka().flatMap: fake =>
+    FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
         for
           _            <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
@@ -63,7 +63,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           assertEquals(sent, 1, "only the offset read under the current assignment should reach the client")
 
   test("with assignment fencing off, an offset read under a revoked assignment is still recorded, as it was before fencing"):
-    FakeLibrdkafka().flatMap: fake =>
+    FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings.withoutAssignmentFencing): (producer, consumer) =>
         for
           _       <- fake.assign *> fake.until(_.contains("assign"))
@@ -76,7 +76,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           assertEquals(sent, 1)
 
   test("a plain commit of an offset read under a revoked assignment is refused before it reaches the client"):
-    FakeLibrdkafka().flatMap: fake =>
+    FakeDriver().flatMap: fake =>
       consuming(fake): consumer =>
         for
           _         <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
@@ -93,7 +93,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           assertEquals(committed, 1, "only the offset read under the current assignment should reach the client")
 
   test("a revocation waits for a plain commit the client has not reported yet"):
-    FakeLibrdkafka(holdCommits = true).flatMap: fake =>
+    FakeDriver(holdCommits = true).flatMap: fake =>
       consuming(fake): consumer =>
         for
           _          <- fake.assign *> fake.until(_.contains("assign"))
@@ -110,7 +110,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           assertEquals(reported, Right(()))
 
   test("a revocation waits for a transaction recording one of its offsets before it unassigns"):
-    FakeLibrdkafka(holdOffsets = true).flatMap: fake =>
+    FakeDriver(holdOffsets = true).flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
         for
           _         <- fake.assign *> fake.until(_.contains("assign"))
@@ -127,7 +127,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           assertEquals(outcome, Right(()))
 
   test("a revocation during a poll leaves the records it returns unable to be recorded in a transaction"):
-    FakeLibrdkafka().flatMap: fake =>
+    FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
         for
           _       <- fake.assign *> fake.until(_.contains("assign"))
@@ -142,9 +142,9 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           assertEquals(second, Right(()))
 
   test("a group handle from one client is recorded by a transactional producer from another"):
-    FakeLibrdkafka().flatMap: fake =>
-      (new LibrdkafkaClient[IO](fake).transactionalProducer(transactionalSettings), new LibrdkafkaClient[IO](fake).consumer(consumerSettings, topics))
-        .tupled.use: (producer, consumer) =>
+    FakeDriver().flatMap: fake =>
+      (new DriverClient[IO](fake).transactionalProducer(transactionalSettings), new DriverClient[IO](fake).consumer(consumerSettings, topics)).tupled
+        .use: (producer, consumer) =>
           for
             _       <- fake.assign *> fake.until(_.contains("assign"))
             record  <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
@@ -152,27 +152,27 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
           yield assertEquals(outcome, Right(()))
         .timeout(10.seconds)
 
-  test("a rebalance taken from librdkafka is applied even when the consumer is released while taking it"):
+  test("a rebalance taken from the driver is applied even when the consumer is released while taking it"):
     for
-      fake  <- FakeLibrdkafka()
+      fake  <- FakeDriver()
       taken <- Deferred[IO, Unit]
       _     <-
-        new LibrdkafkaClient[IO](fake).consumer(consumerSettings, topics).use: _ =>
+        new DriverClient[IO](fake).consumer(consumerSettings, topics).use: _ =>
           // The fake pauses once it has taken a rebalance, and the consumer is released during that pause.
           fake.assign *> fake.until(_.contains("assign")) *> fake.pauseNextTake(taken) *> fake.revoke *> taken.get
         .timeout(10.seconds)
       calls <- fake.calls
-    yield assert(calls.contains("unassign"), s"the revocation was taken from librdkafka but never applied: $calls")
+    yield assert(calls.contains("unassign"), s"the revocation was taken from the driver but never applied: $calls")
 
   private val topics = Selection.Topics(NonEmptySet.one(events))
 
-  private def consuming[A](fake: FakeLibrdkafka)(use: KafkaConsumer[IO, String, String] => IO[A]): IO[A] =
-    new LibrdkafkaClient[IO](fake).consumer(consumerSettings, topics).use(use).timeout(10.seconds)
+  private def consuming[A](fake: FakeDriver)(use: KafkaConsumer[IO, String, String] => IO[A]): IO[A] =
+    new DriverClient[IO](fake).consumer(consumerSettings, topics).use(use).timeout(10.seconds)
 
-  private def transactional[A](fake: FakeLibrdkafka, settings: ConsumerSettings[IO, String, String])(
+  private def transactional[A](fake: FakeDriver, settings: ConsumerSettings[IO, String, String])(
       use: (KafkaTransactionalProducer[IO, String, String], KafkaConsumer[IO, String, String]) => IO[A]
   ): IO[A] =
-    val client = new LibrdkafkaClient[IO](fake)
+    val client = new DriverClient[IO](fake)
     (client.transactionalProducer(transactionalSettings), client.consumer(settings, topics)).tupled.use(use.tupled).timeout(10.seconds)
 
   private def recorded(producer: KafkaTransactionalProducer[IO, String, String], value: CommittableConsumerRecord[IO, String, String]) =
@@ -183,10 +183,10 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
       case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.IllegalGeneration)
       case _                                      => false
 
-  /** Bindings for one eager-protocol consumer and one transactional producer, recording each call that reaches librdkafka. */
+  /** A driver for one eager-protocol consumer and one transactional producer, recording each call that reaches it. */
   private final case class FakeGroupMetadata(consumer: String) extends GroupHandle
 
-  private final class FakeLibrdkafka(
+  private final class FakeDriver(
       log: Ref[IO, Vector[String]],
       queued: Ref[IO, List[PolledRecord]],
       pendingRebalances: Ref[IO, List[Rebalance[Int]]],
@@ -195,7 +195,7 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
       pauseTake: Ref[IO, Option[Deferred[IO, Unit]]],
       holdCommits: Boolean,
       holdOffsets: Boolean
-  ) extends Librdkafka[IO]:
+  ) extends KafkaDriver[IO]:
     type Client        = String
     type Batch         = Int
     type Event         = Int
@@ -238,6 +238,8 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
     private def unused[A](call: String): IO[A] = IO.raiseError(new UnsupportedOperationException(s"$call is not part of the fake"))
 
     override def version: String = "fake"
+
+    override val deliveriesShareQueue: Boolean = true
 
     override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] = IO.pure("producer")
 
@@ -293,11 +295,11 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
 
     override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit] = IO.unit
 
-    override def poll(consumer: Client, timeoutMillis: Int): IO[Option[PolledRecord]] =
+    override def poll(consumer: Client, timeoutMillis: Int): IO[List[PolledRecord]] =
       inPoll.getAndSet(None).flatMap(_.sequence_) *> queued.modify {
-        case head :: tail => (tail, Some(head))
-        case Nil          => (Nil, None)
-      }.flatMap(polled => if polled.isEmpty then IO.sleep(5.millis).as(None) else IO.pure(polled))
+        case head :: tail => (tail, List(head))
+        case Nil          => (Nil, Nil)
+      }.flatMap(polled => if polled.isEmpty then IO.sleep(5.millis).as(Nil) else IO.pure(polled))
 
     override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]] =
       pendingRebalances.getAndSet(Nil).flatTap: rebalances =>
@@ -339,16 +341,20 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
 
     override def createPartitions(admin: Client, topic: Topic, count: Int, timeoutMillis: Int): IO[Unit] = unused("createPartitions")
 
-    override def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[DeletedRecords] =
-      unused("deleteRecords")
+    override def deleteRecords(
+        admin: Client,
+        cuts: Vector[(TopicPartition, Offset)],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Offset]]] = unused("deleteRecords")
 
-    override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): IO[Vector[ConfigResource]] =
-      unused("describeTopicConfigs")
+    override def describeTopicConfigs(
+        admin: Client,
+        topics: Vector[Topic],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, TopicConfiguration]]] = unused("describeTopicConfigs")
 
-    override def errorString(code: Int): String = s"error $code"
-
-  private object FakeLibrdkafka:
-    def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false): IO[FakeLibrdkafka] =
+  private object FakeDriver:
+    def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false): IO[FakeDriver] =
       (
         Ref.of[IO, Vector[String]](Vector.empty),
         Ref.of[IO, List[PolledRecord]](Nil),
@@ -357,5 +363,5 @@ final class LibrdkafkaClientSuite extends CatsEffectSuite:
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
         Ref.of[IO, Option[Deferred[IO, Unit]]](None)
       ).mapN((log, queued, rebalances, inPoll, holds, pauseTake) =>
-        new FakeLibrdkafka(log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
+        new FakeDriver(log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
       )
