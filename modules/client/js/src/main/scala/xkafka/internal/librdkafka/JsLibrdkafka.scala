@@ -68,9 +68,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
   private def direct[A](call: Shim => A): F[A] = shim.flatMap(loaded => F.delay(call(loaded)))
 
   override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
-    val error                  = ErrorSlot()
-    val (names, values, count) = nativeProperties(properties)
-    direct(_.producerNew(bootstrapServers, optional(clientId), names, values, count, error.message, ErrorBufferSize, error.code)).map(error.orFail)
+    F.defer:
+      val error                  = ErrorSlot()
+      val (names, values, count) = nativeProperties(properties)
+      direct(_.producerNew(bootstrapServers, optional(clientId), names, values, count, error.message, ErrorBufferSize, error.code)).map(error.orFail)
 
   override def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit] = background(_.producerDestroy)(producer, timeoutMillis)
 
@@ -81,19 +82,30 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       autoOffsetReset: String,
       properties: Map[String, String]
   ): F[Client] =
-    val error                  = ErrorSlot()
-    val (names, values, count) = nativeProperties(properties)
-    direct(
-      _.consumerNew(bootstrapServers, optional(clientId), groupId, autoOffsetReset, names, values, count, error.message, ErrorBufferSize, error.code)
-    ).map(error.orFail)
+    F.defer:
+      val error                  = ErrorSlot()
+      val (names, values, count) = nativeProperties(properties)
+      direct(_.consumerNew(
+        bootstrapServers,
+        optional(clientId),
+        groupId,
+        autoOffsetReset,
+        names,
+        values,
+        count,
+        error.message,
+        ErrorBufferSize,
+        error.code
+      )).map(error.orFail)
 
   // Closing a consumer leaves its group, which waits on the coordinator.
   override def destroyConsumer(consumer: Client): F[Unit] = background(_.consumerDestroy)(consumer)
 
   override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
-    val error                  = ErrorSlot()
-    val (names, values, count) = nativeProperties(properties)
-    direct(_.adminNew(bootstrapServers, optional(clientId), names, values, count, error.message, ErrorBufferSize, error.code)).map(error.orFail)
+    F.defer:
+      val error                  = ErrorSlot()
+      val (names, values, count) = nativeProperties(properties)
+      direct(_.adminNew(bootstrapServers, optional(clientId), names, values, count, error.message, ErrorBufferSize, error.code)).map(error.orFail)
 
   override def destroyAdmin(admin: Client): F[Unit] = background(_.adminDestroy)(admin)
 
@@ -166,9 +178,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   // Beginning a transaction only changes the producer's own state, so it waits on nothing.
   override def beginTransaction(producer: Client): F[Unit] =
-    val error = ErrorSlot()
-    direct(_.beginTransaction((producer +: error.classifiedArguments)*)).flatMap: result =>
-      if result.asInstanceOf[Int] != 0 then F.raiseError(error.classifiedFailure) else F.unit
+    F.defer:
+      val error = ErrorSlot()
+      direct(_.beginTransaction((producer +: error.classifiedArguments)*)).flatMap: result =>
+        if result.asInstanceOf[Int] != 0 then F.raiseError(error.classifiedFailure) else F.unit
 
   override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
     transactional((error, result) =>
@@ -181,14 +194,15 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     )
 
   override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
-    val (topics, partitions) = partitionArrays(offsets.map(_._1))
-    val values               = longs(offsets.map(_._2.value))
-    transactional((error, result) =>
-      background(_.sendOffsets)(
-        (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, offsets.size, timeoutMillis) ++ error.classifiedArguments :+
-          result.value)*
+    F.defer:
+      val (topics, partitions) = partitionArrays(offsets.map(_._1))
+      val values               = longs(offsets.map(_._2.value))
+      transactional((error, result) =>
+        background(_.sendOffsets)(
+          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, offsets.size, timeoutMillis) ++ error.classifiedArguments :+
+            result.value)*
+        )
       )
-    )
 
   override def groupMetadata(consumer: Client): F[GroupMetadata] = direct(_.groupMetadata(consumer)).map(JsGroupMetadata(_))
 
@@ -213,17 +227,18 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       finally shim.subscriptionDestroy(subscription): Unit
 
   override def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]] =
-    val error  = ErrorSlot()
-    val status = Buffers.alloc(4)
-    val result = Result()
-    background(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
-      status.readInt32LE(0) match
-        case negative if negative < 0 => F.raiseError(error.failure)
-        case 0                        => F.pure(Nil)
-        case _                        => direct: shim =>
-            val message = result.pointer
-            try List(copyMessage(shim, message))
-            finally shim.messageDestroy(message): Unit
+    F.defer:
+      val error  = ErrorSlot()
+      val status = Buffers.alloc(4)
+      val result = Result()
+      background(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+        status.readInt32LE(0) match
+          case negative if negative < 0 => F.raiseError(error.failure)
+          case 0                        => F.pure(Nil)
+          case _                        => direct: shim =>
+              val message = result.pointer
+              try List(copyMessage(shim, message))
+              finally shim.messageDestroy(message): Unit
 
   private def copyMessage(shim: Shim, message: js.Any): PolledRecord =
     val timestamp = long(shim.messageTimestamp(message))
@@ -277,204 +292,217 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       finally shim.assignmentDestroy(assignment): Unit
 
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
-    val (topics, partitions) = partitionArrays(offsets.map(_._1))
-    val error                = ErrorSlot()
-    val result               = Result()
-    background(_.commit)(
-      consumer,
-      topics,
-      partitions,
-      longs(offsets.map(_._2.value)),
-      offsets.size,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result)
+    F.defer:
+      val (topics, partitions) = partitionArrays(offsets.map(_._1))
+      val error                = ErrorSlot()
+      val result               = Result()
+      background(_.commit)(
+        consumer,
+        topics,
+        partitions,
+        longs(offsets.map(_._2.value)),
+        offsets.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result)
 
   override def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] = partitionCall(_.pause, consumer, partitions)
 
   override def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] = partitionCall(_.resume, consumer, partitions)
 
   override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]] =
-    val (topics, values) = partitionArrays(partitions)
-    val offsets          = Buffers.alloc(8 * partitions.size.max(1))
-    val error            = ErrorSlot()
-    val result           = Result()
-    background(_.committed)(
-      consumer,
-      topics,
-      values,
-      partitions.size,
-      offsets,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result) *> F.delay(readLongs(offsets, partitions.size))
+    F.defer:
+      val (topics, values) = partitionArrays(partitions)
+      val offsets          = Buffers.alloc(8 * partitions.size.max(1))
+      val error            = ErrorSlot()
+      val result           = Result()
+      background(_.committed)(
+        consumer,
+        topics,
+        values,
+        partitions.size,
+        offsets,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result) *> F.delay(readLongs(offsets, partitions.size))
 
   override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)] =
-    val low    = Buffers.alloc(8)
-    val high   = Buffers.alloc(8)
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.watermarks)(
-      consumer,
-      partition.topic.value,
-      partition.partition.value,
-      low,
-      high,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result) *> F.delay((readLongs(low, 1).head, readLongs(high, 1).head))
+    F.defer:
+      val low    = Buffers.alloc(8)
+      val high   = Buffers.alloc(8)
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.watermarks)(
+        consumer,
+        partition.topic.value,
+        partition.partition.value,
+        low,
+        high,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result) *> F.delay((readLongs(low, 1).head, readLongs(high, 1).head))
 
   override def offsetsForTimes(consumer: Client, searches: Vector[(TopicPartition, Timestamp)], timeoutMillis: Int): F[Vector[Long]] =
-    val (topics, partitions) = partitionArrays(searches.map(_._1))
-    val offsets              = Buffers.alloc(8 * searches.size.max(1))
-    val error                = ErrorSlot()
-    val result               = Result()
-    background(_.offsetsForTimes)(
-      consumer,
-      topics,
-      partitions,
-      longs(searches.map(_._2.epochMillis)),
-      searches.size,
-      offsets,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result) *> F.delay(readLongs(offsets, searches.size))
+    F.defer:
+      val (topics, partitions) = partitionArrays(searches.map(_._1))
+      val offsets              = Buffers.alloc(8 * searches.size.max(1))
+      val error                = ErrorSlot()
+      val result               = Result()
+      background(_.offsetsForTimes)(
+        consumer,
+        topics,
+        partitions,
+        longs(searches.map(_._2.epochMillis)),
+        searches.size,
+        offsets,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result) *> F.delay(readLongs(offsets, searches.size))
 
   override def positions(consumer: Client, partitions: Vector[TopicPartition]): F[Vector[Long]] =
-    val (topics, values) = partitionArrays(partitions)
-    val offsets          = Buffers.alloc(8 * partitions.size.max(1))
-    val error            = ErrorSlot()
-    direct(_.position(consumer, topics, values, partitions.size, offsets, error.message, ErrorBufferSize, error.code)).flatMap(error.check) *>
-      F.delay(readLongs(offsets, partitions.size))
+    F.defer:
+      val (topics, values) = partitionArrays(partitions)
+      val offsets          = Buffers.alloc(8 * partitions.size.max(1))
+      val error            = ErrorSlot()
+      direct(_.position(consumer, topics, values, partitions.size, offsets, error.message, ErrorBufferSize, error.code)).flatMap(error.check) *>
+        F.delay(readLongs(offsets, partitions.size))
 
   override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): F[Unit] =
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.seek)(
-      consumer,
-      partition.topic.value,
-      partition.partition.value,
-      bigInt(offset),
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result)
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.seek)(
+        consumer,
+        partition.topic.value,
+        partition.partition.value,
+        bigInt(offset),
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result)
 
   override def metadata(client: Client, topic: Option[String], timeoutMillis: Int): F[Vector[(String, Vector[Int])]] =
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.metadata)(client, optional(topic), timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
-      val metadata = result.pointer
-      if metadata == null then F.raiseError(error.failure)
-      else
-        direct: shim =>
-          try Vector.tabulate(shim.metadataTopicCount(metadata).asInstanceOf[Double].toInt): topicIndex =>
-              shim.metadataTopicAt(metadata, topicIndex).asInstanceOf[String] -> Vector.tabulate(
-                shim.metadataPartitionCount(metadata, topicIndex).asInstanceOf[Double].toInt
-              )(partitionIndex => shim.metadataPartitionAt(metadata, topicIndex, partitionIndex).asInstanceOf[Int])
-          finally shim.metadataDestroy(metadata): Unit
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.metadata)(client, optional(topic), timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+        val metadata = result.pointer
+        if metadata == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try Vector.tabulate(shim.metadataTopicCount(metadata).asInstanceOf[Double].toInt): topicIndex =>
+                shim.metadataTopicAt(metadata, topicIndex).asInstanceOf[String] -> Vector.tabulate(
+                  shim.metadataPartitionCount(metadata, topicIndex).asInstanceOf[Double].toInt
+                )(partitionIndex => shim.metadataPartitionAt(metadata, topicIndex, partitionIndex).asInstanceOf[Int])
+            finally shim.metadataDestroy(metadata): Unit
 
   override def createTopics(admin: Client, topics: Vector[NewTopic], timeoutMillis: Int): F[Unit] =
-    val configured   = topics.flatMap(_.configuration.toVector)
-    val configCounts = Buffers.alloc(8 * topics.size.max(1))
-    topics.iterator.zipWithIndex.foreach((topic, index) => configCounts.writeBigUInt64LE(bigInt(topic.configuration.size.toLong), 8 * index): Unit)
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.createTopics)(
-      admin,
-      strings(topics.map(_.topic.value)),
-      ints(topics.map(_.partitions)),
-      ints(topics.map(_.replicationFactor.toInt)),
-      if configured.isEmpty then null else strings(configured.map(_._1)),
-      if configured.isEmpty then null else strings(configured.map(_._2)),
-      configCounts,
-      topics.size,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result)
+    F.defer:
+      val configured   = topics.flatMap(_.configuration.toVector)
+      val configCounts = Buffers.alloc(8 * topics.size.max(1))
+      topics.iterator.zipWithIndex.foreach((topic, index) => configCounts.writeBigUInt64LE(bigInt(topic.configuration.size.toLong), 8 * index): Unit)
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.createTopics)(
+        admin,
+        strings(topics.map(_.topic.value)),
+        ints(topics.map(_.partitions)),
+        ints(topics.map(_.replicationFactor.toInt)),
+        if configured.isEmpty then null else strings(configured.map(_._1)),
+        if configured.isEmpty then null else strings(configured.map(_._2)),
+        configCounts,
+        topics.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result)
 
   override def deleteTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Unit] =
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.deleteTopics)(
-      admin,
-      strings(topics.map(_.value)),
-      topics.size,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> error.checked(result)
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.deleteTopics)(
+        admin,
+        strings(topics.map(_.value)),
+        topics.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> error.checked(result)
 
   override def createPartitions(admin: Client, topic: Topic, count: Int, timeoutMillis: Int): F[Unit] =
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.createPartitions)(admin, topic.value, count, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *>
-      error.checked(result)
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.createPartitions)(admin, topic.value, count, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *>
+        error.checked(result)
 
   override def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Vector[Either[KafkaException, Offset]]] =
-    val (topics, partitions) = partitionArrays(cuts.map(_._1))
-    val codes                = Buffers.alloc(4 * cuts.size.max(1))
-    val lowWatermarks        = Buffers.alloc(8 * cuts.size.max(1))
-    val error                = ErrorSlot()
-    val result               = Result()
-    background(_.deleteRecords)(
-      admin,
-      topics,
-      partitions,
-      longs(cuts.map(_._2.value)),
-      cuts.size,
-      timeoutMillis,
-      codes,
-      lowWatermarks,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> F.delay:
-      val answer =
-        if result.int != 0 then DeletedRecords.Refused(error.failure, error.codeValue)
-        else DeletedRecords.Answered(Vector.tabulate(cuts.size)(index => (codes.readInt32LE(4 * index), readLongs(lowWatermarks, cuts.size)(index))))
-      LibrdkafkaAnswers.deleted(cuts, answer, errorString)
+    F.defer:
+      val (topics, partitions) = partitionArrays(cuts.map(_._1))
+      val codes                = Buffers.alloc(4 * cuts.size.max(1))
+      val lowWatermarks        = Buffers.alloc(8 * cuts.size.max(1))
+      val error                = ErrorSlot()
+      val result               = Result()
+      background(_.deleteRecords)(
+        admin,
+        topics,
+        partitions,
+        longs(cuts.map(_._2.value)),
+        cuts.size,
+        timeoutMillis,
+        codes,
+        lowWatermarks,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> F.delay:
+        val answer =
+          if result.int != 0 then DeletedRecords.Refused(error.failure, error.codeValue)
+          else
+            DeletedRecords.Answered(Vector.tabulate(cuts.size)(index => (codes.readInt32LE(4 * index), readLongs(lowWatermarks, cuts.size)(index))))
+        LibrdkafkaAnswers.deleted(cuts, answer, errorString)
 
   override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]] =
-    val error  = ErrorSlot()
-    val result = Result()
-    background(_.describeConfigs)(
-      admin,
-      strings(topics.map(_.value)),
-      topics.size,
-      timeoutMillis,
-      error.message,
-      ErrorBufferSize,
-      error.code,
-      result.value
-    ) *> F.defer:
-      val configs = result.pointer
-      if configs == null then F.raiseError(error.failure)
-      else
-        direct: shim =>
-          try LibrdkafkaAnswers
-              .configurations(topics, Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _)))
-          finally shim.configsDestroy(configs): Unit
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.describeConfigs)(
+        admin,
+        strings(topics.map(_.value)),
+        topics.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> F.defer:
+        val configs = result.pointer
+        if configs == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers
+                .configurations(topics, Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _)))
+            finally shim.configsDestroy(configs): Unit
 
   private def resource(shim: Shim, configs: js.Any, index: Int): ConfigResource =
     val error = shim.configsResourceError(configs, index).asInstanceOf[Int]
