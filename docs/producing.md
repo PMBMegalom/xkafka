@@ -120,6 +120,31 @@ which is why `withAcks` and `withIdempotence` return a `ValidatedNel`. Call
 [Transactional producers](transactions.md) are always idempotent, because Kafka
 requires it for transactions.
 
+## Batching and compression
+
+A producer sends records to the broker in batches. `linger` sets how long a
+record waits for others to join its batch before the batch is sent. It defaults
+to five milliseconds, and zero sends each batch as soon as it can. A longer
+linger makes larger batches, at the cost of that much delay per record.
+
+`compression` sets how each batch is compressed: `Compression.Uncompressed`,
+which is the default, `Gzip`, `Snappy`, `Lz4` or `Zstd`. Every backend supports
+all five, and consumers read them all without being told which one was used.
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def batched[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSettings[F, K, V]] =
+  settings.withCompression(Compression.Zstd).withLinger(20.millis).liftTo[IO]
+```
+
+`withLinger` returns a `ValidatedNel`, because a negative linger, or one longer
+than `ProducerSettings.MaxLinger`, is rejected.
+
 ## Releasing a producer
 
 Releasing the resource first waits for records the producer has already accepted,

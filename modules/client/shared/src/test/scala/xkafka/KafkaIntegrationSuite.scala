@@ -74,7 +74,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         partition = Some(partition),
         headers = headers
       )
-    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "0")).toOption.get
+    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, linger = Duration.Zero).toOption.get
     val consumerSettings =
       ConsumerSettings
         .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "1"))

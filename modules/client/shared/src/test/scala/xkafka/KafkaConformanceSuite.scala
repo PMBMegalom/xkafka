@@ -113,20 +113,40 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         consumed <- consume(server, topic, 1)
       yield assertEquals(consumed.head.record.headers.values, headers.values)
 
-  test(conformance("records compressed with lz4 come back as they were produced")):
+  Compression.values.foreach: compression =>
+    test(conformance(s"records compressed with $compression come back as they were produced")):
+      withBroker: server =>
+        val topic       = uniqueTopic(compression.toString.toLowerCase)
+        val values      = List.tabulate(200)(index => s"record $index " + "compressible " * 50)
+        val records     = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), validPartition(0))))
+        val compressing =
+          ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+            ProducerSettings.from(client, optionalSerializer, optionalSerializer, compression = compression).liftTo[IO]
+
+        for
+          settings <- compressing
+          _        <- PlatformKafkaClient().producer(settings).use(_.produceAndAwait(records)).timeout(60.seconds)
+          consumed <- consume(server, topic, values.size)
+        yield assertEquals(consumed.map(_.record.value), values.map(Some(_)))
+
+  test(conformance("a record waits out the linger before it is sent")):
     withBroker: server =>
-      val topic   = uniqueTopic("lz4")
-      val values  = List.tabulate(200)(index => s"record $index " + "compressible " * 50)
-      val records = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), validPartition(0))))
-      val lz4     =
+      val topic                                                    = uniqueTopic("linger")
+      val one                                                      = NonEmptyList.one(record(topic, Some("k"), Some("v"), validPartition(0)))
+      def acknowledged(linger: FiniteDuration): IO[FiniteDuration] =
         ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
-          ProducerSettings.from(client, optionalSerializer, optionalSerializer, Map("compression.type" -> "lz4")).liftTo[IO]
+          ProducerSettings.from(client, optionalSerializer, optionalSerializer, linger = linger).liftTo[IO]
+        .flatMap: settings =>
+          PlatformKafkaClient().producer(settings).use: producer =>
+            // The first record also fetches the topic's metadata, so only the second one is timed.
+            producer.produceAndAwait(one) *> producer.produceAndAwait(one).timed.map(_._1)
 
       for
-        settings <- lz4
-        _        <- PlatformKafkaClient().producer(settings).use(_.produceAndAwait(records)).timeout(60.seconds)
-        consumed <- consume(server, topic, values.size)
-      yield assertEquals(consumed.map(_.record.value), values.map(Some(_)))
+        immediate <- acknowledged(Duration.Zero)
+        lingering <- acknowledged(2.seconds)
+      yield
+        assert(immediate < 1.second, s"acknowledged after $immediate without lingering")
+        assert(lingering >= 1900.millis, s"acknowledged after $lingering while lingering for 2 seconds")
 
   test(conformance("producing reports metadata for every record")):
     withBroker: server =>
@@ -170,7 +190,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       // Lingering holds the first batch long enough that its acknowledgement is still outstanding when the
       // second is enqueued, which is the whole point of separating the two stages.
       ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
-        ProducerSettings.from(client, optionalSerializer, optionalSerializer, Map("linger.ms" -> "5000")).liftTo[IO]
+        ProducerSettings.from(client, optionalSerializer, optionalSerializer, linger = 5.seconds).liftTo[IO]
       .flatMap: settings =>
         PlatformKafkaClient().producer(settings).use: producer =>
           for
@@ -1116,7 +1136,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       for
         base <- transactionalSettings(server, uniqueTransactionalId("purged"))
         // Held back long enough that the transaction aborts before the record is sent.
-        settings <- IO.fromOption(base.withProperty("linger.ms", "5000").toOption)(new AssertionError("linger.ms was rejected"))
+        settings <- base.withLinger(5.seconds).liftTo[IO]
         waiting  <- Deferred[IO, Either[Throwable, ProducerResult[Option[String], Option[String]]]]
         outcome  <-
           PlatformKafkaClient().transactionalProducer(settings).use: producer =>

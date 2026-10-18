@@ -49,6 +49,10 @@ val ManagedProperties: Set[String] =
     "isolation.level",
     "transactional.id",
     "transaction.timeout.ms",
+    "compression.type",
+    "compression.codec",
+    "linger.ms",
+    "queue.buffering.max.ms",
     "default.api.timeout.ms",
     "metadata.max.age.ms",
     "topic.metadata.refresh.interval.ms",
@@ -77,19 +81,23 @@ enum SettingsError derives CanEqual:
   case NonPositiveDuration(field: SettingsError.DurationField, value: FiniteDuration)
   case DurationExceedsMaximum(field: SettingsError.DurationField, value: FiniteDuration)
   case IdempotenceRequiresAllReplicas(acks: Acks)
+  case NegativeDuration(field: SettingsError.DurationField, value: FiniteDuration)
+  case DurationAboveLimit(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration)
 
   def message: String =
     this match
-      case BlankBootstrapServer(index)          => s"bootstrapServers[$index] must not be blank"
-      case InvalidBootstrapServer(index, value) => s"bootstrapServers[$index] must be host:port, was '$value'"
-      case BlankPropertyName(scope)             => s"${scope.label} properties must not contain a blank name"
-      case ManagedProperty(name, scope)         => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
-      case BlankCertificateAuthority            => "certificate authority must not be blank"
-      case BlankSaslUsername                    => "SASL username must not be blank"
-      case BlankSaslPassword                    => "SASL password must not be blank"
-      case NonPositiveDuration(field, value)    => s"${field.label} must be positive, was $value"
-      case DurationExceedsMaximum(field, value) => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
-      case IdempotenceRequiresAllReplicas(acks) => s"acks must be AllReplicas while idempotence is on, was $acks"
+      case BlankBootstrapServer(index)             => s"bootstrapServers[$index] must not be blank"
+      case InvalidBootstrapServer(index, value)    => s"bootstrapServers[$index] must be host:port, was '$value'"
+      case BlankPropertyName(scope)                => s"${scope.label} properties must not contain a blank name"
+      case ManagedProperty(name, scope)            => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
+      case BlankCertificateAuthority               => "certificate authority must not be blank"
+      case BlankSaslUsername                       => "SASL username must not be blank"
+      case BlankSaslPassword                       => "SASL password must not be blank"
+      case NonPositiveDuration(field, value)       => s"${field.label} must be positive, was $value"
+      case DurationExceedsMaximum(field, value)    => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
+      case IdempotenceRequiresAllReplicas(acks)    => s"acks must be AllReplicas while idempotence is on, was $acks"
+      case NegativeDuration(field, value)          => s"${field.label} must not be negative, was $value"
+      case DurationAboveLimit(field, value, limit) => s"${field.label} must not exceed $limit, was $value"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -101,6 +109,7 @@ object SettingsError:
     case CommitTimeout           extends DurationField("commitTimeout")
     case PollTimeout             extends DurationField("pollTimeout")
     case RequestTimeout          extends DurationField("requestTimeout")
+    case Linger                  extends DurationField("linger")
 
   enum PropertyScope(val label: String) derives CanEqual:
     case Client   extends PropertyScope("client")
@@ -120,6 +129,12 @@ private def propertyErrors(properties: Map[String, String], scope: SettingsError
 private def durationErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > SettingsError.MaxDuration then List(SettingsError.DurationExceedsMaximum(field, value))
+  else Nil
+
+/** Checks a duration both backends accept from zero up to a limit, which is the lower of their two maximums. */
+private def boundedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
+  if value < Duration.Zero then List(SettingsError.NegativeDuration(field, value))
+  else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
   else Nil
 
 /** Accepts `host:port`, including bracketed IPv6 literals, so an unusable endpoint is caught at construction. */
@@ -188,41 +203,67 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     properties: Map[String, String],
     acks: Acks,
     closeTimeout: FiniteDuration,
-    idempotence: Boolean
+    idempotence: Boolean,
+    compression: Compression,
+    linger: FiniteDuration
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
-    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, acks, closeTimeout, idempotence) {}
+    new ProducerSettings(
+      client,
+      keySerializer.mapK(fk),
+      valueSerializer.mapK(fk),
+      properties,
+      acks,
+      closeTimeout,
+      idempotence,
+      compression,
+      linger
+    ) {}
 
   def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
-    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence) {}
+    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger) {}
 
   /** How many replicas must have a record before the broker answers for it. Anything short of `AllReplicas` needs idempotence turned off first. */
   def withAcks(value: Acks): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence, compression, linger)
 
   /** Turns on Kafka's idempotent producer, `enable.idempotence`, which is the default. It needs `acks` to be `AllReplicas`. */
   def withIdempotence: ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence = true)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, true, compression, linger)
 
   /** Turns off Kafka's idempotent producer, `enable.idempotence`, which any `acks` short of `AllReplicas` needs. */
   def withoutIdempotence: ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, false) {}
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, false, compression, linger) {}
 
   /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value, idempotence)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value, idempotence, compression, linger)
+
+  /** How record batches are compressed on their way to the broker. */
+  def withCompression(value: Compression): ProducerSettings[F, K, V] =
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, value, linger) {}
+
+  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.MaxLinger`. */
+  def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value)
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence)
+    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence, compression, linger)
 
   /** The Kafka properties these settings own, spelled the same for both clients. */
-  private[xkafka] def managedProperties: Map[String, String] = Map("acks" -> acks.property, "enable.idempotence" -> idempotence.toString)
+  private[xkafka] def managedProperties: Map[String, String] =
+    Map(
+      "acks"               -> acks.property,
+      "enable.idempotence" -> idempotence.toString,
+      "compression.type"   -> compression.property,
+      "linger.ms"          -> linger.toMillis.toString
+    )
 
   override def toString: String =
-    s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$acks,$closeTimeout,$idempotence)"
+    s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$acks,$closeTimeout,$idempotence,$compression,$linger)"
 
 object ProducerSettings:
   /** What both backends already ask for, and the only setting that survives losing a leader. */
@@ -231,6 +272,12 @@ object ProducerSettings:
   /** Long enough that a producer with records still in flight delivers them rather than dropping them on the way out. */
   val DefaultCloseTimeout: FiniteDuration = 60.seconds
 
+  /** What both backends wait by default. */
+  val DefaultLinger: FiniteDuration = 5.millis
+
+  /** The longest linger librdkafka accepts. The Java client has no limit of its own. */
+  val MaxLinger: FiniteDuration = 15.minutes
+
   def from[F[_], K, V](
       client: ClientSettings,
       keySerializer: Serializer[F, K],
@@ -238,12 +285,16 @@ object ProducerSettings:
       properties: Map[String, String] = Map.empty,
       acks: Acks = ProducerSettings.DefaultAcks,
       closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout,
-      idempotence: Boolean = true
+      idempotence: Boolean = true,
+      compression: Compression = Compression.Uncompressed,
+      linger: FiniteDuration = ProducerSettings.DefaultLinger
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
-        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks))
-    validateSettings(errors).map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence) {})
+        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++
+        boundedDurationErrors(SettingsError.DurationField.Linger, linger, MaxLinger)
+    validateSettings(errors)
+      .map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger) {})
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
@@ -272,6 +323,14 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     producer.withCloseTimeout(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
 
+  /** How record batches are compressed on their way to the broker. */
+  def withCompression(value: Compression): TransactionalProducerSettings[F, K, V] =
+    new TransactionalProducerSettings(producer.withCompression(value), transactionalId, transactionTimeout) {}
+
+  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.MaxLinger`. */
+  def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withLinger(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     withProperties(producer.properties.updated(name, value))
 
@@ -289,10 +348,13 @@ object TransactionalProducerSettings:
       valueSerializer: Serializer[F, V],
       transactionTimeout: FiniteDuration = TransactionalProducerSettings.DefaultTransactionTimeout,
       properties: Map[String, String] = Map.empty,
-      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
+      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout,
+      compression: Compression = Compression.Uncompressed,
+      linger: FiniteDuration = ProducerSettings.DefaultLinger
   ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     (
-      ProducerSettings.from(client, keySerializer, valueSerializer, properties, closeTimeout = closeTimeout),
+      ProducerSettings
+        .from(client, keySerializer, valueSerializer, properties, closeTimeout = closeTimeout, compression = compression, linger = linger),
       validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, transactionTimeout))
     ).mapN((producer, _) => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})
 
@@ -317,6 +379,28 @@ enum Acks:
 
   /** Every in-sync replica, which is the only one of the three that survives losing the leader. */
   case AllReplicas
+
+/** How a producer compresses its record batches. */
+enum Compression:
+  /** What both backends read this as, which is the same string on each of them. */
+  private[xkafka] def property: String =
+    this match
+      case Compression.Uncompressed => "none"
+      case Compression.Gzip         => "gzip"
+      case Compression.Snappy       => "snappy"
+      case Compression.Lz4          => "lz4"
+      case Compression.Zstd         => "zstd"
+
+  /** Batches are sent as they are, which is the default. */
+  case Uncompressed
+
+  case Gzip
+
+  case Snappy
+
+  case Lz4
+
+  case Zstd
 
 /** Where a consumer starts in a partition where its group has no committed offset, or where that offset is no longer in the partition's log. */
 enum AutoOffsetReset:

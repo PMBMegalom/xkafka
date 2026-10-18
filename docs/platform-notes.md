@@ -21,7 +21,8 @@ Java client.
 
 The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
 OAUTHBEARER, and gzip and zstd compression enabled, so it can reach
-authenticated brokers and read compressed topics.
+authenticated brokers and read and write every compression codec. Snappy and LZ4
+are built into librdkafka itself.
 
 librdkafka links these against system libraries, so any application linking the
 Native backend needs OpenSSL, zlib, and zstd available:
