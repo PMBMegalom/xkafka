@@ -86,7 +86,7 @@ val installNativeDependencies = WorkflowStep.Run(
 def cacheLibrdkafkaLibrary = Def.setting {
   val builds = Seq((client.js / librdkafkaLibraryBuild).value, (client.js / librdkafkaMuslBuild).value)
   WorkflowStep.Use(
-    UseRef.Public("actions", "cache", "v4"),
+    UseRef.Public("actions", "cache", "v6"),
     name = Some("Cache the librdkafka library build"),
     params = Map(
       "path" -> builds.map(repositoryPath).mkString("\n"),
@@ -137,7 +137,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
       cond = Some("runner.os == 'Linux'")
     ),
     WorkflowStep.Use(
-      UseRef.Public("actions", "upload-artifact", "v5"),
+      UseRef.Public("actions", "upload-artifact", "v7"),
       name = Some("Keep the packages"),
       params = Map("name" -> "npm-librdkafka-${{ matrix.os }}", "path" -> s"${repositoryPath((client.js / npmLibrdkafkaPackages).value)}/librdkafka*")
     )
@@ -161,7 +161,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
       params = Map("node-version-file" -> ".nvmrc")
     ),
     WorkflowStep.Use(
-      UseRef.Public("actions", "download-artifact", "v6"),
+      UseRef.Public("actions", "download-artifact", "v8"),
       name = Some("Collect the packages"),
       params = Map("pattern" -> "npm-librdkafka-*", "merge-multiple" -> "true", "path" -> "npm-packages")
     ),
