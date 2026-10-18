@@ -736,8 +736,7 @@ trait KafkaAdminClient[F[_]]:
   /** Reports each topic's effective configuration, including the values it inherits, or the reason the broker would not describe it.
     *
     * Every requested topic gets an answer, including one the cluster does not have, which answers as `ErrorCode.UnknownTopicOrPartition`. The call
-    * fails only where nothing is known about any topic, such as when the cluster cannot be reached in time. The JavaScript backend cannot describe
-    * configuration and fails with `KafkaException.Unsupported`.
+    * fails only where nothing is known about any topic, such as when the cluster cannot be reached in time.
     */
   def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]]
 
