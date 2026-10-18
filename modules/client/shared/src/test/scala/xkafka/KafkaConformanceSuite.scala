@@ -202,6 +202,24 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           yield ()
         .timeout(60.seconds)
 
+  test(conformance("enqueueing does not slow down as acknowledgements pile up")):
+    withBroker: server =>
+      val topic   = uniqueTopic("piling")
+      val records = List.tabulate(20)(index => NonEmptyList.one(record(topic, Some("k"), Some(s"record $index"), validPartition(0))))
+
+      // A long linger keeps every batch waiting for its acknowledgement while the next ones are enqueued.
+      ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+        ProducerSettings.from(client, optionalSerializer, optionalSerializer, linger = 10.seconds).liftTo[IO]
+      .flatMap: settings =>
+        PlatformKafkaClient().producer(settings).use: producer =>
+          for
+            // The first record also fetches the topic's metadata, so it is acknowledged before anything is timed.
+            _        <- producer.produceAndAwait(records.head).timeout(30.seconds)
+            enqueued <- records.traverse(producer.produce).timed
+            (took, acknowledgements) = enqueued
+            _ <- acknowledgements.sequence.timeout(30.seconds)
+          yield assert(took < 1.second, s"enqueueing 20 batches took $took while their acknowledgements were outstanding")
+
   test(conformance("an unreachable broker fails with the same portable classification")):
     val unreachable = "127.0.0.1:1"
     val settings    =

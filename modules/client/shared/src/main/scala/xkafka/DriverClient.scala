@@ -24,7 +24,7 @@ package xkafka
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Poll, Ref, Resource}
 import cats.effect.implicits.*
-import cats.effect.std.{Mutex, Queue, Random, Semaphore, Supervisor}
+import cats.effect.std.{Mutex, Queue, Random, Supervisor}
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
@@ -45,7 +45,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   /** Group metadata, from a consumer of any client on this platform, that a transaction records offsets against. */
   private object GroupMetadata:
     def unapply(handle: GroupHandle): Option[driver.GroupMetadata] = driver.asGroupMetadata(handle)
-  // How long one poll waits for delivery reports before the batch waiting on them checks whether it is done.
+  // How long one wait for delivery reports lasts before whoever is waiting checks again whether to go on.
   private val DeliveryPollTimeoutMillis = 100
   // Admin calls are metadata round trips against the controller, so they are bounded on their own.
   private val AdminTimeoutMillis = 30000
@@ -111,15 +111,27 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       client <- nativeClient(acquire, destroy)
       // Release cancels acknowledgement fibers before closing the client instead of waiting indefinitely for them.
       supervisor <- Supervisor[F](await = false)
-      batches    <- Resource.eval(Semaphore[F](1))
-    yield NativeProducerHandle(client, supervisor, batches, owned)
+      deliveries <- Resource.eval((SignallingRef[F, Int](0), SignallingRef[F, Long](0L), Deferred[F, Throwable]).mapN(Deliveries(_, _, _)))
+      // Started after the client and cancelled before it, so it is not polling when the producer is destroyed.
+      _ <- if driver.deliveriesShareQueue then serveDeliveries(client, deliveries).background.void else Resource.unit[F]
+    yield NativeProducerHandle(client, supervisor, deliveries, owned)
+
+  /** Where one queue carries every batch's delivery reports, one fiber serves it while any batch is waiting, so neither waiting batches nor new
+    * enqueues have to take turns at it.
+    */
+  private def serveDeliveries(client: NativeClient, deliveries: Deliveries): F[Unit] =
+    (deliveries.waiting.waitUntil(_ > 0) *> client(driver.serveDeliveries(client.handle, DeliveryPollTimeoutMillis)) *>
+      deliveries.served.update(_ + 1)).foreverM[Unit].onError(deliveries.failure.complete(_).void)
+
+  /** How many batches are waiting for their reports, how many times the shared queue has been served, and why serving it stopped, if it has. */
+  private final case class Deliveries(waiting: SignallingRef[F, Int], served: SignallingRef[F, Long], failure: Deferred[F, Throwable])
 
   private def releaseBatches(owned: Ref[F, Set[driver.Batch]]): F[Unit] = owned.getAndSet(Set.empty).flatMap(_.toList.traverse_(driver.freeBatch))
 
   private final case class NativeProducerHandle(
       client: NativeClient,
       supervisor: Supervisor[F],
-      batches: Semaphore[F],
+      deliveries: Deliveries,
       owned: Ref[F, Set[driver.Batch]]
   )
 
@@ -127,7 +139,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     producerHandle(
       createProducer(settings.client, settings.properties ++ settings.managedProperties),
       handle => driver.destroyProducer(handle, settings.closeTimeout.toMillis.toInt)
-    ).map(handle => new DriverProducer(handle.client, handle.supervisor, handle.batches, handle.owned, settings))
+    ).map(handle => new DriverProducer(handle.client, handle.supervisor, handle.deliveries, handle.owned, settings))
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
@@ -192,7 +204,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       lock <- Resource.eval(Mutex[F])
     yield new DriverTransactionalProducer(
       handle.client,
-      new DriverProducer(handle.client, handle.supervisor, handle.batches, handle.owned, settings.producer),
+      new DriverProducer(handle.client, handle.supervisor, handle.deliveries, handle.owned, settings.producer),
       lock,
       timeoutMillis
     )
@@ -301,7 +313,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   private final class DriverProducer[K, V](
       client: NativeClient,
       supervisor: Supervisor[F],
-      batches: Semaphore[F],
+      deliveries: Deliveries,
       owned: Ref[F, Set[driver.Batch]],
       settings: ProducerSettings[F, K, V]
   ) extends KafkaProducer[F, K, V]:
@@ -318,14 +330,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         result  <-
           F.uncancelable: _ =>
             for
-              batch <- client(driver.batch(encoded.size))
-              _     <- owned.update(_ + batch)
-              // Delivery reports are served from whichever batch is being awaited, so the slots they write into are
-              // only ever touched by one call at a time.
-              enqueued <- batches.permit.use(_ => client(driver.enqueue(client.handle, batch, encoded))).attempt
+              batch    <- client(driver.batch(encoded.size))
+              _        <- owned.update(_ + batch)
+              enqueued <- client(driver.enqueue(client.handle, batch, encoded)).attempt
               result   <-
                 enqueued match
-                  case Right(_) => superviseBatch(batch, awaitDelivery(batch) *> batches.permit.use(_ => client(awaitBatch(batch, records))))
+                  case Right(_) => superviseBatch(batch, awaitDelivery(batch) *> client(awaitBatch(batch, records)))
                   // A prefix can already belong to the producer when a later enqueue fails. It keeps its supervised cleanup,
                   // while the caller receives the failure saying that the complete batch was not accepted.
                   case Left(failure) => superviseBatch(batch, awaitDelivery(batch)).void *> F.raiseError(failure)
@@ -336,19 +346,21 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch))).map(_.joinWithNever)
 
     private def releaseBatchWhenComplete(batch: driver.Batch): F[Unit] =
-      batches.permit.use(_ => driver.pending(batch)).flatMap: pending =>
+      driver.pending(batch).flatMap: pending =>
         if pending == 0 then owned.modify(current => (current - batch, current.contains(batch))).flatMap(F.whenA(_)(driver.freeBatch(batch)))
         else F.unit
 
-    /** Serves delivery reports until this batch has all of its own.
+    /** Waits until this batch has all of its delivery reports.
       *
-      * Where serving reports serves every batch's, the lock is taken for one poll at a time, so the reports a poll delivers still reach their slots
-      * one thread at a time, and a batch waiting here does not hold up the next enqueue.
+      * Where one queue carries every batch's reports, the batch is counted as waiting, so the queue is served, and it looks again each time it has
+      * been. Otherwise the reports arrive on their own and the batch waits for them directly.
       */
     private def awaitDelivery(batch: driver.Batch): F[Unit] =
-      val serve = client(driver.serveDeliveries(client.handle, batch, DeliveryPollTimeoutMillis))
-      (if driver.deliveriesShareQueue then batches.permit.use(_ => serve) else serve)
-        .flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
+      if driver.deliveriesShareQueue then
+        val delivered = deliveries.served.discrete.evalMap(_ => driver.pending(batch)).find(_ == 0).compile.drain
+        val failed    = deliveries.failure.get.flatMap(F.raiseError[Unit])
+        F.bracket(deliveries.waiting.update(_ + 1))(_ => F.race(delivered, failed).void)(_ => deliveries.waiting.update(_ - 1))
+      else client(driver.awaitDeliveries(batch, DeliveryPollTimeoutMillis)).flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
       (

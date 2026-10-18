@@ -45,8 +45,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** A consumer's group identity, owned until destroyed, which a transaction records offsets against. */
   type GroupMetadata <: GroupHandle
 
-  /** Whether serving one batch's delivery reports serves every other batch's too, so that batches are served one at a time. librdkafka reports every
-    * delivery through one queue; the Java client reports each record on its own thread as the broker acknowledges it.
+  /** Whether every batch's delivery reports arrive through one queue that has to be served, as librdkafka's do. The Java client reports each record
+    * on its own thread as the broker acknowledges it.
     */
   def deliveriesShareQueue: Boolean
 
@@ -76,8 +76,15 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Enqueues every record in order, failing at the first one the producer refuses; the records before it stay enqueued. */
   def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit]
 
-  /** Serves delivery reports for up to the timeout and answers how many of the batch's reports are still outstanding. */
-  def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): F[Int]
+  /** Serves the shared queue's delivery reports for up to the timeout. Called only where deliveries share a queue, by one fiber at a time, while
+    * enqueues go on alongside it.
+    */
+  def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit]
+
+  /** Waits up to the timeout for the batch's own delivery reports and answers how many are still outstanding. Called only where deliveries do not
+    * share a queue.
+    */
+  def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int]
 
   def pending(batch: Batch): F[Int]
 

@@ -263,7 +263,9 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] = unused("enqueue")
 
-    override def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): IO[Int] = unused("serveDeliveries")
+    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = unused("serveDeliveries")
+
+    override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int] = unused("awaitDeliveries")
 
     override def pending(batch: Batch): IO[Int] = IO.pure(0)
 
