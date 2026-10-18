@@ -45,8 +45,6 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** A consumer's group identity, owned until destroyed, which a transaction records offsets against. */
   type GroupMetadata <: GroupHandle
 
-  def version: String
-
   /** Whether serving one batch's delivery reports serves every other batch's too, so that batches are served one at a time. librdkafka reports every
     * delivery through one queue; the Java client reports each record on its own thread as the broker acknowledges it.
     */

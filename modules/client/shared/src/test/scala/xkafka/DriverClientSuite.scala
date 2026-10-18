@@ -237,8 +237,6 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     private def unused[A](call: String): IO[A] = IO.raiseError(new UnsupportedOperationException(s"$call is not part of the fake"))
 
-    override def version: String = "fake"
-
     override val deliveriesShareQueue: Boolean = true
 
     override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] = IO.pure("producer")
