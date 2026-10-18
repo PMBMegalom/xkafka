@@ -138,8 +138,8 @@ final class EffectLazinessSuite extends CatsEffectSuite:
     override def batch(capacity: Int): IO[Batch]                                                         = called("batch")(IO.pure(capacity))
     override def freeBatch(batch: Batch): IO[Unit]                                                       = called("freeBatch")(IO.unit)
     override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] = called("enqueue")(IO.unit)
-    override def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): IO[Int]            =
-      called("serveDeliveries")(IO.sleep(timeoutMillis.millis).as(1))
+    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit]   = called("serveDeliveries")(IO.sleep(timeoutMillis.millis))
+    override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int]        = called("awaitDeliveries")(IO.sleep(timeoutMillis.millis).as(1))
     override def pending(batch: Batch): IO[Int]                                    = called("pending")(IO.pure(1))
     override def deliveries(producer: Client, batch: Batch): IO[Vector[Delivery]]  = waiting("deliveries")
     override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit]  = called("initTransactions")(IO.unit)

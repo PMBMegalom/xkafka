@@ -158,7 +158,10 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             batch.enqueued.incrementAndGet()
         finally batch.seal()
 
-  override def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): F[Int] =
+  /** The Java client reports each record on its own thread, so there is no queue to serve. */
+  override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = F.unit
+
+  override def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int] =
     // The batch's own future is shared by every wait, so a wait that times out gives up on a copy of it.
     F.fromCompletableFuture(F.delay(batch.delivered.thenApply(identity)))
       .timeoutTo(scala.concurrent.duration.FiniteDuration(timeoutMillis.toLong, "ms"), F.unit) *> pending(batch)

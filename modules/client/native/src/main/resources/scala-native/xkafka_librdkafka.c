@@ -20,9 +20,11 @@ typedef struct xkafka_delivery_s {
 } xkafka_delivery_t;
 
 /* Delivery reports arrive after the enqueue returns, so the slots they write
- * into are heap allocated and outlive the call that produced them. Every
- * access happens on the thread holding the producer's permit, so the counters
- * need no synchronisation of their own. */
+ * into are heap allocated and outlive the call that produced them. A report
+ * can arrive on the polling thread while the batch is still being enqueued on
+ * another, so `pending` is only touched atomically. A report writes its slot
+ * before releasing its count, and the slots are read only once `pending` has
+ * been seen at zero, so the slots themselves need no lock. */
 typedef struct xkafka_batch_s {
         size_t capacity;
         size_t count;
@@ -196,8 +198,8 @@ static void xkafka_delivery_callback(rd_kafka_t *client,
         delivery->timestamp = rd_kafka_message_timestamp(message, NULL);
         delivery->complete = 1;
 
-        if (delivery->owner != NULL && delivery->owner->pending > 0)
-                delivery->owner->pending--;
+        if (delivery->owner != NULL)
+                __atomic_sub_fetch(&delivery->owner->pending, 1, __ATOMIC_RELEASE);
 }
 
 rd_kafka_t *xkafka_producer_new(const char *brokers,
@@ -343,6 +345,8 @@ int xkafka_batch_add(rd_kafka_t *producer,
         slot->partition = RD_KAFKA_PARTITION_UA;
         slot->offset = -1;
         slot->timestamp = -1;
+        /* Counted before librdkafka has the message, since its report can arrive before producev returns. */
+        __atomic_add_fetch(&batch->pending, 1, __ATOMIC_RELAXED);
 
         if (timestamp >= 0) {
                 result = rd_kafka_producev(
@@ -369,23 +373,22 @@ int xkafka_batch_add(rd_kafka_t *producer,
                 /* librdkafka only takes ownership of the headers on success. */
                 if (headers != NULL)
                         rd_kafka_headers_destroy(headers);
+                __atomic_sub_fetch(&batch->pending, 1, __ATOMIC_RELAXED);
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
 
         batch->count++;
-        batch->pending++;
         return 0;
 }
 
-/* Serves whatever delivery reports are ready. The caller decides how long to keep asking, so one
- * batch waiting for its reports does not stop another from being enqueued. */
+/* Serves whatever delivery reports are ready, for up to the timeout. Enqueues may run alongside it. */
 void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms) {
         rd_kafka_poll(producer, timeout_ms);
 }
 
 size_t xkafka_batch_pending(const xkafka_batch_t *batch) {
-        return batch == NULL ? 0 : batch->pending;
+        return batch == NULL ? 0 : __atomic_load_n(&batch->pending, __ATOMIC_ACQUIRE);
 }
 
 /* Reads the outcome of a batch whose reports have all arrived. */

@@ -155,8 +155,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         shim.headersDestroy(native): Unit
         throw failure
 
-  override def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): F[Int] =
-    background(_.producerPoll)(producer, timeoutMillis) *> pending(batch)
+  override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = background(_.producerPoll)(producer, timeoutMillis).void
+
+  /** Reports reach the batch through `serveDeliveries`, so this only reads how many are outstanding. */
+  override def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int] = pending(batch)
 
   override def pending(batch: Batch): F[Int] = direct(_.batchPending(batch).asInstanceOf[Double].toInt)
 
