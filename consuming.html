@@ -255,8 +255,8 @@
   </span><span class="identifier">partition</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">handle</span><span>)
 }.</span><span class="identifier">parJoinUnbounded</span></code></pre>
         <p>Every emitted stream must be consumed concurrently. <code>maxQueuedRecords</code> is the
-        point at which a shared-source backend pauses a partition. Records already in
-        flight can temporarily take its buffer past that threshold.</p>
+        point at which the backend pauses a partition. Records already in flight can
+        temporarily take its buffer past that threshold.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
           <p>A consumer that subscribes to a topic before that topic exists sees it once the
