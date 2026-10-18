@@ -7,7 +7,8 @@ their respective licenses and are not relicensed as part of xkafka.
 
 | Component | Version | License | Use |
 | --- | --- | --- | --- |
-| [fs2-kafka](https://github.com/typelevel/fs2-kafka) | 4.1.1 | MIT | JVM Kafka backend |
+| [Apache Kafka Java client](https://kafka.apache.org) (`kafka-clients`) | 4.3.1 | Apache-2.0 | JVM Kafka backend |
+| [lz4-java](https://github.com/yawkat/lz4-java) | 1.11.4 | Apache-2.0 | LZ4 compression for the JVM backend |
 | [librdkafka](https://github.com/confluentinc/librdkafka) | 2.15.1 | BSD-2-Clause | Kafka backend for Scala Native and Scala.js |
 | [koffi](https://koffi.dev) | 3.3.3 | MIT | Calls librdkafka from Node.js for the Scala.js backend |
 | [OpenSSL](https://www.openssl.org) | 3.5.7 | Apache-2.0 | TLS and SASL in the prebuilt Scala.js libraries |
