@@ -113,6 +113,21 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         consumed <- consume(server, topic, 1)
       yield assertEquals(consumed.head.record.headers.values, headers.values)
 
+  test(conformance("records compressed with lz4 come back as they were produced")):
+    withBroker: server =>
+      val topic   = uniqueTopic("lz4")
+      val values  = List.tabulate(200)(index => s"record $index " + "compressible " * 50)
+      val records = NonEmptyList.fromListUnsafe(values.map(value => record(topic, Some("k"), Some(value), validPartition(0))))
+      val lz4     =
+        ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+          ProducerSettings.from(client, optionalSerializer, optionalSerializer, Map("compression.type" -> "lz4")).liftTo[IO]
+
+      for
+        settings <- lz4
+        _        <- PlatformKafkaClient().producer(settings).use(_.produceAndAwait(records)).timeout(60.seconds)
+        consumed <- consume(server, topic, values.size)
+      yield assertEquals(consumed.map(_.record.value), values.map(Some(_)))
+
   test(conformance("producing reports metadata for every record")):
     withBroker: server =>
       val topic     = uniqueTopic("metadata")
