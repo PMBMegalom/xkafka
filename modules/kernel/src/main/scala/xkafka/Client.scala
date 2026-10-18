@@ -1017,7 +1017,7 @@ trait KafkaConsumer[F[_], K, V]:
     * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails.
     *
     * @param maxQueuedRecords
-    *   positive per-partition threshold at which a shared-source backend pauses fetching; records already in flight can temporarily exceed it
+    *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
     */
   final def consumeChunk(process: Chunk[ConsumerRecord[K, V]] => F[CommitNow], maxQueuedRecords: Int = 256)(using F: Async[F]): F[Unit] =
     partitionedRecords(maxQueuedRecords).map(
@@ -1032,7 +1032,7 @@ trait KafkaConsumer[F[_], K, V]:
     * Every emitted stream must be consumed concurrently; backpressure from one partition otherwise backpressures the shared record source.
     *
     * @param maxQueuedRecords
-    *   positive per-partition threshold at which a shared-source backend pauses fetching; records already in flight can temporarily exceed it
+    *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
     */
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
     PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords, pausing)

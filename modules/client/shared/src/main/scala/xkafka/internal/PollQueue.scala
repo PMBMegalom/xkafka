@@ -27,7 +27,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.Channel
 
-/** The queue between a librdkafka consumer's single poll and whoever reads its records.
+/** The queue between a consumer's single poll and whoever reads its records.
   *
   * A poll that fails records its failure before it closes the queue, and a reader that reaches the end of the queue raises a recorded failure, so a
   * reader never takes a failed poll for a stream that simply ended.

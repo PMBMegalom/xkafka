@@ -353,7 +353,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     * the other. Neither protocol version changes this, and librdkafka never starts its own idle timer for such a consumer, so the partitions it holds
     * are not handed back.
     */
-  test(conformance("a consumer that is never read leaves the whole topic to one that is", divergent = Set("js", "native"))):
+  test(conformance("a consumer that is never read still takes its share of the topic")):
     withBroker: server =>
       val topic     = validTopic(partitionedTopic)
       val group     = uniqueGroup("idle")
@@ -366,12 +366,27 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             PlatformKafkaClient().consumer(settings, selection).use: reading =>
               for
                 _ <- reading.assignmentChanges.filter(_.nonEmpty).head.compile.lastOrError
-                // A member that joined without being read would take its share through a rebalance, so this settles first.
+                // The member that joined without being read takes its share through a rebalance, so this settles first.
                 _      <- IO.sleep(8.seconds)
                 latest <- reading.assignment
               yield latest
           .timeout(90.seconds)
-      yield assertEquals(settled.size, 2, s"$backend gave the consumer that is read ${settled.size} of 2 partitions")
+      // Every backend polls for a consumer from the moment it is made, so the one never read is still a member and keeps a partition.
+      yield assertEquals(settled.size, 1, s"$backend gave the consumer that is read ${settled.size} of 2 partitions")
+
+  test(conformance("a consumer that commits every chunk it reads goes on reading")):
+    withBroker: server =>
+      val partition = TopicPartition(uniqueTopic("chunk-commits"), validPartition(0))
+      val count     = 5000
+
+      for
+        _        <- produceValues(server, partition, count)
+        settings <- consumerSettings(server, uniqueGroup("chunk-commits"))
+        read     <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(partition.topic))).use: consumer =>
+            consumer.records.take(count.toLong).chunks.evalMap(chunk => chunk.last.traverse_(_.offset.commit).as(chunk.size)).compile.foldMonoid
+          .timeout(60.seconds)
+      yield assertEquals(read, count)
 
   test(conformance("naming partitions directly keeps the assignment whole and fixed")):
     withBroker: server =>

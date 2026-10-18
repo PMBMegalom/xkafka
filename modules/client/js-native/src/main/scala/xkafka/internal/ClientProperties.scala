@@ -22,8 +22,20 @@
 package xkafka
 package internal
 
-/** Backend property names for the client settings that are not security. */
+/** Backend property names for the client settings. */
 private[xkafka] object ClientProperties:
   /** librdkafka refreshes on this timer and derives `metadata.max.age.ms` from it, so only the timer is set here. */
   def apply(settings: ClientSettings): Map[String, String] =
     Map("topic.metadata.refresh.interval.ms" -> settings.metadataRefreshInterval.toMillis.toString)
+
+  /** librdkafka bounds each call by the timeout it is given, so a consumer needs nothing more. */
+  def consumer[F[_], K, V](@scala.annotation.unused settings: ConsumerSettings[F, K, V]): Map[String, String] = Map.empty
+
+  def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.librdkafka(settings)
+
+  /** librdkafka names the policy that refuses to reset `error`. */
+  def autoOffsetReset(value: AutoOffsetReset): String =
+    value match
+      case AutoOffsetReset.Earliest => "earliest"
+      case AutoOffsetReset.Latest   => "latest"
+      case AutoOffsetReset.Fail     => "error"

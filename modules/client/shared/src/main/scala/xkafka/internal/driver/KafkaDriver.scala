@@ -21,19 +21,19 @@
 
 package xkafka
 package internal
-package librdkafka
+package driver
 
 import cats.data.NonEmptyList
 import fs2.Chunk
 
-/** The C shim's functions, in Scala types, as each platform reaches them.
+/** The Kafka client each platform drives, in Scala types: librdkafka through the C shim on Scala.js and Scala Native, and the Java client on the JVM.
   *
   * Every call that can wait on the network returns once it has an answer, so a platform runs it where waiting blocks nothing else. A call that fails
-  * raises the `KafkaException.BackendFailure` the shim described, built with [[Failures]]. Handles are the platform's own pointers and are valid
-  * until the matching destroy.
+  * raises a `KafkaException.BackendFailure` classified the same way on every platform. Handles are the platform's own and are valid until the
+  * matching destroy.
   */
-private[xkafka] trait Librdkafka[F[_]]:
-  /** A librdkafka client: a producer, a consumer or an administration client. */
+private[xkafka] trait KafkaDriver[F[_]]:
+  /** A client of the driver: a producer, a consumer or an administration client. */
   type Client
 
   /** The delivery slots of one produced batch, owned until freed. */
@@ -46,6 +46,11 @@ private[xkafka] trait Librdkafka[F[_]]:
   type GroupMetadata <: GroupHandle
 
   def version: String
+
+  /** Whether serving one batch's delivery reports serves every other batch's too, so that batches are served one at a time. librdkafka reports every
+    * delivery through one queue; the Java client reports each record on its own thread as the broker acknowledges it.
+    */
+  def deliveriesShareQueue: Boolean
 
   def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client]
 
@@ -70,7 +75,7 @@ private[xkafka] trait Librdkafka[F[_]]:
 
   def freeBatch(batch: Batch): F[Unit]
 
-  /** Enqueues every record in order, failing at the first one librdkafka refuses; the records before it stay enqueued. */
+  /** Enqueues every record in order, failing at the first one the producer refuses; the records before it stay enqueued. */
   def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit]
 
   /** Serves delivery reports for up to the timeout and answers how many of the batch's reports are still outstanding. */
@@ -100,11 +105,11 @@ private[xkafka] trait Librdkafka[F[_]]:
 
   def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
 
-  /** Subscribes to topic names, or to patterns spelled the way librdkafka reads them. */
+  /** Subscribes to topic names, or to one pattern, which starts with `^` as no topic name can. */
   def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit]
 
-  /** One record, or none when the timeout passes first or the poll only reached the end of a partition. */
-  def poll(consumer: Client, timeoutMillis: Int): F[Option[PolledRecord]]
+  /** The records one poll returned, none when the timeout passed first or the poll only reached the end of a partition. */
+  def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]]
 
   /** Every rebalance the consumer received since the last call, oldest first. */
   def takeRebalances(consumer: Client): F[List[Rebalance[Event]]]
@@ -133,6 +138,7 @@ private[xkafka] trait Librdkafka[F[_]]:
   /** The position of each partition in request order, negative where there is none. */
   def positions(consumer: Client, partitions: Vector[TopicPartition]): F[Vector[Long]]
 
+  /** Moves to an offset, or to either end of the log for [[KafkaDriver.BeginningOffset]] and [[KafkaDriver.EndOffset]]. */
   def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): F[Unit]
 
   /** Each topic's name and partitions, for one topic or for all of them. */
@@ -144,12 +150,18 @@ private[xkafka] trait Librdkafka[F[_]]:
 
   def createPartitions(admin: Client, topic: Topic, count: Int, timeoutMillis: Int): F[Unit]
 
-  def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[DeletedRecords]
+  /** Each partition's new low watermark, or why it was not cut, in request order. */
+  def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Vector[Either[KafkaException, Offset]]]
 
-  def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[ConfigResource]]
+  /** Each topic's configuration, or why it was not described, in request order. */
+  def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]]
 
-  /** librdkafka's description of an error code. */
-  def errorString(code: Int): String
+private[xkafka] object KafkaDriver:
+  /** The offset `seek` reads as the beginning of a partition's log. */
+  val BeginningOffset: Long = -2L
+
+  /** The offset `seek` reads as the end of a partition's log. */
+  val EndOffset: Long = -1L
 
 /** A record ready for the producer, serialized. */
 private[xkafka] final case class EncodedRecord(
@@ -164,7 +176,7 @@ private[xkafka] final case class EncodedRecord(
 /** Where a record was delivered. A negative offset or timestamp is one the broker did not report. */
 private[xkafka] final case class Delivery(partition: Int, offset: Long, timestamp: Long)
 
-/** A record the consumer polled, copied out of librdkafka's memory. */
+/** A record the consumer polled, copied out of the client's own memory. */
 private[xkafka] final case class PolledRecord(
     topic: String,
     partition: Int,
@@ -177,34 +189,3 @@ private[xkafka] final case class PolledRecord(
 
 /** A rebalance and the partitions it names. `kind` is 1 for an assignment, 0 for a revocation, and anything else for a failure to resynchronise. */
 private[xkafka] final case class Rebalance[E](event: E, kind: Int, partitions: List[LeaseKey])
-
-/** What deleting records answered. */
-private[xkafka] enum DeletedRecords:
-  /** One failure for the whole call, with librdkafka's code for it. */
-  case Refused(failure: KafkaException.BackendFailure, code: Int)
-
-  /** A code and low watermark for each requested partition, in request order; `Failures.NoAnswer` where the result left one out. */
-  case Answered(results: Vector[(Int, Long)])
-
-/** One described topic: its error code and text, and its entries when the code is 0. */
-private[xkafka] final case class ConfigResource(name: String, error: Int, errorString: String, entries: Vector[ConfigEntry])
-
-private[xkafka] final case class ConfigEntry(name: String, value: Option[String], source: Int, sensitive: Boolean, readOnly: Boolean)
-
-/** How the shim's failures become exceptions, the same on every platform. */
-private[xkafka] object Failures:
-  /** What the shim leaves in place of a code for a partition its result does not mention. */
-  val NoAnswer: Int = Int.MinValue
-
-  /** A failure the shim reported with a librdkafka code. */
-  def coded(message: String, code: Int): KafkaException.BackendFailure =
-    val classified = ErrorCode.fromLibrdkafka(code)
-    new KafkaException.BackendFailure(message, Some(classified), retriable = Some(classified.retriable))
-
-  /** A transactional failure, whose flags are -1 when librdkafka did not say. */
-  def classified(message: String, code: Int, fatal: Int, retriable: Int, transactionAbortRequired: Int): KafkaException.BackendFailure =
-    new KafkaException.BackendFailure(message, Some(ErrorCode.fromLibrdkafka(code)), flag(retriable), flag(fatal), flag(transactionAbortRequired))
-
-  def plain(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
-
-  private def flag(value: Int): Option[Boolean] = Option.when(value >= 0)(value != 0)

@@ -27,10 +27,7 @@ import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 import munit.CatsEffectSuite
 
-/** What the kernel's partition router needs from a backend whose records all arrive from one source.
-  *
-  * Compiled by the Scala.js and Scala Native builds, which are the two that offer it.
-  */
+/** What the kernel's partition router needs from a backend, whose records all arrive from one source. */
 final class PartitionPausingSuite extends CatsEffectSuite:
   override val munitIOTimeout: Duration = 3.minutes
 

@@ -4,14 +4,18 @@ The API is the same everywhere. These are the places the runtimes differ.
 
 ## Record delivery
 
-On the JVM the partition streams come from fs2-kafka and are fed independently.
-On Scala.js and Scala Native they share one record source: a single poll owned
-by the consumer, feeding both the record stream and the assignment. A partition
-whose buffer fills is paused at the broker until its reader catches up, so a
-slow partition does not hold up the others.
+Every backend has one record source for each consumer: a single poll owned by
+the consumer, feeding both the record stream and the assignment. The poll starts
+when the consumer is made, so a consumer joins its group and takes its share of
+the partitions even before anything reads its records. A partition whose buffer
+fills is paused at the broker until its reader catches up, so a slow partition
+does not hold up the others.
 
 A consumer which stops reading records for long enough stops seeing rebalances
 too, because both come from that one poll.
+
+On the JVM each consumer has a thread of its own, which makes every call to the
+Java client.
 
 ## Scala Native
 

@@ -6,7 +6,7 @@ Native while using the established Kafka client for each runtime.
 
 | Platform | Backend | Runtime |
 | --- | --- | --- |
-| JVM | [fs2-kafka](https://github.com/typelevel/fs2-kafka) | Java 17 or newer |
+| JVM | [Apache Kafka Java client](https://kafka.apache.org/documentation/#api) | Java 17 or newer |
 | Scala.js | [librdkafka](https://github.com/confluentinc/librdkafka), called through [koffi](https://koffi.dev) | Node.js 24 |
 | Scala Native | [librdkafka](https://github.com/confluentinc/librdkafka) | Scala Native 0.5 or newer |
 
