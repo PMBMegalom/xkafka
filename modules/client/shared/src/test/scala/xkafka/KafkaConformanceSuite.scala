@@ -148,6 +148,28 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assert(immediate < 1.second, s"acknowledged after $immediate without lingering")
         assert(lingering >= 1900.millis, s"acknowledged after $lingering while lingering for 2 seconds")
 
+  test(conformance("a full batch is sent without waiting out the linger")):
+    withBroker: server =>
+      val topic   = uniqueTopic("batch")
+      val records = List.tabulate(20)(index => record(topic, Some("k"), Some(s"record $index " + "x" * 100), validPartition(0)))
+      def firstAcknowledged(batchSize: Option[Int]): IO[FiniteDuration] =
+        ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
+          ProducerSettings.from(client, optionalSerializer, optionalSerializer, linger = 10.seconds, batchSize = batchSize).liftTo[IO]
+        .flatMap: settings =>
+          PlatformKafkaClient().producer(settings).use: producer =>
+            // The first record also fetches the topic's metadata, so it is sent and acknowledged before anything is timed.
+            producer.produceAndAwait(NonEmptyList.one(records.head)).timeout(30.seconds) *>
+              // Each record is enqueued on its own, and only the first one's acknowledgement is timed: its batch fills up as the
+              // later records arrive, while the last batch, which nothing fills, waits out the linger on every backend.
+              records.traverse(value => producer.produce(NonEmptyList.one(value))).flatMap(_.head.timeout(30.seconds)).timed.map(_._1)
+
+      for
+        full    <- firstAcknowledged(Some(1024))
+        waiting <- firstAcknowledged(None)
+      yield
+        assert(full < 5.seconds, s"acknowledged after $full although its batch was full")
+        assert(waiting >= 9.seconds, s"acknowledged after $waiting although its batch was not full")
+
   test(conformance("producing reports metadata for every record")):
     withBroker: server =>
       val topic     = uniqueTopic("metadata")

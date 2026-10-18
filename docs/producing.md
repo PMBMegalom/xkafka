@@ -145,6 +145,12 @@ def batched[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSetting
 `withLinger` returns a `ValidatedNel`, because a negative linger, or one longer
 than `ProducerSettings.MaxLinger`, is rejected.
 
+A batch is sent as soon as it is full or its linger has passed, whichever comes
+first. `batchSize` sets how many bytes of records make a batch full. Unless it is
+set, each backend keeps its own default, and the two differ: 16384 bytes on the
+JVM, and 1000000 bytes on Scala.js and Scala Native. `withBatchSize` sets the same size on every backend, and
+`withoutBatchSize` goes back to each one's default.
+
 ## Releasing a producer
 
 Releasing the resource first waits for records the producer has already accepted,
