@@ -274,7 +274,7 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(secure.security, SecuritySettings.Tls(tls))
     assertEquals(secure.withClientId("id").security, SecuritySettings.Tls(tls))
-    assertEquals(secure.withProperty("batch.size", "5").toOption.get.security, SecuritySettings.Tls(tls))
+    assertEquals(secure.withProperty("retry.backoff.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
 
   test("the consumer request timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
@@ -307,10 +307,10 @@ final class ClientSuite extends FunSuite:
     assertEquals(updated.withProperty("fetch.min.bytes", "1").toOption.get.pollTimeout, 25.millis)
 
   test("withers revalidate and preserve the remaining settings"):
-    val updated = clientSettings.withClientId("probe").withProperty("batch.size", "5")
+    val updated = clientSettings.withClientId("probe").withProperty("retry.backoff.ms", "5")
 
     assertEquals(updated.toEither.map(_.clientId), Right(Some("probe")))
-    assertEquals(updated.toEither.map(_.properties), Right(Map("batch.size" -> "5")))
+    assertEquals(updated.toEither.map(_.properties), Right(Map("retry.backoff.ms" -> "5")))
     assertEquals(
       clientSettings.withProperty("group.id", "mine").toEither,
       Left(NonEmptyList.one(SettingsError.ManagedProperty("group.id", SettingsError.PropertyScope.Client)))
@@ -505,8 +505,8 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.transactionalId, id)
     assertEquals(settings.transactionTimeout, TransactionalProducerSettings.DefaultTransactionTimeout)
     assertEquals(updated.transactionTimeout, 5.seconds)
-    assertEquals(updated.withProperty("batch.size", "5").toOption.get.transactionTimeout, 5.seconds)
-    assertEquals(settings.withProperty("batch.size", "5").toOption.get.producer.properties, Map("batch.size" -> "5"))
+    assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.transactionTimeout, 5.seconds)
+    assertEquals(settings.withProperty("retry.backoff.ms", "5").toOption.get.producer.properties, Map("retry.backoff.ms" -> "5"))
 
   test("transactional producer settings carry a close timeout, which the other withers keep"):
     val serializer = Serializer.const[IO, String](None)
@@ -519,7 +519,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(shorter.producer.closeTimeout, 5.seconds)
     assertEquals(updated.producer.closeTimeout, 5.seconds)
     assertEquals(updated.withTransactionTimeout(10.seconds).toOption.get.producer.closeTimeout, 5.seconds)
-    assertEquals(updated.withProperty("batch.size", "5").toOption.get.producer.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.producer.closeTimeout, 5.seconds)
     assertEquals(
       settings.withCloseTimeout(Duration.Zero).toEither,
       Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.CloseTimeout, Duration.Zero)))
@@ -568,7 +568,7 @@ final class ClientSuite extends FunSuite:
     assert(settings.withoutIdempotence.withIdempotence.toOption.exists(_.idempotence))
     // The withers that revalidate keep idempotence off.
     assertEquals(
-      List(leader.withCloseTimeout(1.second), leader.withProperty("batch.size", "5"), leader.withAcks(Acks.NoAcknowledgement))
+      List(leader.withCloseTimeout(1.second), leader.withProperty("retry.backoff.ms", "5"), leader.withAcks(Acks.NoAcknowledgement))
         .map(_.toOption.map(_.idempotence)),
       List.fill(3)(Some(false))
     )
@@ -585,7 +585,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.acks, Acks.AllReplicas)
     val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
     assertEquals(leader.acks, Acks.Leader)
-    assertEquals(leader.withProperty("batch.size", "5").toOption.get.acks, Acks.Leader)
+    assertEquals(leader.withProperty("retry.backoff.ms", "5").toOption.get.acks, Acks.Leader)
     // The three values Kafka itself accepts, which both backends read from the same property.
     assertEquals(Acks.values.toList.map(_.property), List("0", "1", "all"))
 
@@ -609,7 +609,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
     assertEquals(updated.closeTimeout, 5.seconds)
     assertEquals(updated.withClient(clientSettings).closeTimeout, 5.seconds)
-    assertEquals(updated.withProperty("batch.size", "5").toOption.get.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.closeTimeout, 5.seconds)
 
   test("compression and linger default to what both backends do, and are carried by their withers"):
     val serializer    = Serializer.const[IO, String](None)
@@ -644,10 +644,31 @@ final class ClientSuite extends FunSuite:
       Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.MaxLinger)))
     )
 
-  test("settings reject the compression and linger properties, under either backend's name"):
+  test("the batch size is left to the backend unless it is set, and must be positive"):
+    val serializer    = Serializer.const[IO, String](None)
+    val id            = TransactionalId.from("writer").toOption.get
+    val settings      = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val sized         = settings.withBatchSize(1024).toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, batchSize = Some(2048)).toOption.get
+
+    assertEquals(settings.batchSize, None)
+    assertEquals(settings.managedProperties.get("batch.size"), None)
+    assertEquals(sized.managedProperties.get("batch.size"), Some("1024"))
+    assertEquals(sized.withLinger(1.second).toOption.flatMap(_.batchSize), Some(1024))
+    assertEquals(sized.withoutBatchSize.batchSize, None)
+    assertEquals(transactional.producer.batchSize, Some(2048))
+    assertEquals(transactional.withoutBatchSize.producer.batchSize, None)
+    assertEquals(transactional.withBatchSize(4096).toOption.flatMap(_.producer.batchSize), Some(4096))
+    assertEquals(settings.withBatchSize(0).toEither, Left(NonEmptyList.one(SettingsError.NonPositiveBatchSize(0))))
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, batchSize = Some(-1)).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveBatchSize(-1)))
+    )
+
+  test("settings reject the batching and compression properties, under either backend's name"):
     val serializer = Serializer.const[IO, String](None)
 
-    List("compression.type", "compression.codec", "linger.ms", "queue.buffering.max.ms").foreach: name =>
+    List("compression.type", "compression.codec", "linger.ms", "queue.buffering.max.ms", "batch.size").foreach: name =>
       assertEquals(
         ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "1")).toEither,
         Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Producer)))

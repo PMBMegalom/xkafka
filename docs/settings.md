@@ -67,7 +67,7 @@ val settings =
     bootstrapServers = NonEmptyList.one("localhost:9092"),
     properties = Map("client.rack" -> "eu-west-1a")
   ).andThen: client =>
-    ProducerSettings.from(client, utf8, utf8, properties = Map("batch.size" -> "65536"))
+    ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 
 Producer or consumer properties override client properties. Names and values are
@@ -79,7 +79,7 @@ properties supported with the same meaning by each one.
 `ManagedProperties` lists the names xkafka derives from the typed settings:
 bootstrap servers, client and group IDs, offset reset, automatic commits, the
 default API timeout, the metadata refresh names, the isolation level, the
-acknowledgement, compression, linger and transaction names, and the TLS and SASL
+acknowledgement, compression, batching and transaction names, and the TLS and SASL
 names.
 Supplying one through the map is a `SettingsError`, so the typed settings and the
 map cannot disagree.
@@ -125,6 +125,7 @@ Beyond the serializers, `ProducerSettings` carries:
 | `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
 | `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `batchSize` | each backend's own | the most bytes one batch holds before it is sent |
 
 See [Producing](producing.md) for each of them.
 
