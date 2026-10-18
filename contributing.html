@@ -139,8 +139,12 @@
         <h2 id="the-c-shim" class="section"><a class="anchor-link left" href="#the-c-shim"><i class="icofont-laika link">&#xef71;</i></a>The C shim</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/native-leak-check.sh</span></code></pre>
         <p>Runs the Native smoke binary against a broker under <code>leaks</code> on macOS or
-        <code>valgrind</code> on Linux, so the shim&#39;s allocations are exercised through a real
+        LeakSanitizer on Linux, so the shim&#39;s allocations are exercised through a real
         round trip.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/js-leak-check.sh</span></code></pre>
+        <p>Runs every asynchronous call of the Scala.js library against a broker under the
+        same leak checkers, through a small C program linked against the library the
+        npm package ships.</p>
         
         <h2 id="published-artifacts" class="section"><a class="anchor-link left" href="#published-artifacts"><i class="icofont-laika link">&#xef71;</i></a>Published artifacts</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/downstream-test.sh</span></code></pre>
