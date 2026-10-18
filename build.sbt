@@ -4,6 +4,7 @@ import java.security.MessageDigest
 import scala.sys.process.Process
 import scala.sys.process.ProcessLogger
 
+import com.typesafe.tools.mima.core.{IncompatibleMethTypeProblem, ProblemFilters}
 import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
@@ -470,7 +471,9 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .settings(
     name        := "xkafka-client",
     description := "Cross-platform functional Kafka client for Scala",
-    Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md")
+    Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
+    // A private class of the package-private client, which no code outside xkafka can reach.
+    mimaBinaryIssueFilters += ProblemFilters.exclude[IncompatibleMethTypeProblem]("xkafka.DriverClient#NativeClient.apply")
   )
   .jsConfigure(
     _.enablePlugins(ScalaJSBundlerPlugin, BuildInfoPlugin)

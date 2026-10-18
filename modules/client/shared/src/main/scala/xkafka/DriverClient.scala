@@ -70,7 +70,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     * then letting the ones already inside leave.
     */
   private final class NativeClient(val handle: driver.Client, gate: Ref[F, Gate]):
-    def apply[A](operation: F[A]): F[A] =
+    /** Takes the operation by name, so a driver call is not even made until the effect runs. */
+    def apply[A](operation: => F[A]): F[A] =
       F.bracket(enter)(entered => if entered then operation else F.raiseError(new IllegalStateException("the client is closed")))(entered =>
         leave.whenA(entered)
       )

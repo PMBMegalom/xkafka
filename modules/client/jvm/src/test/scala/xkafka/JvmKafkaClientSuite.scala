@@ -427,6 +427,61 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     mocked(consumer = _ => consumer).consumer(reading, Selection.Topics(NonEmptySet.one(topic))).use(use)
 
   /** The client over the given mocks; a client of a kind the test does not expect fails the test. */
+  test("an administration effect calls the Java client only when it runs, and again on every run"):
+    val calls   = new java.util.concurrent.ConcurrentLinkedQueue[String]
+    val handler =
+      new java.lang.reflect.InvocationHandler:
+        override def invoke(proxy: AnyRef, method: java.lang.reflect.Method, arguments: Array[AnyRef]): AnyRef =
+          if method.getName == "close" then null
+          else
+            calls.add(method.getName): Unit
+            throw new IllegalStateException(s"${method.getName} reached the Java client")
+    val admin    = java.lang.reflect.Proxy.newProxyInstance(classOf[Admin].getClassLoader, Array(classOf[Admin]), handler).asInstanceOf[Admin]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val topic    = Topic.from("events").toOption.get
+    val newTopic = NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get
+    val cut      = cats.data.NonEmptyMap.one(TopicPartition(topic, Partition.from(0).toOption.get), Offset.from(1L).toOption.get)
+
+    mocked(admin = _ => admin).admin(client).use: client =>
+      for
+        built <-
+          IO.delay(List(
+            client.createTopics(NonEmptySet.one(newTopic)),
+            client.deleteTopics(NonEmptySet.one(topic)),
+            client.createPartitions(topic, 2),
+            client.describeTopics(NonEmptySet.one(topic)),
+            client.deleteRecords(cut),
+            client.describeTopicConfigurations(NonEmptySet.one(topic))
+          ))
+        before <- IO.delay(calls.asScala.toList)
+        _      <- built.traverse_(_.attempt)
+        _      <- built.traverse_(_.attempt)
+      yield
+        assertEquals(before, Nil, "building the effects should not call the Java client")
+        assertEquals(
+          calls.asScala.toList,
+          // Describing topics lists them first, and deleting records stops at looking up its topic, which the proxy refuses.
+          List.fill(2)(List("createTopics", "deleteTopics", "createPartitions", "listTopics", "describeTopics", "describeConfigs")).flatten,
+          "each run should make its own call"
+        )
+
+  test("a producer effect calls the Java client only when it runs"):
+    val mock     = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+    val utf8     = Serializer.utf8[IO]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings = ProducerSettings.from(client, utf8, utf8).toOption.get
+    val topic    = Topic.from("events").toOption.get
+    val records  = NonEmptyList.one(ProducerRecord(topic = topic, key = "key", value = "value", partition = Partition.from(0).toOption))
+
+    mocked(producer = _ => mock).producer(settings).use: producer =>
+      for
+        built  <- IO.delay(List(producer.produce(records).void, producer.produceAndAwait(records).void, producer.partitionsFor(topic).void))
+        before <- IO.delay(mock.history.size)
+        _      <- built.traverse_(_.attempt)
+      yield
+        assertEquals(before, 0, "building the effects should not send anything")
+        assertEquals(mock.history.size, 2, "running them should send each record")
+
   private def mocked(
       producer: Map[String, AnyRef] => org.apache.kafka.clients.producer.Producer[Array[Byte], Array[Byte]] = _ => fail("no producer expected"),
       consumer: Map[String, AnyRef] => org.apache.kafka.clients.consumer.Consumer[Array[Byte], Array[Byte]] = _ => fail("no consumer expected"),

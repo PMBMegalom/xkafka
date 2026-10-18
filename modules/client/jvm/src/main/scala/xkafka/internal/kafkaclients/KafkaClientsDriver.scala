@@ -386,21 +386,22 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def javaCall[A](call: F[A]): F[A] = call.adaptError(JavaFailures.portable)
 
-  private def answered[A](future: KafkaFuture[A]): F[A] = javaCall(F.fromCompletionStage(F.delay(future.toCompletionStage)))
+  /** Takes the request by name and makes it only when the effect runs, so each run sends a request of its own. */
+  private def answered[A](future: => KafkaFuture[A]): F[A] = javaCall(F.fromCompletionStage(F.delay(future.toCompletionStage)))
 
   private def producing[A](client: Client)(use: JavaProducer[Array[Byte], Array[Byte]] => F[A]): F[A] =
     client match
-      case JavaClient.Producer(value) => javaCall(use(value))
+      case JavaClient.Producer(value) => javaCall(F.defer(use(value)))
       case other                      => F.raiseError(new IllegalArgumentException(s"not a producer: $other"))
 
   private def administering[A](client: Client)(use: Admin => F[A]): F[A] =
     client match
-      case JavaClient.Administration(value) => javaCall(use(value))
+      case JavaClient.Administration(value) => javaCall(F.defer(use(value)))
       case other                            => F.raiseError(new IllegalArgumentException(s"not an administration client: $other"))
 
   private def onThread[A](client: Client)(use: ConsumerThread => F[A]): F[A] =
     client match
-      case JavaClient.Consumer(thread) => use(thread)
+      case JavaClient.Consumer(thread) => F.defer(use(thread))
       case other                       => F.raiseError(new IllegalArgumentException(s"not a consumer: $other"))
 
   /** Makes a call on the consumer's own thread. */

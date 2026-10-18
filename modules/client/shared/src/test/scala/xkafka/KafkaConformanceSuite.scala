@@ -568,6 +568,88 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(grown, 2, "growing a topic should report the added partition")
         assert(gone, "a deleted topic should stop being described")
 
+  test(conformance("an administration effect changes nothing until it runs")):
+    withBroker: server =>
+      val topic     = uniqueTopic("admin-unrun")
+      val other     = uniqueTopic("admin-unrun-other")
+      val partition = TopicPartition(topic, validPartition(0))
+
+      for
+        client     <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic   <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+        otherTopic <- NewTopic.from(other, partitions = 1, replicationFactor = 1).liftTo[IO]
+        settings   <- consumerSettings(server, uniqueGroup("admin-unrun"))
+        outcome    <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            for
+              _ <- admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 1)
+              _ <-
+                produce(
+                  server,
+                  NonEmptyList.of(record(topic, None, Some("one"), partition.partition), record(topic, None, Some("two"), partition.partition))
+                )
+              // Each effect is built and thrown away, so none of them may reach the broker.
+              _ <-
+                IO.delay(List(
+                  admin.deleteTopics(NonEmptySet.one(topic)),
+                  admin.createPartitions(topic, 2),
+                  admin.createTopics(NonEmptySet.one(otherTopic)),
+                  admin.deleteRecords(NonEmptyMap.one(partition, validOffset(2)))
+                ))
+              _          <- IO.sleep(3.seconds)
+              partitions <- admin.describeTopics(NonEmptySet.one(topic)).map(_.get(topic).map(_.size))
+              unmade     <- admin.describeTopics(NonEmptySet.one(other)).attempt
+              beginning  <-
+                PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(partition))).use(_.beginningOffsets(Set(partition)))
+              _ <- admin.deleteTopics(NonEmptySet.one(topic)).attempt
+            yield (partitions, unmade, beginning)
+          .timeout(90.seconds)
+      yield
+        val (partitions, unmade, beginning) = outcome
+        assertEquals(partitions, Some(1), "the topic should be neither deleted nor grown")
+        assert(unmade.isLeft, s"the other topic should not have been created, got $unmade")
+        assertEquals(beginning.get(partition).map(_.value), Some(0L), "no records should have been deleted")
+
+  test(conformance("an administration effect does its work again each time it runs")):
+    withBroker: server =>
+      val topic = uniqueTopic("admin-rerun")
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+        outcome  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            val create = admin.createTopics(NonEmptySet.one(newTopic))
+            val delete = admin.deleteTopics(NonEmptySet.one(topic))
+            for
+              _         <- create *> described(admin, topic, 1)
+              recreated <- create.attempt
+              _         <- delete *> absent(admin, topic)
+              redeleted <- delete.attempt
+            yield (recreated, redeleted)
+          .timeout(90.seconds)
+      yield
+        val (recreated, redeleted) = outcome
+        assert(recreated.isLeft, s"creating the topic again should fail as it already exists, got $recreated")
+        assert(redeleted.isLeft, s"deleting the topic again should fail as it is gone, got $redeleted")
+
+  test(conformance("a producer effect sends nothing until it runs")):
+    withBroker: server =>
+      val topic     = uniqueTopic("produce-unrun")
+      val partition = TopicPartition(topic, validPartition(0))
+      val records   = NonEmptyList.one(record(topic, None, Some("unsent"), partition.partition))
+
+      for
+        // The topic exists before anything is built, so only the records themselves are at stake.
+        _        <- produce(server, NonEmptyList.one(record(topic, None, Some("first"), partition.partition)))
+        settings <- producerSettings(server)
+        consumer <- consumerSettings(server, uniqueGroup("produce-unrun"))
+        ends     <-
+        PlatformKafkaClient().producer(settings).use: producer =>
+          IO.delay(List(producer.produce(records), producer.produceAndAwait(records))) *> IO.sleep(3.seconds)
+        *> PlatformKafkaClient().consumer(consumer, Selection.Partitions(NonEmptySet.one(partition))).use(_.endOffsets(Set(partition)))
+      yield assertEquals(ends.get(partition).map(_.value), Some(1L), "only the first record should have been sent")
+
   test(conformance("creating a topic that already exists fails")):
     withBroker: server =>
       val topic = uniqueTopic("admin-twice")
