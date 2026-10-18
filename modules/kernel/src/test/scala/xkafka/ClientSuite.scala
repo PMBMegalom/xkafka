@@ -274,7 +274,7 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(secure.security, SecuritySettings.Tls(tls))
     assertEquals(secure.withClientId("id").security, SecuritySettings.Tls(tls))
-    assertEquals(secure.withProperty("linger.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
+    assertEquals(secure.withProperty("batch.size", "5").toOption.get.security, SecuritySettings.Tls(tls))
 
   test("the consumer request timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
@@ -307,10 +307,10 @@ final class ClientSuite extends FunSuite:
     assertEquals(updated.withProperty("fetch.min.bytes", "1").toOption.get.pollTimeout, 25.millis)
 
   test("withers revalidate and preserve the remaining settings"):
-    val updated = clientSettings.withClientId("probe").withProperty("linger.ms", "5")
+    val updated = clientSettings.withClientId("probe").withProperty("batch.size", "5")
 
     assertEquals(updated.toEither.map(_.clientId), Right(Some("probe")))
-    assertEquals(updated.toEither.map(_.properties), Right(Map("linger.ms" -> "5")))
+    assertEquals(updated.toEither.map(_.properties), Right(Map("batch.size" -> "5")))
     assertEquals(
       clientSettings.withProperty("group.id", "mine").toEither,
       Left(NonEmptyList.one(SettingsError.ManagedProperty("group.id", SettingsError.PropertyScope.Client)))
@@ -505,8 +505,8 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.transactionalId, id)
     assertEquals(settings.transactionTimeout, TransactionalProducerSettings.DefaultTransactionTimeout)
     assertEquals(updated.transactionTimeout, 5.seconds)
-    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.transactionTimeout, 5.seconds)
-    assertEquals(settings.withProperty("linger.ms", "5").toOption.get.producer.properties, Map("linger.ms" -> "5"))
+    assertEquals(updated.withProperty("batch.size", "5").toOption.get.transactionTimeout, 5.seconds)
+    assertEquals(settings.withProperty("batch.size", "5").toOption.get.producer.properties, Map("batch.size" -> "5"))
 
   test("transactional producer settings carry a close timeout, which the other withers keep"):
     val serializer = Serializer.const[IO, String](None)
@@ -519,7 +519,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(shorter.producer.closeTimeout, 5.seconds)
     assertEquals(updated.producer.closeTimeout, 5.seconds)
     assertEquals(updated.withTransactionTimeout(10.seconds).toOption.get.producer.closeTimeout, 5.seconds)
-    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.producer.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("batch.size", "5").toOption.get.producer.closeTimeout, 5.seconds)
     assertEquals(
       settings.withCloseTimeout(Duration.Zero).toEither,
       Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.CloseTimeout, Duration.Zero)))
@@ -556,19 +556,19 @@ final class ClientSuite extends FunSuite:
     val rejected   = SettingsError.IdempotenceRequiresAllReplicas(Acks.Leader)
 
     assert(settings.idempotence)
-    assertEquals(settings.managedProperties, Map("acks" -> "all", "enable.idempotence" -> "true"))
+    assertEquals(settings.managedProperties, Map("acks" -> "all", "enable.idempotence" -> "true", "compression.type" -> "none", "linger.ms" -> "5"))
     assertEquals(settings.withAcks(Acks.Leader).toEither, Left(NonEmptyList.one(rejected)))
     assertEquals(ProducerSettings.from(clientSettings, serializer, serializer, acks = Acks.Leader).toEither, Left(NonEmptyList.one(rejected)))
     assertEquals(
       ProducerSettings.from(clientSettings, serializer, serializer, acks = Acks.Leader, idempotence = false).toOption.map(_.managedProperties),
-      Some(Map("acks" -> "1", "enable.idempotence" -> "false"))
+      Some(Map("acks" -> "1", "enable.idempotence" -> "false", "compression.type" -> "none", "linger.ms" -> "5"))
     )
     val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
     assertEquals(leader.withIdempotence.toEither, Left(NonEmptyList.one(rejected)))
     assert(settings.withoutIdempotence.withIdempotence.toOption.exists(_.idempotence))
     // The withers that revalidate keep idempotence off.
     assertEquals(
-      List(leader.withCloseTimeout(1.second), leader.withProperty("linger.ms", "5"), leader.withAcks(Acks.NoAcknowledgement))
+      List(leader.withCloseTimeout(1.second), leader.withProperty("batch.size", "5"), leader.withAcks(Acks.NoAcknowledgement))
         .map(_.toOption.map(_.idempotence)),
       List.fill(3)(Some(false))
     )
@@ -585,7 +585,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.acks, Acks.AllReplicas)
     val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
     assertEquals(leader.acks, Acks.Leader)
-    assertEquals(leader.withProperty("linger.ms", "5").toOption.get.acks, Acks.Leader)
+    assertEquals(leader.withProperty("batch.size", "5").toOption.get.acks, Acks.Leader)
     // The three values Kafka itself accepts, which both backends read from the same property.
     assertEquals(Acks.values.toList.map(_.property), List("0", "1", "all"))
 
@@ -609,7 +609,49 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
     assertEquals(updated.closeTimeout, 5.seconds)
     assertEquals(updated.withClient(clientSettings).closeTimeout, 5.seconds)
-    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("batch.size", "5").toOption.get.closeTimeout, 5.seconds)
+
+  test("compression and linger default to what both backends do, and are carried by their withers"):
+    val serializer    = Serializer.const[IO, String](None)
+    val id            = TransactionalId.from("writer").toOption.get
+    val settings      = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val updated       = settings.withCompression(Compression.Zstd).withLinger(Duration.Zero).toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, compression = Compression.Gzip).toOption.get
+
+    assertEquals(settings.compression, Compression.Uncompressed)
+    assertEquals(settings.linger, ProducerSettings.DefaultLinger)
+    assertEquals(updated.managedProperties.get("compression.type"), Some("zstd"))
+    assertEquals(updated.managedProperties.get("linger.ms"), Some("0"))
+    assertEquals(updated.withCloseTimeout(1.second).toOption.map(p => (p.compression, p.linger)), Some((Compression.Zstd, Duration.Zero)))
+    assertEquals(transactional.producer.compression, Compression.Gzip)
+    assertEquals(transactional.withLinger(1.second).toOption.map(_.producer.linger), Some(1.second))
+    assertEquals(transactional.withCompression(Compression.Snappy).producer.compression, Compression.Snappy)
+    // The names both backends read from the same property.
+    assertEquals(Compression.values.toList.map(_.property), List("none", "gzip", "snappy", "lz4", "zstd"))
+
+  test("linger runs from zero to the longest librdkafka accepts"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val tooLong    = ProducerSettings.MaxLinger + 1.milli
+
+    assert(settings.withLinger(ProducerSettings.MaxLinger).isValid)
+    assertEquals(
+      settings.withLinger((-1).milli).toEither,
+      Left(NonEmptyList.one(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, (-1).milli)))
+    )
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, linger = tooLong).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.MaxLinger)))
+    )
+
+  test("settings reject the compression and linger properties, under either backend's name"):
+    val serializer = Serializer.const[IO, String](None)
+
+    List("compression.type", "compression.codec", "linger.ms", "queue.buffering.max.ms").foreach: name =>
+      assertEquals(
+        ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "1")).toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Producer)))
+      )
 
   test("the commit timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]

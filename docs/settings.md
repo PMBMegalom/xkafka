@@ -67,7 +67,7 @@ val settings =
     bootstrapServers = NonEmptyList.one("localhost:9092"),
     properties = Map("client.rack" -> "eu-west-1a")
   ).andThen: client =>
-    ProducerSettings.from(client, utf8, utf8, properties = Map("linger.ms" -> "5"))
+    ProducerSettings.from(client, utf8, utf8, properties = Map("batch.size" -> "65536"))
 ```
 
 Producer or consumer properties override client properties. Names and values are
@@ -79,7 +79,8 @@ properties supported with the same meaning by each one.
 `ManagedProperties` lists the names xkafka derives from the typed settings:
 bootstrap servers, client and group IDs, offset reset, automatic commits, the
 default API timeout, the metadata refresh names, the isolation level, the
-acknowledgement and transaction names, and the TLS and SASL names.
+acknowledgement, compression, linger and transaction names, and the TLS and SASL
+names.
 Supplying one through the map is a `SettingsError`, so the typed settings and the
 map cannot disagree.
 
@@ -89,8 +90,8 @@ Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
 duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
-`withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`, and
-`withRequestTimeout`.
+`withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
+`withRequestTimeout`, and `withLinger`.
 
 ## Consumer settings
 
@@ -122,8 +123,10 @@ Beyond the serializers, `ProducerSettings` carries:
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
 | `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
 | `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
+| `compression` | `Compression.Uncompressed` | how record batches are compressed |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
 
-See [Producing](producing.md) for all three.
+See [Producing](producing.md) for each of them.
 
 ## Client settings
 
