@@ -119,11 +119,8 @@ partition it came from. Returning `CommitNow` is what triggers the commit.
 processed.
 
 @:callout(warning)
-Consumers join their group at different moments on different backends. The JVM
-backend begins group work when its record stream is pulled, so a consumer nobody
-reads holds no partitions. The JavaScript and Native backends start a background
-poll when the consumer resource is allocated, so a consumer nobody reads still
-takes a share of the partitions. Release consumers you are not reading.
+A consumer joins its group as soon as it is made, so a consumer nobody reads
+still takes a share of the partitions. Release consumers you are not reading.
 @:@
 
 ## Stopping
