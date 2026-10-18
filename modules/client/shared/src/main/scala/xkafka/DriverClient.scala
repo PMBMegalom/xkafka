@@ -22,7 +22,7 @@
 package xkafka
 
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
-import cats.effect.{Async, Deferred, Outcome, Ref, Resource}
+import cats.effect.{Async, Deferred, Outcome, Poll, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Mutex, Queue, Random, Semaphore, Supervisor}
 import cats.syntax.all.*
@@ -438,21 +438,21 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       *
       * A revocation ends its leases and waits for any transaction still recording an offset under one of them before it is applied, and until then
       * the group cannot hand those partitions to another member. Polling carries on meanwhile. Whatever is cancelled or left is still applied,
-      * because the close cannot finish while a rebalance is waiting.
+      * because the close cannot finish while a rebalance is waiting: a rebalance taken from the queue is applied even when the stream is cancelled
+      * before it gets to it, and the ones still queued are applied as the stream ends.
       */
     val rebalancing: Stream[F, Nothing] =
-      Stream.fromQueueUnterminated(rebalances).evalMap(rebalanced).drain
+      Stream.repeatEval(F.uncancelable(poll => poll(rebalances.take).flatMap(rebalanced(poll)))).drain
         .onFinalize(rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event)))))
 
-    private def rebalanced(taken: Rebalance[driver.Event]): F[Unit] =
+    private def rebalanced(poll: Poll[F])(taken: Rebalance[driver.Event]): F[Unit] =
       val leasing =
         taken.kind match
           case 1 => client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(taken.partitions, replacing = !cooperative))
           case 0 => leases.revoke(taken.partitions)
           // Anything else clears the assignment to resynchronise, which ends every lease with it.
           case _ => leases.assign(Nil, replacing = true)
-      F.uncancelable(poll => poll(leasing).guarantee(client(driver.applyRebalance(client.handle, taken.event)))) *>
-        assignment.flatMap(assignments.set)
+      poll(leasing).guarantee(client(driver.applyRebalance(client.handle, taken.event))) *> poll(assignment.flatMap(assignments.set))
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
