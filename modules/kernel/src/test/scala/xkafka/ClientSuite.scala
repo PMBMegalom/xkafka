@@ -54,7 +54,7 @@ final class ClientSuite extends FunSuite:
       override def apply[A](value: Option[A]): SyncIO[A] = value.fold(SyncIO.raiseError(new NoSuchElementException("empty")))(SyncIO.pure)
 
   test("valid settings succeed"):
-    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.key.password" -> ""))
+    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.truststore.password" -> ""))
 
     assert(settings.isValid)
 
@@ -69,17 +69,19 @@ final class ClientSuite extends FunSuite:
 
   test("settings retain structural case-class semantics without exposing property values"):
     val firstClient =
-      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.keystore.password" -> "client-secret")).toOption.get
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.truststore.password" -> "client-secret")).toOption.get
     val secondClient =
-      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.keystore.password" -> "client-secret")).toOption.get
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.truststore.password" -> "client-secret")).toOption.get
     val serializer     = Serializer.const[IO, String](None)
-    val firstProducer  = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
-    val secondProducer = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
+    val firstProducer  = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.truststore.password" -> "producer-secret")).toOption.get
+    val secondProducer = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.truststore.password" -> "producer-secret")).toOption.get
     val deserializer   = Deserializer.utf8[IO]
     val firstConsumer  =
-      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.key.password" -> "consumer-secret")).toOption.get
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.truststore.password" -> "consumer-secret")).toOption
+        .get
     val secondConsumer =
-      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.key.password" -> "consumer-secret")).toOption.get
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.truststore.password" -> "consumer-secret")).toOption
+        .get
     val renderedSettings = List(firstClient.toString, firstProducer.toString, firstConsumer.toString)
 
     assertEquals(firstClient, secondClient)
@@ -232,6 +234,36 @@ final class ClientSuite extends FunSuite:
     assertEquals(TlsSettings.from(CertificateAuthority.Pem("")).toEither, Left(NonEmptyList.one(SettingsError.BlankCertificateAuthority)))
     assert(TlsSettings.from(CertificateAuthority.SystemDefault).isValid)
 
+  test("a client certificate is checked when the TLS settings are built"):
+    val key                                   = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+    val chain                                 = "-----BEGIN CERTIFICATE-----\nchain\n-----END CERTIFICATE-----"
+    def built(certificate: ClientCertificate) = TlsSettings.from(clientCertificate = Some(certificate)).toEither.left.map(_.toList)
+
+    assert(built(ClientCertificate.PemFile("client.pem", None)).isRight)
+    assert(built(ClientCertificate.Pem(chain, key, None)).isRight)
+    assert(built(ClientCertificate.Pem(chain, key.replace("PRIVATE KEY", "ENCRYPTED PRIVATE KEY"), Some("secret"))).isRight)
+    assertEquals(built(ClientCertificate.PemFile(" ", None)), Left(List(SettingsError.BlankClientCertificate)))
+    assertEquals(built(ClientCertificate.Pem(chain, "", None)), Left(List(SettingsError.BlankClientCertificate)))
+    // The Java client reads only PKCS#8 keys, so an older RSA key is refused for every backend.
+    assertEquals(
+      built(ClientCertificate.Pem(chain, key.replace("PRIVATE KEY", "RSA PRIVATE KEY"), None)),
+      Left(List(SettingsError.PrivateKeyNotPkcs8))
+    )
+    assertEquals(built(ClientCertificate.PemFile("client.pem", Some(""))), Left(List(SettingsError.BlankKeyPassword)))
+
+  test("a client certificate is carried by the TLS withers and kept out of toString"):
+    val key        = "-----BEGIN PRIVATE KEY-----\nsecret-key\n-----END PRIVATE KEY-----"
+    val inline     = ClientCertificate.Pem("-----BEGIN CERTIFICATE-----", key, Some("key-password"))
+    val tls        = TlsSettings.from().toOption.get
+    val presenting = tls.withClientCertificate(inline).toOption.get
+
+    assertEquals(presenting.clientCertificate, Some(inline))
+    assertEquals(presenting.withoutHostnameVerification.clientCertificate, Some(inline))
+    assertEquals(presenting.withCertificateAuthority(CertificateAuthority.PemFile("ca.pem")).toOption.flatMap(_.clientCertificate), Some(inline))
+    assertEquals(presenting.withoutClientCertificate.clientCertificate, None)
+    assert(!presenting.toString.contains("secret-key"), presenting.toString)
+    assert(!presenting.toString.contains("key-password"), presenting.toString)
+
   test("SASL settings accumulate blank credential errors"):
     assertEquals(
       SaslSettings.from(SaslMechanism.ScramSha256, " ", "").toEither,
@@ -267,6 +299,24 @@ final class ClientSuite extends FunSuite:
         SettingsError.ManagedProperty("ssl.ca.location", SettingsError.PropertyScope.Client)
       ))
     )
+
+  test("settings reject the client certificate properties of either backend"):
+    List(
+      "ssl.keystore.type",
+      "ssl.keystore.location",
+      "ssl.keystore.password",
+      "ssl.keystore.key",
+      "ssl.keystore.certificate.chain",
+      "ssl.key.password",
+      "ssl.key.location",
+      "ssl.key.pem",
+      "ssl.certificate.location",
+      "ssl.certificate.pem"
+    ).foreach: name =>
+      assertEquals(
+        ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map(name -> "value")).toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Client)))
+      )
 
   test("client settings carry security through the withers"):
     val tls    = TlsSettings.from(CertificateAuthority.PemFile("ca.pem")).toOption.get

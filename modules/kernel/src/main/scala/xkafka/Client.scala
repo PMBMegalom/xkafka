@@ -72,7 +72,17 @@ val ManagedProperties: Set[String] =
     "ssl.truststore.location",
     "ssl.truststore.certificates",
     "ssl.truststore.type",
-    "ssl.endpoint.identification.algorithm"
+    "ssl.endpoint.identification.algorithm",
+    "ssl.keystore.type",
+    "ssl.keystore.location",
+    "ssl.keystore.password",
+    "ssl.keystore.key",
+    "ssl.keystore.certificate.chain",
+    "ssl.key.password",
+    "ssl.key.location",
+    "ssl.key.pem",
+    "ssl.certificate.location",
+    "ssl.certificate.pem"
   )
 
 enum SettingsError derives CanEqual:
@@ -81,6 +91,9 @@ enum SettingsError derives CanEqual:
   case BlankPropertyName(scope: SettingsError.PropertyScope)
   case ManagedProperty(name: String, scope: SettingsError.PropertyScope)
   case BlankCertificateAuthority
+  case BlankClientCertificate
+  case PrivateKeyNotPkcs8
+  case BlankKeyPassword
   case BlankSaslUsername
   case BlankSaslPassword
   case NonPositiveDuration(field: SettingsError.DurationField, value: FiniteDuration)
@@ -100,6 +113,9 @@ enum SettingsError derives CanEqual:
       case BlankPropertyName(scope)                => s"${scope.label} properties must not contain a blank name"
       case ManagedProperty(name, scope)            => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
       case BlankCertificateAuthority               => "certificate authority must not be blank"
+      case BlankClientCertificate                  => "client certificate must not be blank"
+      case PrivateKeyNotPkcs8                      => "client private key must be PKCS#8, a PEM PRIVATE KEY or ENCRYPTED PRIVATE KEY"
+      case BlankKeyPassword                        => "client key password must not be empty; leave it out for a key that has none"
       case BlankSaslUsername                       => "SASL username must not be blank"
       case BlankSaslPassword                       => "SASL password must not be blank"
       case NonPositiveDuration(field, value)       => s"${field.label} must be positive, was $value"

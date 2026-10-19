@@ -115,6 +115,10 @@ static void xkafka_error_callback(rd_kafka_t *client,
         (void)client;
         if (state == NULL)
                 return;
+        /* Under TLS 1.3 a broker refuses a client certificate after the handshake, so the
+         * alert arrives as a failed receive. OpenSSL names every alert it receives this way. */
+        if (err == RD_KAFKA_RESP_ERR__TRANSPORT && reason != NULL && strstr(reason, "SSL alert number") != NULL)
+                err = RD_KAFKA_RESP_ERR__SSL;
         if (err != RD_KAFKA_RESP_ERR__AUTHENTICATION && err != RD_KAFKA_RESP_ERR__SSL)
                 return;
 
@@ -247,6 +251,9 @@ rd_kafka_t *xkafka_producer_new(const char *brokers,
             rd_kafka_new(RD_KAFKA_PRODUCER, conf, error, error_size);
         if (producer == NULL) {
                 /* rd_kafka_new owns conf only on success, and the opaque with it. */
+                /* It wrote its own message; every way it fails is a setting it cannot use. */
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR_INVALID_CONFIG;
                 rd_kafka_conf_destroy(conf);
                 xkafka_client_free(state);
                 return NULL;
@@ -610,6 +617,9 @@ rd_kafka_t *xkafka_consumer_new(const char *brokers,
             rd_kafka_new(RD_KAFKA_CONSUMER, conf, error, error_size);
         if (consumer == NULL) {
                 /* rd_kafka_new owns conf only on success, and the opaque with it. */
+                /* It wrote its own message; every way it fails is a setting it cannot use. */
+                if (error_code != NULL)
+                        *error_code = RD_KAFKA_RESP_ERR_INVALID_CONFIG;
                 rd_kafka_conf_destroy(conf);
                 xkafka_client_free(state);
                 return NULL;
@@ -1106,9 +1116,10 @@ rd_kafka_t *xkafka_admin_new(const char *brokers,
         client = rd_kafka_new(RD_KAFKA_PRODUCER, conf, error, error_size);
         if (client == NULL) {
                 /* rd_kafka_new already wrote the detail into error. Copying that buffer onto
-                 * itself through snprintf has undefined behaviour. */
+                 * itself through snprintf has undefined behaviour. Every way it fails is a
+                 * setting it cannot use. */
                 if (error_code != NULL)
-                        *error_code = RD_KAFKA_RESP_ERR__INVALID_ARG;
+                        *error_code = RD_KAFKA_RESP_ERR_INVALID_CONFIG;
                 rd_kafka_conf_destroy(conf);
                 return NULL;
         }

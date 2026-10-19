@@ -34,33 +34,76 @@ enum CertificateAuthority derives CanEqual:
   /** PEM encoded authorities held in memory. */
   case Pem(certificates: String)
 
+/** The certificate a client presents to a broker that asks for one, with its private key.
+  *
+  * The key must be PKCS#8, which PEM marks as `PRIVATE KEY`, or `ENCRYPTED PRIVATE KEY` when it takes the password. The Java client reads no other
+  * form.
+  */
+enum ClientCertificate derives CanEqual:
+  /** One PEM file holding the private key and the certificate chain. */
+  case PemFile(path: String, keyPassword: Option[String])
+
+  /** The certificate chain and the private key, PEM encoded and held in memory. */
+  case Pem(certificateChain: String, privateKey: String, keyPassword: Option[String])
+
+  def keyPassword: Option[String]
+
+  override def toString: String =
+    this match
+      case PemFile(path, password) => s"PemFile($path,${password.map(_ => "<redacted>")})"
+      case Pem(chain, _, password) => s"Pem(${chain.length} characters,<redacted>,${password.map(_ => "<redacted>")})"
+
 /** SASL mechanisms every backend implements with the same name. */
 enum SaslMechanism(val name: String) derives CanEqual:
   case Plain       extends SaslMechanism("PLAIN")
   case ScramSha256 extends SaslMechanism("SCRAM-SHA-256")
   case ScramSha512 extends SaslMechanism("SCRAM-SHA-512")
 
-sealed abstract case class TlsSettings private (certificateAuthority: CertificateAuthority, verifyHostname: Boolean):
-  def withCertificateAuthority(value: CertificateAuthority): ValidatedNel[SettingsError, TlsSettings] = TlsSettings.from(value, verifyHostname)
+sealed abstract case class TlsSettings private (
+    certificateAuthority: CertificateAuthority,
+    verifyHostname: Boolean,
+    clientCertificate: Option[ClientCertificate]
+):
+  def withCertificateAuthority(value: CertificateAuthority): ValidatedNel[SettingsError, TlsSettings] =
+    TlsSettings.from(value, verifyHostname, clientCertificate)
 
   /** Checks that the broker's certificate names the host the client connected to, which is the default. */
-  def withHostnameVerification: TlsSettings = new TlsSettings(certificateAuthority, true) {}
+  def withHostnameVerification: TlsSettings = new TlsSettings(certificateAuthority, true, clientCertificate) {}
 
   /** Accepts a broker certificate that is otherwise trusted, whatever host it names. */
-  def withoutHostnameVerification: TlsSettings = new TlsSettings(certificateAuthority, false) {}
+  def withoutHostnameVerification: TlsSettings = new TlsSettings(certificateAuthority, false, clientCertificate) {}
+
+  /** Presents this certificate to a broker that asks the client for one. */
+  def withClientCertificate(value: ClientCertificate): ValidatedNel[SettingsError, TlsSettings] =
+    TlsSettings.from(certificateAuthority, verifyHostname, Some(value))
+
+  /** Presents no certificate, which is the default. */
+  def withoutClientCertificate: TlsSettings = new TlsSettings(certificateAuthority, verifyHostname, None) {}
 
 object TlsSettings:
   def from(
       certificateAuthority: CertificateAuthority = CertificateAuthority.SystemDefault,
-      verifyHostname: Boolean = true
+      verifyHostname: Boolean = true,
+      clientCertificate: Option[ClientCertificate] = None
   ): ValidatedNel[SettingsError, TlsSettings] =
     val blank =
       certificateAuthority match
         case CertificateAuthority.SystemDefault     => false
         case CertificateAuthority.PemFile(path)     => path.trim.isEmpty
         case CertificateAuthority.Pem(certificates) => certificates.trim.isEmpty
-    validateSettings(Option.when(blank)(SettingsError.BlankCertificateAuthority).toList)
-      .map(_ => new TlsSettings(certificateAuthority, verifyHostname) {})
+    val errors = Option.when(blank)(SettingsError.BlankCertificateAuthority).toList ++ clientCertificate.toList.flatMap(certificateErrors)
+    validateSettings(errors).map(_ => new TlsSettings(certificateAuthority, verifyHostname, clientCertificate) {})
+
+  private val Pkcs8Headers = List("-----BEGIN PRIVATE KEY-----", "-----BEGIN ENCRYPTED PRIVATE KEY-----")
+
+  private def certificateErrors(certificate: ClientCertificate): List[SettingsError] =
+    val parts =
+      certificate match
+        case ClientCertificate.PemFile(path, _)   => Option.when(path.trim.isEmpty)(SettingsError.BlankClientCertificate).toList
+        case ClientCertificate.Pem(chain, key, _) =>
+          if chain.trim.isEmpty || key.trim.isEmpty then List(SettingsError.BlankClientCertificate)
+          else Option.when(!Pkcs8Headers.exists(key.contains))(SettingsError.PrivateKeyNotPkcs8).toList
+    parts ++ Option.when(certificate.keyPassword.exists(_.isEmpty))(SettingsError.BlankKeyPassword)
 
 sealed abstract case class SaslSettings private (mechanism: SaslMechanism, username: String, password: String):
   def withMechanism(value: SaslMechanism): SaslSettings = new SaslSettings(value, username, password) {}
