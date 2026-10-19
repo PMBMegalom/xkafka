@@ -52,6 +52,10 @@ val ManagedProperties: Set[String] =
     "compression.type",
     "compression.codec",
     "linger.ms",
+    "group.instance.id",
+    "session.timeout.ms",
+    "heartbeat.interval.ms",
+    "max.poll.interval.ms",
     "batch.size",
     "queue.buffering.max.ms",
     "default.api.timeout.ms",
@@ -85,6 +89,9 @@ enum SettingsError derives CanEqual:
   case NegativeDuration(field: SettingsError.DurationField, value: FiniteDuration)
   case DurationAboveLimit(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration)
   case NonPositiveBatchSize(value: Int)
+  case BlankGroupInstanceId
+  case HeartbeatNotBelowSessionTimeout(heartbeatInterval: FiniteDuration, sessionTimeout: FiniteDuration)
+  case MaxPollIntervalBelowSessionTimeout(maxPollInterval: FiniteDuration, sessionTimeout: FiniteDuration)
 
   def message: String =
     this match
@@ -101,6 +108,10 @@ enum SettingsError derives CanEqual:
       case NegativeDuration(field, value)          => s"${field.label} must not be negative, was $value"
       case DurationAboveLimit(field, value, limit) => s"${field.label} must not exceed $limit, was $value"
       case NonPositiveBatchSize(value)             => s"batchSize must be positive, was $value"
+      case BlankGroupInstanceId                    => "group instance id must not be blank"
+      case HeartbeatNotBelowSessionTimeout(heartbeat, session) =>
+        s"heartbeatInterval must be less than sessionTimeout, was $heartbeat against $session"
+      case MaxPollIntervalBelowSessionTimeout(maxPoll, session) => s"maxPollInterval must be at least sessionTimeout, was $maxPoll against $session"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -113,6 +124,9 @@ object SettingsError:
     case PollTimeout             extends DurationField("pollTimeout")
     case RequestTimeout          extends DurationField("requestTimeout")
     case Linger                  extends DurationField("linger")
+    case SessionTimeout          extends DurationField("sessionTimeout")
+    case HeartbeatInterval       extends DurationField("heartbeatInterval")
+    case MaxPollInterval         extends DurationField("maxPollInterval")
 
   enum PropertyScope(val label: String) derives CanEqual:
     case Client   extends PropertyScope("client")
@@ -132,6 +146,12 @@ private def propertyErrors(properties: Map[String, String], scope: SettingsError
 private def durationErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > SettingsError.MaxDuration then List(SettingsError.DurationExceedsMaximum(field, value))
+  else Nil
+
+/** Checks a positive duration both backends accept up to a limit, which is the lower of their two maximums. */
+private def limitedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
+  if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
+  else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
   else Nil
 
 /** Checks a duration both backends accept from zero up to a limit, which is the lower of their two maximums. */
@@ -248,7 +268,7 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
   def withCompression(value: Compression): ProducerSettings[F, K, V] =
     new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, value, linger, batchSize) {}
 
-  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.MaxLinger`. */
+  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value, batchSize)
 
@@ -291,7 +311,7 @@ object ProducerSettings:
   val DefaultLinger: FiniteDuration = 5.millis
 
   /** The longest linger librdkafka accepts. The Java client has no limit of its own. */
-  val MaxLinger: FiniteDuration = 15.minutes
+  val LingerLimit: FiniteDuration = 15.minutes
 
   def from[F[_], K, V](
       client: ClientSettings,
@@ -308,7 +328,7 @@ object ProducerSettings:
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
         Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++
-        boundedDurationErrors(SettingsError.DurationField.Linger, linger, MaxLinger) ++ batchSize.filter(_ <= 0)
+        boundedDurationErrors(SettingsError.DurationField.Linger, linger, LingerLimit) ++ batchSize.filter(_ <= 0)
           .map(SettingsError.NonPositiveBatchSize(_))
     validateSettings(errors).map(_ =>
       new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize) {}
@@ -345,7 +365,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withCompression(value: Compression): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withCompression(value), transactionalId, transactionTimeout) {}
 
-  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.MaxLinger`. */
+  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     producer.withLinger(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
 
@@ -468,7 +488,11 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     pollTimeout: FiniteDuration,
     requestTimeout: FiniteDuration,
     properties: Map[String, String],
-    assignmentFencing: Boolean
+    assignmentFencing: Boolean,
+    groupInstanceId: Option[String],
+    sessionTimeout: Option[FiniteDuration],
+    heartbeatInterval: Option[FiniteDuration],
+    maxPollInterval: FiniteDuration
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -483,172 +507,104 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       pollTimeout,
       requestTimeout,
       properties,
-      assignmentFencing
+      assignmentFencing,
+      groupInstanceId,
+      sessionTimeout,
+      heartbeatInterval,
+      maxPollInterval
     ) {}
 
-  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      value,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
 
-  def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      value,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] = copied(groupId = value)
 
-  def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      value,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] = copied(autoOffsetReset = value)
 
   /** Whether records of a transaction that has not committed are delivered. */
-  def withIsolationLevel(value: IsolationLevel): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      value,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withIsolationLevel(value: IsolationLevel): ConsumerSettings[F, K, V] = copied(isolationLevel = value)
 
   /** How long a commit waits for the broker before it fails as `ErrorCode.RequestTimedOut`, which the recovery policy retries. */
-  def withCommitTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      value,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    )
+  def withCommitTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(commitTimeout = value)
 
   /** How a failed offset commit is retried. */
-  def withCommitRecovery(value: CommitRecovery): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      value,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withCommitRecovery(value: CommitRecovery): ConsumerSettings[F, K, V] = copied(commitRecovery = value)
 
   /** Refuses offsets from a partition this consumer no longer owns, which is the default.
     *
     * An offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, whether it is committed on its own, in a
     * batch, or in a transaction.
     */
-  def withAssignmentFencing: ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      true
-    ) {}
+  def withAssignmentFencing: ConsumerSettings[F, K, V] = copied(assignmentFencing = true)
 
   /** Commits offsets even after their partition has moved to another consumer, which can move that partition back to an earlier position. */
-  def withoutAssignmentFencing: ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      false
-    ) {}
+  def withoutAssignmentFencing: ConsumerSettings[F, K, V] = copied(assignmentFencing = false)
 
   /** How long one poll waits for records before it returns empty.
     *
     * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
     */
-  def withPollTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      value,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    )
+  def withPollTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(pollTimeout = value)
 
   /** How long a call that asks the broker something waits for its answer.
     *
     * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
     */
-  def withRequestTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(
+  def withRequestTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(requestTimeout = value)
+
+  /** Makes the consumer a static member of its group under this identity, Kafka's `group.instance.id`.
+    *
+    * A static member that is released, or stops, keeps its partitions until its session times out, so one that comes back under the same identity
+    * within the session timeout gets them back without the rest of the group rebalancing.
+    */
+  def withGroupInstanceId(value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(groupInstanceId = Some(value))
+
+  /** Makes the consumer a dynamic member of its group, which is the default: it leaves the group when it is released. */
+  def withoutGroupInstanceId: ConsumerSettings[F, K, V] = copied(groupInstanceId = None)
+
+  /** How long the group waits to hear from the consumer before it hands the consumer's partitions to the rest, from more than the heartbeat interval
+    * up to `ConsumerSettings.SessionTimeoutLimit`. The broker also bounds it, through `group.min.session.timeout.ms` and
+    * `group.max.session.timeout.ms`.
+    */
+  def withSessionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = Some(value))
+
+  /** Leaves the session timeout to the backend, which is the default. Both default to `ConsumerSettings.DefaultSessionTimeout`. */
+  def withoutSessionTimeout: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = None)
+
+  /** How often the consumer tells the group it is alive, which must be less than the session timeout. */
+  def withHeartbeatInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    revalidated(heartbeatInterval = Some(value))
+
+  /** Leaves the heartbeat interval to the backend, which is the default. Both default to `ConsumerSettings.DefaultHeartbeatInterval`. */
+  def withoutHeartbeatInterval: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(heartbeatInterval = None)
+
+  /** How long the consumer can go without fetching records before it leaves its group, which happens once records wait unread long enough for
+    * fetching to stop. It must be at least the session timeout, and at most `ConsumerSettings.MaxPollIntervalLimit`.
+    */
+  def withMaxPollInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollInterval = value)
+
+  def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    withProperties(properties.updated(name, value))
+
+  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(properties = values)
+
+  /** The Kafka properties of group membership these settings own, spelled the same for both clients. A timeout left to the backend is not set, since
+    * both clients refuse one under `group.protocol=consumer`, where the broker decides it.
+    */
+  private[xkafka] def managedProperties: Map[String, String] =
+    Map("max.poll.interval.ms" -> maxPollInterval.toMillis.toString) ++ groupInstanceId.map("group.instance.id" -> _) ++
+      sessionTimeout.map(value => "session.timeout.ms" -> value.toMillis.toString) ++
+      heartbeatInterval.map(value => "heartbeat.interval.ms" -> value.toMillis.toString)
+
+  private def copied(
+      client: ClientSettings = client,
+      groupId: ConsumerGroup = groupId,
+      autoOffsetReset: AutoOffsetReset = autoOffsetReset,
+      isolationLevel: IsolationLevel = isolationLevel,
+      commitRecovery: CommitRecovery = commitRecovery,
+      assignmentFencing: Boolean = assignmentFencing,
+      groupInstanceId: Option[String] = groupInstanceId
+  ): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(
       client,
       groupId,
       keyDeserializer,
@@ -658,15 +614,25 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitRecovery,
       commitTimeout,
       pollTimeout,
-      value,
+      requestTimeout,
       properties,
-      assignmentFencing
-    )
+      assignmentFencing,
+      groupInstanceId,
+      sessionTimeout,
+      heartbeatInterval,
+      maxPollInterval
+    ) {}
 
-  def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    withProperties(properties.updated(name, value))
-
-  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+  private def revalidated(
+      commitTimeout: FiniteDuration = commitTimeout,
+      pollTimeout: FiniteDuration = pollTimeout,
+      requestTimeout: FiniteDuration = requestTimeout,
+      properties: Map[String, String] = properties,
+      groupInstanceId: Option[String] = groupInstanceId,
+      sessionTimeout: Option[FiniteDuration] = sessionTimeout,
+      heartbeatInterval: Option[FiniteDuration] = heartbeatInterval,
+      maxPollInterval: FiniteDuration = maxPollInterval
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     ConsumerSettings.from(
       client,
       groupId,
@@ -678,14 +644,18 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      values,
-      assignmentFencing
+      properties,
+      assignmentFencing,
+      groupInstanceId,
+      sessionTimeout,
+      heartbeatInterval,
+      maxPollInterval
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
-      )},$assignmentFencing)"
+      )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval)"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -696,6 +666,24 @@ object ConsumerSettings:
 
   /** What Kafka's own clients wait for the same answers, through `default.api.timeout.ms`. */
   val DefaultRequestTimeout: FiniteDuration = 60.seconds
+
+  /** The session timeout both backends use when it is left to them. */
+  val DefaultSessionTimeout: FiniteDuration = 45.seconds
+
+  /** The heartbeat interval both backends use when it is left to them. */
+  val DefaultHeartbeatInterval: FiniteDuration = 3.seconds
+
+  /** What both backends use. */
+  val DefaultMaxPollInterval: FiniteDuration = 5.minutes
+
+  /** The longest session timeout librdkafka accepts. The Java client has no limit of its own. */
+  val SessionTimeoutLimit: FiniteDuration = 1.hour
+
+  /** The longest heartbeat interval librdkafka accepts. The Java client has no limit of its own. */
+  val HeartbeatIntervalLimit: FiniteDuration = 1.hour
+
+  /** The longest maximum poll interval librdkafka accepts. */
+  val MaxPollIntervalLimit: FiniteDuration = 24.hours
 
   def from[F[_], K, V](
       client: ClientSettings,
@@ -709,12 +697,30 @@ object ConsumerSettings:
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty,
-      assignmentFencing: Boolean = true
+      assignmentFencing: Boolean = true,
+      groupInstanceId: Option[String] = None,
+      sessionTimeout: Option[FiniteDuration] = None,
+      heartbeatInterval: Option[FiniteDuration] = None,
+      maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
+    val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
+    val intervals =
+      sessionTimeout.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.SessionTimeout, _, SessionTimeoutLimit)) ++
+        heartbeatInterval.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.HeartbeatInterval, _, HeartbeatIntervalLimit)) ++
+        limitedDurationErrors(SettingsError.DurationField.MaxPollInterval, maxPollInterval, MaxPollIntervalLimit)
+    // The Java client refuses the first combination and librdkafka the second, so both are refused here for every backend. They are only
+    // compared once each is valid on its own.
+    val combinations =
+      if intervals.nonEmpty then Nil
+      else
+        Option.when(heartbeat >= session)(SettingsError.HeartbeatNotBelowSessionTimeout(heartbeat, session)).toList ++
+          Option.when(maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session))
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
-        durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout)
+        durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout) ++
+        Option.when(groupInstanceId.exists(_.trim.isEmpty))(SettingsError.BlankGroupInstanceId) ++ intervals ++ combinations
     validateSettings(errors).map(_ =>
       new ConsumerSettings(
         client,
@@ -728,7 +734,11 @@ object ConsumerSettings:
         pollTimeout,
         requestTimeout,
         properties,
-        assignmentFencing
+        assignmentFencing,
+        groupInstanceId,
+        sessionTimeout,
+        heartbeatInterval,
+        maxPollInterval
       ) {}
     )
 

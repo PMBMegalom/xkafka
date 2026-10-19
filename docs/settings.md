@@ -79,7 +79,8 @@ properties supported with the same meaning by each one.
 `ManagedProperties` lists the names xkafka derives from the typed settings:
 bootstrap servers, client and group IDs, offset reset, automatic commits, the
 default API timeout, the metadata refresh names, the isolation level, the
-acknowledgement, compression, batching and transaction names, and the TLS and SASL
+group membership names, the acknowledgement, compression, batching and
+transaction names, and the TLS and SASL
 names.
 Supplying one through the map is a `SettingsError`, so the typed settings and the
 map cannot disagree.
@@ -91,7 +92,8 @@ can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
 duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
 `withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
-`withRequestTimeout`, and `withLinger`.
+`withRequestTimeout`, `withLinger`, `withSessionTimeout`,
+`withHeartbeatInterval`, and `withMaxPollInterval`.
 
 ## Consumer settings
 
@@ -106,13 +108,18 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for an answer |
 | `commitTimeout` | 15s | how long a commit waits before failing as a timed out request |
 | `assignmentFencing` | `true` | whether offsets from a partition this consumer no longer owns are refused |
+| `groupInstanceId` | none | an identity that makes the consumer a static member of its group |
+| `sessionTimeout` | each backend's own, 45s on both | how long the group waits to hear from the consumer before handing its partitions on |
+| `heartbeatInterval` | each backend's own, 3s on both | how often the consumer tells the group it is alive |
+| `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default matches
 what Kafka's own clients use.
 
 See [Offsets](offsets.md) for commit recovery, the commit timeout, and assignment
-fencing, and [Transactions](transactions.md) for the isolation level.
+fencing, [Transactions](transactions.md) for the isolation level, and
+[Group membership](consuming.md#group-membership) for the last four.
 
 ## Producer settings
 

@@ -61,6 +61,56 @@ By default a consumer delivers records from transactions that have not
 committed. Set `isolationLevel` to change that. See
 [Transactions](transactions.md).
 
+## Group membership
+
+A consumer that joins a group stays in it while it keeps in touch with the
+group. Four settings govern that, and each is checked when the settings are
+built, so a combination either backend would refuse is a `SettingsError`:
+
+- `sessionTimeout` is how long the group waits to hear from the consumer before
+  handing its partitions to the others. The broker also bounds it, through its
+  `group.min.session.timeout.ms` and `group.max.session.timeout.ms`, which
+  default to six seconds and thirty minutes.
+- `heartbeatInterval` is how often the consumer tells the group it is alive. It
+  must be less than the session timeout.
+- `maxPollInterval` is how long the consumer can go without fetching records.
+  Fetching stops while too many records wait unread, so a consumer whose records
+  go unread for longer than this leaves its group. It must be at least the
+  session timeout.
+- `groupInstanceId` makes the consumer a static member of its group.
+
+Unless they are set, the session timeout and heartbeat interval are left to the
+backend, and both backends use the same defaults: 45 seconds and 3 seconds.
+Leave them unset when the group uses the newer consumer group protocol, where the
+broker decides them.
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def staticMember[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
+  settings.withGroupInstanceId("orders-1").andThen(_.withSessionTimeout(2.minutes)).andThen(_.withMaxPollInterval(5.minutes)).liftTo[IO]
+```
+
+Each wither revalidates the settings as a whole, so raising the session timeout
+above the maximum poll interval fails unless the poll interval is raised first.
+
+### Static members
+
+A dynamic member leaves its group when it is released, and the others take its
+partitions at once. A static member does not: the group keeps its partitions
+for it until its session times out. One that comes back under the same
+`groupInstanceId` within the session timeout gets the same partitions back, and
+the rest of the group carries on with theirs. One that stays away loses its
+partitions once its session times out.
+
+Give each static member an identity of its own. A longer session timeout gives a
+restarting member more time to come back, at the cost of leaving its partitions
+unread for that long if it does not.
+
 ## Where a consumer starts
 
 A consumer resumes each partition from its group's committed offset. Where the

@@ -184,7 +184,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       settings.groupId.value,
       ClientProperties.autoOffsetReset(settings.autoOffsetReset),
       settings.client.properties ++ settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel)) ++
-        ClientProperties.security(settings.client.security) ++ ClientProperties(settings.client) ++ ClientProperties.consumer(settings)
+        ClientProperties.security(settings.client.security) ++ ClientProperties(settings.client) ++ ClientProperties.consumer(settings) ++
+        settings.managedProperties
     )
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =
