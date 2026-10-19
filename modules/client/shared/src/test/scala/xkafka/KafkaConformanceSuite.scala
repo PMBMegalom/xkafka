@@ -335,6 +335,86 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(right.size, 1)
         assertEquals(left ++ right, both)
 
+  test(conformance("a static member that comes back within its session timeout gets its partitions back, and the others keep theirs")):
+    withBroker: server =>
+      val topic     = validTopic(partitionedTopic)
+      val group     = uniqueGroup("static")
+      val selection = Selection.Topics(NonEmptySet.one(topic))
+
+      for
+        dynamic <- consumerSettings(server, group)
+        static  <- dynamic.withGroupInstanceId(s"static-$backend").andThen(_.withSessionTimeout(30.seconds)).liftTo[IO]
+        outcome <-
+          PlatformKafkaClient().consumer(dynamic, selection).use: other =>
+            for
+              before <- PlatformKafkaClient().consumer(static, selection).use(member => (assignmentOf(member, 1), assignmentOf(other, 1)).parTupled)
+              // A dynamic member would leave the group here and the other one would take both partitions.
+              _     <- IO.sleep(5.seconds)
+              kept  <- other.assignment
+              back  <- PlatformKafkaClient().consumer(static, selection).use(member => assignmentOf(member, 1))
+              still <- other.assignment
+            yield (before, kept, back, still)
+          .timeout(90.seconds)
+      yield
+        val ((held, others), kept, back, still) = outcome
+        assertEquals(kept, others, "the other member should keep only its own partition while the static member is away")
+        assertEquals(back, held, "the static member should get its own partition back")
+        assertEquals(still, others)
+
+  test(conformance("a static member that stays away loses its partitions once its session times out")):
+    withBroker: server =>
+      val topic     = validTopic(partitionedTopic)
+      val group     = uniqueGroup("expiring")
+      val selection = Selection.Topics(NonEmptySet.one(topic))
+
+      for
+        dynamic <- consumerSettings(server, group)
+        // The broker accepts no session timeout shorter than six seconds by default.
+        static  <- dynamic.withGroupInstanceId(s"expiring-$backend").andThen(_.withSessionTimeout(6.seconds)).liftTo[IO]
+        outcome <-
+          PlatformKafkaClient().consumer(dynamic, selection).use: other =>
+            for
+              _       <- PlatformKafkaClient().consumer(static, selection).use(member => (assignmentOf(member, 1), assignmentOf(other, 1)).parTupled)
+              started <- IO.monotonic
+              _       <- assignmentOf(other, 2).timeout(30.seconds)
+              taken   <- IO.monotonic
+            yield taken - started
+          .timeout(90.seconds)
+      yield
+        assert(outcome >= 4.seconds, s"the other member took the partitions after $outcome, before the session could time out")
+        assert(outcome < 20.seconds, s"the other member took the partitions after $outcome, long after a six second session")
+
+  test(conformance("a consumer whose records go unread leaves its group once its poll interval passes")):
+    withBroker: server =>
+      val topic     = uniqueTopic("unread")
+      val group     = uniqueGroup("unread")
+      val selection = Selection.Topics(NonEmptySet.one(topic))
+      // More records than a consumer holds unread, in each partition, so fetching stops for the one nobody reads.
+      val records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(index => record(topic, None, Some(s"record $index"), validPartition(index % 2))))
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 2, replicationFactor = 1).liftTo[IO]
+        _        <- PlatformKafkaClient().admin(client).use(admin => admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 2))
+        _        <- produce(server, records)
+        reader   <- consumerSettings(server, group)
+        idle <- reader.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds)).liftTo[IO]
+        history <- Ref.of[IO, Vector[(FiniteDuration, Int)]](Vector.empty)
+        // The reading member's assignments as they change, so a handover that happens quickly is not missed.
+        handedOver =
+          history.get.map: changes =>
+            changes.collectFirst { case (shared, 1) => shared }
+              .flatMap(shared => changes.collectFirst { case (taken, 2) if taken > shared => taken - shared })
+        outcome <-
+          PlatformKafkaClient().consumer(reader, selection).use: other =>
+            val watching = other.assignmentChanges.evalMap(changed => IO.monotonic.flatMap(at => history.update(_ :+ (at -> changed.size))))
+            (other.records.compile.drain, watching.compile.drain).parTupled.background.surround:
+              PlatformKafkaClient().consumer(idle, selection).use: _ =>
+                (IO.sleep(250.millis) *> handedOver).iterateWhile(_.isEmpty).map(_.get).timeout(90.seconds)
+                  .onError(_ => history.get.flatMap(changes => IO.println(s"[$backend] the reading member's assignments: $changes")))
+          .timeout(120.seconds)
+      yield assert(outcome >= 4.seconds, s"the reading member took both partitions after $outcome, before the poll interval could pass")
+
   test(conformance("a consumer answers queries while its records are being consumed")):
     withBroker: server =>
       val topic     = uniqueTopic("concurrent")

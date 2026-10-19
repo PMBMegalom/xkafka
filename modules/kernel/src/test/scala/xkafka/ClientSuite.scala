@@ -632,16 +632,16 @@ final class ClientSuite extends FunSuite:
   test("linger runs from zero to the longest librdkafka accepts"):
     val serializer = Serializer.const[IO, String](None)
     val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
-    val tooLong    = ProducerSettings.MaxLinger + 1.milli
+    val tooLong    = ProducerSettings.LingerLimit + 1.milli
 
-    assert(settings.withLinger(ProducerSettings.MaxLinger).isValid)
+    assert(settings.withLinger(ProducerSettings.LingerLimit).isValid)
     assertEquals(
       settings.withLinger((-1).milli).toEither,
       Left(NonEmptyList.one(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, (-1).milli)))
     )
     assertEquals(
       ProducerSettings.from(clientSettings, serializer, serializer, linger = tooLong).toEither,
-      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.MaxLinger)))
+      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.LingerLimit)))
     )
 
   test("the batch size is left to the backend unless it is set, and must be positive"):
@@ -672,6 +672,98 @@ final class ClientSuite extends FunSuite:
       assertEquals(
         ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "1")).toEither,
         Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Producer)))
+      )
+
+  test("group membership is left to the backends unless it is set, apart from the poll interval both share"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.groupInstanceId, None)
+    assertEquals(settings.sessionTimeout, None)
+    assertEquals(settings.heartbeatInterval, None)
+    assertEquals(settings.maxPollInterval, ConsumerSettings.DefaultMaxPollInterval)
+    assertEquals(settings.managedProperties, Map("max.poll.interval.ms" -> "300000"))
+
+  test("group membership settings are carried by their withers and read as Kafka reads them"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val updated      =
+      settings.withGroupInstanceId("instance-1").andThen(_.withSessionTimeout(10.seconds)).andThen(_.withHeartbeatInterval(2.seconds))
+        .andThen(_.withMaxPollInterval(1.minute)).toOption.get
+
+    assertEquals(
+      updated.managedProperties,
+      Map("group.instance.id" -> "instance-1", "session.timeout.ms" -> "10000", "heartbeat.interval.ms" -> "2000", "max.poll.interval.ms" -> "60000")
+    )
+    // The other withers keep them.
+    assertEquals(updated.withIsolationLevel(IsolationLevel.ReadCommitted).managedProperties, updated.managedProperties)
+    assertEquals(updated.withCommitTimeout(1.second).toOption.map(_.managedProperties), Some(updated.managedProperties))
+    assertEquals(updated.withoutGroupInstanceId.groupInstanceId, None)
+    assertEquals(updated.withoutHeartbeatInterval.toOption.flatMap(_.heartbeatInterval), None)
+    assertEquals(
+      updated.withoutHeartbeatInterval.andThen(_.withoutSessionTimeout).toOption.map(_.managedProperties.keySet),
+      Some(Set("group.instance.id", "max.poll.interval.ms"))
+    )
+
+  test("group membership settings are refused where either backend would refuse them"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField
+
+    assertEquals(settings.withGroupInstanceId(" ").toEither, Left(NonEmptyList.one(SettingsError.BlankGroupInstanceId)))
+    assertEquals(
+      settings.withSessionTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(field.SessionTimeout, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withHeartbeatInterval(ConsumerSettings.HeartbeatIntervalLimit + 1.milli).toEither.left.map(_.head),
+      Left(
+        SettingsError
+          .DurationAboveLimit(field.HeartbeatInterval, ConsumerSettings.HeartbeatIntervalLimit + 1.milli, ConsumerSettings.HeartbeatIntervalLimit)
+      )
+    )
+    assertEquals(
+      settings.withMaxPollInterval(ConsumerSettings.MaxPollIntervalLimit + 1.milli).toEither,
+      Left(NonEmptyList.one(
+        SettingsError
+          .DurationAboveLimit(field.MaxPollInterval, ConsumerSettings.MaxPollIntervalLimit + 1.milli, ConsumerSettings.MaxPollIntervalLimit)
+      ))
+    )
+    // Raising the session timeout past the poll interval needs both at once, since each wither revalidates the whole.
+    assert(settings.withSessionTimeout(ConsumerSettings.SessionTimeoutLimit).isInvalid)
+    assert(
+      ConsumerSettings.from(
+        clientSettings,
+        group,
+        deserializer,
+        deserializer,
+        sessionTimeout = Some(ConsumerSettings.SessionTimeoutLimit),
+        maxPollInterval = ConsumerSettings.SessionTimeoutLimit
+      ).isValid
+    )
+    // The Java client refuses a heartbeat that is not below the session timeout, counted against the default when the timeout is left to it.
+    assertEquals(
+      settings.withSessionTimeout(3.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.HeartbeatNotBelowSessionTimeout(3.seconds, 3.seconds)))
+    )
+    assertEquals(
+      settings.withHeartbeatInterval(45.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.HeartbeatNotBelowSessionTimeout(45.seconds, 45.seconds)))
+    )
+    // librdkafka refuses a poll interval below the session timeout.
+    assertEquals(
+      settings.withMaxPollInterval(44.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(44.seconds, 45.seconds)))
+    )
+    assert(settings.withSessionTimeout(10.seconds).andThen(_.withMaxPollInterval(10.seconds)).isValid)
+
+  test("settings reject the group membership properties the typed model owns"):
+    val deserializer = Deserializer.utf8[IO]
+
+    List("group.instance.id", "session.timeout.ms", "heartbeat.interval.ms", "max.poll.interval.ms").foreach: name =>
+      assertEquals(
+        ConsumerSettings.from(clientSettings, group, deserializer, deserializer, properties = Map(name -> "1")).toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Consumer)))
       )
 
   test("the commit timeout defaults and is carried by its wither"):

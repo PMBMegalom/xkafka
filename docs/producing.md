@@ -143,7 +143,7 @@ def batched[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSetting
 ```
 
 `withLinger` returns a `ValidatedNel`, because a negative linger, or one longer
-than `ProducerSettings.MaxLinger`, is rejected.
+than `ProducerSettings.LingerLimit`, is rejected.
 
 A batch is sent as soon as it is full or its linger has passed, whichever comes
 first. `batchSize` sets how many bytes of records make a batch full. Unless it is
