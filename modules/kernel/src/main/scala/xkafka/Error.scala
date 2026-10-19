@@ -109,6 +109,9 @@ enum ErrorCode derives CanEqual:
   /** A consumer has no committed offset for a partition, or one outside its log, and its `AutoOffsetReset` is `Fail`. */
   case OffsetResetRequired
 
+  /** The client could not be built from its settings, such as a client key that its password does not decrypt. */
+  case InvalidConfiguration
+
   /** A code with no portable meaning. */
   case Other(value: Int)
 
@@ -147,6 +150,7 @@ object ErrorCode:
       30 -> GroupAuthorizationFailed,   // GROUP_AUTHORIZATION_FAILED
       31 -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
       35 -> UnsupportedVersion,         // UNSUPPORTED_VERSION
+      40 -> InvalidConfiguration,       // INVALID_CONFIG
       47 -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
       58 -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
       82 -> Fenced,                     // FENCED_INSTANCE_ID

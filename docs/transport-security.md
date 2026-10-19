@@ -40,6 +40,32 @@ Scala.js and Scala Native also accept a directory of certificates as a
 `TlsSettings` verifies the broker hostname by default. Call
 `withoutHostnameVerification` to turn that off.
 
+## Client certificates
+
+A broker can require each client to present a certificate of its own. Give
+`TlsSettings` a `ClientCertificate`, which is one of:
+
+| case | meaning |
+| --- | --- |
+| `PemFile` | a path to one PEM file holding the private key and the certificate chain |
+| `Pem` | the certificate chain and the private key, as PEM text held in memory |
+
+```scala mdoc:compile-only
+import xkafka.*
+
+val tls =
+  TlsSettings.from(
+    CertificateAuthority.PemFile("/etc/kafka/ca.pem"),
+    clientCertificate = Some(ClientCertificate.PemFile("/etc/kafka/client.pem", keyPassword = None))
+  )
+```
+
+The private key must be PKCS#8, which PEM marks as `PRIVATE KEY`, or as
+`ENCRYPTED PRIVATE KEY` when it needs `keyPassword`. The Java client reads no
+other form, so an inline key in another form, such as `RSA PRIVATE KEY`, is a
+`SettingsError`. `openssl pkcs8 -topk8` converts one. The certificate's key and
+password are kept out of `toString`.
+
 ## Credentials
 
 `SaslSettings` accepts `SaslMechanism.Plain`, `ScramSha256`, and `ScramSha512`,
@@ -47,8 +73,15 @@ and keeps its password out of `toString`.
 
 ## Failures
 
-A rejected broker certificate or an incorrect password fails the call as
-`KafkaException.BackendFailure`.
+Each of these fails as `KafkaException.BackendFailure`, and its `code` says
+which:
 
-`BackendFailure.code` distinguishes these as `SslAuthenticationFailed` and
-`SaslAuthenticationFailed`.
+| failure | `code` |
+| --- | --- |
+| the broker's certificate is not trusted | `SslAuthenticationFailed` |
+| the broker refuses the client's certificate, or wants one and gets none | `SslAuthenticationFailed` |
+| the SASL credentials are incorrect | `SaslAuthenticationFailed` |
+| `keyPassword` does not decrypt the client's key | `InvalidConfiguration` |
+
+The last one fails when the producer, consumer or admin client is acquired,
+before any connection is made.

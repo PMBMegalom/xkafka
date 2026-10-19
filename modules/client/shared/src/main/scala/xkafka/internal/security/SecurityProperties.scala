@@ -42,8 +42,15 @@ private[xkafka] object SecurityProperties:
             case CertificateAuthority.SystemDefault     => Map.empty[String, String]
             case CertificateAuthority.PemFile(path)     => Map("ssl.truststore.type" -> "PEM", "ssl.truststore.location" -> path)
             case CertificateAuthority.Pem(certificates) => Map("ssl.truststore.type" -> "PEM", "ssl.truststore.certificates" -> certificates)
+        val certificate =
+          value.clientCertificate.fold(Map.empty[String, String]):
+            case ClientCertificate.PemFile(path, password) => Map("ssl.keystore.type" -> "PEM", "ssl.keystore.location" -> path) ++
+                password.map("ssl.key.password" -> _)
+            case ClientCertificate.Pem(chain, key, password) =>
+              Map("ssl.keystore.type" -> "PEM", "ssl.keystore.certificate.chain" -> chain, "ssl.keystore.key" -> key) ++
+                password.map("ssl.key.password" -> _)
         // The Java client turns endpoint identification off through an empty algorithm.
-        authority.updated("ssl.endpoint.identification.algorithm", if value.verifyHostname then "https" else "")
+        (authority ++ certificate).updated("ssl.endpoint.identification.algorithm", if value.verifyHostname then "https" else "")
 
     val sasl =
       settings.saslSettings.fold(Map.empty[String, String]): value =>
@@ -66,7 +73,14 @@ private[xkafka] object SecurityProperties:
             case CertificateAuthority.SystemDefault     => Map.empty[String, String]
             case CertificateAuthority.PemFile(path)     => Map("ssl.ca.location" -> path)
             case CertificateAuthority.Pem(certificates) => Map("ssl.ca.pem" -> certificates)
-        authority.updated("ssl.endpoint.identification.algorithm", if value.verifyHostname then "https" else "none")
+        // librdkafka reads the key and the chain separately, so one file holding both is named for each.
+        val certificate =
+          value.clientCertificate.fold(Map.empty[String, String]):
+            case ClientCertificate.PemFile(path, password) => Map("ssl.certificate.location" -> path, "ssl.key.location" -> path) ++
+                password.map("ssl.key.password" -> _)
+            case ClientCertificate.Pem(chain, key, password) => Map("ssl.certificate.pem" -> chain, "ssl.key.pem" -> key) ++
+                password.map("ssl.key.password" -> _)
+        (authority ++ certificate).updated("ssl.endpoint.identification.algorithm", if value.verifyHostname then "https" else "none")
 
     val sasl =
       settings.saslSettings.fold(Map.empty[String, String]): value =>

@@ -95,6 +95,44 @@ final class SecurityPropertiesSuite extends FunSuite:
       Map("sasl.mechanism" -> "SCRAM-SHA-256", "sasl.username" -> "user", "sasl.password" -> "secret")
     )
 
+  test("a client certificate in one file is named by each backend"):
+    val file      = ClientCertificate.PemFile("/etc/kafka/client.pem", Some("key-password"))
+    val presented = SecuritySettings.Tls(tls.withClientCertificate(file).toOption.get)
+
+    assertEquals(
+      SecurityProperties.javaClient(presented) -- SecurityProperties.javaClient(SecuritySettings.Tls(tls)).keySet,
+      Map("ssl.keystore.type" -> "PEM", "ssl.keystore.location" -> "/etc/kafka/client.pem", "ssl.key.password" -> "key-password")
+    )
+    // librdkafka reads the chain and the key from separate names, so the one file is named for both.
+    assertEquals(
+      SecurityProperties.librdkafka(presented) -- SecurityProperties.librdkafka(SecuritySettings.Tls(tls)).keySet,
+      Map("ssl.certificate.location" -> "/etc/kafka/client.pem", "ssl.key.location" -> "/etc/kafka/client.pem", "ssl.key.password" -> "key-password")
+    )
+
+  test("an inline client certificate is carried by value, and a key without a password names none"):
+    val key       = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+    val inline    = ClientCertificate.Pem("-----BEGIN CERTIFICATE-----", key, None)
+    val presented = SecuritySettings.SaslTls(tls.withClientCertificate(inline).toOption.get, sasl)
+
+    assertEquals(
+      SecurityProperties.javaClient(presented) -- SecurityProperties.javaClient(SecuritySettings.SaslTls(tls, sasl)).keySet,
+      Map("ssl.keystore.type" -> "PEM", "ssl.keystore.certificate.chain" -> "-----BEGIN CERTIFICATE-----", "ssl.keystore.key" -> key)
+    )
+    assertEquals(
+      SecurityProperties.librdkafka(presented) -- SecurityProperties.librdkafka(SecuritySettings.SaslTls(tls, sasl)).keySet,
+      Map("ssl.certificate.pem" -> "-----BEGIN CERTIFICATE-----", "ssl.key.pem" -> key)
+    )
+
+  test("every property a client certificate sets is one xkafka manages"):
+    val file   = ClientCertificate.PemFile("client.pem", Some("password"))
+    val inline = ClientCertificate.Pem("chain", "-----BEGIN PRIVATE KEY-----", Some("password"))
+    val names  =
+      List(file, inline).flatMap: certificate =>
+        val presented = SecuritySettings.Tls(tls.withClientCertificate(certificate).toOption.get)
+        (SecurityProperties.javaClient(presented) ++ SecurityProperties.librdkafka(presented)).keySet
+
+    assertEquals(names.filterNot(ManagedProperties.contains), Nil)
+
   test("each mechanism selects its own login module"):
     def module(mechanism: SaslMechanism): Option[String] =
       SecurityProperties.javaClient(SecuritySettings.SaslPlaintext(SaslSettings.from(mechanism, "user", "secret").toOption.get))
