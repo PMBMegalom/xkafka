@@ -26,7 +26,7 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.IO
 import munit.CatsEffectSuite
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
 
 /** Every effect the client hands out is a description: building one asks nothing of the driver, so nothing reaches a broker until it runs. */
 final class EffectLazinessSuite extends CatsEffectSuite:
@@ -146,8 +146,12 @@ final class EffectLazinessSuite extends CatsEffectSuite:
     override def beginTransaction(producer: Client): IO[Unit]                      = called("beginTransaction")(IO.unit)
     override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = called("commitTransaction")(IO.unit)
     override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit]  = called("abortTransaction")(IO.unit)
-    override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[Unit] =
-      called("sendOffsets")(IO.unit)
+    override def sendOffsets(
+        producer: Client,
+        metadata: GroupMetadata,
+        offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+        timeoutMillis: Int
+    ): IO[Unit]                                                              = called("sendOffsets")(IO.unit)
     override def groupMetadata(consumer: Client): IO[GroupMetadata]          = called("groupMetadata")(IO.pure(RecordedGroup(consumer)))
     override def destroyGroupMetadata(metadata: GroupMetadata): IO[Unit]     = called("destroyGroupMetadata")(IO.unit)
     override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =
@@ -161,11 +165,12 @@ final class EffectLazinessSuite extends CatsEffectSuite:
     override def applyRebalance(consumer: Client, event: Event): IO[Unit]               = called("applyRebalance")(IO.unit)
     override def cooperative(consumer: Client): IO[Boolean]                             = called("cooperative")(IO.pure(true))
     override def assignment(consumer: Client): IO[Vector[(String, Int)]]                = called("assignment")(IO.pure(Vector.empty))
-    override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[Unit]     = called("commit")(IO.unit)
-    override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]                                 = called("pause")(IO.unit)
-    override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]                                = called("resume")(IO.unit)
-    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[Long]] = waiting("committed")
-    override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)]         = waiting("watermarks")
+    override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
+      called("commit")(IO.unit)
+    override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]  = called("pause")(IO.unit)
+    override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = called("resume")(IO.unit)
+    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = waiting("committed")
+    override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)]                 = waiting("watermarks")
     override def offsetsForTimes(consumer: Client, searches: Vector[(TopicPartition, Timestamp)], timeoutMillis: Int): IO[Vector[Long]] =
       waiting("offsetsForTimes")
     override def positions(consumer: Client, partitions: Vector[TopicPartition]): IO[Vector[Long]]                      = waiting("positions")

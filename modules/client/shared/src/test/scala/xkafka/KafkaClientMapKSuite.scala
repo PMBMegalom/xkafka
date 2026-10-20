@@ -49,7 +49,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
     val committer =
       new OffsetCommitter[ErrorIO]:
-        override def commit(offsets: Map[TopicPartition, Offset]): ErrorIO[Unit] = EitherT.pure(())
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): ErrorIO[Unit] = EitherT.pure(())
 
         override private[xkafka] val membership: GroupMembership[ErrorIO] =
           GroupMembership.Backend(EitherT.pure(TestGroupHandle("workers")), _ => EitherT.pure(()))
@@ -144,11 +144,11 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], selection: Selection): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:
           new KafkaConsumer[IO, K, V]:
-            override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                 = Stream.empty
-            override def assignment: IO[Set[TopicPartition]]                                                      = IO.pure(Set.empty)
-            override val assignmentChanges: Stream[IO, Set[TopicPartition]]                                       = Stream.empty
-            override def stopConsuming: IO[Unit]                                                                  = IO.unit
-            override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] =
+            override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                            = Stream.empty
+            override def assignment: IO[Set[TopicPartition]]                                                                 = IO.pure(Set.empty)
+            override val assignmentChanges: Stream[IO, Set[TopicPartition]]                                                  = Stream.empty
+            override def stopConsuming: IO[Unit]                                                                             = IO.unit
+            override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[OffsetAndMetadata]]] =
               IO.pure(topicPartitions.map(_ -> None).toMap)
             override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]] = IO.pure(Map.empty)
             override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]       = IO.pure(Map.empty)

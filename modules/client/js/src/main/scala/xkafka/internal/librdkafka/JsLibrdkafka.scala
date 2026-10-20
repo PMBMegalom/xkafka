@@ -23,6 +23,8 @@ package xkafka
 package internal
 package librdkafka
 
+import java.nio.charset.StandardCharsets.UTF_8
+
 import scala.scalajs.js
 import scala.scalajs.js.typedarray.{byteArray2Int8Array, int8Array2ByteArray, Int8Array}
 
@@ -30,7 +32,7 @@ import cats.data.NonEmptyList
 import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class JsGroupMetadata(pointer: js.Any) extends GroupHandle
@@ -195,14 +197,19 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       background(_.abortTransaction)((Seq[js.Any](producer, timeoutMillis) ++ error.classifiedArguments :+ result.value)*)
     )
 
-  override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
+  override def sendOffsets(
+      producer: Client,
+      metadata: GroupMetadata,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Unit] =
     F.defer:
-      val (topics, partitions) = partitionArrays(offsets.map(_._1))
-      val values               = longs(offsets.map(_._2.value))
+      val (topics, partitions)       = partitionArrays(offsets.map(_._1))
+      val (values, epochs, comments) = commitArrays(offsets.map(_._2))
       transactional((error, result) =>
         background(_.sendOffsets)(
-          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, offsets.size, timeoutMillis) ++ error.classifiedArguments :+
-            result.value)*
+          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, epochs, comments, offsets.size, timeoutMillis) ++
+            error.classifiedArguments :+ result.value)*
         )
       )
 
@@ -249,6 +256,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       partition = shim.messagePartition(message).asInstanceOf[Int],
       offset = long(shim.messageOffset(message)),
       timestamp = Option.when(timestamp >= 0L)(timestamp),
+      timestampType = shim.messageTimeType(message).asInstanceOf[Int],
+      leaderEpoch = shim.messageEpoch(message).asInstanceOf[Int],
       key = chunk(shim.messageKey(message), shim.messageKeySize(message)),
       value = chunk(shim.messageValue(message), shim.messageValueSize(message)),
       headers = copyHeaders(shim, message)
@@ -293,16 +302,19 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
           shim.assignmentTopicAt(assignment, index).asInstanceOf[String] -> shim.assignmentPartitionAt(assignment, index).asInstanceOf[Int]
       finally shim.assignmentDestroy(assignment): Unit
 
-  override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
+  override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     F.defer:
-      val (topics, partitions) = partitionArrays(offsets.map(_._1))
-      val error                = ErrorSlot()
-      val result               = Result()
+      val (topics, partitions)       = partitionArrays(offsets.map(_._1))
+      val (values, epochs, comments) = commitArrays(offsets.map(_._2))
+      val error                      = ErrorSlot()
+      val result                     = Result()
       background(_.commit)(
         consumer,
         topics,
         partitions,
-        longs(offsets.map(_._2.value)),
+        values,
+        epochs,
+        comments,
         offsets.size,
         timeoutMillis,
         error.message,
@@ -315,24 +327,22 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] = partitionCall(_.resume, consumer, partitions)
 
-  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]] =
+  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]] =
     F.defer:
       val (topics, values) = partitionArrays(partitions)
-      val offsets          = Buffers.alloc(8 * partitions.size.max(1))
       val error            = ErrorSlot()
       val result           = Result()
-      background(_.committed)(
-        consumer,
-        topics,
-        values,
-        partitions.size,
-        offsets,
-        timeoutMillis,
-        error.message,
-        ErrorBufferSize,
-        error.code,
-        result.value
-      ) *> error.checked(result) *> F.delay(readLongs(offsets, partitions.size))
+      background(_.committed)(consumer, topics, values, partitions.size, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *>
+        F.defer:
+          val committed = result.pointer
+          if committed == null then F.raiseError(error.failure)
+          else
+            direct: shim =>
+              try Vector.tabulate(partitions.size): index =>
+                  val size     = js.Array[js.Any](0)
+                  val metadata = chunk(shim.committedMetadataAt(committed, index, size), size(0)).fold("")(bytes => new String(bytes.toArray, UTF_8))
+                  StoredOffset(long(shim.committedOffsetAt(committed, index)), shim.committedEpochAt(committed, index).asInstanceOf[Int], metadata)
+              finally shim.committedDestroy(committed): Unit
 
   override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)] =
     F.defer:
@@ -591,6 +601,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   private def partitionArrays(partitions: Vector[TopicPartition]): (js.Array[String], Buffer) =
     (strings(partitions.map(_.topic.value)), ints(partitions.map(_.partition.value)))
+
+  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
+  private def commitArrays(offsets: Vector[OffsetAndMetadata]): (Buffer, Buffer, js.Array[String]) =
+    (longs(offsets.map(_.offset.value)), ints(offsets.map(_.leaderEpoch.fold(-1)(_.value))), strings(offsets.map(_.metadata)))
 
   private def ints(values: Vector[Int]): Buffer =
     val buffer = Buffers.alloc(4 * values.size.max(1))

@@ -143,7 +143,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
             case (value, 0L) =>
               for
                 assignment <- consumer.assignment
-                before     <- consumer.committed(Set(topicPartition))
+                before     <- consumer.committed(Set(topicPartition)).map(_.offsetsOnly)
                 beginning  <- consumer.beginningOffsets(Set(topicPartition))
                 end        <- consumer.endOffsets(Set(topicPartition))
                 timed      <- consumer.offsetsForTimes(Map(topicPartition -> timestamp))
@@ -151,7 +151,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
                 partitions <- consumer.partitionsFor(topic)
                 topics     <- consumer.listTopics
                 _          <- value.offset.commit
-                stored     <- consumer.committed(Set(topicPartition))
+                stored     <- consumer.committed(Set(topicPartition)).map(_.offsetsOnly)
                 _          <- consumer.seek(topicPartition, value.record.offset)
               yield (value, Some((assignment, before, stored, beginning, end, timed, missing, partitions, topics)))
             case (value, _) => IO.pure((value, None))

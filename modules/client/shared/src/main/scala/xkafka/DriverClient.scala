@@ -29,7 +29,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
 import internal.{ClientProperties, PollQueue}
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
 
 private def isolationLevel(value: IsolationLevel): String =
   value match
@@ -228,7 +228,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
         override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] = GroupMembership.resolve(batch).use(commitMemberships)
 
-        private def commitMemberships(memberships: List[(GroupHandle, Map[TopicPartition, Offset])]): F[Unit] =
+        private def commitMemberships(memberships: List[(GroupHandle, Map[TopicPartition, OffsetAndMetadata])]): F[Unit] =
           memberships.traverse_ : membership =>
             membership match
               case (GroupMetadata(metadata), offsets) =>
@@ -310,6 +310,17 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error")
 
   private def offset(field: String, value: Long): Offset = Offset.from(value).fold(error => throw invalidBackendValue(field, value, error), identity)
+
+  /** A negative epoch is one the backend did not report. */
+  private def epoch(field: String, value: Int): Option[LeaderEpoch] =
+    Option.when(value >= 0)(LeaderEpoch.from(value).fold(error => throw invalidBackendValue(field, value, error), identity))
+
+  /** A record whose timestamp is of neither kind has none. */
+  private def recordTimestamp(kind: Int, millis: Long): Option[RecordTimestamp] =
+    kind match
+      case 1 => Some(RecordTimestamp.CreateTime(Timestamp.fromEpochMillis(millis)))
+      case 2 => Some(RecordTimestamp.LogAppendTime(Timestamp.fromEpochMillis(millis)))
+      case _ => None
 
   private final class DriverProducer[K, V](
       client: NativeClient,
@@ -407,10 +418,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       CommitRecovery.recovering(
         new OffsetCommitter[F]:
           /** Offsets with no lease of their own commit only for a partition this consumer holds now. */
-          override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = leases.current(offsets).flatMap(commitLeased)
+          override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] = leases.current(offsets).flatMap(commitLeased)
 
           /** Each attempt holds the offsets' leases while it runs, so a revocation waits for a commit already sent. */
-          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): F[Unit] =
             leases.holding(offsets.values.map(_._2).toList)(commitOffsets(offsets.view.mapValues(_._1).toMap))
 
           /** A group is named by the metadata its consumer hands out, which also fences a member the group has already replaced. */
@@ -485,12 +496,15 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
       assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
-    override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]] =
+    override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else
         val entries = topicPartitions.toVector
         client(driver.committed(client.handle, entries, requestTimeoutMillis))
-          .flatMap(values => F.delay(entries.zip(values).map((tp, value) => tp -> Option.when(value >= 0L)(offset("committed offset", value))).toMap))
+          .flatMap(values => F.delay(entries.zip(values).map((tp, value) => tp -> Option.when(value.offset >= 0L)(stored(value))).toMap))
+
+    private def stored(value: StoredOffset): OffsetAndMetadata =
+      OffsetAndMetadata(offset("committed offset", value.offset), epoch("committed leader epoch", value.leaderEpoch), value.metadata)
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "beginning offset", (low, _) => low)
@@ -535,16 +549,30 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         partition <- F.fromEither(Partition.from(source.partition).leftMap(error => invalidBackendValue("partition", source.partition, error)))
         offset    <- F.fromEither(Offset.from(source.offset).leftMap(error => invalidBackendValue("offset", source.offset, error)))
         portableNextOffset <- F.fromEither(offset.next.leftMap(error => invalidBackendValue("next offset", source.offset, error)))
+        leaderEpoch        <- F.delay(epoch("leader epoch", source.leaderEpoch))
         key                <- settings.keyDeserializer.deserialize(topic, source.headers, source.key)
         value              <- settings.valueDeserializer.deserialize(topic, source.headers, source.value)
       yield
         val topicPartition = TopicPartition(topic, partition)
-        val record         = ConsumerRecord(topicPartition, offset, source.timestamp.map(Timestamp.fromEpochMillis), key, value, source.headers)
-        val committable    =
+        val record         =
+          ConsumerRecord(
+            topicPartition,
+            offset,
+            source.timestamp.flatMap(recordTimestamp(source.timestampType, _)),
+            key,
+            value,
+            source.headers,
+            leaderEpoch,
+            source.key.map(_.size),
+            source.value.map(_.size)
+          )
+        val committable =
           new CommittableOffset[F]:
             override val topicPartition: TopicPartition = TopicPartition(topic, partition)
 
             override val nextOffset: Offset = portableNextOffset
+
+            override val leaderEpoch: Option[LeaderEpoch] = record.leaderEpoch
 
             override val committer: OffsetCommitter[F] = offsetCommitter
 
@@ -555,7 +583,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
         CommittableConsumerRecord(record, committable)
 
-    private def commitOffsets(offsets: Map[TopicPartition, Offset]): F[Unit] =
+    private def commitOffsets(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
       if offsets.isEmpty then F.unit else client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis))
 
     override val pausing: PartitionPausing[F] =

@@ -88,6 +88,48 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(consumed.map(_.record.key), List(None))
         assertEquals(consumed.map(_.record.value), List(Some("value")))
 
+  test(conformance("a record carries the timestamp its producer set, as a creation time")):
+    withBroker: server =>
+      val topic = uniqueTopic("create-time")
+      val stamp = Timestamp.fromEpochMillis(1700000000000L)
+
+      for
+        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), validPartition(0)).copy(timestamp = Some(stamp))))
+        consumed <- consume(server, topic, 1)
+      yield assertEquals(consumed.map(_.record.timestamp), List(Some(RecordTimestamp.CreateTime(stamp))))
+
+  test(conformance("a topic that stamps records as it appends them reports the broker's time")):
+    withBroker: server =>
+      val topic = uniqueTopic("append-time")
+      val stamp = Timestamp.fromEpochMillis(1700000000000L)
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, 1, 1, Map("message.timestamp.type" -> "LogAppendTime")).liftTo[IO]
+        _        <- PlatformKafkaClient().admin(client).use(admin => admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 1))
+        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), validPartition(0)).copy(timestamp = Some(stamp))))
+        now      <- IO.realTime
+        consumed <- consume(server, topic, 1)
+      yield consumed.map(_.record.timestamp) match
+        case List(Some(RecordTimestamp.LogAppendTime(appended))) =>
+          // The broker's clock is not this one, so this only asks that the time is recent and is not the one produced.
+          assert((appended.epochMillis - now.toMillis).abs < 60000L, s"the append time $appended should be close to $now")
+        case other => fail(s"expected a log append time, got $other")
+
+  test(conformance("a record reports its partition's leader epoch and the sizes of its key and value as read")):
+    withBroker: server =>
+      val topic     = uniqueTopic("record-fields")
+      val partition = validPartition(0)
+
+      for
+        _        <- produce(server, NonEmptyList.of(record(topic, Some("key"), Some("välue"), partition), record(topic, None, None, partition)))
+        consumed <- consume(server, topic, 2)
+      yield assertEquals(
+        consumed.map(read => (read.record.leaderEpoch.map(_.value), read.record.serializedKeySize, read.record.serializedValueSize)),
+        // A topic's first leader starts the epoch at zero, and the value is six bytes in UTF-8.
+        List((Some(0), Some(3), Some(6)), (Some(0), None, None))
+      )
+
   test(conformance("headers keep their produced order, including duplicate names")):
     withBroker: server =>
       val topic   = uniqueTopic("headers")
@@ -401,9 +443,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         idle <- reader.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds)).liftTo[IO]
         history <- Ref.of[IO, Vector[(FiniteDuration, Int)]](Vector.empty)
         // The reading member's assignments as they change, so a handover that happens quickly is not missed.
+        // The idle member may join first and take both partitions, so the reader may start with none.
         handedOver =
           history.get.map: changes =>
-            changes.collectFirst { case (shared, 1) => shared }
+            changes.collectFirst { case (shared, held) if held < 2 => shared }
               .flatMap(shared => changes.collectFirst { case (taken, 2) if taken > shared => taken - shared })
         outcome <-
           PlatformKafkaClient().consumer(reader, selection).use: other =>
@@ -634,9 +677,9 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                 third       <- ahead.records.take(3).compile.toList
                 firstOnly   <- behind.records.take(1).compile.toList
                 _           <- third.last.offset.commit
-                afterAhead  <- ahead.committed(Set(named))
+                afterAhead  <- ahead.committed(Set(named)).map(_.offsetsOnly)
                 _           <- firstOnly.head.offset.commit
-                afterBehind <- behind.committed(Set(named))
+                afterBehind <- behind.committed(Set(named)).map(_.offsetsOnly)
               yield (third.last.offset.nextOffset, firstOnly.head.offset.nextOffset, afterAhead.get(named).flatten, afterBehind.get(named).flatten)
           .timeout(90.seconds)
       yield
@@ -644,6 +687,45 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(afterAhead, Some(higher), "committing the third record should store the offset after it")
         // Kafka stores whatever was committed last, so a commit can move a group's position backwards and replay records.
         assertEquals(afterBehind, Some(lower), "a later commit should replace the stored offset even where it is lower")
+
+  test(conformance("a commit stores its offset's leader epoch and metadata, and a bare offset stores neither")):
+    withBroker: server =>
+      val topic = uniqueTopic("commit-metadata")
+      val named = TopicPartition(topic, validPartition(0))
+
+      for
+        _        <- produceValues(server, named, 2)
+        settings <- consumerSettings(server, uniqueGroup("commit-metadata"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            for
+              taken     <- consumer.records.take(2).compile.toList
+              _         <- taken.head.offset.withMetadata("première note").commit
+              annotated <- consumer.committed(Set(named))
+              _         <- taken.last.offset.committer.commit(Map(named -> taken.last.offset.nextOffset))
+              bare      <- consumer.committed(Set(named))
+            yield (annotated.get(named).flatten, bare.get(named).flatten)
+          .timeout(60.seconds)
+      yield
+        val (annotated, bare) = outcome
+        assertEquals(annotated, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "première note")))
+        assertEquals(bare, Some(OffsetAndMetadata(validOffset(2))))
+
+  test(conformance("a commit whose metadata is longer than the broker keeps fails as too large")):
+    withBroker: server =>
+      val topic = uniqueTopic("commit-metadata-size")
+
+      for
+        _        <- produceValues(server, TopicPartition(topic, validPartition(0)), 1)
+        settings <- consumerSettings(server, uniqueGroup("commit-metadata-size"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
+            // The broker keeps 4096 bytes by default.
+            .use(_.records.take(1).evalMap(_.offset.withMetadata("x" * 4097).commit).compile.drain).attempt.timeout(60.seconds)
+      yield outcome match
+        case Left(failure: KafkaException.BackendFailure) =>
+          assertEquals(failure.code, Some(ErrorCode.OffsetMetadataTooLarge), s"got ${failure.getMessage}")
+        case other => fail(s"expected the commit to fail, got $other")
 
   test(conformance("stopping a consumer ends its streams and leaves the rest of the topic behind")):
     withBroker: server =>
@@ -663,8 +745,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             consumer.records.evalTap(_ => consumer.stopConsuming).evalTap(_.offset.commit).compile.toList
           .timeout(60.seconds)
         stored <-
-          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.committed(Set(TopicPartition(topic, partition))))
-            .timeout(60.seconds)
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
+            .use(_.committed(Set(TopicPartition(topic, partition))).map(_.offsetsOnly)).timeout(60.seconds)
         rest <-
           if taken.sizeIs >= values.size then IO.pure(List.empty[String])
           else
@@ -1013,15 +1095,36 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                     transaction.produce(NonEmptyList.one(produced)) *> transaction.commitOffsets(batch) *>
                       IO.raiseError[Unit](new RuntimeException("rolled back"))
                   ).attempt
-                afterAbort <- consumer.committed(Set(topicPartition))
+                afterAbort <- consumer.committed(Set(topicPartition)).map(_.offsetsOnly)
                 _ <- producer.transactionally(transaction => transaction.produce(NonEmptyList.one(produced)) *> transaction.commitOffsets(batch))
-                afterCommit <- consumer.committed(Set(topicPartition))
+                afterCommit <- consumer.committed(Set(topicPartition)).map(_.offsetsOnly)
               yield (afterAbort.get(topicPartition).flatten, afterCommit.get(topicPartition).flatten)
           .timeout(90.seconds)
       yield
         val (afterAbort, afterCommit) = outcome
         assertEquals(afterAbort, None, "an aborted transaction should leave the group where it was")
         assertEquals(afterCommit.map(_.value), Some(1L), "a committed transaction should store the offset it recorded")
+
+  test(conformance("a transaction stores the leader epoch and metadata of the offsets it records")):
+    withBroker: server =>
+      val input = uniqueTopic("transaction-metadata")
+      val named = TopicPartition(input, validPartition(0))
+
+      for
+        _        <- produceValues(server, named, 1)
+        settings <- transactionalSettings(server, uniqueTransactionalId("metadata"))
+        reading  <- committedConsumerSettings(server, uniqueGroup("transaction-metadata"))
+        stored   <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            PlatformKafkaClient().consumer(reading, Selection.Topics(NonEmptySet.one(input))).use: consumer =>
+              for
+                taken <- consumer.records.take(1).compile.toList
+                _     <-
+                  producer.transactionally(_.commitOffsets(CommittableOffsetBatch.fromFoldable(taken.map(_.offset.withMetadata("in a transaction")))))
+                after <- consumer.committed(Set(named))
+              yield after.get(named).flatten
+          .timeout(90.seconds)
+      yield assertEquals(stored, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "in a transaction")))
 
   test(conformance("a transaction cannot record an offset from a partition its consumer has since lost")):
     withBroker: server =>
@@ -1057,14 +1160,14 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                           kept    <- (assignmentOf(first, 1), assignmentOf(second, 1)).parTupled.map(_._1)
                           revoked <- IO.fromOption(before.keySet.find(!kept.contains(_)))(new AssertionError(s"nothing was revoked from $kept"))
                           stale   <- writeWith(producer, before(revoked)).attempt
-                          lost    <- first.committed(Set(revoked))
+                          lost    <- first.committed(Set(revoked)).map(_.offsetsOnly)
                           // The default protocol revokes every partition on a rebalance, so one the first consumer kept was read under an assignment it no longer holds either.
                           earlier <- writeWith(producer, before(kept.head)).attempt
                           // A record read after the rebalance, from the partition the first consumer kept, is still its to commit.
                           _       <- produce(server, NonEmptyList.one(record(input, Some("k"), Some(marker), kept.head.partition)))
                           current <- read.get.map(_.find(_.record.value.contains(marker)).map(_.offset)).iterateUntil(_.isDefined).map(_.get)
                           _       <- writeWith(producer, current)
-                          moved   <- first.committed(Set(current.topicPartition))
+                          moved   <- first.committed(Set(current.topicPartition)).map(_.offsetsOnly)
                         yield (revoked, stale, lost.get(revoked).flatten, earlier, current, moved.get(current.topicPartition).flatten)
               yield outcome
           .timeout(90.seconds)
@@ -1111,7 +1214,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                               transaction.produce(NonEmptyList.one(record(output, Some("k"), Some("out"), validPartition(0)))) *>
                                 transaction.commitOffsets(CommittableOffsetBatch.empty[IO].updated(before(revoked)))
                             )
-                          lost <- first.committed(Set(revoked))
+                          lost <- first.committed(Set(revoked)).map(_.offsetsOnly)
                         yield (before(revoked).nextOffset, lost.get(revoked).flatten)
               yield outcome
           .timeout(90.seconds)
@@ -1194,7 +1297,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                       earlier <- before(kept.head).commit.attempt
                       direct  <- before(revoked).committer.commit(Map(revoked -> before(revoked).nextOffset)).attempt
                       owned   <- before(kept.head).committer.commit(Map(kept.head -> before(kept.head).nextOffset)).attempt
-                      after   <- first.committed(Set(revoked))
+                      after   <- first.committed(Set(revoked)).map(_.offsetsOnly)
                     yield RolledBack(stale, earlier, direct, owned, latest.offset.nextOffset, after.get(revoked).flatten)
             yield outcome
         .timeout(90.seconds)
@@ -1238,7 +1341,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
                                 transaction.commitOffsets(CommittableOffsetBatch.empty[IO].updated(before(kept.head)))
                             ).attempt
                           plain <- before(kept.head).commit.attempt
-                          moved <- first.committed(Set(kept.head))
+                          moved <- first.committed(Set(kept.head)).map(_.offsetsOnly)
                         yield (lost, recorded, plain, before(kept.head).nextOffset, moved.get(kept.head).flatten)
               yield outcome
           .timeout(90.seconds)
@@ -1323,8 +1426,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         _      <- PlatformKafkaClient().admin(client).use(_.deleteRecords(NonEmptyMap.one(partition, validOffset(3)))).timeout(90.seconds)
         stays  <-
           consumerSettings(server, group).flatMap: settings =>
-            PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(partition))).use(_.committed(Set(partition)))
-              .timeout(60.seconds)
+            PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(partition)))
+              .use(_.committed(Set(partition)).map(_.offsetsOnly)).timeout(60.seconds)
       yield assertEquals(stays, Map(partition -> Some(validOffset(1))))
 
   test(conformance("deleting records against a cluster that cannot be reached fails as a timed out request")):
@@ -1589,3 +1692,6 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def validPartition(value: Int): Partition = Partition.from(value).fold(error => fail(s"invalid test partition: ${error.message}"), identity)
 
   private def validOffset(value: Long): Offset = Offset.from(value).fold(error => fail(s"invalid test offset: ${error.message}"), identity)
+
+  private def validEpoch(value: Int): LeaderEpoch =
+    LeaderEpoch.from(value).fold(error => fail(s"invalid test leader epoch: ${error.message}"), identity)

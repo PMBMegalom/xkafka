@@ -219,6 +219,8 @@ final class DriverClientSuite extends CatsEffectSuite:
           0,
           offset,
           Some(0L),
+          1,
+          0,
           Some(Chunk.array("k".getBytes)),
           Some(Chunk.array("v".getBytes)),
           Headers.fromVector(Vector.empty)
@@ -279,8 +281,12 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
 
-    override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[Unit] =
-      record("send") *> held(holdOffsets)
+    override def sendOffsets(
+        producer: Client,
+        metadata: GroupMetadata,
+        offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+        timeoutMillis: Int
+    ): IO[Unit] = record("send") *> held(holdOffsets)
 
     override def groupMetadata(consumer: Client): IO[GroupMetadata] = IO.pure(FakeGroupMetadata(consumer))
 
@@ -315,14 +321,14 @@ final class DriverClientSuite extends CatsEffectSuite:
     override def assignment(consumer: Client): IO[Vector[(String, Int)]] =
       calls.map(log => if log.lastIndexOf("assign") > log.lastIndexOf("unassign") then Vector("events" -> 0) else Vector.empty)
 
-    override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[Unit] =
+    override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
       record("commit") *> held(holdCommits)
 
     override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = IO.unit
 
     override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = IO.unit
 
-    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[Long]] = unused("committed")
+    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = unused("committed")
 
     override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)] = unused("watermarks")
 

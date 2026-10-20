@@ -190,7 +190,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         consumed   <- consumer.records.take(1).compile.lastOrError
         assignment <- consumer.assignment
         _          <- consumed.offset.commit
-        committed  <- consumer.committed(Set(consumed.record.topicPartition))
+        committed  <- consumer.committed(Set(consumed.record.topicPartition)).map(_.offsetsOnly)
         beginning  <- consumer.beginningOffsets(Set(consumed.record.topicPartition))
         end        <- consumer.endOffsets(Set(consumed.record.topicPartition))
         timed      <- consumer.offsetsForTimes(Map(consumed.record.topicPartition -> Timestamp.fromEpochMillis(1234L)))
@@ -387,7 +387,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           override def nextOffset: Offset             = Offset.from(1L).toOption.get
           override def committer: OffsetCommitter[IO] =
             new OffsetCommitter[IO]:
-              override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+              override def commitWithMetadata(offsets: Map[TopicPartition, xkafka.OffsetAndMetadata]): IO[Unit] = IO.unit
           override private[xkafka] def membership: GroupMembership[IO] = readUnder
       mocked(producer = _ => mock).transactionalProducer(settings)
         .use(_.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(offset)))).attempt.map:

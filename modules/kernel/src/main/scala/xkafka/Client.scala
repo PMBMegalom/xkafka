@@ -908,17 +908,32 @@ object KafkaAdminClient:
   given FunctorK[KafkaAdminClient] with
     override def mapK[F[_], G[_]](client: KafkaAdminClient[F])(fk: FunctionK[F, G]): KafkaAdminClient[G] = client.mapK(fk)
 
+/** An offset to commit, with what the broker stores beside it.
+  *
+  * @param leaderEpoch
+  *   the leader epoch of the record the offset follows
+  * @param metadata
+  *   text stored with the offset. The broker keeps no difference between empty text and none, so empty means none.
+  */
+final case class OffsetAndMetadata(offset: Offset, leaderEpoch: Option[LeaderEpoch] = None, metadata: String = "")
+
 trait OffsetCommitter[F[_]]:
   self =>
 
-  /** Commits these offsets. With assignment fencing on, it commits only for partitions the consumer owns when the commit runs. */
-  def commit(offsets: Map[TopicPartition, Offset]): F[Unit]
+  /** Commits these offsets, each with its leader epoch and metadata. With assignment fencing on, it commits only for partitions the consumer owns
+    * when the commit runs.
+    */
+  def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit]
+
+  /** Commits these offsets alone, with no leader epoch and no metadata. */
+  final def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = commitWithMetadata(offsets.view.mapValues(OffsetAndMetadata(_)).toMap)
 
   /** Commits offsets together with the lease each was read under, which a consumer that fences its assignment checks before committing.
     *
     * `CommittableOffset.commit` and `CommittableOffsetBatch.commit` come through here. A committer that does not fence commits the offsets alone.
     */
-  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] = commit(offsets.view.mapValues(_._1).toMap)
+  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): F[Unit] =
+    commitWithMetadata(offsets.view.mapValues(_._1).toMap)
 
   /** How a transaction names the consumer group these offsets belong to.
     *
@@ -937,9 +952,10 @@ object OffsetCommitter:
     TransformedOffsetCommitter(committer, fk)
 
   private final case class TransformedOffsetCommitter[F[_], G[_]](underlying: OffsetCommitter[F], fk: FunctionK[F, G]) extends OffsetCommitter[G]:
-    override def commit(offsets: Map[TopicPartition, Offset]): G[Unit] = fk(underlying.commit(offsets))
+    override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): G[Unit] = fk(underlying.commitWithMetadata(offsets))
 
-    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): G[Unit] = fk(underlying.commitLeased(offsets))
+    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): G[Unit] =
+      fk(underlying.commitLeased(offsets))
 
     override private[xkafka] def membership: GroupMembership[G] = underlying.membership.mapK(fk)
 
@@ -951,7 +967,33 @@ trait CommittableOffset[F[_]]:
   /** The next offset to consume after this commit succeeds. */
   def nextOffset: Offset
 
+  /** The leader epoch of the record this offset follows, where its backend reported one. */
+  def leaderEpoch: Option[LeaderEpoch] = None
+
+  /** The text committed with this offset, empty unless `withMetadata` set some. */
+  def metadata: String = ""
+
   def committer: OffsetCommitter[F]
+
+  /** What committing this offset sends: the next offset, the leader epoch and the metadata. */
+  final def offsetAndMetadata: OffsetAndMetadata = OffsetAndMetadata(nextOffset, leaderEpoch, metadata)
+
+  /** The same offset, committed with `value` as its metadata. */
+  final def withMetadata(value: String): CommittableOffset[F] =
+    new CommittableOffset[F]:
+      override def topicPartition: TopicPartition = self.topicPartition
+
+      override def nextOffset: Offset = self.nextOffset
+
+      override def leaderEpoch: Option[LeaderEpoch] = self.leaderEpoch
+
+      override def metadata: String = value
+
+      override def committer: OffsetCommitter[F] = self.committer
+
+      override private[xkafka] def membership: GroupMembership[F] = self.membership
+
+      override private[xkafka] def lease: Option[Lease] = self.lease
 
   /** The group membership this offset was read under, which is what a transaction records it against.
     *
@@ -962,13 +1004,17 @@ trait CommittableOffset[F[_]]:
   /** The lease this offset was read under, where its consumer fences its assignment and could name one. */
   private[xkafka] def lease: Option[Lease] = None
 
-  final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (nextOffset, lease)))
+  final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (offsetAndMetadata, lease)))
 
   final def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffset[G] =
     new CommittableOffset[G]:
       override def topicPartition: TopicPartition = self.topicPartition
 
       override def nextOffset: Offset = self.nextOffset
+
+      override def leaderEpoch: Option[LeaderEpoch] = self.leaderEpoch
+
+      override def metadata: String = self.metadata
 
       override def committer: OffsetCommitter[G] = self.committer.mapK(fk)
 
@@ -984,7 +1030,7 @@ object CommittableOffset:
 opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, CommittableOffsetBatch.Entry[F]]]
 
 object CommittableOffsetBatch:
-  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F], lease: Option[Lease])
+  private[xkafka] final case class Entry[F[_]](offset: OffsetAndMetadata, membership: GroupMembership[F], lease: Option[Lease])
 
   def empty[F[_]]: CommittableOffsetBatch[F] = Map.empty
 
@@ -995,7 +1041,7 @@ object CommittableOffsetBatch:
     def updated(offset: CommittableOffset[F]): CommittableOffsetBatch[F] =
       batch.updated(
         offset.committer,
-        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.nextOffset, offset.membership, offset.lease))
+        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.offsetAndMetadata, offset.membership, offset.lease))
       )
 
     def updated(other: CommittableOffsetBatch[F]): CommittableOffsetBatch[F] =
@@ -1006,10 +1052,14 @@ object CommittableOffsetBatch:
               case (committerEntries, (topicPartition, entry)) => include(committerEntries, topicPartition, entry)
           )
 
-    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch.view.mapValues(_.view.mapValues(_.offset).toMap).toMap
+    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch.view.mapValues(_.view.mapValues(_.offset.offset).toMap).toMap
+
+    /** The offsets with the leader epoch and metadata each is committed with. */
+    def offsetsAndMetadata: Map[OffsetCommitter[F], Map[TopicPartition, OffsetAndMetadata]] =
+      batch.view.mapValues(_.view.mapValues(_.offset).toMap).toMap
 
     /** The offsets grouped by the membership each was read under, which is how a transaction records them. */
-    private[xkafka] def memberships: Map[GroupMembership[F], Map[TopicPartition, Offset]] =
+    private[xkafka] def memberships: Map[GroupMembership[F], Map[TopicPartition, OffsetAndMetadata]] =
       batch.valuesIterator.flatten.toList.groupMap(_._2.membership)((topicPartition, entry) => topicPartition -> entry.offset).view.mapValues(_.toMap)
         .toMap
 
@@ -1031,8 +1081,8 @@ object CommittableOffsetBatch:
   /** Keeps the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the earlier. */
   private def include[F[_]](entries: Map[TopicPartition, Entry[F]], topicPartition: TopicPartition, entry: Entry[F]): Map[TopicPartition, Entry[F]] =
     entries.updatedWith(topicPartition):
-      case current @ Some(existing) if existing.offset.value > entry.offset.value => current
-      case Some(_) | None                                                         => Some(entry)
+      case current @ Some(existing) if existing.offset.offset.value > entry.offset.offset.value => current
+      case Some(_) | None                                                                       => Some(entry)
 
 /** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
 def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =
@@ -1181,8 +1231,10 @@ trait KafkaConsumer[F[_], K, V]:
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
     PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords, pausing)
 
-  /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
-  def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]
+  /** Returns the broker-stored next offset for each requested topic-partition, with its leader epoch and metadata, or `None` when no offset has been
+    * committed.
+    */
+  def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]]
 
   /** Returns the earliest available offset for each requested topic-partition. */
   def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]]
@@ -1222,7 +1274,8 @@ trait KafkaConsumer[F[_], K, V]:
 
       override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
 
-      override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[Offset]]] = fk(self.committed(topicPartitions))
+      override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[OffsetAndMetadata]]] =
+        fk(self.committed(topicPartitions))
 
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Offset]] = fk(self.beginningOffsets(topicPartitions))
 

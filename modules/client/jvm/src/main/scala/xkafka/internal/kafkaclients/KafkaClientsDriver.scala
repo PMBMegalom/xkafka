@@ -40,7 +40,8 @@ import org.apache.kafka.clients.admin.{
   DescribeConfigsOptions, DescribeTopicsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete
 }
 import org.apache.kafka.clients.consumer.{
-  Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer, OffsetAndMetadata
+  Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer,
+  OffsetAndMetadata as JavaOffsetAndMetadata
 }
 import org.apache.kafka.clients.producer.{
   Callback, KafkaProducer as JavaKafkaProducer, Producer as JavaProducer, ProducerRecord as JavaProducerRecord, RecordMetadata as JavaRecordMetadata
@@ -49,8 +50,9 @@ import org.apache.kafka.common.{KafkaFuture, TopicPartition as JavaTopicPartitio
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
+import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
 private[xkafka] final case class JavaClients(
@@ -187,8 +189,12 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.abortTransaction()))
 
-  override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
-    producing(producer)(value => F.blocking(value.sendOffsetsToTransaction(committedOffsets(offsets), metadata.metadata)))
+  override def sendOffsets(
+      producer: Client,
+      metadata: GroupMetadata,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Unit] = producing(producer)(value => F.blocking(value.sendOffsetsToTransaction(committedOffsets(offsets), metadata.metadata)))
 
   override def groupMetadata(consumer: Client): F[GroupMetadata] = onConsumer(consumer)(value => JavaGroupMetadata(value.groupMetadata()))
 
@@ -226,7 +232,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def assignment(consumer: Client): F[Vector[(String, Int)]] =
     onConsumer(consumer)(_.assignment.asScala.toVector.map(value => value.topic -> value.partition))
 
-  override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
+  override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     onConsumer(consumer)(_.commitSync(committedOffsets(offsets), Duration.ofMillis(timeoutMillis.toLong)))
 
   override def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
@@ -235,10 +241,12 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
     onConsumer(consumer)(_.resume(partitions.map(javaTopicPartition).asJava))
 
-  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]] =
+  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]] =
     onConsumer(consumer): value =>
       val answers = value.committed(partitions.map(javaTopicPartition).toSet.asJava, Duration.ofMillis(timeoutMillis.toLong))
-      partitions.map(partition => Option(answers.get(javaTopicPartition(partition))).fold(-1L)(_.offset))
+      partitions.map: partition =>
+        Option(answers.get(javaTopicPartition(partition))).fold(StoredOffset(-1L, -1, "")): stored =>
+          StoredOffset(stored.offset, stored.leaderEpoch.map(_.intValue).orElse(-1), Option(stored.metadata).getOrElse(""))
 
   override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)] =
     onConsumer(consumer): value =>
@@ -413,8 +421,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def javaTopicPartition(value: TopicPartition): JavaTopicPartition = new JavaTopicPartition(value.topic.value, value.partition.value)
 
-  private def committedOffsets(offsets: Vector[(TopicPartition, Offset)]): java.util.Map[JavaTopicPartition, OffsetAndMetadata] =
-    offsets.map((partition, offset) => javaTopicPartition(partition) -> new OffsetAndMetadata(offset.value)).toMap.asJava
+  private def committedOffsets(offsets: Vector[(TopicPartition, OffsetAndMetadata)]): java.util.Map[JavaTopicPartition, JavaOffsetAndMetadata] =
+    offsets.map: (partition, offset) =>
+      val epoch = offset.leaderEpoch.fold(java.util.Optional.empty[Integer])(value => java.util.Optional.of(Int.box(value.value)))
+      javaTopicPartition(partition) -> new JavaOffsetAndMetadata(offset.offset.value, epoch, offset.metadata)
+    .toMap.asJava
 
   private def javaRecord(record: EncodedRecord): JavaProducerRecord[Array[Byte], Array[Byte]] =
     val headers: java.lang.Iterable[JavaHeader] =
@@ -434,10 +445,19 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       partition = record.partition,
       offset = record.offset,
       timestamp = Option.when(record.timestamp >= 0L)(record.timestamp),
+      timestampType = timestampKind(record.timestampType),
+      leaderEpoch = record.leaderEpoch.map(_.intValue).orElse(-1),
       key = Option(record.key).map(Chunk.array),
       value = Option(record.value).map(Chunk.array),
       headers = Headers.fromVector(record.headers.toArray.toVector.map(header => Header(header.key, Option(header.value).map(Chunk.array))))
     )
+
+  /** Numbered as librdkafka numbers them, which is what the shared client reads. */
+  private def timestampKind(value: TimestampType): Int =
+    value match
+      case TimestampType.CREATE_TIME     => 1
+      case TimestampType.LOG_APPEND_TIME => 2
+      case _                             => 0
 
   private def invalidBackendValue(field: String, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field: $error")

@@ -36,6 +36,7 @@ enum ValidationError derives CanEqual:
   case NegativePartition(value: Int)
   case NegativeOffset(value: Long)
   case OffsetOverflow
+  case NegativeLeaderEpoch(value: Int)
   case EmptyConsumerGroup
   case EmptyTransactionalId
   case MissingHeaderValue
@@ -56,6 +57,7 @@ enum ValidationError derives CanEqual:
       case NegativePartition(value)              => s"partition must not be negative, was $value"
       case NegativeOffset(value)                 => s"offset must not be negative, was $value"
       case OffsetOverflow                        => "offset cannot be advanced past Long.MaxValue"
+      case NegativeLeaderEpoch(value)            => s"leader epoch must not be negative, was $value"
       case EmptyConsumerGroup                    => "consumer group must not be empty"
       case EmptyTransactionalId                  => "transactional id must not be empty"
       case MissingHeaderValue                    => "header has no value"
@@ -134,6 +136,17 @@ object Offset:
 
   given Order[Offset] = Order.from((x, y) => java.lang.Long.compare(x.value, y.value))
   given Show[Offset]  = Show.show(_.value.toString)
+
+/** The generation of a partition's leadership, which the broker raises each time a new leader takes the partition over. */
+opaque type LeaderEpoch = Int
+
+object LeaderEpoch:
+  def from(value: Int): Either[ValidationError, LeaderEpoch] = Either.cond(value >= 0, value, ValidationError.NegativeLeaderEpoch(value))
+
+  extension (epoch: LeaderEpoch) def value: Int = epoch
+
+  given Order[LeaderEpoch] = Order.from((x, y) => Integer.compare(x.value, y.value))
+  given Show[LeaderEpoch]  = Show.show(_.value.toString)
 
 opaque type ConsumerGroup = String
 
@@ -219,11 +232,36 @@ final case class ProducerResult[K, V](records: NonEmptyList[(ProducerRecord[K, V
   /** Every record that the backend attributed metadata to, in the order the records were produced. */
   def metadata: List[RecordMetadata] = records.toList.flatMap((_, value) => value)
 
+/** A consumed record's timestamp, and which of the two kinds it is. */
+enum RecordTimestamp:
+  /** Set by the producer, or by its client when the producer gave none. */
+  case CreateTime(value: Timestamp)
+
+  /** Set by the broker as it appended the record, for a topic whose `message.timestamp.type` is `LogAppendTime`. */
+  case LogAppendTime(value: Timestamp)
+
+  def value: Timestamp
+
+object RecordTimestamp:
+  given Show[RecordTimestamp] = Show.fromToString
+
+/** A consumed record.
+  *
+  * @param leaderEpoch
+  *   the leader epoch of the partition when the record was written, where the backend reported one
+  * @param serializedKeySize
+  *   the size in bytes of the key as it was read, or `None` for a record without a key
+  * @param serializedValueSize
+  *   the size in bytes of the value as it was read, or `None` for a record without a value
+  */
 final case class ConsumerRecord[K, V](
     topicPartition: TopicPartition,
     offset: Offset,
-    timestamp: Option[Timestamp],
+    timestamp: Option[RecordTimestamp],
     key: K,
     value: V,
-    headers: Headers
+    headers: Headers,
+    leaderEpoch: Option[LeaderEpoch] = None,
+    serializedKeySize: Option[Int] = None,
+    serializedValueSize: Option[Int] = None
 )

@@ -109,6 +109,9 @@ enum ErrorCode derives CanEqual:
   /** A consumer has no committed offset for a partition, or one outside its log, and its `AutoOffsetReset` is `Fail`. */
   case OffsetResetRequired
 
+  /** A committed offset's metadata is longer than the broker keeps, which its `offset.metadata.max.bytes` sets. */
+  case OffsetMetadataTooLarge
+
   /** The client could not be built from its settings, such as a client key that its password does not decrypt. */
   case InvalidConfiguration
 
@@ -137,6 +140,7 @@ object ErrorCode:
       7  -> RequestTimedOut,            // REQUEST_TIMED_OUT
       8  -> BrokerNotAvailable,         // BROKER_NOT_AVAILABLE
       10 -> MessageTooLarge,            // MESSAGE_TOO_LARGE
+      12 -> OffsetMetadataTooLarge,     // OFFSET_METADATA_TOO_LARGE
       13 -> NetworkException,           // NETWORK_EXCEPTION
       14 -> CoordinatorLoadInProgress,  // COORDINATOR_LOAD_IN_PROGRESS
       15 -> CoordinatorNotAvailable,    // COORDINATOR_NOT_AVAILABLE
