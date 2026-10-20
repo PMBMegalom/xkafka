@@ -23,6 +23,8 @@ package xkafka
 package internal
 package librdkafka
 
+import java.nio.charset.StandardCharsets
+
 import scala.scalanative.libc.string.memcpy
 import scala.scalanative.unsafe.*
 import scala.scalanative.unsigned.*
@@ -30,7 +32,7 @@ import scala.scalanative.unsigned.*
 import cats.data.NonEmptyList
 import cats.effect.Sync
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class NativeGroupMetadata(pointer: CVoidPtr) extends GroupHandle
@@ -213,11 +215,16 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       Bindings.xkafka_producer_abort_transaction(producer, timeoutMillis, error, ErrorBufferSize.toUSize, code, fatal, retriable, abort)
     )
 
-  override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
+  override def sendOffsets(
+      producer: Client,
+      metadata: GroupMetadata,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Unit] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone                       = zone
-        val (topics, partitions, values) = offsetArrays(offsets)
+        given Zone                                         = zone
+        val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
         failOnClassified((error, code, fatal, retriable, abort) =>
           Bindings.xkafka_producer_send_offsets(
             producer,
@@ -225,6 +232,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             topics,
             partitions,
             values,
+            epochs,
+            comments,
             offsets.size.toUSize,
             timeoutMillis,
             error,
@@ -287,6 +296,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       partition = Bindings.xkafka_message_partition(message),
       offset = Bindings.xkafka_message_offset(message),
       timestamp = Option.when(timestamp >= 0L)(timestamp),
+      timestampType = Bindings.xkafka_message_timestamp_type(message),
+      leaderEpoch = Bindings.xkafka_message_leader_epoch(message),
       key = Option(keyPointer).map(pointer => chunk(pointer, Bindings.xkafka_message_key_size(message))),
       value = Option(valuePointer).map(pointer => chunk(pointer, Bindings.xkafka_message_value_size(message))),
       headers = copyHeaders(message)
@@ -337,18 +348,20 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
               Bindings.xkafka_assignment_partition_at(assignment, index.toUSize)
         finally Bindings.xkafka_assignment_destroy(assignment)
 
-  override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
+  override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone                       = zone
-        val (topics, partitions, values) = offsetArrays(offsets)
-        val (error, errorCode)           = errorSlots
-        val result                       =
+        given Zone                                         = zone
+        val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
+        val (error, errorCode)                             = errorSlots
+        val result                                         =
           Bindings.xkafka_consumer_commit(
             consumer,
             topics,
             partitions,
             values,
+            epochs,
+            comments,
             offsets.size.toUSize,
             timeoutMillis,
             error,
@@ -367,27 +380,26 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       Bindings.xkafka_consumer_resume(consumer, topics, values, count, error, ErrorBufferSize.toUSize, code)
     )
 
-  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]] =
+  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone             = zone
         val (topics, values)   = partitionArrays(partitions)
-        val committedOffsets   = alloc[CLongLong](partitions.size)
         val (error, errorCode) = errorSlots
-        val result             =
-          Bindings.xkafka_consumer_committed(
-            consumer,
-            topics,
-            values,
-            partitions.size.toUSize,
-            committedOffsets,
-            timeoutMillis,
-            error,
-            ErrorBufferSize.toUSize,
-            errorCode
-          )
-        if result != 0 then throw nativeError(error, errorCode)
-        Vector.tabulate(partitions.size)(committedOffsets(_))
+        val committed          =
+          Bindings
+            .xkafka_consumer_committed(consumer, topics, values, partitions.size.toUSize, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
+        if committed == null then throw nativeError(error, errorCode)
+
+        try Vector.tabulate(partitions.size): index =>
+            val size     = stackalloc[CSize]()
+            val metadata = Bindings.xkafka_committed_metadata_at(committed, index.toUSize, size)
+            StoredOffset(
+              Bindings.xkafka_committed_offset_at(committed, index.toUSize),
+              Bindings.xkafka_committed_leader_epoch_at(committed, index.toUSize),
+              if metadata == null then "" else new String(chunk(metadata, !size).toArray, StandardCharsets.UTF_8)
+            )
+        finally Bindings.xkafka_committed_destroy(committed)
 
   override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)] =
     F.blocking:
@@ -628,6 +640,20 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     val values               = alloc[CLongLong](offsets.size)
     offsets.iterator.zipWithIndex.foreach((entry, index) => values(index) = entry._2.value)
     (topics, partitions, values)
+
+  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
+  private def commitArrays(offsets: Vector[(TopicPartition, OffsetAndMetadata)])(using
+      Zone
+  ): (Ptr[CString], Ptr[CInt], Ptr[CLongLong], Ptr[CInt], Ptr[CString]) =
+    val (topics, partitions) = partitionArrays(offsets.map(_._1))
+    val values               = alloc[CLongLong](offsets.size)
+    val epochs               = alloc[CInt](offsets.size)
+    val metadata             = alloc[CString](offsets.size)
+    offsets.iterator.zipWithIndex.foreach: (entry, index) =>
+      values(index) = entry._2.offset.value
+      epochs(index) = entry._2.leaderEpoch.fold(-1)(_.value)
+      metadata(index) = toCString(entry._2.metadata)
+    (topics, partitions, values, epochs, metadata)
 
   /** A call that names partitions and reports a failure through the usual out-parameters. */
   private def partitionCall(partitions: Vector[TopicPartition])(call: (Ptr[CString], Ptr[CInt], CSize, CString, Ptr[CInt]) => CInt): F[Unit] =

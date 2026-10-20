@@ -55,7 +55,9 @@ private[xkafka] object GroupMembership:
     * A transaction reads these to record offsets against the groups they came from, and the wording of both failures lives here so that every backend
     * reports the same thing.
     */
-  def resolve[F[_]](batch: CommittableOffsetBatch[F])(using F: MonadCancelThrow[F]): Resource[F, List[(GroupHandle, Map[TopicPartition, Offset])]] =
+  def resolve[F[_]](
+      batch: CommittableOffsetBatch[F]
+  )(using F: MonadCancelThrow[F]): Resource[F, List[(GroupHandle, Map[TopicPartition, OffsetAndMetadata])]] =
     batch.memberships.toList.traverse { (membership, offsets) =>
       membership.handle match
         case Some(handle) => Resource.makeFull[F, GroupHandle](poll => poll(handle.acquire))(handle.release).map(_ -> offsets)

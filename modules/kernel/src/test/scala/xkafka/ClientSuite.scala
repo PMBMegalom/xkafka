@@ -450,8 +450,8 @@ final class ClientSuite extends FunSuite:
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
         override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
         override def stopConsuming: Option[Unit]                                                = Some(())
-        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] =
-          Some(topicPartitions.map(_ -> Some(nextOffset)).toMap)
+        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[OffsetAndMetadata]]] =
+          Some(topicPartitions.map(_ -> Some(OffsetAndMetadata(nextOffset))).toMap)
         override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =
           Some(topicPartitions.map(_ -> offset).toMap)
         override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =
@@ -484,7 +484,7 @@ final class ClientSuite extends FunSuite:
       (
         consumerRecord,
         Set(consumerRecord.topicPartition),
-        Map(consumerRecord.topicPartition -> Some(nextOffset)),
+        Map(consumerRecord.topicPartition -> Some(OffsetAndMetadata(nextOffset))),
         Map(consumerRecord.topicPartition -> offset),
         Map(consumerRecord.topicPartition -> nextOffset),
         Map(consumerRecord.topicPartition -> Some(offset))
@@ -505,9 +505,9 @@ final class ClientSuite extends FunSuite:
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
         override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
         override def stopConsuming: Option[Unit]                                                = Some(())
-        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] = Some(Map.empty)
-        override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]  = Some(Map.empty)
-        override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]        = Some(Map.empty)
+        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[OffsetAndMetadata]]] = Some(Map.empty)
+        override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]             = Some(Map.empty)
+        override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]                   = Some(Map.empty)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(Map.empty)
         override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
@@ -532,7 +532,7 @@ final class ClientSuite extends FunSuite:
   test("a committer transformed between effects keeps the group its offsets belong to"):
     val source =
       new OffsetCommitter[Option]:
-        override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Option[Unit] = Some(())
 
         override private[xkafka] val membership: GroupMembership[Option] = GroupMembership.Backend(Some(TestGroupHandle("workers")), _ => Some(()))
 
@@ -541,7 +541,7 @@ final class ClientSuite extends FunSuite:
   test("a committer that did not come from a consumer names no group"):
     val source =
       new OffsetCommitter[Option]:
-        override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Option[Unit] = Some(())
 
     assertEquals(source.membership.handle, None)
     assertEquals(source.mapK(optionToSyncIO).membership.handle, None)
@@ -848,7 +848,7 @@ final class ClientSuite extends FunSuite:
 
   private val optionCommitter: OffsetCommitter[Option] =
     new OffsetCommitter[Option]:
-      override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Option[Unit] = Some(())
 
   private def offsetAt(partition: Partition, nextOffsetValue: Offset): CommittableOffset[Option] =
     new CommittableOffset[Option]:

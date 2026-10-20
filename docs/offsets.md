@@ -7,6 +7,23 @@ policy stay in the calling effect.
 A successful `record.offset.commit` stores `record.offset.nextOffset`, the
 offset after the one just handled.
 
+## Leader epoch and metadata
+
+An offset commits with the leader epoch of the record it was read with. It can
+also carry text of your own, which the broker stores beside it and `committed`
+returns:
+
+```scala
+record.offset.withMetadata("processed by worker 3").commit
+```
+
+The broker keeps no difference between empty metadata and none, so empty means
+none. It refuses metadata longer than its `offset.metadata.max.bytes`, 4096
+bytes by default, and the commit fails with `ErrorCode.OffsetMetadataTooLarge`.
+A batch keeps the metadata of the offset it keeps, and a
+[transaction](transactions.md) stores both the epoch and the metadata of the
+offsets it records.
+
 ## Batches
 
 Offsets can be accumulated and committed together while the consumer resource
@@ -44,6 +61,8 @@ How many offsets a rebalance affects depends on the partition assignment strateg
 
 `committer.commit(offsets)` takes offsets that did not come from a record, so it
 can only check that the consumer owns each partition at the time of the commit.
+It commits them with no leader epoch and no metadata;
+`committer.commitWithMetadata` takes an `OffsetAndMetadata` for each partition.
 
 To turn fencing off:
 

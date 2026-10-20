@@ -30,11 +30,11 @@ import org.scalacheck.Prop.forAll
 final class OffsetBatchPropertySuite extends ScalaCheckSuite, ModelGenerators:
   private val committer: OffsetCommitter[Id] =
     new OffsetCommitter[Id]:
-      override def commit(offsets: Map[TopicPartition, Offset]): Id[Unit] = ()
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Id[Unit] = ()
 
   private val otherCommitter: OffsetCommitter[Id] =
     new OffsetCommitter[Id]:
-      override def commit(offsets: Map[TopicPartition, Offset]): Id[Unit] = ()
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Id[Unit] = ()
 
   private def offsetAt(topicPartition: TopicPartition, next: Offset, owner: OffsetCommitter[Id]): CommittableOffset[Id] =
     val partition = topicPartition

@@ -99,7 +99,7 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit]
 
-  def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit]
+  def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit]
 
   def groupMetadata(consumer: Client): F[GroupMetadata]
 
@@ -125,14 +125,14 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def assignment(consumer: Client): F[Vector[(String, Int)]]
 
-  def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit]
+  def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit]
 
   def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
 
   def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
 
-  /** The committed offset of each partition in request order, negative where none is committed. */
-  def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]]
+  /** What is committed for each partition, in request order. */
+  def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]]
 
   /** The low and high watermarks of one partition. */
   def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)]
@@ -181,12 +181,21 @@ private[xkafka] final case class EncodedRecord(
 /** Where a record was delivered. A negative offset or timestamp is one the broker did not report. */
 private[xkafka] final case class Delivery(partition: Int, offset: Long, timestamp: Long)
 
-/** A record the consumer polled, copied out of the client's own memory. */
+/** A committed offset as the broker stores it. A negative offset or leader epoch is one that is not there. */
+private[xkafka] final case class StoredOffset(offset: Long, leaderEpoch: Int, metadata: String)
+
+/** A record the consumer polled, copied out of the client's own memory.
+  *
+  * `timestampType` is 1 for a creation time and 2 for a log append time, as librdkafka numbers them, and anything else where the record has no
+  * timestamp. A negative `leaderEpoch` is one the backend did not report.
+  */
 private[xkafka] final case class PolledRecord(
     topic: String,
     partition: Int,
     offset: Long,
     timestamp: Option[Long],
+    timestampType: Int,
+    leaderEpoch: Int,
     key: Option[Chunk[Byte]],
     value: Option[Chunk[Byte]],
     headers: Headers

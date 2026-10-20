@@ -37,14 +37,16 @@ int xkafka_producer_commit_transaction(rd_kafka_t *producer, int timeout_ms, cha
 int xkafka_producer_abort_transaction(rd_kafka_t *producer, int timeout_ms, char *error, size_t error_size, int32_t *error_code,
                                       int32_t *is_fatal, int32_t *is_retriable, int32_t *txn_requires_abort);
 int xkafka_producer_send_offsets(rd_kafka_t *producer, void *metadata, const char *const *topics, const int32_t *partitions,
-                                 const int64_t *offset_values, size_t count, int timeout_ms, char *error, size_t error_size,
-                                 int32_t *error_code, int32_t *is_fatal, int32_t *is_retriable, int32_t *txn_requires_abort);
+                                 const int64_t *offset_values, const int32_t *leader_epochs, const char *const *offset_metadata,
+                                 size_t count, int timeout_ms, char *error, size_t error_size, int32_t *error_code, int32_t *is_fatal,
+                                 int32_t *is_retriable, int32_t *txn_requires_abort);
 rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer, int timeout_ms, int *status, char *error, size_t error_size,
                                          int32_t *error_code);
 int xkafka_consumer_commit(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, const int64_t *offset_values,
-                           size_t count, int timeout_ms, char *error, size_t error_size, int32_t *error_code);
-int xkafka_consumer_committed(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, size_t count,
-                              int64_t *offset_values, int timeout_ms, char *error, size_t error_size, int32_t *error_code);
+                           const int32_t *leader_epochs, const char *const *metadata, size_t count, int timeout_ms, char *error,
+                           size_t error_size, int32_t *error_code);
+void *xkafka_consumer_committed(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, size_t count,
+                                int timeout_ms, char *error, size_t error_size, int32_t *error_code);
 int xkafka_consumer_watermark_offsets(rd_kafka_t *consumer, const char *topic, int32_t partition, int64_t *low, int64_t *high,
                                       int timeout_ms, char *error, size_t error_size, int32_t *error_code);
 int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions,
@@ -319,6 +321,8 @@ typedef struct {
         char **topics;
         const int32_t *partitions;
         const int64_t *values_in;
+        const int32_t *leader_epochs;
+        char **metadata_values;
         int64_t *values_out;
         int32_t *codes;
         size_t count;
@@ -327,6 +331,7 @@ typedef struct {
         xkafka_error_slots_t slots;
         xkafka_flags_t flags;
         int32_t *result;
+        void **pointer_result;
 } xkafka_partitions_job_t;
 
 enum { XKAFKA_SEND_OFFSETS, XKAFKA_COMMIT, XKAFKA_COMMITTED, XKAFKA_OFFSETS_FOR_TIMES, XKAFKA_DELETE_RECORDS };
@@ -340,16 +345,18 @@ static void xkafka_partitions_job_run(xkafka_job_t *job) {
         switch (call->kind) {
         case XKAFKA_SEND_OFFSETS:
                 *call->result = xkafka_producer_send_offsets(call->client, call->metadata, topics, call->partitions, call->values_in,
-                                                             call->count, call->timeout_ms, s->error, s->error_size, s->error_code,
-                                                             f->is_fatal, f->is_retriable, f->txn_requires_abort);
+                                                             call->leader_epochs, (const char *const *)call->metadata_values, call->count,
+                                                             call->timeout_ms, s->error, s->error_size, s->error_code, f->is_fatal,
+                                                             f->is_retriable, f->txn_requires_abort);
                 break;
         case XKAFKA_COMMIT:
-                *call->result = xkafka_consumer_commit(call->client, topics, call->partitions, call->values_in, call->count,
-                                                       call->timeout_ms, s->error, s->error_size, s->error_code);
+                *call->result = xkafka_consumer_commit(call->client, topics, call->partitions, call->values_in, call->leader_epochs,
+                                                       (const char *const *)call->metadata_values, call->count, call->timeout_ms, s->error,
+                                                       s->error_size, s->error_code);
                 break;
         case XKAFKA_COMMITTED:
-                *call->result = xkafka_consumer_committed(call->client, topics, call->partitions, call->count, call->values_out,
-                                                          call->timeout_ms, s->error, s->error_size, s->error_code);
+                *call->pointer_result = xkafka_consumer_committed(call->client, topics, call->partitions, call->count, call->timeout_ms,
+                                                                  s->error, s->error_size, s->error_code);
                 break;
         case XKAFKA_OFFSETS_FOR_TIMES:
                 *call->result = xkafka_consumer_offsets_for_times(call->client, topics, call->partitions, call->values_in, call->count,
@@ -367,6 +374,7 @@ static void xkafka_partitions_job_run(xkafka_job_t *job) {
 static void xkafka_partitions_job_release(xkafka_job_t *job) {
         xkafka_partitions_job_t *call = (xkafka_partitions_job_t *)job;
         xkafka_free_strings(call->topics, call->count);
+        xkafka_free_strings(call->metadata_values, call->count);
 }
 
 static xkafka_partitions_job_t *xkafka_partitions_job(rd_kafka_t *client, const char *const *topics, const int32_t *partitions,
@@ -394,42 +402,58 @@ static xkafka_partitions_job_t *xkafka_partitions_job(rd_kafka_t *client, const 
         return call;
 }
 
+/* Copies the offsets' metadata, which the call reads after the starting call returns. Frees the job where it cannot. */
+static int xkafka_partitions_job_metadata(xkafka_partitions_job_t *call, const char *const *metadata) {
+        int ok = 1;
+
+        call->metadata_values = xkafka_copy_strings(metadata, call->count, &ok);
+        if (!ok) {
+                xkafka_free_strings(call->topics, call->count);
+                free(call);
+        }
+        return ok;
+}
+
 int xkafka_async_producer_send_offsets(rd_kafka_t *producer, void *metadata, const char *const *topics, const int32_t *partitions,
-                                       const int64_t *offset_values, size_t count, int timeout_ms, char *error, size_t error_size,
-                                       int32_t *error_code, int32_t *is_fatal, int32_t *is_retriable, int32_t *txn_requires_abort,
-                                       int32_t *result, xkafka_done_t done, int64_t token) {
+                                       const int64_t *offset_values, const int32_t *leader_epochs, const char *const *offset_metadata,
+                                       size_t count, int timeout_ms, char *error, size_t error_size, int32_t *error_code,
+                                       int32_t *is_fatal, int32_t *is_retriable, int32_t *txn_requires_abort, int32_t *result,
+                                       xkafka_done_t done, int64_t token) {
         xkafka_partitions_job_t *call = xkafka_partitions_job(producer, topics, partitions, count, timeout_ms, XKAFKA_SEND_OFFSETS,
                                                               error, error_size, error_code, result);
 
-        if (call == NULL)
+        if (call == NULL || !xkafka_partitions_job_metadata(call, offset_metadata))
                 return -1;
         call->metadata = metadata;
         call->values_in = offset_values;
+        call->leader_epochs = leader_epochs;
         call->flags = (xkafka_flags_t){is_fatal, is_retriable, txn_requires_abort};
         return xkafka_job_start(&call->job, done, token);
 }
 
 int xkafka_async_consumer_commit(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions,
-                                 const int64_t *offset_values, size_t count, int timeout_ms, char *error, size_t error_size,
-                                 int32_t *error_code, int32_t *result, xkafka_done_t done, int64_t token) {
+                                 const int64_t *offset_values, const int32_t *leader_epochs, const char *const *metadata, size_t count,
+                                 int timeout_ms, char *error, size_t error_size, int32_t *error_code, int32_t *result, xkafka_done_t done,
+                                 int64_t token) {
         xkafka_partitions_job_t *call =
             xkafka_partitions_job(consumer, topics, partitions, count, timeout_ms, XKAFKA_COMMIT, error, error_size, error_code, result);
 
-        if (call == NULL)
+        if (call == NULL || !xkafka_partitions_job_metadata(call, metadata))
                 return -1;
         call->values_in = offset_values;
+        call->leader_epochs = leader_epochs;
         return xkafka_job_start(&call->job, done, token);
 }
 
 int xkafka_async_consumer_committed(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, size_t count,
-                                    int64_t *offset_values, int timeout_ms, char *error, size_t error_size, int32_t *error_code,
-                                    int32_t *result, xkafka_done_t done, int64_t token) {
+                                    int timeout_ms, char *error, size_t error_size, int32_t *error_code, void **result, xkafka_done_t done,
+                                    int64_t token) {
         xkafka_partitions_job_t *call = xkafka_partitions_job(consumer, topics, partitions, count, timeout_ms, XKAFKA_COMMITTED, error,
-                                                              error_size, error_code, result);
+                                                              error_size, error_code, NULL);
 
         if (call == NULL)
                 return -1;
-        call->values_out = offset_values;
+        call->pointer_result = result;
         return xkafka_job_start(&call->job, done, token);
 }
 

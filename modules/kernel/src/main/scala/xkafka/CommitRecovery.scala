@@ -90,13 +90,14 @@ object CommitRecovery:
     if policy.maxAttempts == 0 then committer
     else
       new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = retrying(offsets, committer.commit(offsets), 1)
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
+          retrying(offsets.view.mapValues(_.offset).toMap, committer.commitWithMetadata(offsets), 1)
 
         /** Each attempt goes through the committer's own check, so a partition revoked during a backoff fails the next attempt instead of being held
           * across every retry.
           */
-        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
-          retrying(offsets.view.mapValues(_._1).toMap, committer.commitLeased(offsets), 1)
+        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): F[Unit] =
+          retrying(offsets.view.mapValues(_._1.offset).toMap, committer.commitLeased(offsets), 1)
 
         /** The membership travels with the committer, so a transaction still reaches the group these offsets came from. */
         override private[xkafka] def membership: GroupMembership[F] = committer.membership

@@ -134,6 +134,10 @@ private[xkafka] object Bindings:
 
   def xkafka_message_timestamp(message: CVoidPtr): CLongLong = extern
 
+  def xkafka_message_timestamp_type(message: CVoidPtr): CInt = extern
+
+  def xkafka_message_leader_epoch(message: CVoidPtr): CInt = extern
+
   def xkafka_message_key(message: CVoidPtr): CVoidPtr = extern
 
   def xkafka_message_key_size(message: CVoidPtr): CSize = extern
@@ -168,12 +172,19 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       count: CSize,
-      offsets: Ptr[CLongLong],
       timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]
-  ): CInt = extern
+  ): CVoidPtr = extern
+
+  def xkafka_committed_offset_at(committed: CVoidPtr, index: CSize): CLongLong = extern
+
+  def xkafka_committed_leader_epoch_at(committed: CVoidPtr, index: CSize): CInt = extern
+
+  def xkafka_committed_metadata_at(committed: CVoidPtr, index: CSize, size: Ptr[CSize]): CVoidPtr = extern
+
+  def xkafka_committed_destroy(committed: CVoidPtr): Unit = extern
 
   def xkafka_consumer_position(
       consumer: CVoidPtr,
@@ -420,6 +431,8 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       offsets: Ptr[CLongLong],
+      leaderEpochs: Ptr[CInt],
+      offsetMetadata: Ptr[CString],
       count: CSize,
       timeoutMs: CInt,
       error: CString,
@@ -435,6 +448,8 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       offsets: Ptr[CLongLong],
+      leaderEpochs: Ptr[CInt],
+      metadata: Ptr[CString],
       count: CSize,
       timeoutMs: CInt,
       error: CString,

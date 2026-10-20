@@ -23,6 +23,18 @@ val program =
   yield records
 ```
 
+## What a record carries
+
+Besides its topic-partition, offset, key, value and headers, a `ConsumerRecord`
+has:
+
+| field | meaning |
+| --- | --- |
+| `timestamp` | `RecordTimestamp.CreateTime` where the producer set the time, or `LogAppendTime` where the topic's `message.timestamp.type` is `LogAppendTime` and the broker set it |
+| `leaderEpoch` | the leader epoch of the partition when the record was written |
+| `serializedKeySize` | the key's size in bytes as it was read, or `None` for a record without a key |
+| `serializedValueSize` | the value's size in bytes as it was read, or `None` for a record without a value |
+
 ## What a consumer reads
 
 `Selection` says where a consumer's records come from.
@@ -135,7 +147,9 @@ Within the consumer resource:
 
 - `assignment` reports the currently assigned topic-partitions.
 - `assignmentChanges` emits the current assignment and then each distinct one.
-- `committed` returns broker-stored next offsets, without sentinel values.
+- `committed` returns broker-stored next offsets, with the leader epoch and
+  metadata each was committed with, and `None` for a partition with no
+  committed offset.
 - `beginningOffsets` and `endOffsets` query the available offset range.
 - `offsetsForTimes` finds the earliest available offsets at or after timestamps.
 - `partitionsFor` and `listTopics` expose visible topic metadata.

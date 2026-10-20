@@ -198,7 +198,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       override private[xkafka] val pausing: PartitionPausing[IO]      = partitionPausing
       // A backend stops fetching and lets what it has already fetched drain, which is what closing does here.
       override def stopConsuming: IO[Unit]                                                                                      = input.close.void
-      override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]]                     = IO.pure(Map.empty)
+      override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[OffsetAndMetadata]]]          = IO.pure(Map.empty)
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                      = IO.pure(Map.empty)
       override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]                            = IO.pure(Map.empty)
       override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] = IO.pure(Map.empty)
@@ -227,7 +227,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
         override val nextOffset: Offset             = followingOffset
         override val committer: OffsetCommitter[IO] =
           new OffsetCommitter[IO]:
-            override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+            override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
     CommittableConsumerRecord(ConsumerRecord(topicPartition, offset, None, "key", value, Headers.empty), committable)
 
   private def recorded(
@@ -245,5 +245,6 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
         override val nextOffset: Offset             = followingOffset
         override val committer: OffsetCommitter[IO] =
           new OffsetCommitter[IO]:
-            override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = committed.update(_ ++ offsets.toVector)
+            override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] =
+              committed.update(_ ++ offsets.view.mapValues(_.offset).toVector)
     CommittableConsumerRecord(ConsumerRecord(topicPartition, offset, None, "key", value, Headers.empty), committable)

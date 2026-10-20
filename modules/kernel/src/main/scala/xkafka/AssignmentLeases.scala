@@ -92,7 +92,7 @@ private[xkafka] sealed trait AssignmentLeases[F[_]]:
   def held: F[LeaseKey => Option[Lease]]
 
   /** Offsets that came with no lease of their own, paired with each partition's current lease, so they commit only for a partition held now. */
-  final def current(offsets: Map[TopicPartition, Offset])(using cats.Functor[F]): F[Map[TopicPartition, (Offset, Option[Lease])]] =
+  final def current[A](offsets: Map[TopicPartition, A])(using cats.Functor[F]): F[Map[TopicPartition, (A, Option[Lease])]] =
     held.map(now =>
       offsets.map((topicPartition, offset) => topicPartition -> (offset, now(LeaseKey(topicPartition.topic.value, topicPartition.partition.value))))
     )

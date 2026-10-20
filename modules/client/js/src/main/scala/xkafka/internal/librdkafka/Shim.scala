@@ -82,7 +82,7 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val sendOffsets       =
     f(
       "int xkafka_async_producer_send_offsets(void *producer, void *metadata, const char **topics, const int32_t *partitions, const int64_t *offsets, " +
-        s"size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
+        s"const int32_t *leader_epochs, const char **offset_metadata, size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
     )
   val groupMetadata        = f("void *xkafka_consumer_group_metadata(void *consumer)")
   val groupMetadataDestroy = f("void xkafka_consumer_group_metadata_destroy(void *metadata)")
@@ -107,6 +107,8 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val messagePartition = f("int32_t xkafka_message_partition(void *message)")
   val messageOffset    = f("int64_t xkafka_message_offset(void *message)")
   val messageTimestamp = f("int64_t xkafka_message_timestamp(void *message)")
+  val messageTimeType  = f("int32_t xkafka_message_timestamp_type(void *message)")
+  val messageEpoch     = f("int32_t xkafka_message_leader_epoch(void *message)")
   val messageKey       = f("void *xkafka_message_key(void *message)")
   val messageKeySize   = f("size_t xkafka_message_key_size(void *message)")
   val messageValue     = f("void *xkafka_message_value(void *message)")
@@ -125,13 +127,16 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
 
   val commit =
     f(
-      "int xkafka_async_consumer_commit(void *consumer, const char **topics, const int32_t *partitions, const int64_t *offsets, size_t count, " +
-        s"int timeout_ms, $Error, int32_t *result, $Done)"
+      "int xkafka_async_consumer_commit(void *consumer, const char **topics, const int32_t *partitions, const int64_t *offsets, " +
+        s"const int32_t *leader_epochs, const char **metadata, size_t count, int timeout_ms, $Error, int32_t *result, $Done)"
     )
-  val committed =
-    f(s"int xkafka_async_consumer_committed(void *consumer, $PartitionNames, int64_t *offsets, int timeout_ms, $Error, int32_t *result, $Done)")
-  val position   = f(s"int xkafka_consumer_position(void *consumer, $PartitionNames, int64_t *offsets, $Error)")
-  val watermarks =
+  val committed           = f(s"int xkafka_async_consumer_committed(void *consumer, $PartitionNames, int timeout_ms, $Error, void **result, $Done)")
+  val committedOffsetAt   = f("int64_t xkafka_committed_offset_at(void *committed, size_t index)")
+  val committedEpochAt    = f("int32_t xkafka_committed_leader_epoch_at(void *committed, size_t index)")
+  val committedMetadataAt = f("void *xkafka_committed_metadata_at(void *committed, size_t index, _Out_ size_t *size)")
+  val committedDestroy    = f("void xkafka_committed_destroy(void *committed)")
+  val position            = f(s"int xkafka_consumer_position(void *consumer, $PartitionNames, int64_t *offsets, $Error)")
+  val watermarks          =
     f(
       "int xkafka_async_consumer_watermark_offsets(void *consumer, const char *topic, int32_t partition, int64_t *low, int64_t *high, " +
         s"int timeout_ms, $Error, int32_t *result, $Done)"

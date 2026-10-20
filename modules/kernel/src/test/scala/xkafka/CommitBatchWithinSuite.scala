@@ -55,7 +55,8 @@ final class CommitBatchWithinSuite extends CatsEffectSuite:
 
   private def recordingCommitter(committed: Ref[IO, Vector[Map[TopicPartition, Offset]]]): OffsetCommitter[IO] =
     new OffsetCommitter[IO]:
-      override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = committed.update(_ :+ offsets)
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] =
+        committed.update(_ :+ offsets.view.mapValues(_.offset).toMap)
 
   private def offsetAt(partition: Partition, nextOffsetValue: Offset, offsetCommitter: OffsetCommitter[IO]): CommittableOffset[IO] =
     new CommittableOffset[IO]:
