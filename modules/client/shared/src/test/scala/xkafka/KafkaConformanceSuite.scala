@@ -442,17 +442,18 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         reader   <- consumerSettings(server, group)
         idle <- reader.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds)).liftTo[IO]
         history <- Ref.of[IO, Vector[(FiniteDuration, Int)]](Vector.empty)
-        // The reading member's assignments as they change, so a handover that happens quickly is not missed.
-        // The idle member may join first and take both partitions, so the reader may start with none.
+        // The reading member's assignments as they change, so a handover that happens quickly is not missed. It holds both
+        // partitions before the idle member joins, so the handover runs from its first change to fewer than both.
+        holdsBoth  = (IO.sleep(250.millis) *> history.get).iterateWhile(!_.exists(_._2 == 2)).void
         handedOver =
           history.get.map: changes =>
-            changes.collectFirst { case (shared, held) if held < 2 => shared }
+            changes.dropWhile(_._2 < 2).collectFirst { case (shared, held) if held < 2 => shared }
               .flatMap(shared => changes.collectFirst { case (taken, 2) if taken > shared => taken - shared })
         outcome <-
           PlatformKafkaClient().consumer(reader, selection).use: other =>
             val watching = other.assignmentChanges.evalMap(changed => IO.monotonic.flatMap(at => history.update(_ :+ (at -> changed.size))))
             (other.records.compile.drain, watching.compile.drain).parTupled.background.surround:
-              PlatformKafkaClient().consumer(idle, selection).use: _ =>
+              holdsBoth.timeout(60.seconds) *> PlatformKafkaClient().consumer(idle, selection).use: _ =>
                 (IO.sleep(250.millis) *> handedOver).iterateWhile(_.isEmpty).map(_.get).timeout(90.seconds)
                   .onError(_ => history.get.flatMap(changes => IO.println(s"[$backend] the reading member's assignments: $changes")))
           .timeout(120.seconds)
