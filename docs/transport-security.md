@@ -66,6 +66,11 @@ other form, so an inline key in another form, such as `RSA PRIVATE KEY`, is a
 `SettingsError`. `openssl pkcs8 -topk8` converts one. The certificate's key and
 password are kept out of `toString`.
 
+Java 17 can't read a key encrypted with PBES2, the scheme `openssl pkcs8`
+uses by default, so on the JVM with Java 17 acquiring the client fails with
+`InvalidConfiguration`. Encrypt the key with `openssl pkcs8 -topk8 -v1
+PBE-SHA1-3DES` instead, which every backend reads. Java 21 reads both.
+
 ## Credentials
 
 `SaslSettings` accepts `SaslMechanism.Plain`, `ScramSha256`, and `ScramSha512`,

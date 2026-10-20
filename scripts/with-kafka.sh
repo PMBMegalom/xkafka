@@ -54,7 +54,7 @@ openssl x509 -req -in "$secrets_dir/broker.csr" -sha256 -days 2 \
   -out "$secrets_dir/broker.crt" >/dev/null 2>&1
 cat "$secrets_dir/broker.key" "$secrets_dir/broker.crt" > "$secrets_dir/broker.pem"
 # A client certificate from the same authority, for the listener that requires one. Its key is PKCS#8,
-# the only form the Java client reads, once as it is and once encrypted.
+# the only form the Java client reads, once as it is and once encrypted with a scheme Java 17 reads.
 openssl req -newkey rsa:2048 -sha256 -nodes \
   -keyout "$secrets_dir/client.key" -out "$secrets_dir/client.csr" \
   -subj "/CN=xkafka test client" >/dev/null 2>&1
@@ -62,7 +62,7 @@ openssl x509 -req -in "$secrets_dir/client.csr" -sha256 -days 2 \
   -CA "$secrets_dir/ca.pem" -CAkey "$secrets_dir/ca.key" -CAcreateserial \
   -extfile <(printf 'extendedKeyUsage=clientAuth\n') \
   -out "$secrets_dir/client.crt" >/dev/null 2>&1
-openssl pkcs8 -topk8 -v2 aes-256-cbc -in "$secrets_dir/client.key" \
+openssl pkcs8 -topk8 -v1 PBE-SHA1-3DES -in "$secrets_dir/client.key" \
   -out "$secrets_dir/client-encrypted.key" -passout "pass:$key_password" >/dev/null 2>&1
 cat "$secrets_dir/client.key" "$secrets_dir/client.crt" > "$secrets_dir/client.pem"
 cat "$secrets_dir/client-encrypted.key" "$secrets_dir/client.crt" > "$secrets_dir/client-encrypted.pem"
