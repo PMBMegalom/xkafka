@@ -26,7 +26,7 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.IO
 import munit.CatsEffectSuite
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
+import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** Every effect the client hands out is a description: building one asks nothing of the driver, so nothing reaches a broker until it runs. */
 final class EffectLazinessSuite extends CatsEffectSuite:
@@ -158,13 +158,13 @@ final class EffectLazinessSuite extends CatsEffectSuite:
       handle match
         case group: RecordedGroup => Some(group)
         case _                    => None
-    override def assign(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = called("assign")(IO.unit)
-    override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit]    = called("subscribe")(IO.unit)
-    override def poll(consumer: Client, timeoutMillis: Int): IO[List[PolledRecord]]     = called("poll")(IO.sleep(timeoutMillis.millis).as(Nil))
-    override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]]           = called("takeRebalances")(IO.pure(Nil))
-    override def applyRebalance(consumer: Client, event: Event): IO[Unit]               = called("applyRebalance")(IO.unit)
-    override def cooperative(consumer: Client): IO[Boolean]                             = called("cooperative")(IO.pure(true))
-    override def assignment(consumer: Client): IO[Vector[(String, Int)]]                = called("assignment")(IO.pure(Vector.empty))
+    override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): IO[Unit] = called("assign")(IO.unit)
+    override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit]                             = called("subscribe")(IO.unit)
+    override def poll(consumer: Client, timeoutMillis: Int): IO[List[PolledRecord]] = called("poll")(IO.sleep(timeoutMillis.millis).as(Nil))
+    override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]]       = called("takeRebalances")(IO.pure(Nil))
+    override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): IO[Unit] = called("applyRebalance")(IO.unit)
+    override def cooperative(consumer: Client): IO[Boolean]                                        = called("cooperative")(IO.pure(true))
+    override def assignment(consumer: Client): IO[Vector[(String, Int)]]                           = called("assignment")(IO.pure(Vector.empty))
     override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
       called("commit")(IO.unit)
     override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]  = called("pause")(IO.unit)

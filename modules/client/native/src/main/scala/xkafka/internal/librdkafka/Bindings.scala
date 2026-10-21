@@ -111,7 +111,15 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_cooperative(consumer: CVoidPtr): CInt = extern
 
-  def xkafka_consumer_apply_rebalance(consumer: CVoidPtr, event: CVoidPtr): Unit = extern
+  def xkafka_consumer_apply_rebalance(
+      consumer: CVoidPtr,
+      event: CVoidPtr,
+      startTopics: Ptr[CString],
+      startPartitions: Ptr[CInt],
+      startOffsets: Ptr[CLongLong],
+      startLeaderEpochs: Ptr[CInt],
+      startCount: CSize
+  ): Unit = extern
 
   def xkafka_subscription_new(count: CSize): CVoidPtr = extern
 
@@ -342,6 +350,11 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       count: CSize,
+      startTopics: Ptr[CString],
+      startPartitions: Ptr[CInt],
+      startOffsets: Ptr[CLongLong],
+      startLeaderEpochs: Ptr[CInt],
+      startCount: CSize,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]

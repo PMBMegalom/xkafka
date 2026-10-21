@@ -29,7 +29,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
 import internal.{ClientProperties, PollQueue}
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
+import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 private def isolationLevel(value: IsolationLevel): String =
   value match
@@ -146,7 +146,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       client <- nativeClient(createConsumer(settings), driver.destroyConsumer)
       leases <- Resource.eval(AssignmentLeases[F](settings.assignmentFencing))
       hold   <- Resource.eval(RevocationHold[F](settings.rebalanceSafeCommits.map(_.limit)))
-      _      <- Resource.eval(client(select(client.handle, selection)))
+      starts <- Resource.eval(startsFor(settings.startingOffsets, initialAssignment(selection)))
+      _      <- Resource.eval(client(select(client.handle, selection, starts)))
       // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
       _ <-
         Resource.eval(
@@ -287,12 +288,21 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     private val requestTimeoutMillis = AdminTimeoutMillis
 
-  private def select(consumer: driver.Client, selection: Selection): F[Unit] =
+  private def select(consumer: driver.Client, selection: Selection, starts: Vector[StartAt]): F[Unit] =
     selection match
       // Names the partitions to read directly, so the consumer joins no group and its assignment never changes.
-      case Selection.Partitions(topicPartitions) => driver.assign(consumer, topicPartitions.toSortedSet.toVector)
+      case Selection.Partitions(topicPartitions) => driver.assign(consumer, topicPartitions.toSortedSet.toVector, starts)
       case Selection.Topics(values)              => driver.subscribe(consumer, values.toNonEmptyList.map(_.value))
       case Selection.Pattern(pattern)            => driver.subscribe(consumer, NonEmptyList.one(pattern.anchored))
+
+  /** Where the application's own offsets start `partitions`, for those it answers for. */
+  private def startsFor(startingOffsets: Option[StartingOffsets[F]], partitions: Set[TopicPartition]): F[Vector[StartAt]] =
+    startingOffsets.filter(_ => partitions.nonEmpty).fold(F.pure(Vector.empty[StartAt])): starting =>
+      starting.offsets(partitions).timeoutTo(starting.limit, F.raiseError(new KafkaException.StartingOffsetsTimedOut(partitions, starting.limit)))
+        .map(
+          _.toVector.collect:
+            case (partition, start) if partitions.contains(partition) => StartAt(partition, start.offset.value, start.leaderEpoch.fold(-1)(_.value))
+        )
 
   private def initialAssignment(selection: Selection): Set[TopicPartition] =
     selection match
@@ -487,18 +497,26 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       */
     val rebalancing: Stream[F, Nothing] =
       Stream.repeatEval(F.uncancelable(poll => poll(rebalances.take).flatMap(rebalanced(poll)))).drain
-        .onFinalize(rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event)))))
+        .onFinalize(rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event, Vector.empty)))))
 
     private def rebalanced(poll: Poll[F])(taken: Rebalance[driver.Event]): F[Unit] =
-      val leasing =
-        taken.kind match
-          case 1 => assigned(taken.partitions)
-          case 0 => handOver(taken.partitions) *> leases.revoke(taken.partitions)
-          // Partitions the group has already given away can commit nothing more, so nothing is waited for.
-          case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
-          // Anything else clears the assignment to resynchronise, which ends every lease with it.
-          case _ => leases.assign(Nil, replacing = true)
-      poll(leasing).guarantee(client(driver.applyRebalance(client.handle, taken.event))) *> poll(assignment.flatMap(assignments.set))
+      Ref.of[F, Vector[StartAt]](Vector.empty).flatMap: starts =>
+        val leasing =
+          taken.kind match
+            case 1 => assigned(taken.partitions) *> starting(taken.partitions).flatMap(starts.set)
+            case 0 => handOver(taken.partitions) *> leases.revoke(taken.partitions)
+            // Partitions the group has already given away can commit nothing more, so nothing is waited for.
+            case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
+            // Anything else clears the assignment to resynchronise, which ends every lease with it.
+            case _ => leases.assign(Nil, replacing = true)
+        val applying = starts.get.flatMap(chosen => client(driver.applyRebalance(client.handle, taken.event, chosen)))
+        poll(leasing).guarantee(applying) *> poll(assignment.flatMap(assignments.set))
+
+    /** Where the application starts the partitions just assigned. Where it fails, so does the record stream, and the partitions start where they
+      * would.
+      */
+    private def starting(partitions: List[LeaseKey]): F[Vector[StartAt]] =
+      startsFor(settings.startingOffsets, partitions.flatMap(topicPartition).toSet).handleErrorWith(error => failure.complete(error).as(Vector.empty))
 
     private def assigned(partitions: List[LeaseKey]): F[Unit] =
       client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(partitions, replacing = !cooperative)) *> hold.assign(partitions)

@@ -247,6 +247,56 @@ final class DriverClientSuite extends CatsEffectSuite:
           assert(!early, "an aborted transaction let the revocation go ahead")
           assertEquals(outcome, Right(()))
 
+  test("starting offsets start each assigned partition where the application says, before it is assigned"):
+    FakeDriver().flatMap: fake =>
+      Ref.of[IO, List[Set[TopicPartition]]](Nil).flatMap: asked =>
+        val settings = starting(1.second)(partitions => asked.update(_ :+ partitions).as(partitions.map(_ -> startAt(7L, Some(3))).toMap))
+        consuming(fake, settings)(_ => fake.assign *> fake.until(_.contains("assign")) *> (fake.calls, asked.get).tupled).map: (calls, questions) =>
+          assertEquals(questions, List(Set(eventsZero)))
+          assertEquals(calls.filter(call => call.startsWith("start") || call == "assign"), Vector("start events-0 at 7 in epoch 3", "assign"))
+
+  test("a partition the starting offsets answer nothing for starts where it would, and one they were not asked for is left alone"):
+    FakeDriver().flatMap: fake =>
+      val elsewhere = TopicPartition(Topic.from("elsewhere").toOption.get, Partition.from(0).toOption.get)
+      consuming(fake, starting(1.second)(_ => IO.pure(Map(elsewhere -> startAt(7L))))): _ =>
+        fake.assign *> fake.until(_.contains("assign")) *> fake.calls.map(calls => assertEquals(calls.filter(_.startsWith("start")), Vector.empty))
+
+  test("starting offsets that fail fail the record stream, and the partition is still assigned"):
+    FakeDriver().flatMap: fake =>
+      val failure = new Exception("no offsets")
+      consuming(fake, starting(1.second)(_ => IO.raiseError(failure))): consumer =>
+        fake.assign *> fake.until(_.contains("assign")) *> consumer.records.compile.drain.attempt.map(outcome => assertEquals(outcome, Left(failure)))
+
+  test("starting offsets that pass their limit fail the record stream as timed out"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, starting(200.millis)(_ => IO.never)): consumer =>
+        fake.assign *> fake.until(_.contains("assign")) *> consumer.records.compile.drain.attempt.map:
+          case Left(timedOut: KafkaException.StartingOffsetsTimedOut) =>
+            assertEquals(timedOut.topicPartitions, Set(eventsZero))
+            assertEquals(timedOut.limit, 200.millis)
+          case other => fail(s"expected the starting offsets to time out, got $other")
+
+  test("partitions named directly start where the starting offsets say, and their failure fails creating the consumer"):
+    FakeDriver().flatMap: fake =>
+      val named   = Selection.Partitions(NonEmptySet.one(eventsZero))
+      val failure = new Exception("no offsets")
+      val client  = new DriverClient[IO](fake)
+      for
+        _      <- client.consumer(starting(1.second)(partitions => IO.pure(partitions.map(_ -> startAt(4L)).toMap)), named).use_
+        calls  <- fake.calls
+        failed <- client.consumer(starting(1.second)(_ => IO.raiseError(failure)), named).use_.attempt
+      yield
+        assertEquals(calls.filter(call => call.startsWith("start") || call == "assign"), Vector("start events-0 at 4 in epoch -1", "assign"))
+        assertEquals(failed, Left(failure))
+
+  private val eventsZero = TopicPartition(events, Partition.from(0).toOption.get)
+
+  private def startAt(offset: Long, epoch: Option[Int] = None): StartingOffset =
+    StartingOffset(Offset.from(offset).toOption.get, epoch.map(LeaderEpoch.from(_).toOption.get))
+
+  private def starting(limit: FiniteDuration)(offsets: Set[TopicPartition] => IO[Map[TopicPartition, StartingOffset]]) =
+    consumerSettings.withStartingOffsets(limit)(offsets).toOption.get
+
   private val topics = Selection.Topics(NonEmptySet.one(events))
 
   private def consuming[A](fake: FakeDriver, settings: ConsumerSettings[IO, String, String] = consumerSettings)(
@@ -394,7 +444,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         case metadata: FakeGroupMetadata => Some(metadata)
         case _                           => None
 
-    override def assign(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = unused("assign")
+    override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): IO[Unit] =
+      starts.traverse_(started) *> record("assign")
 
     override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit] = IO.unit
 
@@ -411,7 +462,11 @@ final class DriverClientSuite extends CatsEffectSuite:
     /** Makes the next take that finds a rebalance signal `taken`, then pause before it returns. */
     def pauseNextTake(taken: Deferred[IO, Unit]): IO[Unit] = pauseTake.set(Some(taken))
 
-    override def applyRebalance(consumer: Client, event: Event): IO[Unit] = record(if event == 1 then "assign" else "unassign")
+    override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): IO[Unit] =
+      starts.traverse_(started) *> record(if event == 1 then "assign" else "unassign")
+
+    private def started(start: StartAt): IO[Unit] =
+      record(s"start ${start.partition.topic.value}-${start.partition.partition.value} at ${start.offset} in epoch ${start.leaderEpoch}")
 
     override def cooperative(consumer: Client): IO[Boolean] = IO.pure(false)
 

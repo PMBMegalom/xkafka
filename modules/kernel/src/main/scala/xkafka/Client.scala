@@ -106,6 +106,7 @@ enum SettingsError derives CanEqual:
   case HeartbeatNotBelowSessionTimeout(heartbeatInterval: FiniteDuration, sessionTimeout: FiniteDuration)
   case MaxPollIntervalBelowSessionTimeout(maxPollInterval: FiniteDuration, sessionTimeout: FiniteDuration)
   case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
+  case StartingOffsetsLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
 
   def message: String =
     this match
@@ -131,6 +132,8 @@ enum SettingsError derives CanEqual:
       case MaxPollIntervalBelowSessionTimeout(maxPoll, session) => s"maxPollInterval must be at least sessionTimeout, was $maxPoll against $session"
       case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit, maxPoll) =>
         s"the rebalance-safe commit limit must be less than maxPollInterval, was $limit against $maxPoll"
+      case StartingOffsetsLimitNotBelowMaxPollInterval(limit, maxPoll) =>
+        s"the starting offsets limit must be less than maxPollInterval, was $limit against $maxPoll"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -147,6 +150,7 @@ object SettingsError:
     case HeartbeatInterval        extends DurationField("heartbeatInterval")
     case MaxPollInterval          extends DurationField("maxPollInterval")
     case RebalanceSafeCommitLimit extends DurationField("rebalanceSafeCommits.limit")
+    case StartingOffsetsLimit     extends DurationField("startingOffsets.limit")
 
   enum PropertyScope(val label: String) derives CanEqual:
     case Client   extends PropertyScope("client")
@@ -510,6 +514,16 @@ object RebalanceSafeCommits:
     /** The revocation goes ahead, and the consumer's record stream fails as `KafkaException.UncommittedRevocation`. */
     case Fail
 
+/** Where an assigned partition starts reading, with the leader epoch of the record before it where the application kept one. */
+final case class StartingOffset(offset: Offset, leaderEpoch: Option[LeaderEpoch] = None)
+
+/** Offsets an application keeps itself, which each partition assigned to a consumer starts from.
+  *
+  * `offsets` gets the partitions just assigned and answers with where each starts. It must answer within `limit`.
+  */
+final case class StartingOffsets[F[_]](offsets: Set[TopicPartition] => F[Map[TopicPartition, StartingOffset]], limit: FiniteDuration):
+  def mapK[G[_]](fk: FunctionK[F, G]): StartingOffsets[G] = StartingOffsets(partitions => fk(offsets(partitions)), limit)
+
 sealed abstract case class ConsumerSettings[F[_], K, V] private (
     client: ClientSettings,
     groupId: ConsumerGroup,
@@ -527,7 +541,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     sessionTimeout: Option[FiniteDuration],
     heartbeatInterval: Option[FiniteDuration],
     maxPollInterval: FiniteDuration,
-    rebalanceSafeCommits: Option[RebalanceSafeCommits]
+    rebalanceSafeCommits: Option[RebalanceSafeCommits],
+    startingOffsets: Option[StartingOffsets[F]]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -547,7 +562,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       sessionTimeout,
       heartbeatInterval,
       maxPollInterval,
-      rebalanceSafeCommits
+      rebalanceSafeCommits,
+      startingOffsets.map(_.mapK(fk))
     ) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
@@ -632,6 +648,20 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
   /** Lets a revocation go ahead as soon as the transactions recording its offsets finish, which is the default. */
   def withoutRebalanceSafeCommits: ConsumerSettings[F, K, V] = copied(rebalanceSafeCommits = None)
 
+  /** Starts each assigned partition at the offset `offsets` answers for it, which must answer within `limit`, itself less than the maximum poll
+    * interval.
+    *
+    * It is called with the partitions each rebalance assigns, before any of their records are fetched, and once at the start with partitions named
+    * directly. A partition it answers nothing for starts where it would without it. If it fails or passes its limit, the record stream fails, or for
+    * partitions named directly, creating the consumer fails.
+    */
+  def withStartingOffsets(limit: FiniteDuration)(
+      offsets: Set[TopicPartition] => F[Map[TopicPartition, StartingOffset]]
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(startingOffsets = Some(StartingOffsets(offsets, limit)))
+
+  /** Starts each assigned partition at its committed offset, or where `autoOffsetReset` says, which is the default. */
+  def withoutStartingOffsets: ConsumerSettings[F, K, V] = copied(startingOffsets = None)
+
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
@@ -653,7 +683,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitRecovery: CommitRecovery = commitRecovery,
       assignmentFencing: Boolean = assignmentFencing,
       groupInstanceId: Option[String] = groupInstanceId,
-      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits,
+      startingOffsets: Option[StartingOffsets[F]] = startingOffsets
   ): ConsumerSettings[F, K, V] =
     new ConsumerSettings(
       client,
@@ -672,7 +703,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       sessionTimeout,
       heartbeatInterval,
       maxPollInterval,
-      rebalanceSafeCommits
+      rebalanceSafeCommits,
+      startingOffsets
     ) {}
 
   private def revalidated(
@@ -684,7 +716,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       sessionTimeout: Option[FiniteDuration] = sessionTimeout,
       heartbeatInterval: Option[FiniteDuration] = heartbeatInterval,
       maxPollInterval: FiniteDuration = maxPollInterval,
-      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits,
+      startingOffsets: Option[StartingOffsets[F]] = startingOffsets
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     ConsumerSettings.from(
       client,
@@ -703,13 +736,15 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       sessionTimeout,
       heartbeatInterval,
       maxPollInterval,
-      rebalanceSafeCommits
+      rebalanceSafeCommits,
+      startingOffsets
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
-      )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval,$rebalanceSafeCommits)"
+      )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval,$rebalanceSafeCommits,${startingOffsets
+        .map(value => s"StartingOffsets(${value.limit})")})"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -756,7 +791,8 @@ object ConsumerSettings:
       sessionTimeout: Option[FiniteDuration] = None,
       heartbeatInterval: Option[FiniteDuration] = None,
       maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval,
-      rebalanceSafeCommits: Option[RebalanceSafeCommits] = None
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = None,
+      startingOffsets: Option[StartingOffsets[F]] = None
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
     val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
@@ -764,7 +800,8 @@ object ConsumerSettings:
       sessionTimeout.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.SessionTimeout, _, SessionTimeoutLimit)) ++
         heartbeatInterval.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.HeartbeatInterval, _, HeartbeatIntervalLimit)) ++
         limitedDurationErrors(SettingsError.DurationField.MaxPollInterval, maxPollInterval, MaxPollIntervalLimit) ++
-        rebalanceSafeCommits.toList.flatMap(safe => durationErrors(SettingsError.DurationField.RebalanceSafeCommitLimit, safe.limit))
+        rebalanceSafeCommits.toList.flatMap(safe => durationErrors(SettingsError.DurationField.RebalanceSafeCommitLimit, safe.limit)) ++
+        startingOffsets.toList.flatMap(starting => durationErrors(SettingsError.DurationField.StartingOffsetsLimit, starting.limit))
     // The Java client refuses the first combination and librdkafka the second, so both are refused here for every backend. They are only
     // compared once each is valid on its own.
     val combinations =
@@ -774,7 +811,10 @@ object ConsumerSettings:
           Option.when(maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session)) ++
           // A revocation held longer than this outlasts the group's patience, which removes the consumer from it.
           rebalanceSafeCommits.filter(_.limit >= maxPollInterval)
-            .map(safe => SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(safe.limit, maxPollInterval))
+            .map(safe => SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(safe.limit, maxPollInterval)) ++
+          // The rest of the group waits while the offsets are fetched, so the same holds for them.
+          startingOffsets.filter(_.limit >= maxPollInterval)
+            .map(starting => SettingsError.StartingOffsetsLimitNotBelowMaxPollInterval(starting.limit, maxPollInterval))
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
@@ -798,7 +838,8 @@ object ConsumerSettings:
         sessionTimeout,
         heartbeatInterval,
         maxPollInterval,
-        rebalanceSafeCommits
+        rebalanceSafeCommits,
+        startingOffsets
       ) {}
     )
 

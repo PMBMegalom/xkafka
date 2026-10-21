@@ -41,6 +41,8 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   private val Done           = s"${Shim.DoneType} *done, int64_t token"
   private val Properties     = "const char **property_names, const char **property_values, size_t property_count"
   private val PartitionNames = "const char **topics, const int32_t *partitions, size_t count"
+  private val Starts         =
+    "const char **start_topics, const int32_t *start_partitions, const int64_t *start_offsets, const int32_t *start_leader_epochs, size_t start_count"
 
   val versionStr  = f("const char *xkafka_version_str(void)")
   val shimId      = f("const char *xkafka_shim_id(void)")
@@ -91,13 +93,13 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val rebalanceKind       = f("int xkafka_rebalance_kind(void *event)")
   val rebalancePartitions = f("void *xkafka_rebalance_partitions(void *event)")
   val cooperative         = f("int xkafka_consumer_cooperative(void *consumer)")
-  val applyRebalance      = f("void xkafka_consumer_apply_rebalance(void *consumer, void *event)")
+  val applyRebalance      = f(s"void xkafka_consumer_apply_rebalance(void *consumer, void *event, $Starts)")
 
   val subscriptionNew     = f("void *xkafka_subscription_new(size_t count)")
   val subscriptionDestroy = f("void xkafka_subscription_destroy(void *subscription)")
   val subscriptionAdd     = f("void xkafka_subscription_add(void *subscription, const char *topic)")
   val subscribe           = f(s"int xkafka_consumer_subscribe(void *consumer, void *subscription, $Error)")
-  val assign              = f(s"int xkafka_consumer_assign(void *consumer, $PartitionNames, $Error)")
+  val assign              = f(s"int xkafka_consumer_assign(void *consumer, $PartitionNames, $Starts, $Error)")
   val pause               = f(s"int xkafka_consumer_pause(void *consumer, $PartitionNames, $Error)")
   val resume              = f(s"int xkafka_consumer_resume(void *consumer, $PartitionNames, $Error)")
 

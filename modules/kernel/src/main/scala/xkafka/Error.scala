@@ -21,6 +21,8 @@
 
 package xkafka
 
+import scala.concurrent.duration.FiniteDuration
+
 import cats.ApplicativeThrow
 import cats.data.{NonEmptyList, ValidatedNel}
 import cats.syntax.all.*
@@ -213,6 +215,10 @@ object KafkaException:
   /** Partitions revoked while records a consumer handed out from them were still uncommitted, after the rebalance-safe commit limit passed. */
   final class UncommittedRevocation(val topicPartitions: Set[TopicPartition])
       extends KafkaException(s"${topicPartitions.size} partitions were revoked with records still uncommitted")
+
+  /** Starting offsets that were not supplied within their limit, for the partitions they were asked for. */
+  final class StartingOffsetsTimedOut(val topicPartitions: Set[TopicPartition], val limit: FiniteDuration)
+      extends KafkaException(s"the starting offsets of ${topicPartitions.size} partitions were not supplied within $limit")
 
   /** An operation the portable API cannot carry out with what it was given. */
   final class Unsupported(val detail: String) extends KafkaException(detail)

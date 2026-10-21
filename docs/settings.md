@@ -93,8 +93,8 @@ can invalidate the result, such as `withProperty`, return
 duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
 `withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
 `withRequestTimeout`, `withLinger`, `withSessionTimeout`,
-`withHeartbeatInterval`, `withMaxPollInterval`, and
-`withRebalanceSafeCommits`.
+`withHeartbeatInterval`, `withMaxPollInterval`, `withRebalanceSafeCommits`, and
+`withStartingOffsets`.
 
 ## Consumer settings
 
@@ -114,13 +114,14 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `heartbeatInterval` | each backend's own, 3s on both | how often the consumer tells the group it is alive |
 | `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
 | `rebalanceSafeCommits` | none | how long a partition being taken away waits for the records handed out from it to be committed |
+| `startingOffsets` | none | where each assigned partition starts, from offsets the application keeps |
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default matches
 what Kafka's own clients use.
 
 See [Offsets](offsets.md) for commit recovery, the commit timeout, assignment
-fencing, and rebalance-safe commits, [Transactions](transactions.md) for the isolation level, and
+fencing, rebalance-safe commits, and starting offsets, [Transactions](transactions.md) for the isolation level, and
 [Group membership](consuming.md#group-membership) for `groupInstanceId` and the
 three intervals.
 

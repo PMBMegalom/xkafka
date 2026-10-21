@@ -24,6 +24,7 @@ package internal
 package kafkaclients
 
 import java.time.Duration
+import java.util.Optional
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
 import java.util.regex.Pattern
@@ -52,7 +53,7 @@ import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
 private[xkafka] final case class JavaClients(
@@ -205,8 +206,10 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       case metadata: JavaGroupMetadata => Some(metadata)
       case _                           => None
 
-  override def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    onConsumer(consumer)(_.assign(partitions.map(javaTopicPartition).asJava))
+  override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit] =
+    onConsumer(consumer): value =>
+      value.assign(partitions.map(javaTopicPartition).asJava)
+      startAt(value, starts)
 
   /** A subscription the shared client spells as a pattern starts with `^`, which no topic name can. */
   override def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit] =
@@ -224,7 +227,14 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
     onThread(consumer): thread =>
       F.async_[List[ConsumerThread.Rebalancing]](thread.takeRebalances).map(_.map(taken => Rebalance(taken, taken.kind, taken.partitions)))
 
-  override def applyRebalance(consumer: Client, event: Event): F[Unit] = onThread(consumer)(thread => F.async_[Unit](thread.apply(event)))
+  /** Inside the listener, which an assignment is still waiting in, a seek decides where the partition starts. */
+  override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit] =
+    onThread(consumer)(thread => F.async_[Unit](thread.apply(event, startAt(_, starts))))
+
+  private def startAt(consumer: JavaConsumer[Array[Byte], Array[Byte]], starts: Vector[StartAt]): Unit =
+    starts.foreach: start =>
+      val epoch = if start.leaderEpoch < 0 then Optional.empty[Integer] else Optional.of(Integer.valueOf(start.leaderEpoch))
+      consumer.seek(javaTopicPartition(start.partition), new JavaOffsetAndMetadata(start.offset, epoch, ""))
 
   /** The listener hears a revocation before every assignment, whichever protocol the group uses, so an assignment only ever adds partitions. */
   override def cooperative(consumer: Client): F[Boolean] = F.pure(true)

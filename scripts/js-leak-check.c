@@ -43,7 +43,9 @@ void xkafka_subscription_add(void *subscription, const char *topic);
 void xkafka_subscription_destroy(void *subscription);
 int xkafka_consumer_subscribe(rd_kafka_t *consumer, const void *subscription, ERROR_ARGUMENTS);
 void *xkafka_consumer_take_rebalance(rd_kafka_t *consumer);
-void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer, void *event);
+void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer, void *event, const char *const *start_topics,
+                                     const int32_t *start_partitions, const int64_t *start_offsets,
+                                     const int32_t *start_leader_epochs, size_t start_count);
 int64_t xkafka_message_offset(const void *message);
 int32_t xkafka_message_partition(const void *message);
 void xkafka_message_destroy(void *message);
@@ -160,7 +162,7 @@ static void apply_rebalances(rd_kafka_t *consumer) {
         void *event;
 
         while ((event = xkafka_consumer_take_rebalance(consumer)) != NULL)
-                xkafka_consumer_apply_rebalance(consumer, event);
+                xkafka_consumer_apply_rebalance(consumer, event, NULL, NULL, NULL, NULL, 0);
 }
 
 /* Polls until `wanted` records have arrived, and reports the next offset of the last one. */

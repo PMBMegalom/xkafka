@@ -11,6 +11,7 @@ queue threshold use their usual exception type.
 | `InvalidBackendResponse` | a backend returned data the portable API cannot represent |
 | `InvalidValue` | a value did not meet the rules of the type it was to become |
 | `InvalidSettings` | settings could not be constructed |
+| `StartingOffsetsTimedOut` | a consumer's [starting offsets](offsets.md#starting-from-offsets-you-keep) were not supplied within their limit |
 | `UncommittedRevocation` | a consumer whose [rebalance-safe commits](offsets.md#committing-before-a-partition-moves) fail at their limit gave up partitions with records still uncommitted |
 
 `InvalidValue` carries the `ValidationError` that rejected the value, and

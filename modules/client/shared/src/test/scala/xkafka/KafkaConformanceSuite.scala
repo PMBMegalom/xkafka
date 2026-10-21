@@ -1636,6 +1636,63 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         .timeout(120.seconds)
     yield ()
 
+  test(conformance("with starting offsets, a subscribed consumer starts its partition at the offset supplied, with its leader epoch")):
+    withBroker: server =>
+      val partition = TopicPartition(uniqueTopic("starting"), validPartition(0))
+
+      for
+        _        <- produceValues(server, partition, 10)
+        asked    <- Ref.of[IO, List[Set[TopicPartition]]](Nil)
+        plain    <- consumerSettings(server, uniqueGroup("starting"))
+        settings <-
+          plain.withStartingOffsets(10.seconds)(partitions =>
+            asked.update(_ :+ partitions).as(partitions.map(_ -> StartingOffset(validOffset(6), Some(validEpoch(0)))).toMap)
+          ).liftTo[IO]
+        read      <- firstOffsets(settings, Selection.Topics(NonEmptySet.one(partition.topic)), 4)
+        questions <- asked.get
+      yield
+        assertEquals(questions, List(Set(partition)))
+        assertEquals(read, List(6L, 7L, 8L, 9L))
+
+  test(conformance("with starting offsets, a partition they answer nothing for starts at its committed offset, or where the offset reset says")):
+    withBroker: server =>
+      val partition = TopicPartition(uniqueTopic("starting-committed"), validPartition(0))
+      val selection = Selection.Topics(NonEmptySet.one(partition.topic))
+
+      for
+        _        <- produceValues(server, partition, 3)
+        plain    <- consumerSettings(server, uniqueGroup("starting-committed"))
+        settings <- plain.withStartingOffsets(10.seconds)(_ => IO.pure(Map.empty)).liftTo[IO]
+        reset    <- firstOffsets(settings, selection, 2)
+        _        <- commitFirst(plain, partition.topic)
+        resumed  <- firstOffsets(settings, selection, 2)
+      yield
+        assertEquals(reset, List(0L, 1L), "without a committed offset, the earliest reset should start the partition at its first record")
+        assertEquals(resumed, List(1L, 2L), "the partition should start at its committed offset")
+
+  test(conformance("with starting offsets past the end of the partition, the offset reset decides where it starts")):
+    withBroker: server =>
+      val partition = TopicPartition(uniqueTopic("starting-beyond"), validPartition(0))
+
+      for
+        _        <- produceValues(server, partition, 3)
+        plain    <- consumerSettings(server, uniqueGroup("starting-beyond"))
+        settings <-
+          plain.withStartingOffsets(10.seconds)(partitions => IO.pure(partitions.map(_ -> StartingOffset(validOffset(1000))).toMap)).liftTo[IO]
+        read <- firstOffsets(settings, Selection.Topics(NonEmptySet.one(partition.topic)), 3)
+      yield assertEquals(read, List(0L, 1L, 2L))
+
+  test(conformance("with starting offsets, partitions named directly start at the offset supplied")):
+    withBroker: server =>
+      val partition = TopicPartition(uniqueTopic("starting-named"), validPartition(0))
+
+      for
+        _        <- produceValues(server, partition, 6)
+        plain    <- consumerSettings(server, uniqueGroup("starting-named"))
+        settings <- plain.withStartingOffsets(10.seconds)(partitions => IO.pure(partitions.map(_ -> StartingOffset(validOffset(4))).toMap)).liftTo[IO]
+        read     <- firstOffsets(settings, Selection.Partitions(NonEmptySet.one(partition)), 2)
+      yield assertEquals(read, List(4L, 5L))
+
   test(conformance("with offset reset set to fail, a group without a committed offset fails as needing a reset")):
     withBroker: server =>
       val topic = uniqueTopic("reset-fail-none")
@@ -1764,6 +1821,11 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   /** Topic changes reach the cluster in their own time, so this waits for the partition count to settle. */
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)
+      .timeout(60.seconds)
+
+  /** The offsets of the first `count` records a consumer hands out. */
+  private def firstOffsets(settings: ConsumerSettings[IO, Option[String], Option[String]], selection: Selection, count: Int): IO[List[Long]] =
+    PlatformKafkaClient().consumer(settings, selection).use(_.records.take(count.toLong).map(_.record.offset.value).compile.toList)
       .timeout(60.seconds)
 
   /** Topics created on demand get one partition, so a test that needs more makes its own. */

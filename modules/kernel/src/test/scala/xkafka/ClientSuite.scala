@@ -838,6 +838,28 @@ final class ClientSuite extends FunSuite:
       settings.withRebalanceSafeCommits(1.minute).andThen(_.withMaxPollInterval(1.minute)).toEither,
       Left(NonEmptyList.one(SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(1.minute, 1.minute)))
     )
+
+  test("starting offsets are off unless supplied, their limit must be positive and below the poll interval, and mapK carries them over"):
+    val deserializer = Deserializer.utf8[SyncIO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField.StartingOffsetsLimit
+    val partition    = TopicPartition(Topic.from("events").toOption.get, Partition.from(0).toOption.get)
+    val start        = StartingOffset(Offset.from(7L).toOption.get)
+    val offsets      = (_: Set[TopicPartition]) => SyncIO.pure(Map(partition -> start))
+
+    assertEquals(settings.startingOffsets, None)
+    assertEquals(settings.withStartingOffsets(30.seconds)(offsets).toOption.flatMap(_.startingOffsets).map(_.limit), Some(30.seconds))
+    assertEquals(settings.withStartingOffsets(30.seconds)(offsets).toOption.get.withoutStartingOffsets.startingOffsets, None)
+    assertEquals(
+      settings.withStartingOffsets(Duration.Zero)(offsets).toEither.leftMap(_.toList),
+      Left(List(SettingsError.NonPositiveDuration(field, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withStartingOffsets(1.minute)(offsets).andThen(_.withMaxPollInterval(1.minute)).toEither.leftMap(_.toList),
+      Left(List(SettingsError.StartingOffsetsLimitNotBelowMaxPollInterval(1.minute, 1.minute)))
+    )
+    val mapped = settings.withStartingOffsets(30.seconds)(offsets).toOption.get.mapK(FunctionK.id[SyncIO])
+    assertEquals(mapped.startingOffsets.traverse(_.offsets(Set(partition))).unsafeRunSync(), Some(Map(partition -> start)))
     assert(settings.withRebalanceSafeCommits(1.minute).andThen(_.withMaxPollInterval(2.minutes)).isValid)
 
   test("settings reject the group membership properties the typed model owns"):
