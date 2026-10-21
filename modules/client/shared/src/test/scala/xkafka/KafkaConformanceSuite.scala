@@ -1565,8 +1565,13 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       // More records than a consumer holds unread, so fetching stops while the first one is in hand.
       val records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(index => record(topic, None, Some(s"record $index"), validPartition(index % 2))))
 
+      // A member of the same group reading another topic keeps the group from being empty, so the broker does not remove it while
+      // the member under test is out of it.
+      val elsewhere = uniqueTopic("safe-lost-elsewhere")
+
       for
         _      <- createPartitioned(server, topic, 2)
+        _      <- createPartitioned(server, elsewhere, 1)
         _      <- produce(server, records)
         plain  <- consumerSettings(server, uniqueGroup("safe-lost"))
         member <-
@@ -1575,20 +1580,20 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         inHand <- Deferred[IO, (TopicPartition, Either[Throwable, Unit])]
         read   <- Ref.of[IO, Vector[(TopicPartition, Offset)]](Vector.empty)
         // The record held through the loss was never committed, so it comes again once the member is given its partitions back.
-        rejoined = (IO.sleep(250.millis) *> read.get).iterateUntil(seen => seen.headOption.exists(first => seen.count(_ == first) > 1))
-        outcome <-
-          PlatformKafkaClient().consumer(member, selection).use: consumer =>
-            // The first record stays in hand, uncommitted, for longer than the poll interval, which takes the member out of its group.
-            // It is then committed, as an application finishing with it would.
-            val reading =
-              consumer.records.zipWithIndex.evalMap: (handed, index) =>
-                read.update(_ :+ (handed.offset.topicPartition -> handed.record.offset)) *>
-                  (IO.sleep(15.seconds) *>
-                    handed.offset.commit.attempt.flatMap(committed => inHand.complete(handed.offset.topicPartition -> committed))).whenA(index == 0)
-            // Waiting past the limit after the member is back gives a failure every chance to arrive.
-            IO.race(reading.compile.drain.attempt, rejoined.timeout(90.seconds) *> IO.sleep(6.seconds)).flatMap: raced =>
-              inHand.get.flatMap((partition, _) => consumer.committed(Set(partition))).map(raced -> _)
-          .timeout(120.seconds)
+        rejoined  = (IO.sleep(250.millis) *> read.get).iterateUntil(seen => seen.headOption.exists(first => seen.count(_ == first) > 1))
+        bystander = PlatformKafkaClient().consumer(plain, Selection.Topics(NonEmptySet.one(elsewhere)))
+        outcome <- (bystander *> PlatformKafkaClient().consumer(member, selection)).use: consumer =>
+          // The first record stays in hand, uncommitted, for longer than the poll interval, which takes the member out of its group.
+          // It is then committed, as an application finishing with it would.
+          val reading =
+            consumer.records.zipWithIndex.evalMap: (handed, index) =>
+              read.update(_ :+ (handed.offset.topicPartition -> handed.record.offset)) *>
+                (IO.sleep(15.seconds) *>
+                  handed.offset.commit.attempt.flatMap(committed => inHand.complete(handed.offset.topicPartition -> committed))).whenA(index == 0)
+          // Waiting past the limit after the member is back gives a failure every chance to arrive.
+          IO.race(reading.compile.drain.attempt, rejoined.timeout(90.seconds) *> IO.sleep(6.seconds)).flatMap: raced =>
+            inHand.get.flatMap((partition, _) => consumer.committed(Set(partition))).map(raced -> _)
+        .timeout(120.seconds)
         commit <- inHand.get
       yield
         val (raced, stored)        = outcome

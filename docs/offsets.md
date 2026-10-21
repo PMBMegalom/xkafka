@@ -110,7 +110,9 @@ The record stream then fails with `KafkaException.UncommittedRevocation`, whose
 A consumer that has already been removed from its group, for instance because
 it went longer than `maxPollInterval` without fetching, gives up its partitions
 without waiting. Committing a record it read before it was removed fails with
-`ErrorCode.UnknownMemberId`.
+`ErrorCode.UnknownMemberId`. If it was the group's only member, the broker may
+already have removed the empty group, and the commit fails with
+`ErrorCode.GroupIdNotFound` instead.
 
 ## Committing on a schedule
 
