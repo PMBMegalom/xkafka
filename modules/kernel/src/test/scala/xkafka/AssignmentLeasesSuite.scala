@@ -152,7 +152,7 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
   private case object TestHandle extends GroupHandle
 
   private def handleOf(leases: AssignmentLeases[IO], lease: Option[Lease]): Resource[IO, GroupHandle] =
-    val membership = leases.membership(this, lease, IO.pure(TestHandle), _ => IO.unit).handle.get
+    val membership = leases.membership(this, lease, IO.pure(TestHandle), _ => IO.unit, None).handle.get
     Resource.make(membership.acquire)(membership.release)
 
   private def recorded(leases: AssignmentLeases[IO], lease: Option[Lease]): IO[Either[Throwable, Unit]] = handleOf(leases, lease).use_.attempt

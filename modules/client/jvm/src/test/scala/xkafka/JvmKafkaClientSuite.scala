@@ -354,7 +354,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assert(!early, "the revocation went through while a transaction was still recording its offset")
         assertEquals(recorded, Right(()))
 
-  test("a transaction's offsets the group rejects as another generation's are classified the way librdkafka reports them"):
+  test("offsets the group rejects as another generation's, or refused outside the group, are classified the way librdkafka reports them"):
     // Worded as the Java client words it, which appends the broker's own description of its answer.
     def rejected(error: Errors) =
       new CommitFailedException(s"Transaction offset Commit failed due to consumer group metadata mismatch: ${error.exception.getMessage}")
@@ -362,6 +362,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       List(
         rejected(Errors.ILLEGAL_GENERATION) -> Some(ErrorCode.IllegalGeneration),
         rejected(Errors.UNKNOWN_MEMBER_ID)  -> Some(ErrorCode.UnknownMemberId),
+        // Worded as the Java client words a commit it refuses once the consumer has left its group.
+        new CommitFailedException(
+          "Offset commit cannot be completed since the consumer is not part of an active group for auto partition assignment; it is likely that the consumer was kicked out of the group."
+        ) -> Some(ErrorCode.UnknownMemberId),
         // Any other wording is left as before: Kafka's table has no entry for the exception, so it stays an unknown error.
         new CommitFailedException("the group has already rebalanced") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
       )

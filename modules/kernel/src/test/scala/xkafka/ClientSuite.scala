@@ -807,6 +807,39 @@ final class ClientSuite extends FunSuite:
     )
     assert(settings.withSessionTimeout(10.seconds).andThen(_.withMaxPollInterval(10.seconds)).isValid)
 
+  test("rebalance-safe commits are off unless turned on, and their limit must be positive and below the poll interval"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField.RebalanceSafeCommitLimit
+
+    assertEquals(settings.rebalanceSafeCommits, None)
+    assertEquals(
+      settings.withRebalanceSafeCommits(30.seconds).toOption.flatMap(_.rebalanceSafeCommits),
+      Some(RebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Proceed))
+    )
+    assertEquals(
+      settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail).toOption.flatMap(_.rebalanceSafeCommits),
+      Some(RebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail))
+    )
+    assertEquals(settings.withRebalanceSafeCommits(30.seconds).toOption.get.withoutRebalanceSafeCommits.rebalanceSafeCommits, None)
+    assertEquals(
+      settings.withRebalanceSafeCommits(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(field, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withRebalanceSafeCommits(ConsumerSettings.DefaultMaxPollInterval).toEither,
+      Left(NonEmptyList.one(
+        SettingsError
+          .RebalanceSafeCommitLimitNotBelowMaxPollInterval(ConsumerSettings.DefaultMaxPollInterval, ConsumerSettings.DefaultMaxPollInterval)
+      ))
+    )
+    // Lowering the poll interval revalidates the limit already set.
+    assertEquals(
+      settings.withRebalanceSafeCommits(1.minute).andThen(_.withMaxPollInterval(1.minute)).toEither,
+      Left(NonEmptyList.one(SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(1.minute, 1.minute)))
+    )
+    assert(settings.withRebalanceSafeCommits(1.minute).andThen(_.withMaxPollInterval(2.minutes)).isValid)
+
   test("settings reject the group membership properties the typed model owns"):
     val deserializer = Deserializer.utf8[IO]
 

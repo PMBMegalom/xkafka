@@ -24,7 +24,7 @@ package xkafka
 import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
-import cats.effect.{Deferred, IO, Ref}
+import cats.effect.{Deferred, FiberIO, IO, Ref}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import munit.{CatsEffectSuite, TestOptions}
@@ -1492,6 +1492,145 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(answers.get(partition).map(_.leftMap(_.getMessage)), Some(Right(validOffset(4))))
         assertEquals(consumed.map(_.record.value), List(Some("after")), "the committed transaction should have lost its deleted records")
 
+  test(conformance("with rebalance-safe commits, a member commits what it is handling as its partitions are revoked, so no record is read twice")):
+    withBroker: server =>
+      val topic                             = uniqueTopic("safe-handover")
+      val group                             = uniqueGroup("safe-handover")
+      val selection                         = Selection.Topics(NonEmptySet.one(topic))
+      val partitions                        = List(validPartition(0), validPartition(1))
+      def values(label: String, count: Int) =
+        NonEmptyList.fromListUnsafe(
+          partitions.flatMap(partition => List.tabulate(count)(index => record(topic, None, Some(s"$label-${partition.value}-$index"), partition)))
+        )
+      // Slow enough that the first member is still handling a record when the second one joins.
+      val early = values("early", 40)
+      // Produced once each member holds one partition, so each has to read the one it was given.
+      val late       = values("late", 5)
+      val everything = (early ++ late.toList).toList.flatMap(_.value).toSet
+
+      for
+        _       <- createPartitioned(server, topic, 2)
+        _       <- produce(server, early)
+        plain   <- consumerSettings(server, group)
+        safe    <- plain.withRebalanceSafeCommits(20.seconds).liftTo[IO]
+        reads   <- Ref.of[IO, Vector[(String, String)]](Vector.empty)
+        commits <- Ref.of[IO, Vector[Either[Throwable, Unit]]](Vector.empty)
+        reading =
+          (member: String, consumer: KafkaConsumer[IO, Option[String], Option[String]], handling: FiniteDuration) =>
+            consumer.records.evalMap: read =>
+              reads.update(_ :+ (member -> read.record.value.getOrElse(""))) *> IO.sleep(handling) *>
+                read.offset.commit.attempt.flatMap(outcome => commits.update(_ :+ outcome))
+        readAll = (IO.sleep(250.millis) *> reads.get).iterateUntil(_.map(_._2).toSet == everything)
+        _ <-
+          PlatformKafkaClient().consumer(safe, selection).use: first =>
+            reading("first", first, 250.millis).compile.drain.background.surround:
+              (IO.sleep(250.millis) *> reads.get).iterateUntil(_.size >= 3) *> PlatformKafkaClient().consumer(plain, selection).use: second =>
+                reading("second", second, Duration.Zero).compile.drain.background.surround:
+                  (assignmentOf(first, 1), assignmentOf(second, 1)).parTupled *> produce(server, late) *> readAll
+          .timeout(120.seconds)
+        read      <- reads.get
+        committed <- commits.get
+      yield
+        val repeated = read.groupBy(_._2).collect { case (value, readers) if readers.size > 1 => value -> readers.map(_._1) }
+        assertEquals(repeated, Map.empty[String, Vector[String]], "records were read more than once")
+        assertEquals(committed.collect { case Left(error) => error.getMessage }, Vector.empty[String], "commits failed")
+
+  test(conformance("with rebalance-safe commits, a revocation goes ahead once its limit passes, and the records are read again")):
+    withBroker: server =>
+      heldPastLimit(server, "safe-proceed", RebalanceSafeCommits.AtLimit.Proceed): (first, firstReads, secondReads, waited) =>
+        val readAgain = (IO.sleep(250.millis) *> firstReads.get).iterateUntil(_.size >= 3).timeout(60.seconds)
+        IO.race(first.joinWithNever, readAgain).map:
+          case Left(ended) => fail(s"the first member's record stream ended: $ended")
+          case Right(read) =>
+            assert(waited >= 4.seconds, s"the second member was given a partition after $waited, before the limit passed")
+            assertEquals(secondReads.size, 1)
+            assert(read.take(2).contains(secondReads.head), s"the second member read ${secondReads.head}, which the first had not handed out")
+            assertEquals((secondReads ++ read.drop(2)).toSet, read.take(2).toSet, "between them, the members should read both records again")
+
+  test(conformance("with rebalance-safe commits set to fail at the limit, the record stream fails naming the uncommitted partitions")):
+    withBroker: server =>
+      heldPastLimit(server, "safe-fail", RebalanceSafeCommits.AtLimit.Fail): (first, _, _, waited) =>
+        first.joinWithNever.timeout(60.seconds).map:
+          case Left(failure: KafkaException.UncommittedRevocation) =>
+            assert(waited >= 4.seconds, s"the second member was given a partition after $waited, before the limit passed")
+            assertEquals(failure.topicPartitions.map(_.partition), Set(validPartition(0), validPartition(1)))
+          case other => fail(s"the record stream should have failed as an uncommitted revocation, got $other")
+
+  test(
+    conformance("with rebalance-safe commits, a member that has lost its partitions lets them go without waiting, and cannot commit what it held")
+  ):
+    withBroker: server =>
+      val topic     = uniqueTopic("safe-lost")
+      val selection = Selection.Topics(NonEmptySet.one(topic))
+      // More records than a consumer holds unread, so fetching stops while the first one is in hand.
+      val records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(index => record(topic, None, Some(s"record $index"), validPartition(index % 2))))
+
+      for
+        _      <- createPartitioned(server, topic, 2)
+        _      <- produce(server, records)
+        plain  <- consumerSettings(server, uniqueGroup("safe-lost"))
+        member <-
+          plain.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds))
+            .andThen(_.withRebalanceSafeCommits(4.seconds, RebalanceSafeCommits.AtLimit.Fail)).liftTo[IO]
+        inHand <- Deferred[IO, (TopicPartition, Either[Throwable, Unit])]
+        read   <- Ref.of[IO, Vector[(TopicPartition, Offset)]](Vector.empty)
+        // The record held through the loss was never committed, so it comes again once the member is given its partitions back.
+        rejoined = (IO.sleep(250.millis) *> read.get).iterateUntil(seen => seen.headOption.exists(first => seen.count(_ == first) > 1))
+        outcome <-
+          PlatformKafkaClient().consumer(member, selection).use: consumer =>
+            // The first record stays in hand, uncommitted, for longer than the poll interval, which takes the member out of its group.
+            // It is then committed, as an application finishing with it would.
+            val reading =
+              consumer.records.zipWithIndex.evalMap: (handed, index) =>
+                read.update(_ :+ (handed.offset.topicPartition -> handed.record.offset)) *>
+                  (IO.sleep(15.seconds) *>
+                    handed.offset.commit.attempt.flatMap(committed => inHand.complete(handed.offset.topicPartition -> committed))).whenA(index == 0)
+            // Waiting past the limit after the member is back gives a failure every chance to arrive.
+            IO.race(reading.compile.drain.attempt, rejoined.timeout(90.seconds) *> IO.sleep(6.seconds)).flatMap: raced =>
+              inHand.get.flatMap((partition, _) => consumer.committed(Set(partition))).map(raced -> _)
+          .timeout(120.seconds)
+        commit <- inHand.get
+      yield
+        val (raced, stored)        = outcome
+        val (partition, committed) = commit
+        raced.left.foreach(ended => fail(s"the record stream ended while the member was out of its group: $ended"))
+        committed match
+          case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.UnknownMemberId), failure.getMessage)
+          case other => fail(s"the commit of the record held through the loss should have failed as an unknown member, got $other")
+        assertEquals(stored.get(partition).flatten, None, "the refused commit stored an offset")
+
+  /** A first member with a limit of four seconds hands out one record of each partition and commits neither. A second member then joins, and `check`
+    * gets the first member's record stream, what each member has read, and how long the second one waited for its partition.
+    */
+  private def heldPastLimit(server: String, label: String, atLimit: RebalanceSafeCommits.AtLimit)(
+      check: (FiberIO[Either[Throwable, Unit]], Ref[IO, Vector[String]], List[String], FiniteDuration) => IO[Unit]
+  ): IO[Unit] =
+    val topic     = uniqueTopic(label)
+    val group     = uniqueGroup(label)
+    val selection = Selection.Topics(NonEmptySet.one(topic))
+    val records   = NonEmptyList.of(record(topic, None, Some("held-0"), validPartition(0)), record(topic, None, Some("held-1"), validPartition(1)))
+
+    for
+      _          <- createPartitioned(server, topic, 2)
+      _          <- produce(server, records)
+      plain      <- consumerSettings(server, group)
+      safe       <- plain.withRebalanceSafeCommits(4.seconds, atLimit).liftTo[IO]
+      firstReads <- Ref.of[IO, Vector[String]](Vector.empty)
+      _          <-
+        PlatformKafkaClient().consumer(safe, selection).use: first =>
+          first.records.evalMap(read => firstReads.update(_ :+ read.record.value.getOrElse(""))).compile.drain.attempt.start.flatMap: reading =>
+            for
+              _           <- (IO.sleep(250.millis) *> firstReads.get).iterateUntil(_.size >= 2).timeout(60.seconds)
+              started     <- IO.monotonic
+              secondReads <-
+                PlatformKafkaClient().consumer(plain, selection)
+                  .use(_.records.take(1).evalTap(_.offset.commit).compile.toList.map(_.map(_.record.value.getOrElse(""))))
+              joined <- IO.monotonic
+              _      <- check(reading, firstReads, secondReads, joined - started)
+            yield ()
+        .timeout(120.seconds)
+    yield ()
+
   test(conformance("with offset reset set to fail, a group without a committed offset fails as needing a reset")):
     withBroker: server =>
       val topic = uniqueTopic("reset-fail-none")
@@ -1621,6 +1760,14 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def described(admin: KafkaAdminClient[IO], topic: Topic, partitions: Int): IO[Int] =
     admin.describeTopics(NonEmptySet.one(topic)).attempt.map(_.toOption.flatMap(_.get(topic)).map(_.size).getOrElse(0)).iterateUntil(_ == partitions)
       .timeout(60.seconds)
+
+  /** Topics created on demand get one partition, so a test that needs more makes its own. */
+  private def createPartitioned(server: String, topic: Topic, partitions: Int): IO[Unit] =
+    for
+      client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+      newTopic <- NewTopic.from(topic, partitions = partitions, replicationFactor = 1).liftTo[IO]
+      _ <- PlatformKafkaClient().admin(client).use(admin => admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, partitions))
+    yield ()
 
   /** Deletion reaches the cluster in its own time, and describing a topic it no longer has is a failure. */
   private def absent(admin: KafkaAdminClient[IO], topic: Topic): IO[Boolean] =

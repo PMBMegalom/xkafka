@@ -74,6 +74,44 @@ Without fencing, an offset read before a rebalance can still be committed after 
 partition has moved to another consumer, which moves that partition back to an
 earlier position.
 
+## Committing before a partition moves
+
+When a partition moves, the records your consumer is still handling from it can
+no longer be committed, so the consumer that gets the partition reads them
+again. Rebalance-safe commits give those records time to be committed first:
+
+```scala
+settings.withRebalanceSafeCommits(30.seconds)
+```
+
+Before the consumer gives up a partition, it waits until every record it has
+handed out from that partition is committed, for at most the limit. While it
+waits:
+
+- committing those records succeeds, one at a time, in a batch, or in a
+  [transaction](transactions.md) once the transaction commits;
+- the consumer hands out no further records of that partition, and the consumer
+  that gets the partition reads them instead;
+- the rest of the group waits for the rebalance to finish.
+
+Keep the limit short for that last reason. It must be less than
+`maxPollInterval`.
+
+If the limit passes with records still uncommitted, the consumer gives up the
+partition anyway, and those records are read again. To stop consuming instead:
+
+```scala
+settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail)
+```
+
+The record stream then fails with `KafkaException.UncommittedRevocation`, whose
+`topicPartitions` names the partitions that still had records uncommitted.
+
+A consumer that has already been removed from its group, for instance because
+it went longer than `maxPollInterval` without fetching, gives up its partitions
+without waiting. Committing a record it read before it was removed fails with
+`ErrorCode.UnknownMemberId`.
+
 ## Committing on a schedule
 
 `commitBatchWithin` is an FS2 pipe which commits whenever it collects `n`

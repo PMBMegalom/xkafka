@@ -105,6 +105,7 @@ enum SettingsError derives CanEqual:
   case BlankGroupInstanceId
   case HeartbeatNotBelowSessionTimeout(heartbeatInterval: FiniteDuration, sessionTimeout: FiniteDuration)
   case MaxPollIntervalBelowSessionTimeout(maxPollInterval: FiniteDuration, sessionTimeout: FiniteDuration)
+  case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
 
   def message: String =
     this match
@@ -128,21 +129,24 @@ enum SettingsError derives CanEqual:
       case HeartbeatNotBelowSessionTimeout(heartbeat, session) =>
         s"heartbeatInterval must be less than sessionTimeout, was $heartbeat against $session"
       case MaxPollIntervalBelowSessionTimeout(maxPoll, session) => s"maxPollInterval must be at least sessionTimeout, was $maxPoll against $session"
+      case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit, maxPoll) =>
+        s"the rebalance-safe commit limit must be less than maxPollInterval, was $limit against $maxPoll"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
 
   enum DurationField(val label: String) derives CanEqual:
-    case MetadataRefreshInterval extends DurationField("metadataRefreshInterval")
-    case CloseTimeout            extends DurationField("closeTimeout")
-    case TransactionTimeout      extends DurationField("transactionTimeout")
-    case CommitTimeout           extends DurationField("commitTimeout")
-    case PollTimeout             extends DurationField("pollTimeout")
-    case RequestTimeout          extends DurationField("requestTimeout")
-    case Linger                  extends DurationField("linger")
-    case SessionTimeout          extends DurationField("sessionTimeout")
-    case HeartbeatInterval       extends DurationField("heartbeatInterval")
-    case MaxPollInterval         extends DurationField("maxPollInterval")
+    case MetadataRefreshInterval  extends DurationField("metadataRefreshInterval")
+    case CloseTimeout             extends DurationField("closeTimeout")
+    case TransactionTimeout       extends DurationField("transactionTimeout")
+    case CommitTimeout            extends DurationField("commitTimeout")
+    case PollTimeout              extends DurationField("pollTimeout")
+    case RequestTimeout           extends DurationField("requestTimeout")
+    case Linger                   extends DurationField("linger")
+    case SessionTimeout           extends DurationField("sessionTimeout")
+    case HeartbeatInterval        extends DurationField("heartbeatInterval")
+    case MaxPollInterval          extends DurationField("maxPollInterval")
+    case RebalanceSafeCommitLimit extends DurationField("rebalanceSafeCommits.limit")
 
   enum PropertyScope(val label: String) derives CanEqual:
     case Client   extends PropertyScope("client")
@@ -492,6 +496,20 @@ enum IsolationLevel:
   /** A record written by a transaction is delivered once that transaction commits, and never where it aborts. */
   case ReadCommitted
 
+/** How long a consumer holds back the revocation of a partition for the records it handed out from it to be committed, and what happens if they still
+  * are not.
+  */
+final case class RebalanceSafeCommits(limit: FiniteDuration, atLimit: RebalanceSafeCommits.AtLimit)
+
+object RebalanceSafeCommits:
+  /** What a revocation does once it has waited `limit` with records still uncommitted. */
+  enum AtLimit derives CanEqual:
+    /** The revocation goes ahead, and whoever the partition goes to reads those records again. */
+    case Proceed
+
+    /** The revocation goes ahead, and the consumer's record stream fails as `KafkaException.UncommittedRevocation`. */
+    case Fail
+
 sealed abstract case class ConsumerSettings[F[_], K, V] private (
     client: ClientSettings,
     groupId: ConsumerGroup,
@@ -508,7 +526,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     groupInstanceId: Option[String],
     sessionTimeout: Option[FiniteDuration],
     heartbeatInterval: Option[FiniteDuration],
-    maxPollInterval: FiniteDuration
+    maxPollInterval: FiniteDuration,
+    rebalanceSafeCommits: Option[RebalanceSafeCommits]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -527,7 +546,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       groupInstanceId,
       sessionTimeout,
       heartbeatInterval,
-      maxPollInterval
+      maxPollInterval,
+      rebalanceSafeCommits
     ) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
@@ -598,6 +618,20 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     */
   def withMaxPollInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollInterval = value)
 
+  /** Holds back the revocation of a partition until every record `records` handed out from it is committed, for at most `limit`, which must be less
+    * than the maximum poll interval.
+    *
+    * While it waits, the partition still belongs to this consumer, so those commits succeed, and the records of the partition that have not been
+    * handed out yet are dropped. A partition the group has already given away is let go at once, since nothing can be committed for it.
+    */
+  def withRebalanceSafeCommits(
+      limit: FiniteDuration,
+      atLimit: RebalanceSafeCommits.AtLimit = RebalanceSafeCommits.AtLimit.Proceed
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(rebalanceSafeCommits = Some(RebalanceSafeCommits(limit, atLimit)))
+
+  /** Lets a revocation go ahead as soon as the transactions recording its offsets finish, which is the default. */
+  def withoutRebalanceSafeCommits: ConsumerSettings[F, K, V] = copied(rebalanceSafeCommits = None)
+
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
@@ -618,7 +652,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       isolationLevel: IsolationLevel = isolationLevel,
       commitRecovery: CommitRecovery = commitRecovery,
       assignmentFencing: Boolean = assignmentFencing,
-      groupInstanceId: Option[String] = groupInstanceId
+      groupInstanceId: Option[String] = groupInstanceId,
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits
   ): ConsumerSettings[F, K, V] =
     new ConsumerSettings(
       client,
@@ -636,7 +671,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       groupInstanceId,
       sessionTimeout,
       heartbeatInterval,
-      maxPollInterval
+      maxPollInterval,
+      rebalanceSafeCommits
     ) {}
 
   private def revalidated(
@@ -647,7 +683,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       groupInstanceId: Option[String] = groupInstanceId,
       sessionTimeout: Option[FiniteDuration] = sessionTimeout,
       heartbeatInterval: Option[FiniteDuration] = heartbeatInterval,
-      maxPollInterval: FiniteDuration = maxPollInterval
+      maxPollInterval: FiniteDuration = maxPollInterval,
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     ConsumerSettings.from(
       client,
@@ -665,13 +702,14 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       groupInstanceId,
       sessionTimeout,
       heartbeatInterval,
-      maxPollInterval
+      maxPollInterval,
+      rebalanceSafeCommits
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
-      )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval)"
+      )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval,$rebalanceSafeCommits)"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -717,21 +755,26 @@ object ConsumerSettings:
       groupInstanceId: Option[String] = None,
       sessionTimeout: Option[FiniteDuration] = None,
       heartbeatInterval: Option[FiniteDuration] = None,
-      maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval
+      maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval,
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = None
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
     val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
     val intervals =
       sessionTimeout.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.SessionTimeout, _, SessionTimeoutLimit)) ++
         heartbeatInterval.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.HeartbeatInterval, _, HeartbeatIntervalLimit)) ++
-        limitedDurationErrors(SettingsError.DurationField.MaxPollInterval, maxPollInterval, MaxPollIntervalLimit)
+        limitedDurationErrors(SettingsError.DurationField.MaxPollInterval, maxPollInterval, MaxPollIntervalLimit) ++
+        rebalanceSafeCommits.toList.flatMap(safe => durationErrors(SettingsError.DurationField.RebalanceSafeCommitLimit, safe.limit))
     // The Java client refuses the first combination and librdkafka the second, so both are refused here for every backend. They are only
     // compared once each is valid on its own.
     val combinations =
       if intervals.nonEmpty then Nil
       else
         Option.when(heartbeat >= session)(SettingsError.HeartbeatNotBelowSessionTimeout(heartbeat, session)).toList ++
-          Option.when(maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session))
+          Option.when(maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session)) ++
+          // A revocation held longer than this outlasts the group's patience, which removes the consumer from it.
+          rebalanceSafeCommits.filter(_.limit >= maxPollInterval)
+            .map(safe => SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(safe.limit, maxPollInterval))
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
@@ -754,7 +797,8 @@ object ConsumerSettings:
         groupInstanceId,
         sessionTimeout,
         heartbeatInterval,
-        maxPollInterval
+        maxPollInterval,
+        rebalanceSafeCommits
       ) {}
     )
 
