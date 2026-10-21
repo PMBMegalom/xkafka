@@ -328,6 +328,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   private def leaseKey(topicPartition: TopicPartition): LeaseKey = LeaseKey(topicPartition.topic.value, topicPartition.partition.value)
 
+  private def leaseKeyOf(record: PolledRecord): LeaseKey = LeaseKey(record.topic, record.partition)
+
   /** A partition the backend named, which is only absent where the backend named one no topic or partition can have. */
   private def topicPartition(key: LeaseKey): Option[TopicPartition] =
     (Topic.from(key.topic).toOption, Partition.from(key.partition).toOption).mapN(TopicPartition(_, _))
@@ -418,7 +420,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         Option.when(delivery.timestamp >= 0L)(delivery.timestamp).map(Timestamp.fromEpochMillis)
       )
 
-  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease])
+  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long)
 
   private final class DriverConsumer[K, V](
       client: NativeClient,
@@ -469,13 +471,16 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       *
       * Kafka clients advance group membership only from this call, so it belongs to the consumer and not to whoever happens to be reading records.
       * Each record is labelled with the lease it was read under, and each rebalance the poll raised is handed to `rebalancing`.
+      *
+      * Each record is also labelled with the assignment its partition is read under once the poll returns. A partition is assigned again only after
+      * its revocation is applied, which follows the poll that raised the revocation, and the records of the new assignment come only from a later
+      * poll.
       */
     val pollLoop: Stream[F, Nothing] =
       // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
       PollQueue.feed(
-        Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
-          .evalMap(_ => leases.reading(pollOnce)(record => LeaseKey(record.topic, record.partition))).flatMap(Stream.emits)
-          .map((record, lease) => ReadRecord(record, lease)),
+        Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => leases.reading(pollOnce)(leaseKeyOf).product(hold.readUnder))
+          .flatMap((read, assignment) => Stream.emits(read.map((record, lease) => ReadRecord(record, lease, assignment(leaseKeyOf(record)))))),
         polled,
         failure
       )
@@ -540,10 +545,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
-    /** A record of a partition being revoked is dropped and not handed out, where the revocation waits for what was handed out to be committed. */
+    /** A record of a partition being revoked, or read under an assignment the group has since replaced, is dropped and not handed out, where the
+      * revocation waits for what was handed out to be committed.
+      */
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalMap(decode)
-        .evalFilter(read => hold.handOut(leaseKey(read.offset.topicPartition), read.offset.nextOffset.value))
+      PollQueue.read(polled, failure).evalFilter(read => hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L))
+        .evalMap(decode)
 
     override def assignment: F[Set[TopicPartition]] =
       client(driver.assignment(client.handle)).flatMap: entries =>
