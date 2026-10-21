@@ -1566,7 +1566,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       val records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(index => record(topic, None, Some(s"record $index"), validPartition(index % 2))))
 
       // A member of the same group reading another topic keeps the group from being empty, so the broker does not remove it while
-      // the member under test is out of it.
+      // the member under test is out of it. It joins first, so its joining does not revoke the record held by the member under test.
       val elsewhere = uniqueTopic("safe-lost-elsewhere")
 
       for
@@ -1581,7 +1581,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         read   <- Ref.of[IO, Vector[(TopicPartition, Offset)]](Vector.empty)
         // The record held through the loss was never committed, so it comes again once the member is given its partitions back.
         rejoined  = (IO.sleep(250.millis) *> read.get).iterateUntil(seen => seen.headOption.exists(first => seen.count(_ == first) > 1))
-        bystander = PlatformKafkaClient().consumer(plain, Selection.Topics(NonEmptySet.one(elsewhere)))
+        bystander = PlatformKafkaClient().consumer(plain, Selection.Topics(NonEmptySet.one(elsewhere))).evalTap(assignmentOf(_, 1))
         outcome <- (bystander *> PlatformKafkaClient().consumer(member, selection)).use: consumer =>
           // The first record stays in hand, uncommitted, for longer than the poll interval, which takes the member out of its group.
           // It is then committed, as an application finishing with it would.
