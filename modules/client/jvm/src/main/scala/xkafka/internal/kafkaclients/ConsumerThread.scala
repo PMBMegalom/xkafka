@@ -72,7 +72,7 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
     new ConsumerRebalanceListener:
       override def onPartitionsRevoked(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Revoked, partitions)
 
-      override def onPartitionsLost(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Revoked, partitions)
+      override def onPartitionsLost(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Lost, partitions)
 
       override def onPartitionsAssigned(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Assigned, partitions)
 
@@ -167,6 +167,7 @@ private[kafkaclients] object ConsumerThread:
   /** The kinds `Rebalance` reports. */
   val Assigned = 1
   val Revoked  = 0
+  val Lost     = 2
 
   /** A rebalance the listener is holding until the shared client applies it. */
   final class Rebalancing(val kind: Int, val partitions: List[LeaseKey]):

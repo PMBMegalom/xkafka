@@ -164,10 +164,102 @@ final class DriverClientSuite extends CatsEffectSuite:
       calls <- fake.calls
     yield assert(calls.contains("unassign"), s"the revocation was taken from the driver but never applied: $calls")
 
+  test("with rebalance-safe commits, a revocation waits for the records handed out to be committed, with their partition paused meanwhile"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(10.seconds)): consumer =>
+        for
+          _      <- fake.assign *> fake.until(_.contains("assign"))
+          record <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          _      <- fake.revoke *> fake.until(_.contains("pause")) *> IO.sleep(200.millis)
+          early  <- fake.calls.map(_.contains("unassign"))
+          _      <- record.offset.commit *> fake.until(_.contains("unassign"))
+          calls  <- fake.calls
+        yield
+          assert(!early, "the partition was unassigned while a record handed out of it was uncommitted")
+          assertEquals(handOverCalls(calls), Vector("pause", "commit", "resume", "unassign"))
+
+  test("with rebalance-safe commits, a record of a partition being revoked that was not handed out yet is dropped"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(10.seconds)): consumer =>
+        for
+          _       <- fake.assign *> fake.until(_.contains("assign"))
+          record  <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          _       <- fake.deliver(1L) *> fake.drained
+          _       <- fake.revoke *> fake.until(_.contains("pause"))
+          dropped <- consumer.records.take(1).compile.lastOrError.timeout(300.millis).attempt
+          _       <- record.offset.commit *> fake.until(_.contains("unassign"))
+        yield assert(dropped.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"a record was handed out: $dropped")
+
+  test("with rebalance-safe commits, a revocation goes ahead at its limit and the consumer carries on"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(300.millis)): consumer =>
+        for
+          _     <- fake.assign *> fake.until(_.contains("assign"))
+          _     <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          _     <- fake.revoke *> fake.until(_.contains("unassign"))
+          _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
+          after <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError.attempt
+          calls <- fake.calls
+        yield
+          assertEquals(after.map(_.record.offset.value), Right(1L))
+          assertEquals(handOverCalls(calls), Vector("pause", "resume", "unassign"))
+
+  test("with rebalance-safe commits set to fail, a revocation at its limit fails the record stream"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(300.millis, RebalanceSafeCommits.AtLimit.Fail)): consumer =>
+        for
+          _       <- fake.assign *> fake.until(_.contains("assign"))
+          _       <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          _       <- fake.revoke *> fake.until(_.contains("unassign"))
+          outcome <- consumer.records.compile.drain.attempt
+        yield assertEquals(uncommittedRevocation(outcome), Some(Set(TopicPartition(events, Partition.from(0).toOption.get))))
+
+  test("with rebalance-safe commits, a lost partition is let go at once"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(5.seconds, RebalanceSafeCommits.AtLimit.Fail)): consumer =>
+        for
+          _     <- fake.assign *> fake.until(_.contains("assign"))
+          _     <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          let   <- (fake.lose *> fake.until(_.contains("unassign"))).timed
+          _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
+          after <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError.attempt
+          calls <- fake.calls
+        yield
+          assert(let._1 < 1.second, s"the lost partition was let go after ${let._1}")
+          assertEquals(after.map(_.record.offset.value), Right(1L))
+          assertEquals(handOverCalls(calls), Vector("unassign"))
+
+  test("with rebalance-safe commits, a revocation waits for a transaction that records the offsets handed out to commit"):
+    FakeDriver().flatMap: fake =>
+      transactional(fake, safe(10.seconds)): (producer, consumer) =>
+        for
+          _       <- fake.assign *> fake.until(_.contains("assign"))
+          record  <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          _       <- fake.revoke *> fake.until(_.contains("pause"))
+          aborted <-
+            producer.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(record.offset)) *> IO.raiseError(new Exception)).attempt
+          _       <- IO.sleep(200.millis)
+          early   <- fake.calls.map(_.contains("unassign"))
+          outcome <- recorded(producer, record)
+          _       <- fake.until(_.contains("unassign"))
+        yield
+          assert(aborted.isLeft)
+          assert(!early, "an aborted transaction let the revocation go ahead")
+          assertEquals(outcome, Right(()))
+
   private val topics = Selection.Topics(NonEmptySet.one(events))
 
-  private def consuming[A](fake: FakeDriver)(use: KafkaConsumer[IO, String, String] => IO[A]): IO[A] =
-    new DriverClient[IO](fake).consumer(consumerSettings, topics).use(use).timeout(10.seconds)
+  private def consuming[A](fake: FakeDriver, settings: ConsumerSettings[IO, String, String] = consumerSettings)(
+      use: KafkaConsumer[IO, String, String] => IO[A]
+  ): IO[A] = new DriverClient[IO](fake).consumer(settings, topics).use(use).timeout(10.seconds)
+
+  private def safe(limit: FiniteDuration, atLimit: RebalanceSafeCommits.AtLimit = RebalanceSafeCommits.AtLimit.Proceed) =
+    consumerSettings.withRebalanceSafeCommits(limit, atLimit).toOption.get
+
+  private def handOverCalls(calls: Vector[String]): Vector[String] = calls.filter(Set("pause", "commit", "resume", "unassign"))
+
+  private def uncommittedRevocation(outcome: Either[Throwable, ?]): Option[Set[TopicPartition]] =
+    outcome.left.toOption.collect { case failure: KafkaException.UncommittedRevocation => failure.topicPartitions }
 
   private def transactional[A](fake: FakeDriver, settings: ConsumerSettings[IO, String, String])(
       use: (KafkaTransactionalProducer[IO, String, String], KafkaConsumer[IO, String, String]) => IO[A]
@@ -211,6 +303,11 @@ final class DriverClientSuite extends CatsEffectSuite:
     def assign: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(1, 1, List(partition)))
 
     def revoke: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(0, 0, List(partition)))
+
+    def lose: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(2, 2, List(partition)))
+
+    /** Completes once every delivered record has been polled. */
+    def drained: IO[Unit] = queued.get.map(_.isEmpty).flatMap(done => if done then IO.unit else IO.sleep(5.millis) *> drained)
 
     def deliver(offset: Long): IO[Unit] =
       queued.update(
@@ -324,9 +421,9 @@ final class DriverClientSuite extends CatsEffectSuite:
     override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
       record("commit") *> held(holdCommits)
 
-    override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = IO.unit
+    override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = record("pause")
 
-    override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = IO.unit
+    override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = record("resume")
 
     override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = unused("committed")
 

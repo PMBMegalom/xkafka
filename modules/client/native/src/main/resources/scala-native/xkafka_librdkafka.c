@@ -35,6 +35,9 @@ typedef struct xkafka_batch_s {
 /* A rebalance the callback received and left for the consumer to apply. */
 typedef struct xkafka_rebalance_s {
         rd_kafka_resp_err_t err;
+        /* A revocation of partitions the group already gave away, which only
+         * the callback can still tell. */
+        int lost;
         rd_kafka_topic_partition_list_t *partitions;
         struct xkafka_rebalance_s *next;
 } xkafka_rebalance_t;
@@ -505,6 +508,7 @@ static void xkafka_rebalance_callback(rd_kafka_t *client,
                 return;
         }
         event->err = err;
+        event->lost = err == RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS && rd_kafka_assignment_lost(client);
         event->partitions = rd_kafka_topic_partition_list_copy(partitions);
         if (state->last == NULL)
                 state->pending = event;
@@ -529,13 +533,16 @@ void *xkafka_consumer_take_rebalance(rd_kafka_t *consumer) {
         return event;
 }
 
-/* 1 for an assignment, 0 for a revocation, and -1 for anything else. */
+/* 1 for an assignment, 0 for a revocation, 2 for a revocation of partitions
+ * already lost, and -1 for anything else. */
 int xkafka_rebalance_kind(const void *event) {
-        switch (((const xkafka_rebalance_t *)event)->err) {
+        const xkafka_rebalance_t *taken = (const xkafka_rebalance_t *)event;
+
+        switch (taken->err) {
         case RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS:
                 return 1;
         case RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS:
-                return 0;
+                return taken->lost ? 2 : 0;
         default:
                 return -1;
         }
@@ -701,7 +708,10 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                 *status = 0;
                 return NULL;
         }
-        if (message->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) {
+        /* librdkafka leaves the group when the poll interval is exceeded and rejoins on a later poll, after handing over the lost partitions,
+         * so the notice it queues first is not a failure of the consumer. */
+        if (message->err == RD_KAFKA_RESP_ERR__PARTITION_EOF ||
+            message->err == RD_KAFKA_RESP_ERR__MAX_POLL_EXCEEDED) {
                 rd_kafka_message_destroy(message);
                 *status = 0;
                 return NULL;

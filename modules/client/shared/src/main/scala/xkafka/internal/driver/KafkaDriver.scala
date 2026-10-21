@@ -201,5 +201,7 @@ private[xkafka] final case class PolledRecord(
     headers: Headers
 )
 
-/** A rebalance and the partitions it names. `kind` is 1 for an assignment, 0 for a revocation, and anything else for a failure to resynchronise. */
+/** A rebalance and the partitions it names. `kind` is 1 for an assignment, 0 for a revocation, 2 for a revocation of partitions the group has already
+  * given away, and anything else for a failure to resynchronise.
+  */
 private[xkafka] final case class Rebalance[E](event: E, kind: Int, partitions: List[LeaseKey])

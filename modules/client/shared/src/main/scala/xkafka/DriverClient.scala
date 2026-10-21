@@ -145,6 +145,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     for
       client <- nativeClient(createConsumer(settings), driver.destroyConsumer)
       leases <- Resource.eval(AssignmentLeases[F](settings.assignmentFencing))
+      hold   <- Resource.eval(RevocationHold[F](settings.rebalanceSafeCommits.map(_.limit)))
       _      <- Resource.eval(client(select(client.handle, selection)))
       // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
       _ <-
@@ -162,7 +163,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       failure <- Resource.eval(Deferred[F, Throwable])
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
-      consumer = new DriverConsumer(client, settings, leases, polled, rebalances, assignments, stopping, random, failure)
+      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure)
       // Both are started after the client and cancelled before it, so neither is using the handle when it is destroyed.
       _ <- consumer.rebalancing.compile.drain.onError(failure.complete(_).void).background
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
@@ -213,20 +214,26 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   private final class DriverTransactionalProducer[K, V](client: NativeClient, records: KafkaProducer[F, K, V], lock: Mutex[F], timeoutMillis: Int)
       extends KafkaTransactionalProducer[F, K, V]:
 
+    /** Once the transaction commits, each consumer whose offsets it recorded is told they are committed. */
     override def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A] =
-      lock.lock.surround(client(driver.beginTransaction(client.handle)) *> use(transaction).guaranteeCase:
-        case Outcome.Succeeded(_) => client(driver.commitTransaction(client.handle, timeoutMillis))
-        case Outcome.Canceled()   => client(driver.abortTransaction(client.handle, timeoutMillis))
-        // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
-        case Outcome.Errored(error) => client(driver.abortTransaction(client.handle, timeoutMillis))
-            .handleErrorWith(failure => F.delay(error.addSuppressed(failure))))
+      lock.lock.surround(
+        Ref.of[F, List[CommittableOffsetBatch[F]]](Nil).flatMap: recorded =>
+          client(driver.beginTransaction(client.handle)) *> use(transaction(recorded)).guaranteeCase:
+            case Outcome.Succeeded(_) => client(driver.commitTransaction(client.handle, timeoutMillis)) *>
+                recorded.get.flatMap(_.traverse_(GroupMembership.committed(_)))
+            case Outcome.Canceled() => client(driver.abortTransaction(client.handle, timeoutMillis))
+            // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
+            case Outcome.Errored(error) => client(driver.abortTransaction(client.handle, timeoutMillis))
+                .handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
+      )
 
-    private val transaction: Transaction[F, K, V] =
+    private def transaction(recorded: Ref[F, List[CommittableOffsetBatch[F]]]): Transaction[F, K, V] =
       new Transaction[F, K, V]:
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
         override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
 
-        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] = GroupMembership.resolve(batch).use(commitMemberships)
+        override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
+          GroupMembership.resolve(batch).use(commitMemberships) *> recorded.update(_ :+ batch)
 
         private def commitMemberships(memberships: List[(GroupHandle, Map[TopicPartition, OffsetAndMetadata])]): F[Unit] =
           memberships.traverse_ : membership =>
@@ -308,6 +315,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   private def invalidBackendValue(field: String, value: Any, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error")
+
+  private def leaseKey(topicPartition: TopicPartition): LeaseKey = LeaseKey(topicPartition.topic.value, topicPartition.partition.value)
+
+  /** A partition the backend named, which is only absent where the backend named one no topic or partition can have. */
+  private def topicPartition(key: LeaseKey): Option[TopicPartition] =
+    (Topic.from(key.topic).toOption, Partition.from(key.partition).toOption).mapN(TopicPartition(_, _))
 
   private def offset(field: String, value: Long): Offset = Offset.from(value).fold(error => throw invalidBackendValue(field, value, error), identity)
 
@@ -401,6 +414,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       client: NativeClient,
       settings: ConsumerSettings[F, K, V],
       leases: AssignmentLeases[F],
+      hold: RevocationHold[F],
       polled: Channel[F, ReadRecord],
       rebalances: Queue[F, Rebalance[driver.Event]],
       assignments: SignallingRef[F, Set[TopicPartition]],
@@ -425,11 +439,16 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
             leases.holding(offsets.values.map(_._2).toList)(commitOffsets(offsets.view.mapValues(_._1).toMap))
 
           /** A group is named by the metadata its consumer hands out, which also fences a member the group has already replaced. */
-          override private[xkafka] val membership: GroupMembership[F] = GroupMembership.Backend(groupHandle, releaseGroupMetadata)
+          override private[xkafka] val membership: GroupMembership[F] =
+            GroupMembership.Backend(groupHandle, releaseGroupMetadata, Some(committedElsewhere))
         ,
         settings.commitRecovery,
         random
       )
+
+    /** Offsets a transaction committed, which a held revocation waits for as it does for its own commits. */
+    private def committedElsewhere(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
+      hold.committed(offsets.map((topicPartition, offset) => leaseKey(topicPartition) -> offset.offset.value))
 
     private def releaseGroupMetadata(handle: GroupHandle): F[Unit] =
       handle match
@@ -473,15 +492,40 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     private def rebalanced(poll: Poll[F])(taken: Rebalance[driver.Event]): F[Unit] =
       val leasing =
         taken.kind match
-          case 1 => client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(taken.partitions, replacing = !cooperative))
-          case 0 => leases.revoke(taken.partitions)
+          case 1 => assigned(taken.partitions)
+          case 0 => handOver(taken.partitions) *> leases.revoke(taken.partitions)
+          // Partitions the group has already given away can commit nothing more, so nothing is waited for.
+          case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
           // Anything else clears the assignment to resynchronise, which ends every lease with it.
           case _ => leases.assign(Nil, replacing = true)
       poll(leasing).guarantee(client(driver.applyRebalance(client.handle, taken.event))) *> poll(assignment.flatMap(assignments.set))
 
+    private def assigned(partitions: List[LeaseKey]): F[Unit] =
+      client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(partitions, replacing = !cooperative)) *> hold.assign(partitions)
+
+    /** With rebalance-safe commits, waits for the records handed out of revoked partitions to be committed.
+      *
+      * The partitions are paused meanwhile, so the backend fetches none of their records only to drop them, and resumed before the revocation is
+      * applied. librdkafka keeps a pause across a revocation, so a partition the group later gives back would otherwise stay paused.
+      */
+    private def handOver(partitions: List[LeaseKey]): F[Unit] =
+      settings.rebalanceSafeCommits.traverse_ : safe =>
+        val named   = partitions.flatMap(topicPartition).toVector
+        val pausing = F.whenA[Unit](named.nonEmpty)
+        for
+          _           <- pausing(client(driver.pause(client.handle, named)))
+          uncommitted <- hold.revoke(partitions).guarantee(pausing(client(driver.resume(client.handle, named))))
+          _           <- hold.revoked(partitions)
+          failing = safe.atLimit == RebalanceSafeCommits.AtLimit.Fail && uncommitted.nonEmpty
+          _ <- F.whenA(failing)(failure.complete(new KafkaException.UncommittedRevocation(uncommitted.flatMap(topicPartition))).void)
+        yield ()
+
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = PollQueue.read(polled, failure).evalMap(decode)
+    /** A record of a partition being revoked is dropped and not handed out, where the revocation waits for what was handed out to be committed. */
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
+      PollQueue.read(polled, failure).evalMap(decode)
+        .evalFilter(read => hold.handOut(leaseKey(read.offset.topicPartition), read.offset.nextOffset.value))
 
     override def assignment: F[Set[TopicPartition]] =
       client(driver.assignment(client.handle)).flatMap: entries =>
@@ -579,12 +623,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
             override private[xkafka] val lease: Option[Lease] = read.lease
 
             override private[xkafka] val membership: GroupMembership[F] =
-              leases.membership(DriverConsumer.this, read.lease, groupHandle, releaseGroupMetadata)
+              leases.membership(DriverConsumer.this, read.lease, groupHandle, releaseGroupMetadata, Some(committedElsewhere))
 
         CommittableConsumerRecord(record, committable)
 
     private def commitOffsets(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
-      if offsets.isEmpty then F.unit else client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis))
+      if offsets.isEmpty then F.unit else client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis)) *> committedElsewhere(offsets)
 
     override val pausing: PartitionPausing[F] =
       new PartitionPausing.Backend[F]:

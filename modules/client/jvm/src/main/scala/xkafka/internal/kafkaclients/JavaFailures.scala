@@ -52,7 +52,8 @@ private[kafkaclients] object JavaFailures:
     *
     * A transaction's offsets that the group rejects as no longer its member's come back as one `CommitFailedException` for either of two answers, and
     * only its message, which ends with that answer's own description, says which. Reading it back gives the code librdkafka reports for the same
-    * rejection.
+    * rejection. A consumer that has left its group refuses a commit itself, with a message of its own, where librdkafka sends it without a member id
+    * and the broker answers that the member is unknown.
     */
   private def protocolCode(error: JavaKafkaException): Option[ErrorCode] =
     error match
@@ -73,8 +74,15 @@ private[kafkaclients] object JavaFailures:
   private def tabled(error: JavaKafkaException): Option[ErrorCode] =
     Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
 
-  /** The two answers the Java client folds into a `CommitFailedException` when a transaction records offsets. */
+  /** The two answers the Java client folds into a `CommitFailedException` when a transaction records offsets, and its refusal to commit outside a
+    * group.
+    */
   private def rejectedMembership(failed: CommitFailedException): Option[ErrorCode] =
-    Option(failed.getMessage)
-      .flatMap(message => List(Errors.ILLEGAL_GENERATION, Errors.UNKNOWN_MEMBER_ID).find(value => message.endsWith(value.exception.getMessage)))
-      .map(value => ErrorCode.fromProtocol(value.code.toInt))
+    Option(failed.getMessage).flatMap: message =>
+      if message.contains(NotInGroup) then Some(ErrorCode.UnknownMemberId)
+      else
+        List(Errors.ILLEGAL_GENERATION, Errors.UNKNOWN_MEMBER_ID).find(value => message.endsWith(value.exception.getMessage))
+          .map(value => ErrorCode.fromProtocol(value.code.toInt))
+
+  /** How the Java client words a commit it refuses because the consumer is no longer a member of its group. */
+  private val NotInGroup = "since the consumer is not part of an active group"

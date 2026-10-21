@@ -65,6 +65,10 @@ private[xkafka] object GroupMembership:
             .eval(F.raiseError(new KafkaException.Unsupported("a transaction can only record offsets that came from a consumer of the same backend")))
     }
 
+  /** Tells each consumer in `batch` which of its offsets are now committed, once the transaction that recorded them has committed. */
+  def committed[F[_]](batch: CommittableOffsetBatch[F])(using F: MonadCancelThrow[F]): F[Unit] =
+    batch.memberships.toList.traverse_((membership, offsets) => membership.handle.flatMap(_.onCommitted).traverse_(_(offsets)))
+
   /** For a handle built by one backend and read by another. */
   def unrecognised(handle: GroupHandle): KafkaException.Unsupported =
     new KafkaException.Unsupported(s"a transaction on this backend cannot record offsets from ${handle.getClass.getName}")
@@ -78,12 +82,18 @@ private[xkafka] object GroupMembership:
   /** For offsets whose consumer a transaction of the same backend can name.
     *
     * Two values with the same `key` name the same membership, so a transaction acquires one handle for all the offsets they share, whatever effect
-    * each was transformed into.
+    * each was transformed into. `onCommitted` tells the consumer which of its offsets a transaction committed, where it keeps track of them.
     */
-  final class Backend[F[_]](val key: Any, val acquire: F[GroupHandle], val release: GroupHandle => F[Unit]) extends GroupMembership[F]:
+  final class Backend[F[_]](
+      val key: Any,
+      val acquire: F[GroupHandle],
+      val release: GroupHandle => F[Unit],
+      val onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]] = None
+  ) extends GroupMembership[F]:
     override def handle: Option[Backend[F]] = Some(this)
 
-    override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] = new Backend(key, fk(acquire), handle => fk(release(handle)))
+    override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] =
+      new Backend(key, fk(acquire), handle => fk(release(handle)), onCommitted.map(notify => offsets => fk(notify(offsets))))
 
     override def equals(other: Any): Boolean =
       other match
@@ -94,4 +104,8 @@ private[xkafka] object GroupMembership:
 
   object Backend:
     /** A membership equal only to itself and to its transformations. */
-    def apply[F[_]](acquire: F[GroupHandle], release: GroupHandle => F[Unit]): Backend[F] = new Backend(new AnyRef, acquire, release)
+    def apply[F[_]](
+        acquire: F[GroupHandle],
+        release: GroupHandle => F[Unit],
+        onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]] = None
+    ): Backend[F] = new Backend(new AnyRef, acquire, release, onCommitted)

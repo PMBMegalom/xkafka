@@ -206,6 +206,10 @@ object KafkaException:
   final class CommitFailed(val attempts: Int, val offsets: Map[TopicPartition, Offset], cause: Throwable)
       extends KafkaException(s"committing ${offsets.size} offsets failed after $attempts attempts", cause)
 
+  /** Partitions revoked while records a consumer handed out from them were still uncommitted, after the rebalance-safe commit limit passed. */
+  final class UncommittedRevocation(val topicPartitions: Set[TopicPartition])
+      extends KafkaException(s"${topicPartitions.size} partitions were revoked with records still uncommitted")
+
   /** An operation the portable API cannot carry out with what it was given. */
   final class Unsupported(val detail: String) extends KafkaException(detail)
 
