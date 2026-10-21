@@ -114,6 +114,35 @@ without waiting. Committing a record it read before it was removed fails with
 already have removed the empty group, and the commit fails with
 `ErrorCode.GroupIdNotFound` instead.
 
+## Starting from offsets you keep
+
+An application that stores how far it has got itself, for example in the same
+database transaction as its results, can tell the consumer where each partition
+starts:
+
+```scala
+settings.withStartingOffsets(10.seconds): partitions =>
+  loadPositions(partitions) // F[Map[TopicPartition, StartingOffset]]
+```
+
+The consumer calls the function with the partitions each rebalance assigns,
+before it reads any of their records, and once at the start with partitions
+named directly. Each partition it answers for starts at the offset given, and
+no earlier record of it is handed out. A `StartingOffset` can also carry the
+leader epoch of the last record you handled, `record.offset.leaderEpoch`, if
+you stored it.
+
+- A partition the function answers nothing for starts as it would without the
+  function: at its committed offset, or where `autoOffsetReset` says if it has
+  none.
+- An offset past the end of the partition also starts where `autoOffsetReset`
+  says.
+- The function must answer within its limit, which must be less than
+  `maxPollInterval`. If it fails or passes the limit, the record stream fails,
+  with the function's own failure or with
+  `KafkaException.StartingOffsetsTimedOut`. For partitions named directly,
+  creating the consumer fails instead.
+
 ## Committing on a schedule
 
 `commitBatchWithin` is an FS2 pipe which commits whenever it collects `n`

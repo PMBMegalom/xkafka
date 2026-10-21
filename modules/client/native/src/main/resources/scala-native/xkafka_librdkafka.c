@@ -559,10 +559,41 @@ int xkafka_consumer_cooperative(rd_kafka_t *consumer) {
         return strcmp(rd_kafka_rebalance_protocol(consumer), "COOPERATIVE") == 0;
 }
 
-/* Applies a taken rebalance, and frees it. */
-void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer, void *event) {
+/* Sets where the named partitions of a list about to be assigned start, with a
+ * negative leader epoch for none. A partition the list does not hold is left out. */
+static void xkafka_set_starts(rd_kafka_topic_partition_list_t *list,
+                              const char *const *topics,
+                              const int32_t *partitions,
+                              const int64_t *offsets,
+                              const int32_t *leader_epochs,
+                              size_t count) {
+        size_t index;
+
+        for (index = 0; index < count; index++) {
+                rd_kafka_topic_partition_t *entry =
+                    rd_kafka_topic_partition_list_find(list, topics[index], partitions[index]);
+                if (entry == NULL)
+                        continue;
+                entry->offset = offsets[index];
+                if (leader_epochs[index] >= 0)
+                        rd_kafka_topic_partition_set_leader_epoch(entry, leader_epochs[index]);
+        }
+}
+
+/* Applies a taken rebalance, starting the named partitions of an assignment
+ * where they are given, and frees it. */
+void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer,
+                                     void *event,
+                                     const char *const *start_topics,
+                                     const int32_t *start_partitions,
+                                     const int64_t *start_offsets,
+                                     const int32_t *start_leader_epochs,
+                                     size_t start_count) {
         xkafka_rebalance_t *taken = (xkafka_rebalance_t *)event;
 
+        if (taken->err == RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS && taken->partitions != NULL)
+                xkafka_set_starts(taken->partitions, start_topics, start_partitions, start_offsets,
+                                  start_leader_epochs, start_count);
         xkafka_rebalance_apply(consumer, taken->err, taken->partitions);
         xkafka_rebalance_free(taken);
 }
@@ -659,7 +690,7 @@ void xkafka_consumer_destroy(rd_kafka_t *consumer) {
                 state->closing = 1;
                 for (xkafka_rebalance_t *event = (xkafka_rebalance_t *)xkafka_consumer_take_rebalance(consumer); event != NULL;
                      event = (xkafka_rebalance_t *)xkafka_consumer_take_rebalance(consumer))
-                        xkafka_consumer_apply_rebalance(consumer, event);
+                        xkafka_consumer_apply_rebalance(consumer, event, NULL, NULL, NULL, NULL, 0);
         }
         rd_kafka_consumer_close(consumer);
         rd_kafka_destroy(consumer);
@@ -1536,6 +1567,11 @@ int xkafka_consumer_assign(rd_kafka_t *consumer,
                            const char *const *topics,
                            const int32_t *partitions,
                            size_t count,
+                           const char *const *start_topics,
+                           const int32_t *start_partitions,
+                           const int64_t *start_offsets,
+                           const int32_t *start_leader_epochs,
+                           size_t start_count,
                            char *error,
                            size_t error_size,
                            int32_t *error_code) {
@@ -1546,6 +1582,7 @@ int xkafka_consumer_assign(rd_kafka_t *consumer,
         list = rd_kafka_topic_partition_list_new((int)count);
         for (index = 0; index < count; index++)
                 rd_kafka_topic_partition_list_add(list, topics[index], partitions[index]);
+        xkafka_set_starts(list, start_topics, start_partitions, start_offsets, start_leader_epochs, start_count);
 
         result = rd_kafka_assign(consumer, list);
         rd_kafka_topic_partition_list_destroy(list);

@@ -108,7 +108,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** The handle as group metadata of this platform, if it is one. Handles from every client on the platform qualify. */
   def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata]
 
-  def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
+  /** Assigns `partitions`, each of `starts` starting at its offset and the rest where they would. */
+  def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit]
 
   /** Subscribes to topic names, or to one pattern, which starts with `^` as no topic name can. */
   def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit]
@@ -119,7 +120,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Every rebalance the consumer received since the last call, oldest first. */
   def takeRebalances(consumer: Client): F[List[Rebalance[Event]]]
 
-  def applyRebalance(consumer: Client, event: Event): F[Unit]
+  /** Applies a rebalance, and for an assignment starts each of `starts` at its offset and the rest where they would. */
+  def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit]
 
   def cooperative(consumer: Client): F[Boolean]
 
@@ -200,6 +202,9 @@ private[xkafka] final case class PolledRecord(
     value: Option[Chunk[Byte]],
     headers: Headers
 )
+
+/** Where an assigned partition starts. `leaderEpoch` is negative where none is known. */
+private[xkafka] final case class StartAt(partition: TopicPartition, offset: Long, leaderEpoch: Int)
 
 /** A rebalance and the partitions it names. `kind` is 1 for an assignment, 0 for a revocation, 2 for a revocation of partitions the group has already
   * given away, and anything else for a failure to resynchronise.

@@ -32,7 +32,7 @@ import scala.scalanative.unsigned.*
 import cats.data.NonEmptyList
 import cats.effect.Sync
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class NativeGroupMetadata(pointer: CVoidPtr) extends GroupHandle
@@ -254,10 +254,29 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       case metadata: NativeGroupMetadata => Some(metadata)
       case _                             => None
 
-  override def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    partitionCall(partitions)((topics, values, count, error, code) =>
-      Bindings.xkafka_consumer_assign(consumer, topics, values, count, error, ErrorBufferSize.toUSize, code)
-    )
+  override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone                                          = zone
+        val (topics, values)                                = partitionArrays(partitions)
+        val (startTopics, startPartitions, offsets, epochs) = startArrays(starts)
+        val (error, errorCode)                              = errorSlots
+        val result                                          =
+          Bindings.xkafka_consumer_assign(
+            consumer,
+            topics,
+            values,
+            partitions.size.toUSize,
+            startTopics,
+            startPartitions,
+            offsets,
+            epochs,
+            starts.size.toUSize,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if result != 0 then throw nativeError(error, errorCode)
 
   override def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit] =
     F.blocking:
@@ -331,7 +350,12 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         )
       .toList
 
-  override def applyRebalance(consumer: Client, event: Event): F[Unit] = F.blocking(Bindings.xkafka_consumer_apply_rebalance(consumer, event))
+  override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone                                          = zone
+        val (startTopics, startPartitions, offsets, epochs) = startArrays(starts)
+        Bindings.xkafka_consumer_apply_rebalance(consumer, event, startTopics, startPartitions, offsets, epochs, starts.size.toUSize)
 
   override def cooperative(consumer: Client): F[Boolean] = F.blocking(Bindings.xkafka_consumer_cooperative(consumer) != 0)
 
@@ -640,6 +664,16 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     val values               = alloc[CLongLong](offsets.size)
     offsets.iterator.zipWithIndex.foreach((entry, index) => values(index) = entry._2.value)
     (topics, partitions, values)
+
+  /** Where partitions start, as the shim takes them: names, offsets, and leader epochs, negative for none. */
+  private def startArrays(starts: Vector[StartAt])(using Zone): (Ptr[CString], Ptr[CInt], Ptr[CLongLong], Ptr[CInt]) =
+    val (topics, partitions) = partitionArrays(starts.map(_.partition))
+    val offsets              = alloc[CLongLong](starts.size.max(1))
+    val epochs               = alloc[CInt](starts.size.max(1))
+    starts.iterator.zipWithIndex.foreach: (start, index) =>
+      offsets(index) = start.offset
+      epochs(index) = start.leaderEpoch
+    (topics, partitions, offsets, epochs)
 
   /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
   private def commitArrays(offsets: Vector[(TopicPartition, OffsetAndMetadata)])(using

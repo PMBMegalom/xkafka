@@ -32,7 +32,7 @@ import cats.data.NonEmptyList
 import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StoredOffset}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class JsGroupMetadata(pointer: js.Any) extends GroupHandle
@@ -222,7 +222,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       case metadata: JsGroupMetadata => Some(metadata)
       case _                         => None
 
-  override def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] = partitionCall(_.assign, consumer, partitions)
+  override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit] =
+    val (topics, values) = partitionArrays(partitions)
+    val error            = ErrorSlot()
+    val arguments        =
+      Seq[js.Any](consumer, topics, values, partitions.size) ++ startArrays(starts) ++ Seq[js.Any](error.message, ErrorBufferSize, error.code)
+    direct(_.assign(arguments*)).flatMap(error.check)
 
   override def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit] =
     direct: shim =>
@@ -288,7 +293,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         )
       .toList
 
-  override def applyRebalance(consumer: Client, event: Event): F[Unit] = direct(_.applyRebalance(consumer, event)).void
+  override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit] =
+    direct(_.applyRebalance((Seq[js.Any](consumer, event) ++ startArrays(starts))*)).void
 
   override def cooperative(consumer: Client): F[Boolean] = direct(_.cooperative(consumer).asInstanceOf[Int] != 0)
 
@@ -601,6 +607,11 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   private def partitionArrays(partitions: Vector[TopicPartition]): (js.Array[String], Buffer) =
     (strings(partitions.map(_.topic.value)), ints(partitions.map(_.partition.value)))
+
+  /** Where partitions start, as the shim takes them: names, offsets, leader epochs, and how many. */
+  private def startArrays(starts: Vector[StartAt]): Seq[js.Any] =
+    val (topics, partitions) = partitionArrays(starts.map(_.partition))
+    Seq[js.Any](topics, partitions, longs(starts.map(_.offset)), ints(starts.map(_.leaderEpoch)), starts.size)
 
   /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
   private def commitArrays(offsets: Vector[OffsetAndMetadata]): (Buffer, Buffer, js.Array[String]) =
