@@ -190,6 +190,19 @@ final class DriverClientSuite extends CatsEffectSuite:
           _       <- record.offset.commit *> fake.until(_.contains("unassign"))
         yield assert(dropped.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"a record was handed out: $dropped")
 
+  test("with rebalance-safe commits, a record read before a revocation is not handed out once the group assigns its partition again"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(10.seconds)): consumer =>
+        for
+          _      <- fake.assign *> fake.until(_.contains("assign"))
+          record <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          _      <- fake.deliver(1L) *> fake.drained
+          _      <- fake.revoke *> fake.until(_.contains("pause")) *> record.offset.commit *> fake.until(_.contains("unassign"))
+          // The partition starts again at its committed offset, so the new assignment reads the record again.
+          _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
+          after <- fake.deliver(1L) *> fake.deliver(2L) *> consumer.records.take(2).compile.toList
+        yield assertEquals(after.map(_.record.offset.value), List(1L, 2L))
+
   test("with rebalance-safe commits, a revocation goes ahead at its limit and the consumer carries on"):
     FakeDriver().flatMap: fake =>
       consuming(fake, safe(300.millis)): consumer =>
