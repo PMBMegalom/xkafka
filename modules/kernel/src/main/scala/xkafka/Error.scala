@@ -70,6 +70,9 @@ enum ErrorCode derives CanEqual:
   /** The group does not know this member. */
   case UnknownMemberId
 
+  /** The broker has no group of this id, such as one it removed once its last member left and no committed offset kept it. */
+  case GroupIdNotFound
+
   /** The group is rebalancing. */
   case RebalanceInProgress
 
@@ -155,6 +158,7 @@ object ErrorCode:
       31 -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
       35 -> UnsupportedVersion,         // UNSUPPORTED_VERSION
       40 -> InvalidConfiguration,       // INVALID_CONFIG
+      69 -> GroupIdNotFound,            // GROUP_ID_NOT_FOUND
       47 -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
       58 -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
       82 -> Fenced,                     // FENCED_INSTANCE_ID
