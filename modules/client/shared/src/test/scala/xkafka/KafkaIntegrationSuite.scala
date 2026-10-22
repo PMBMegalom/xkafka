@@ -88,7 +88,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       (consumedFirst, observedSecond) = consumed
       consumedSecond <- consumeOne(consumerSettings, Selection.Pattern(topicPattern))
     yield
-      assertEquals(produced.records.size, 2)
+      assertEquals(produced.size, 2)
       assertEquals(consumedFirst.record.topicPartition, TopicPartition(topic, partition))
       assertEquals(consumedFirst.record.key, first.key)
       assertEquals(consumedFirst.record.value, first.value)

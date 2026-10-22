@@ -86,9 +86,9 @@ from transactions that have not committed, including ones that later abort.
 @:@
 
 @:callout(info)
-`produce` inside a transaction returns `F[ProducerResult]` rather than the two
-stages a plain producer offers. A transaction cannot commit records the broker
-has not acknowledged, so the call waits for them.
+`produce` inside a transaction returns `F[NonEmptyList[Produced]]` rather than
+the two stages a plain producer offers. A transaction cannot commit records the
+broker has not acknowledged, so the call waits for them.
 @:@
 
 ## Settings

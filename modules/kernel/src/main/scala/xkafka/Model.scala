@@ -24,7 +24,6 @@ package xkafka
 import scala.concurrent.duration.FiniteDuration
 
 import cats.{Order, Show}
-import cats.data.NonEmptyList
 import fs2.Chunk
 
 enum ValidationError derives CanEqual:
@@ -223,14 +222,34 @@ final case class ProducerRecord[K, V](
 
 final case class RecordMetadata(topicPartition: TopicPartition, offset: Option[Offset], timestamp: Option[Timestamp])
 
-/** The acknowledged result of producing a non-empty collection of records, pairing each record with the metadata its backend reported for it.
-  *
-  * A `None` means the backend acknowledged the record but did not attribute metadata to it individually, so the absence is visible to the caller
-  * instead of being inferred from a shorter list.
-  */
-final case class ProducerResult[K, V](records: NonEmptyList[(ProducerRecord[K, V], Option[RecordMetadata])]):
-  /** Every record that the backend attributed metadata to, in the order the records were produced. */
-  def metadata: List[RecordMetadata] = records.toList.flatMap((_, value) => value)
+/** A record that was delivered, with the metadata its backend reported for it. */
+opaque type Produced[K, V] = (ProducerRecord[K, V], RecordMetadata)
+
+object Produced:
+  def apply[K, V](record: ProducerRecord[K, V], metadata: RecordMetadata): Produced[K, V] = (record, metadata)
+
+  def unapply[K, V](produced: Produced[K, V]): (ProducerRecord[K, V], RecordMetadata) = produced
+
+  extension [K, V](produced: Produced[K, V])
+    def record: ProducerRecord[K, V] = produced._1
+
+    def metadata: RecordMetadata = produced._2
+
+/** A record that was attempted, with the metadata its backend reported for it where it was delivered, or why it was not. */
+opaque type Attempted[K, V] = (ProducerRecord[K, V], Either[KafkaException, RecordMetadata])
+
+object Attempted:
+  def apply[K, V](record: ProducerRecord[K, V], outcome: Either[KafkaException, RecordMetadata]): Attempted[K, V] = (record, outcome)
+
+  def unapply[K, V](attempted: Attempted[K, V]): (ProducerRecord[K, V], Either[KafkaException, RecordMetadata]) = attempted
+
+  extension [K, V](attempted: Attempted[K, V])
+    def record: ProducerRecord[K, V] = attempted._1
+
+    def outcome: Either[KafkaException, RecordMetadata] = attempted._2
+
+    /** The record as delivered, or why it was not. */
+    def produced: Either[KafkaException, Produced[K, V]] = attempted._2.map(Produced(attempted._1, _))
 
 /** A consumed record's timestamp, and which of the two kinds it is. */
 enum RecordTimestamp:

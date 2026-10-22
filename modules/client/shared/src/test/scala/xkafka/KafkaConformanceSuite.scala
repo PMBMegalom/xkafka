@@ -219,9 +219,35 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       val records   = NonEmptyList.of("a", "b", "c").map(value => record(topic, Some("k"), Some(value), partition))
 
       produce(server, records).map: result =>
-        assertEquals(result.records.size, records.size)
-        assert(result.records.forall((_, metadata) => metadata.isDefined), "every record should carry its own metadata")
-        assertEquals(result.metadata.flatMap(_.offset.map(_.value)), List(0L, 1L, 2L))
+        assertEquals(result.map(_.record), records)
+        assertEquals(result.toList.flatMap(_.metadata.offset.map(_.value)), List(0L, 1L, 2L))
+
+  test(conformance("attempting each record answers every record on its own, so one the broker rejects leaves the others delivered")):
+    withBroker: server =>
+      val topic = uniqueTopic("attempt-each")
+      // The topic takes no record larger than a kilobyte. The large record goes to a partition of its own, so the broker rejects it alone, and its
+      // value does not compress below the limit.
+      val small   = record(topic, Some("k"), Some("small"), validPartition(0))
+      val large   = record(topic, Some("k"), Some(scala.util.Random(7).alphanumeric.take(8192).mkString), validPartition(1))
+      val records = NonEmptyList.of(small, large, small)
+
+      for
+        _        <- createPartitioned(server, topic, 2, Map("max.message.bytes" -> "1024"))
+        settings <- producerSettings(server)
+        outcomes <-
+          PlatformKafkaClient().producer(settings)
+            .use(producer => (producer.produceAttemptEachAndAwait(records), producer.produceAndAwait(records).attempt).tupled).timeout(60.seconds)
+      yield
+        val (attempted, produced)                = outcomes
+        val code: Throwable => Option[ErrorCode] =
+          case failure: KafkaException.BackendFailure => failure.code
+          case _                                      => None
+        assertEquals(attempted.map(_.record), records)
+        assertEquals(
+          attempted.toList.map(_.outcome.leftMap(code).map(_.offset.map(_.value))),
+          List(Right(Some(0L)), Left(Some(ErrorCode.MessageTooLarge)), Right(Some(1L)))
+        )
+        assertEquals(produced.leftMap(code), Left(Some(ErrorCode.MessageTooLarge)))
 
   test(conformance("acknowledgements can be held while further batches are enqueued")):
     withBroker: server =>
@@ -239,8 +265,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             secondResult <- secondAck
             consumed     <- consume(server, topic, 4)
           yield
-            assertEquals(firstResult.records.size, 2)
-            assertEquals(secondResult.records.size, 2)
+            assertEquals(firstResult.size, 2)
+            assertEquals(secondResult.size, 2)
             assertEquals(consumed.map(_.record.value), List("a", "b", "c", "d").map(Some(_)))
         .timeout(60.seconds)
 
@@ -341,7 +367,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           PlatformKafkaClient().producer(settings).use(producer => Stream.emits(batches).through(producer.pipe()).compile.toList).timeout(60.seconds)
         consumed <- consume(server, topic, values.size)
       yield
-        assertEquals(results.flatMap(_.records.toList.flatMap(_._1.value)), values, "the pipe should report batches in the order it took them")
+        assertEquals(results.flatMap(_.toList.flatMap(_.record.value)), values, "the pipe should report batches in the order it took them")
         assertEquals(consumed.flatMap(_.record.value), values, "and the broker should hold them in that order")
 
   test(conformance("a consumer resource can be allocated and released repeatedly")):
@@ -1361,7 +1387,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         base <- transactionalSettings(server, uniqueTransactionalId("purged"))
         // Held back long enough that the transaction aborts before the record is sent.
         settings <- base.withLinger(5.seconds).liftTo[IO]
-        waiting  <- Deferred[IO, Either[Throwable, ProducerResult[Option[String], Option[String]]]]
+        waiting  <- Deferred[IO, Either[Throwable, NonEmptyList[Produced[Option[String], Option[String]]]]]
         outcome  <-
           PlatformKafkaClient().transactionalProducer(settings).use: producer =>
             producer.transactionally(transaction =>
@@ -1829,10 +1855,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       .timeout(60.seconds)
 
   /** Topics created on demand get one partition, so a test that needs more makes its own. */
-  private def createPartitioned(server: String, topic: Topic, partitions: Int): IO[Unit] =
+  private def createPartitioned(server: String, topic: Topic, partitions: Int, configuration: Map[String, String] = Map.empty): IO[Unit] =
     for
       client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
-      newTopic <- NewTopic.from(topic, partitions = partitions, replicationFactor = 1).liftTo[IO]
+      newTopic <- NewTopic.from(topic, partitions = partitions, replicationFactor = 1, configuration).liftTo[IO]
       _ <- PlatformKafkaClient().admin(client).use(admin => admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, partitions))
     yield ()
 
@@ -1846,7 +1872,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def produce(
       server: String,
       records: NonEmptyList[ProducerRecord[Option[String], Option[String]]]
-  ): IO[ProducerResult[Option[String], Option[String]]] =
+  ): IO[NonEmptyList[Produced[Option[String], Option[String]]]] =
     producerSettings(server).flatMap: settings =>
       PlatformKafkaClient().producer(settings).use(_.produceAndAwait(records)).timeout(60.seconds)
 

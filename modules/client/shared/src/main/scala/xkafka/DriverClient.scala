@@ -231,7 +231,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     private def transaction(recorded: Ref[F, List[CommittableOffsetBatch[F]]]): Transaction[F, K, V] =
       new Transaction[F, K, V]:
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
-        override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] = records.produceAndAwait(values)
+        override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]] = records.produceAndAwait(values)
 
         override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
           GroupMembership.resolve(batch).use(commitMemberships) *> recorded.update(_ :+ batch)
@@ -360,24 +360,33 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic))
 
-    /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip. */
-    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]] =
-      for
-        encoded <- records.traverse(encodeRecord)
-        result  <-
-          F.uncancelable: _ =>
-            for
-              batch    <- client(driver.batch(encoded.size))
-              _        <- owned.update(_ + batch)
-              enqueued <- client(driver.enqueue(client.handle, batch, encoded)).attempt
-              result   <-
-                enqueued match
-                  case Right(_) => superviseBatch(batch, awaitDelivery(batch) *> client(awaitBatch(batch, records)))
-                  // A prefix can already belong to the producer when a later enqueue fails. It keeps its supervised cleanup,
-                  // while the caller receives the failure saying that the complete batch was not accepted.
-                  case Left(failure) => superviseBatch(batch, awaitDelivery(batch)).void *> F.raiseError(failure)
-            yield result
-      yield result
+    override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Produced[K, V]]]] =
+      send(records).flatMap: (refused, reported) =>
+        // The caller learns that the complete batch was not accepted, while the prefix accepted before it keeps its supervised cleanup.
+        refused.fold(
+          F.pure(reported.flatMap(outcomes => attempts(records, outcomes, None).flatMap(each => F.fromEither(each.traverse(_.produced)))))
+        )(F.raiseError)
+
+    override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Attempted[K, V]]]] =
+      send(records).flatMap: (refused, reported) =>
+        refused.traverse:
+          case failure: KafkaException => F.pure(failure)
+          case other                   => F.raiseError[KafkaException](other)
+        .map(refusal => reported.flatMap(attempts(records, _, refusal)))
+
+    /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip.
+      *
+      * It answers why the backend refused a record, where it did, and the effect that reports the records it accepted before that one.
+      */
+    private def send(records: NonEmptyList[ProducerRecord[K, V]]): F[(Option[Throwable], F[Vector[Either[KafkaException, RecordMetadata]]])] =
+      records.traverse(encodeRecord).flatMap: encoded =>
+        F.uncancelable: _ =>
+          for
+            batch    <- client(driver.batch(encoded.size))
+            _        <- owned.update(_ + batch)
+            enqueued <- client(driver.enqueue(client.handle, batch, encoded)).attempt
+            reported <- superviseBatch(batch, awaitDelivery(batch) *> client(outcomes(batch, records)))
+          yield (enqueued.left.toOption, reported)
 
     private def superviseBatch[A](batch: driver.Batch, result: F[A]): F[F[A]] =
       supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch))).map(_.joinWithNever)
@@ -405,12 +414,20 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         settings.valueSerializer.serialize(record.topic, record.headers, record.value)
       ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
 
-    private def awaitBatch(batch: driver.Batch, records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]] =
+    private def outcomes(batch: driver.Batch, records: NonEmptyList[ProducerRecord[K, V]]): F[Vector[Either[KafkaException, RecordMetadata]]] =
       driver.deliveries(client.handle, batch).flatMap: reported =>
-        F.delay:
-          if reported.size != records.size then
-            throw new KafkaException.InvalidBackendResponse(s"expected ${records.size} delivery reports, got ${reported.size}")
-          ProducerResult(records.zipWithIndex.map((record, index) => record -> Some(metadataOf(reported(index), record.topic))))
+        F.delay(reported.zip(records.toList).map((outcome, record) => outcome.map(metadataOf(_, record.topic))))
+
+    /** Each record with its outcome, where the records past those the backend accepted fail with its refusal. */
+    private def attempts(
+        records: NonEmptyList[ProducerRecord[K, V]],
+        outcomes: Vector[Either[KafkaException, RecordMetadata]],
+        refusal: Option[KafkaException]
+    ): F[NonEmptyList[Attempted[K, V]]] =
+      F.delay:
+        def invalid = new KafkaException.InvalidBackendResponse(s"expected ${records.size} delivery reports, got ${outcomes.size}")
+        if outcomes.size > records.size then throw invalid
+        records.zipWithIndex.map((record, index) => Attempted(record, outcomes.lift(index).orElse(refusal.map(Left(_))).getOrElse(throw invalid)))
 
     private def metadataOf(delivery: Delivery, topic: Topic): RecordMetadata =
       val partition = Partition.from(delivery.partition).fold(error => throw invalidBackendValue("partition", delivery.partition, error), identity)

@@ -30,6 +30,11 @@ typedef struct xkafka_batch_s {
         size_t count;
         size_t pending;
         xkafka_delivery_t *slots;
+        /* The security failure behind the batch's failed deliveries, taken from
+         * the producer once, when the first of them is read. */
+        int security_read;
+        int32_t security_error;
+        char security_message[512];
 } xkafka_batch_t;
 
 /* A rebalance the callback received and left for the consumer to apply. */
@@ -401,30 +406,36 @@ size_t xkafka_batch_pending(const xkafka_batch_t *batch) {
         return batch == NULL ? 0 : __atomic_load_n(&batch->pending, __ATOMIC_ACQUIRE);
 }
 
-/* Reads the outcome of a batch whose reports have all arrived. */
-int xkafka_batch_await(rd_kafka_t *producer,
-                       xkafka_batch_t *batch,
-                       char *error,
-                       size_t error_size,
-                       int32_t *error_code) {
-        size_t index;
+/* Reads the outcome of one delivery of a batch whose reports have all arrived,
+ * returning 0 where it was delivered. */
+int xkafka_batch_error_at(rd_kafka_t *producer,
+                          xkafka_batch_t *batch,
+                          size_t index,
+                          char *error,
+                          size_t error_size,
+                          int32_t *error_code) {
+        rd_kafka_resp_err_t err;
 
-        if (batch == NULL) {
-                xkafka_set_error(error, error_size, error_code, "batch is not allocated");
+        if (batch == NULL || index >= batch->count) {
+                xkafka_set_error(error, error_size, error_code, "no such delivery in the batch");
                 return -1;
         }
 
-        for (index = 0; index < batch->count; index++) {
-                if (batch->slots[index].error !=
-                    RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        /* A delivery report that never reached a broker reports the
-                         * retries ending, so a recorded security failure is the cause. */
-                        if (!xkafka_take_security_error(producer, error, error_size, error_code))
-                                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(batch->slots[index].error), batch->slots[index].error);
-                        return -1;
-                }
+        err = batch->slots[index].error;
+        if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
+                return 0;
+
+        /* A delivery report that never reached a broker reports the retries
+         * ending, so a recorded security failure is the cause. */
+        if (!batch->security_read) {
+                batch->security_read = 1;
+                xkafka_take_security_error(producer, batch->security_message, sizeof(batch->security_message), &batch->security_error);
         }
-        return 0;
+        if (batch->security_error != 0)
+                xkafka_set_error_at(error, error_size, error_code, batch->security_message, batch->security_error);
+        else
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);
+        return -1;
 }
 
 size_t xkafka_batch_count(const xkafka_batch_t *batch) {

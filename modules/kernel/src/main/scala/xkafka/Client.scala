@@ -1186,13 +1186,27 @@ trait KafkaProducer[F[_], K, V]:
 
   /** Enqueues `records` with the backend and returns the effect that completes once the broker has acknowledged them.
     *
-    * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once. Awaiting the inner
-    * effect immediately makes production fully synchronous.
+    * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once, and fails where the
+    * backend refuses one of them. Awaiting the inner effect immediately makes production fully synchronous. It fails where any record was not
+    * delivered, with the failure of the first such record.
     */
-  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]]
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Produced[K, V]]]]
 
   /** Enqueues `records` and waits for the broker to acknowledge them. */
-  final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[ProducerResult[K, V]] = F.flatten(produce(records))
+  final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[NonEmptyList[Produced[K, V]]] =
+    F.flatten(produce(records))
+
+  /** Enqueues `records` with the backend and returns the effect that completes once each of them has been delivered or has failed.
+    *
+    * Each record is answered on its own, in the order given, so the records that were delivered are known when some fail. A record the backend
+    * refuses to accept fails with that refusal, as do the ones after it. Neither effect fails because of a record, only where the whole call does,
+    * such as when a record cannot be serialized.
+    */
+  def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Attempted[K, V]]]]
+
+  /** Enqueues `records` and waits until each of them has been delivered or has failed. */
+  final def produceAttemptEachAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[NonEmptyList[Attempted[K, V]]] =
+    F.flatten(produceAttemptEach(records))
 
   /** Returns the partitions currently known for `topic`, which is what choosing one to produce to needs. */
   def partitionsFor(topic: Topic): F[Set[Partition]]
@@ -1205,14 +1219,33 @@ trait KafkaProducer[F[_], K, V]:
     * @param maxInFlight
     *   positive bound on the batches awaiting acknowledgement
     */
-  final def pipe(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], ProducerResult[K, V]] =
+  final def pipe(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], NonEmptyList[Produced[K, V]]] =
+    pipelined(maxInFlight)(produce)
+
+  /** Produces each batch with `produceAttemptEach` and reports how each of its records fared, in the order the batches arrived.
+    *
+    * It pipelines batches the way `pipe` does, and carries on past records that fail.
+    *
+    * @param maxInFlight
+    *   positive bound on the batches awaiting acknowledgement
+    */
+  final def pipeAttemptEach(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], NonEmptyList[Attempted[K, V]]] =
+    pipelined(maxInFlight)(produceAttemptEach)
+
+  private def pipelined[A](
+      maxInFlight: Int
+  )(enqueue: NonEmptyList[ProducerRecord[K, V]] => F[F[A]])(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], A] =
     if maxInFlight <= 0 then _ => Stream.raiseError(new IllegalArgumentException("maxInFlight must be positive"))
-    else _.evalMap(produce).parEvalMap(maxInFlight)(identity)
+    else _.evalMap(enqueue).parEvalMap(maxInFlight)(identity)
 
   /** Transforms the effect. Translating the acknowledgement nested inside the enqueue needs a `Functor[G]`, so this is not a lawful `FunctorK`. */
   final def mapK[G[_]](fk: FunctionK[F, G])(using G: Functor[G]): KafkaProducer[G, K, V] =
     new KafkaProducer[G, K, V]:
-      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[ProducerResult[K, V]]] = G.map(fk(self.produce(records)))(fk.apply)
+      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[NonEmptyList[Produced[K, V]]]] =
+        G.map(fk(self.produce(records)))(fk.apply)
+
+      override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): G[G[NonEmptyList[Attempted[K, V]]]] =
+        G.map(fk(self.produceAttemptEach(records)))(fk.apply)
 
       override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
 
@@ -1225,7 +1258,7 @@ trait Transaction[F[_], K, V]:
   self =>
 
   /** Enqueues `records` and waits for the broker to acknowledge them, which a transaction must do before it can commit. */
-  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]]
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]]
 
   /** Records `batch` against the group that read it, so those offsets land only where this transaction commits.
     *
@@ -1236,7 +1269,7 @@ trait Transaction[F[_], K, V]:
   /** Transforms the effect. Carrying a batch back to the underlying transaction needs the reverse direction, so this is not a lawful `FunctorK`. */
   final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Transaction[G, K, V] =
     new Transaction[G, K, V]:
-      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[ProducerResult[K, V]] = fk(self.produce(records))
+      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[NonEmptyList[Produced[K, V]]] = fk(self.produce(records))
 
       override def commitOffsets(batch: CommittableOffsetBatch[G]): G[Unit] = fk(self.commitOffsets(batch.mapK(gk)))
 

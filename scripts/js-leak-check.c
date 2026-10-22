@@ -35,7 +35,8 @@ void *xkafka_batch_new(size_t capacity);
 int xkafka_batch_add(rd_kafka_t *producer, void *batch, const char *topic, int32_t partition, int64_t timestamp, const void *key,
                      size_t key_size, const void *value, size_t value_size, void *headers, ERROR_ARGUMENTS);
 size_t xkafka_batch_pending(const void *batch);
-int xkafka_batch_await(rd_kafka_t *producer, void *batch, ERROR_ARGUMENTS);
+size_t xkafka_batch_count(const void *batch);
+int xkafka_batch_error_at(rd_kafka_t *producer, void *batch, size_t index, ERROR_ARGUMENTS);
 void xkafka_batch_free(void *batch);
 int xkafka_producer_begin_transaction(rd_kafka_t *producer, ERROR_ARGUMENTS, FLAG_ARGUMENTS);
 void *xkafka_subscription_new(size_t count);
@@ -215,8 +216,9 @@ static void produce(rd_kafka_t *producer, const char *topic, int count) {
         }
         while (xkafka_batch_pending(batch) > 0)
                 await_answer("xkafka_async_producer_poll", xkafka_async_producer_poll(producer, 100, done, next_token()));
-        if (xkafka_batch_await(producer, batch, ERRORS) != 0)
-                fail("xkafka_batch_await");
+        for (index = 0; index < (int)xkafka_batch_count(batch); index++)
+                if (xkafka_batch_error_at(producer, batch, (size_t)index, ERRORS) != 0)
+                        fail("xkafka_batch_error_at");
         xkafka_batch_free(batch);
 }
 

@@ -45,6 +45,11 @@ private[kafkaclients] object JavaFailures:
     )
   }
 
+  /** Why one record was not delivered. The Java client reports its own exceptions there, and anything else is kept as the cause. */
+  def delivery(error: Throwable): KafkaException =
+    portable.lift(error).collect { case failure: KafkaException => failure }
+      .getOrElse(new KafkaException.BackendFailure(Option(error.getMessage).getOrElse(error.getClass.getName), cause = error))
+
   /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports.
     *
     * Authentication never reached the broker, so it has no entry in that table. `Errors.forException` answers `INVALID_CONFIG` for the whole family,

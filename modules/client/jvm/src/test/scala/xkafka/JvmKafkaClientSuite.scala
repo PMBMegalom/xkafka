@@ -134,10 +134,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(new String(produced.value(), StandardCharsets.UTF_8), "value")
       val headerKeys: List[String] = produced.headers().toArray.toList.map(_.key())
       assertEquals(headerKeys, List("trace", "trace"))
-      assertEquals(result.metadata.head.topicPartition, TopicPartition(topic, partition))
-      assertEquals(result.metadata.head.offset.map(_.value), Some(0L))
-      assertEquals(result.records.size, 1)
-      assert(result.records.forall((_, metadata) => metadata.isDefined))
+      assertEquals(result.head.metadata.topicPartition, TopicPartition(topic, partition))
+      assertEquals(result.head.metadata.offset.map(_.value), Some(0L))
+      assertEquals(result.size, 1)
 
   test("consumer delegates streaming and offset commits to the Java consumer"):
     val topic              = Topic.from("events").toOption.get

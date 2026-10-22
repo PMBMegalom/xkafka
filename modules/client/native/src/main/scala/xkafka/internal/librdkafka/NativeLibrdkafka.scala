@@ -181,19 +181,20 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override def pending(batch: Batch): F[Int] = F.blocking(Bindings.xkafka_batch_pending(batch).toInt)
 
-  override def deliveries(producer: Client, batch: Batch): F[Vector[Delivery]] =
+  override def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone             = zone
         val (error, errorCode) = errorSlots
-        val result             = Bindings.xkafka_batch_await(producer, batch, error, ErrorBufferSize.toUSize, errorCode)
-        if result != 0 then throw nativeError(error, errorCode)
         Vector.tabulate(Bindings.xkafka_batch_count(batch).toInt): index =>
-          Delivery(
-            Bindings.xkafka_batch_partition_at(batch, index.toUSize),
-            Bindings.xkafka_batch_offset_at(batch, index.toUSize),
-            Bindings.xkafka_batch_timestamp_at(batch, index.toUSize)
-          )
+          if Bindings.xkafka_batch_error_at(producer, batch, index.toUSize, error, ErrorBufferSize.toUSize, errorCode) != 0 then
+            Left(nativeError(error, errorCode))
+          else
+            Right(Delivery(
+              Bindings.xkafka_batch_partition_at(batch, index.toUSize),
+              Bindings.xkafka_batch_offset_at(batch, index.toUSize),
+              Bindings.xkafka_batch_timestamp_at(batch, index.toUSize)
+            ))
 
   override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] =
     transactional((error, code, fatal, retriable, abort) =>
