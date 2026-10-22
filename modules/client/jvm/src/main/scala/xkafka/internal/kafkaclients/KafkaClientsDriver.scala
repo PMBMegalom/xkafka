@@ -171,16 +171,15 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def pending(batch: Batch): F[Int] = F.delay(batch.outstanding.get)
 
-  override def deliveries(producer: Client, batch: Batch): F[Vector[Delivery]] =
-    javaCall:
-      F.delay:
-        Vector.tabulate(batch.enqueued.get)(batch.reports.get).map:
-          case Right(metadata) => Delivery(
-              metadata.partition,
-              if metadata.hasOffset then metadata.offset else -1L,
-              if metadata.hasTimestamp then metadata.timestamp else -1L
-            )
-          case Left(error) => throw error
+  override def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]] =
+    F.delay:
+      Vector.tabulate(batch.enqueued.get)(batch.reports.get).map:
+        case Right(metadata) => Right(Delivery(
+            metadata.partition,
+            if metadata.hasOffset then metadata.offset else -1L,
+            if metadata.hasTimestamp then metadata.timestamp else -1L
+          ))
+        case Left(error) => Left(JavaFailures.delivery(error))
 
   override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.initTransactions()))
 

@@ -164,16 +164,17 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def pending(batch: Batch): F[Int] = direct(_.batchPending(batch).asInstanceOf[Double].toInt)
 
-  override def deliveries(producer: Client, batch: Batch): F[Vector[Delivery]] =
+  override def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]] =
     direct: shim =>
-      val error = ErrorSlot()
-      if shim.batchAwait(producer, batch, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then throw error.failure
       Vector.tabulate(shim.batchCount(batch).asInstanceOf[Double].toInt): index =>
-        Delivery(
-          shim.batchPartitionAt(batch, index).asInstanceOf[Int],
-          long(shim.batchOffsetAt(batch, index)),
-          long(shim.batchTimestampAt(batch, index))
-        )
+        val error = ErrorSlot()
+        if shim.batchErrorAt(producer, batch, index, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then Left(error.failure)
+        else
+          Right(Delivery(
+            shim.batchPartitionAt(batch, index).asInstanceOf[Int],
+            long(shim.batchOffsetAt(batch, index)),
+            long(shim.batchTimestampAt(batch, index))
+          ))
 
   override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] =
     transactional((error, result) =>

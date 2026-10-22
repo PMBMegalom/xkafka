@@ -92,12 +92,15 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       deleted   <- client.admin(clientSettings).use(_.deleteRecords(cut)).value
       inspected <- client.admin(clientSettings).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).value
     yield
-      assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record -> None))))
+      assertEquals(produced, Right(NonEmptyList.one(Produced(record, metadataOf(record)))))
       assertEquals(consumed, Right(()))
       assertEquals(deleted, Right(cut.toSortedMap.view.mapValues(Right(_)).toMap))
       assertEquals(inspected, Right(Map(topic -> Right(TopicConfiguration(Map.empty)))))
 
   private val source: KafkaClient[IO] = sourceRecording(_ => IO.unit)
+
+  private def metadataOf(record: ProducerRecord[?, ?]): RecordMetadata =
+    RecordMetadata(TopicPartition(record.topic, Partition.from(0).toOption.get), None, None)
 
   private def sourceRecording(record: GroupHandle => IO[Unit]): KafkaClient[IO] =
     new KafkaClient[IO]:
@@ -109,8 +112,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def transactionally[A](use: Transaction[IO, K, V] => IO[A]): IO[A] =
               use:
                 new Transaction[IO, K, V]:
-                  override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[ProducerResult[K, V]] =
-                    IO.pure(ProducerResult(records.map(_ -> None)))
+                  override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[NonEmptyList[Produced[K, V]]] =
+                    IO.pure(records.map(record => Produced(record, metadataOf(record))))
 
                   override def commitOffsets(batch: CommittableOffsetBatch[IO]): IO[Unit] =
                     batch.offsets.toList.traverse_ { (committer, _) =>
@@ -120,12 +123,15 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override def producer[K, V](settings: ProducerSettings[IO, K, V]): Resource[IO, KafkaProducer[IO, K, V]] =
         Resource.pure:
           new KafkaProducer[IO, K, V]:
-            override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[ProducerResult[K, V]]] =
+            override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[NonEmptyList[Produced[K, V]]]] =
               val first = records.head
               (
                 settings.keySerializer.serialize(first.topic, first.headers, first.key),
                 settings.valueSerializer.serialize(first.topic, first.headers, first.value)
-              ).tupled.as(IO.pure(ProducerResult(records.map(_ -> None))))
+              ).tupled.as(IO.pure(records.map(record => Produced(record, metadataOf(record)))))
+
+            override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[NonEmptyList[Attempted[K, V]]]] =
+              produce(records).map(_.map(_.map(produced => Attempted(produced.record, Right(produced.metadata)))))
 
             override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set.empty)
 

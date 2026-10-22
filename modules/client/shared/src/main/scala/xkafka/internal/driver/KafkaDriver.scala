@@ -88,8 +88,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def pending(batch: Batch): F[Int]
 
-  /** What each record of a fully reported batch was delivered as, in enqueue order, failing with the first failed delivery. */
-  def deliveries(producer: Client, batch: Batch): F[Vector[Delivery]]
+  /** What each record of a fully reported batch was delivered as, or why it was not, in enqueue order. */
+  def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]]
 
   def initTransactions(producer: Client, timeoutMillis: Int): F[Unit]
 

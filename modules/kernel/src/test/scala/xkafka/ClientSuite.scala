@@ -429,18 +429,39 @@ final class ClientSuite extends FunSuite:
     assertEquals(batch.commit, Right(()))
 
   test("KafkaProducer transforms both the enqueue and the acknowledgement"):
-    val result = ProducerResult(NonEmptyList.one(producerRecord -> None))
-    val source =
+    val metadata  = RecordMetadata(TopicPartition(topic, partition), None, None)
+    val result    = NonEmptyList.one(Produced(producerRecord, metadata))
+    val attempted = NonEmptyList.one(Attempted(producerRecord, Right(metadata)))
+    val source    =
       new KafkaProducer[Option, String, String]:
-        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[Option[ProducerResult[String, String]]] =
-          Some(Some(ProducerResult(records.map(_ -> None))))
+        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[Option[NonEmptyList[Produced[String, String]]]] =
+          Some(Some(records.map(Produced(_, metadata))))
+
+        override def produceAttemptEach(
+            records: NonEmptyList[ProducerRecord[String, String]]
+        ): Option[Option[NonEmptyList[Attempted[String, String]]]] = Some(Some(records.map(Attempted(_, Right(metadata)))))
 
         override def partitionsFor(value: Topic): Option[Set[Partition]] = Some(Set(partition))
     val mapped = source.mapK(optionToErrorOr)
 
     assertEquals(mapped.produce(NonEmptyList.one(producerRecord)), Right(Right(result)))
     assertEquals(mapped.produceAndAwait(NonEmptyList.one(producerRecord)), Right(result))
+    assertEquals(mapped.produceAttemptEach(NonEmptyList.one(producerRecord)), Right(Right(attempted)))
+    assertEquals(mapped.produceAttemptEachAndAwait(NonEmptyList.one(producerRecord)), Right(attempted))
     assertEquals(mapped.partitionsFor(topic), Right(Set(partition)))
+
+  test("a produced or attempted record gives back what it holds, by name and by pattern"):
+    val metadata = RecordMetadata(TopicPartition(topic, partition), None, None)
+    val failure  = new KafkaException.BackendFailure("refused", Some(ErrorCode.MessageTooLarge))
+    val produced = Produced(producerRecord, metadata)
+
+    assertEquals((produced.record, produced.metadata), (producerRecord, metadata))
+    produced match
+      case Produced(record, value) => assertEquals((record, value), (producerRecord, metadata))
+    Attempted(producerRecord, Left(failure)) match
+      case Attempted(record, outcome) => assertEquals((record, outcome), (producerRecord, Left(failure)))
+    assertEquals(Attempted(producerRecord, Right(metadata)).produced, Right(produced))
+    assertEquals(Attempted(producerRecord, Left(failure)).produced, Left(failure))
 
   test("KafkaConsumer transforms both its stream and committable offsets"):
     val sourceRecord = CommittableConsumerRecord(consumerRecord, committableOffset)

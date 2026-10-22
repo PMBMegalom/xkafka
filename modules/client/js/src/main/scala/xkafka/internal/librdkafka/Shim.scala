@@ -70,7 +70,7 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
     )
   val producerPoll     = f(s"int xkafka_async_producer_poll(void *producer, int timeout_ms, $Done)")
   val batchPending     = f("size_t xkafka_batch_pending(void *batch)")
-  val batchAwait       = f(s"int xkafka_batch_await(void *producer, void *batch, $Error)")
+  val batchErrorAt     = f(s"int xkafka_batch_error_at(void *producer, void *batch, size_t index, $Error)")
   val batchCount       = f("size_t xkafka_batch_count(void *batch)")
   val batchPartitionAt = f("int32_t xkafka_batch_partition_at(void *batch, size_t index)")
   val batchOffsetAt    = f("int64_t xkafka_batch_offset_at(void *batch, size_t index)")

@@ -43,6 +43,47 @@ final class DriverClientSuite extends CatsEffectSuite:
   private val transactionalSettings =
     TransactionalProducerSettings.from(client, TransactionalId.from("fake").toOption.get, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get
 
+  private val producerSettings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get
+
+  // The fake refuses to enqueue a record whose value is "refused", and fails to deliver one whose value is "lost".
+  private val refused = new KafkaException.BackendFailure("queue full", Some(ErrorCode.Other(-184)))
+  private val lost    = new KafkaException.BackendFailure("too large", Some(ErrorCode.MessageTooLarge))
+
+  test("attempting each record answers every record on its own, and producing fails with the first record that was not delivered"):
+    val records = values("a", "lost", "b", "lost")
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use: producer =>
+        (producer.produceAttemptEachAndAwait(records), producer.produceAndAwait(records).attempt).tupled.timeout(10.seconds)
+    .map: (attempted, produced) =>
+      assertEquals(
+        attempted.toList.map(each => each.record.value -> each.outcome.map(_.offset.map(_.value))),
+        List("a" -> Right(Some(0L)), "lost" -> Left(lost), "b" -> Right(Some(2L)), "lost" -> Left(lost))
+      )
+      assertEquals(produced.leftMap(identity[Throwable]), Left(lost))
+
+  test("a record the backend refuses fails with its refusal when attempting each, as do the ones after it, and fails producing as it is enqueued"):
+    val records = values("a", "refused", "b")
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use: producer =>
+        (producer.produceAttemptEachAndAwait(records), producer.produce(records).attempt).tupled.timeout(10.seconds)
+    .map: (attempted, enqueued) =>
+      assertEquals(
+        attempted.toList.map(each => each.record.value -> each.outcome.map(_.offset.map(_.value))),
+        List("a" -> Right(Some(0L)), "refused" -> Left(refused), "b" -> Left(refused))
+      )
+      assertEquals(enqueued.void.leftMap(identity[Throwable]), Left(refused))
+
+  test("attempting each record still fails as a whole where a record cannot be serialized"):
+    val failing =
+      Serializer.instance[IO, String]((_, _, value) => if value == "bad" then IO.raiseError(new IllegalArgumentException("bad")) else IO.pure(None))
+    val settings = ProducerSettings.from(client, Serializer.utf8[IO], failing).toOption.get
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(settings).use(_.produceAttemptEach(values("a", "bad")).attempt).map: outcome =>
+        assertEquals(outcome.void.leftMap(_.getMessage), Left("bad"))
+
+  private def values(first: String, rest: String*): NonEmptyList[ProducerRecord[String, String]] =
+    NonEmptyList(first, rest.toList).map(ProducerRecord(events, "k", _))
+
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
@@ -342,6 +383,7 @@ final class DriverClientSuite extends CatsEffectSuite:
   private final case class FakeGroupMetadata(consumer: String) extends GroupHandle
 
   private final class FakeDriver(
+      batches: Ref[IO, Map[Int, Vector[EncodedRecord]]],
       log: Ref[IO, Vector[String]],
       queued: Ref[IO, List[PolledRecord]],
       pendingRebalances: Ref[IO, List[Rebalance[Int]]],
@@ -419,19 +461,25 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def destroyAdmin(admin: Client): IO[Unit] = IO.unit
 
-    override def batch(capacity: Int): IO[Batch] = unused("batch")
+    override def batch(capacity: Int): IO[Batch] = batches.modify(held => (held.updated(held.size, Vector.empty), held.size))
 
     override def freeBatch(batch: Batch): IO[Unit] = IO.unit
 
-    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] = unused("enqueue")
+    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] =
+      records.traverse_ : record =>
+        if valueOf(record) == "refused" then IO.raiseError(refused) else batches.update(held => held.updated(batch, held(batch) :+ record))
 
-    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = unused("serveDeliveries")
+    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = IO.sleep(5.millis)
 
     override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int] = unused("awaitDeliveries")
 
     override def pending(batch: Batch): IO[Int] = IO.pure(0)
 
-    override def deliveries(producer: Client, batch: Batch): IO[Vector[Delivery]] = unused("deliveries")
+    override def deliveries(producer: Client, batch: Batch): IO[Vector[Either[KafkaException, Delivery]]] =
+      batches.get
+        .map(_(batch).zipWithIndex.map((record, index) => if valueOf(record) == "lost" then Left(lost) else Right(Delivery(0, index.toLong, -1L))))
+
+    private def valueOf(record: EncodedRecord): String = record.value.fold("")(value => new String(value.toArray))
 
     override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
 
@@ -527,12 +575,13 @@ final class DriverClientSuite extends CatsEffectSuite:
   private object FakeDriver:
     def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false): IO[FakeDriver] =
       (
+        Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
         Ref.of[IO, Vector[String]](Vector.empty),
         Ref.of[IO, List[PolledRecord]](Nil),
         Ref.of[IO, List[Rebalance[Int]]](Nil),
         Ref.of[IO, Option[IO[Unit]]](None),
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
         Ref.of[IO, Option[Deferred[IO, Unit]]](None)
-      ).mapN((log, queued, rebalances, inPoll, holds, pauseTake) =>
-        new FakeDriver(log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
+      ).mapN((batches, log, queued, rebalances, inPoll, holds, pauseTake) =>
+        new FakeDriver(batches, log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
       )
