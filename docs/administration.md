@@ -38,10 +38,9 @@ as duplicate topics, replication capacity, topic configuration, and whether a
 new total partition count is greater than the current one.
 
 @:callout(warning)
-Kafka reports an outcome for each topic, but the backends do not agree on whether
-that detail survives. The topic operations therefore report only the first failure. A
-request covering several topics may already have changed the cluster before the
-failure it reports.
+Creating, deleting, and growing topics report only the first failure, even
+when several topics fail. A request covering several topics may already have
+changed the cluster for the others.
 @:@
 
 @:callout(info)
@@ -86,9 +85,8 @@ val program =
 - A topic or partition the cluster does not have answers with
   `ErrorCode.UnknownTopicOrPartition`, and the other partitions in the call are
   still answered.
-- The call itself fails only where nothing is known about any partition, such as
-  when the cluster cannot be reached in time. It then fails with that failure,
-  which is retriable.
+- The call fails as a whole only when no partition got an answer, such as when
+  the cluster cannot be reached in time. That failure is retriable.
 - Deleting records moves no consumer group's offsets. A group whose committed
   offset is now below the start of the partition resumes as its
   `autoOffsetReset` says. See [Where a consumer starts](consuming.md#where-a-consumer-starts).
@@ -105,8 +103,8 @@ see the records such a cut deletes, even after their transaction commits.
 effect, including the values it inherits from the broker or from Kafka's
 defaults. Each topic answers on its own, as with `deleteRecords`: a topic the
 cluster does not have answers with `ErrorCode.UnknownTopicOrPartition`, and the
-call itself fails only where nothing is known about any topic, such as when the
-cluster cannot be reached in time.
+call fails as a whole only when no topic got an answer, such as when the cluster
+cannot be reached in time.
 
 ```scala mdoc:compile-only
 import cats.data.{NonEmptyList, NonEmptySet}

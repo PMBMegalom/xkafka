@@ -98,7 +98,8 @@ object Topic:
 
 /** A non-empty regular expression matched against complete topic names.
   *
-  * Portable patterns should use syntax supported by Java, ECMAScript, and POSIX extended regular expressions.
+  * The JVM matches it as a Java regular expression, and Scala.js and Native through librdkafka, so a pattern meant for every platform should keep to
+  * simple syntax, such as `events-.*`.
   */
 opaque type TopicPattern = String
 
@@ -150,7 +151,7 @@ object LeaderEpoch:
 opaque type ConsumerGroup = String
 
 object ConsumerGroup:
-  /** Rejects blank names. Brokers accept them, but they make group ownership impossible to attribute. */
+  /** Rejects a blank name. */
   def from(value: String): Either[ValidationError, ConsumerGroup] = Either.cond(value.trim.nonEmpty, value, ValidationError.EmptyConsumerGroup)
 
   extension (group: ConsumerGroup) def value: String = group

@@ -61,14 +61,14 @@ val tls =
 ```
 
 The private key must be PKCS#8, which PEM marks as `PRIVATE KEY`, or as
-`ENCRYPTED PRIVATE KEY` when it needs `keyPassword`. The Java client reads no
-other form, so an inline key in another form, such as `RSA PRIVATE KEY`, is a
+`ENCRYPTED PRIVATE KEY` when it needs `keyPassword`. Other forms are not
+supported, and an inline key in another form, such as `RSA PRIVATE KEY`, is a
 `SettingsError`. `openssl pkcs8 -topk8` converts one. The certificate's key and
 password are kept out of `toString`.
 
 Java 17 can't read a key encrypted with PBES2, the scheme `openssl pkcs8`
-uses by default, so on the JVM with Java 17 acquiring the client fails with
-`InvalidConfiguration`. Encrypt the key with `openssl pkcs8 -topk8 -v1
+uses by default, so on the JVM with Java 17 acquiring the client fails with a
+`BackendFailure` whose code is `ErrorCode.InvalidConfiguration`. Encrypt the key with `openssl pkcs8 -topk8 -v1
 PBE-SHA1-3DES` instead, which every backend reads. Java 21 reads both.
 
 ## Credentials

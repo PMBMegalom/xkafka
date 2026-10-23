@@ -7,7 +7,8 @@ sbt test
 ```
 
 That runs the ordinary JVM, Scala.js, and Scala Native suites. Tests which need
-a broker are skipped unless one is configured.
+a broker are skipped unless `XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS` names one,
+which the script below sets.
 
 ## Broker-backed tests
 

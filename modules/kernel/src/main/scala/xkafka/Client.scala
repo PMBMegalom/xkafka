@@ -31,9 +31,9 @@ import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.{Chunk, Pipe, Stream}
 
-/** Backend property names xkafka derives from the typed settings.
+/** Kafka property names xkafka sets from the typed settings.
   *
-  * Settings construction rejects them, so the portable model stays the single source for these values.
+  * Passing one through `properties` or `withProperty` fails as `SettingsError.ManagedProperty`; use the typed setting instead.
   */
 val ManagedProperties: Set[String] =
   Set(
@@ -215,7 +215,7 @@ sealed abstract case class ClientSettings private (
   def withSecurity(value: SecuritySettings): ClientSettings =
     new ClientSettings(bootstrapServers, clientId, properties, value, metadataRefreshInterval) {}
 
-  /** How long a topic created after a client started can stay unseen. */
+  /** How often the client refreshes what it knows of the cluster, which bounds how long a topic created after it started can stay unseen. */
   def withMetadataRefreshInterval(value: FiniteDuration): ValidatedNel[SettingsError, ClientSettings] =
     ClientSettings.from(bootstrapServers, clientId, properties, security, value)
 
@@ -334,7 +334,7 @@ object ProducerSettings:
   /** What both backends wait by default. */
   val DefaultLinger: FiniteDuration = 5.millis
 
-  /** The longest linger librdkafka accepts. The Java client has no limit of its own. */
+  /** The longest linger the settings accept. */
   val LingerLimit: FiniteDuration = 15.minutes
 
   def from[F[_], K, V](
@@ -364,7 +364,7 @@ object ProducerSettings:
 /** Kafka requires idempotence of every transactional producer, so each backend asks for it outright. */
 private[xkafka] val TransactionalIdempotence: (String, String) = "enable.idempotence" -> "true"
 
-/** A producer that writes inside transactions, which is all it writes, so these settings build a producer of their own. */
+/** Settings for a producer that writes only inside transactions. It always waits for every in-sync replica and is always idempotent. */
 sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     producer: ProducerSettings[F, K, V],
     transactionalId: TransactionalId,
@@ -376,7 +376,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withClient(value: ClientSettings): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withClient(value), transactionalId, transactionTimeout) {}
 
-  /** Kafka's `transaction.timeout.ms`. */
+  /** How long the broker lets a transaction stay open before it aborts it, Kafka's `transaction.timeout.ms`. */
   def withTransactionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, value))
       .map(_ => new TransactionalProducerSettings(producer, transactionalId, value) {})
@@ -591,15 +591,13 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
   /** Commits offsets even after their partition has moved to another consumer, which can move that partition back to an earlier position. */
   def withoutAssignmentFencing: ConsumerSettings[F, K, V] = copied(assignmentFencing = false)
 
-  /** How long one poll waits for records before it returns empty.
-    *
-    * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
-    */
+  /** How long one poll waits for records before it returns empty. */
   def withPollTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(pollTimeout = value)
 
   /** How long a call that asks the broker something waits for its answer.
     *
-    * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
+    * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, `seek`, `seekToBeginning`, and
+    * `seekToEnd`.
     */
   def withRequestTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(requestTimeout = value)
 
@@ -619,18 +617,19 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     */
   def withSessionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = Some(value))
 
-  /** Leaves the session timeout to the backend, which is the default. Both default to `ConsumerSettings.DefaultSessionTimeout`. */
+  /** Leaves the session timeout unset, which is the default, and is `ConsumerSettings.DefaultSessionTimeout` on every platform. */
   def withoutSessionTimeout: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = None)
 
   /** How often the consumer tells the group it is alive, which must be less than the session timeout. */
   def withHeartbeatInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     revalidated(heartbeatInterval = Some(value))
 
-  /** Leaves the heartbeat interval to the backend, which is the default. Both default to `ConsumerSettings.DefaultHeartbeatInterval`. */
+  /** Leaves the heartbeat interval unset, which is the default, and is `ConsumerSettings.DefaultHeartbeatInterval` on every platform. */
   def withoutHeartbeatInterval: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(heartbeatInterval = None)
 
-  /** How long the consumer can go without fetching records before it leaves its group, which happens once records wait unread long enough for
-    * fetching to stop. It must be at least the session timeout, and at most `ConsumerSettings.MaxPollIntervalLimit`.
+  /** How long the consumer can go without fetching records before it leaves its group and its partitions go to the others. Fetching stops while too
+    * many fetched records wait unread, so records left unread for this long make the consumer leave. It must be at least the session timeout, and at
+    * most `ConsumerSettings.MaxPollIntervalLimit`.
     */
   def withMaxPollInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollInterval = value)
 
@@ -645,15 +644,17 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       atLimit: RebalanceSafeCommits.AtLimit = RebalanceSafeCommits.AtLimit.Proceed
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(rebalanceSafeCommits = Some(RebalanceSafeCommits(limit, atLimit)))
 
-  /** Lets a revocation go ahead as soon as the transactions recording its offsets finish, which is the default. */
+  /** Lets a revocation go ahead without waiting for the records handed out to be committed, which is the default. With assignment fencing on, it
+    * still waits for commits and transactions already under way for the partition.
+    */
   def withoutRebalanceSafeCommits: ConsumerSettings[F, K, V] = copied(rebalanceSafeCommits = None)
 
   /** Starts each assigned partition at the offset `offsets` answers for it, which must answer within `limit`, itself less than the maximum poll
     * interval.
     *
-    * It is called with the partitions each rebalance assigns, before any of their records are fetched, and once at the start with partitions named
-    * directly. A partition it answers nothing for starts where it would without it. If it fails or passes its limit, the record stream fails, or for
-    * partitions named directly, creating the consumer fails.
+    * It is called with the partitions each rebalance assigns, before any of their records are fetched, and, for `Selection.Partitions`, once when the
+    * consumer is created. A partition it answers nothing for starts where it would without it. If it fails, or passes its limit as
+    * `KafkaException.StartingOffsetsTimedOut`, the record stream fails, or for `Selection.Partitions`, creating the consumer fails.
     */
   def withStartingOffsets(limit: FiniteDuration)(
       offsets: Set[TopicPartition] => F[Map[TopicPartition, StartingOffset]]
@@ -765,13 +766,13 @@ object ConsumerSettings:
   /** What both backends use. */
   val DefaultMaxPollInterval: FiniteDuration = 5.minutes
 
-  /** The longest session timeout librdkafka accepts. The Java client has no limit of its own. */
+  /** The longest session timeout the settings accept. */
   val SessionTimeoutLimit: FiniteDuration = 1.hour
 
-  /** The longest heartbeat interval librdkafka accepts. The Java client has no limit of its own. */
+  /** The longest heartbeat interval the settings accept. */
   val HeartbeatIntervalLimit: FiniteDuration = 1.hour
 
-  /** The longest maximum poll interval librdkafka accepts. */
+  /** The longest maximum poll interval the settings accept. */
   val MaxPollIntervalLimit: FiniteDuration = 24.hours
 
   def from[F[_], K, V](
@@ -920,7 +921,7 @@ enum ConfigurationSource derives CanEqual:
   /** Kafka's default, set nowhere. */
   case Default
 
-  /** A source with no portable meaning. */
+  /** A source none of the other cases describe. */
   case Unknown
 
 object ConfigurationSource:
@@ -990,9 +991,8 @@ final case class ConsumerGroupDescription(
 
 /** Topic and consumer group administration.
   *
-  * Kafka reports an outcome for each topic, and the backends do not agree on whether that detail survives when creating, deleting, or growing topics,
-  * so those report the first failure and nothing more. Deleting records, describing topic configurations, and the consumer group calls that name
-  * partitions or groups answer for each one.
+  * Creating, deleting, and growing topics report only the first failure, even when several topics fail. Deleting records, describing topic
+  * configurations, and the consumer group calls that name partitions or groups answer for each one.
   */
 trait KafkaAdminClient[F[_]]:
   self =>
@@ -1003,7 +1003,7 @@ trait KafkaAdminClient[F[_]]:
   /** Deletes each topic, failing if any of them cannot be deleted, including where it does not exist. */
   def deleteTopics(topics: NonEmptySet[Topic]): F[Unit]
 
-  /** Adds partitions to a topic, which Kafka allows only as an increase. */
+  /** Grows the topic to `count` partitions in all, failing where it already has `count` or more. */
   def createPartitions(topic: Topic, count: Int): F[Unit]
 
   /** Reports the partitions of each requested topic, failing where the cluster does not have one of them. */
@@ -1012,16 +1012,16 @@ trait KafkaAdminClient[F[_]]:
   /** Deletes each partition's records below its offset, answering for each one its new low watermark or the reason the broker refused it.
     *
     * Every requested partition gets an answer, including a topic or partition the cluster does not have, which answers as
-    * `ErrorCode.UnknownTopicOrPartition`. The call fails only where nothing is known about any partition, such as when the cluster cannot be reached
-    * in time. A partition already beginning at or after its offset keeps its records and answers with its current low watermark. An offset past the
-    * end of the partition is refused as `ErrorCode.OffsetOutOfRange`. Deleting records moves no consumer group's offsets.
+    * `ErrorCode.UnknownTopicOrPartition`. The call fails as a whole only when the cluster answered for none of the partitions, such as when it cannot
+    * be reached in time. A partition already beginning at or after its offset keeps its records and answers with its current low watermark. An offset
+    * past the end of the partition is refused as `ErrorCode.OffsetOutOfRange`. Deleting records moves no consumer group's offsets.
     */
   def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]]
 
   /** Reports each topic's effective configuration, including the values it inherits, or the reason the broker would not describe it.
     *
     * Every requested topic gets an answer, including one the cluster does not have, which answers as `ErrorCode.UnknownTopicOrPartition`. The call
-    * fails only where nothing is known about any topic, such as when the cluster cannot be reached in time.
+    * fails as a whole only when the cluster answered for none of the topics, such as when it cannot be reached in time.
     */
   def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]]
 
@@ -1140,8 +1140,8 @@ final case class OffsetAndMetadata(offset: Offset, leaderEpoch: Option[LeaderEpo
 trait OffsetCommitter[F[_]]:
   self =>
 
-  /** Commits these offsets, each with its leader epoch and metadata. With assignment fencing on, it commits only for partitions the consumer owns
-    * when the commit runs.
+  /** Commits these offsets, each with its leader epoch and metadata. With assignment fencing on, the commit fails as `ErrorCode.IllegalGeneration`,
+    * before it reaches the broker, where the consumer no longer owns one of the partitions.
     */
   def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit]
 
@@ -1319,11 +1319,11 @@ object CommittableConsumerRecord:
 trait KafkaProducer[F[_], K, V]:
   self =>
 
-  /** Enqueues `records` with the backend and returns the effect that completes once the broker has acknowledged them.
+  /** Enqueues `records` and returns the effect that completes once the broker has acknowledged them.
     *
     * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once, and fails where the
-    * backend refuses one of them. Awaiting the inner effect immediately makes production fully synchronous. It fails where any record was not
-    * delivered, with the failure of the first such record.
+    * client refuses one of them as it is enqueued. Awaiting the inner effect immediately makes production fully synchronous. It fails where any
+    * record was not delivered, with the failure of the first such record.
     */
   def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Produced[K, V]]]]
 
@@ -1331,11 +1331,11 @@ trait KafkaProducer[F[_], K, V]:
   final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[NonEmptyList[Produced[K, V]]] =
     F.flatten(produce(records))
 
-  /** Enqueues `records` with the backend and returns the effect that completes once each of them has been delivered or has failed.
+  /** Enqueues `records` and returns the effect that completes once each of them has been delivered or has failed.
     *
-    * Each record is answered on its own, in the order given, so the records that were delivered are known when some fail. A record the backend
-    * refuses to accept fails with that refusal, as do the ones after it. Neither effect fails because of a record, only where the whole call does,
-    * such as when a record cannot be serialized.
+    * Each record is answered on its own, in the order given, so the records that were delivered are known when some fail. A record the client refuses
+    * as it is enqueued fails with that refusal, as do the ones after it. A record that is not delivered fails neither effect. The outer effect still
+    * fails, with nothing enqueued, where a record cannot be serialized.
     */
   def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Attempted[K, V]]]]
 
@@ -1404,10 +1404,7 @@ trait Transaction[F[_], K, V]:
   /** Enqueues `records` and waits for the broker to acknowledge them, which a transaction must do before it can commit. */
   def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]]
 
-  /** Records `batch` against the group that read it, so those offsets land only where this transaction commits.
-    *
-    * The offsets carry the committer they came from, and that committer knows its consumer, so nothing here can name the wrong group.
-    */
+  /** Records `batch` against the consumer group each of its offsets was read by, so those offsets are committed only if this transaction commits. */
   def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit]
 
   /** Transforms the effect. Carrying a batch back to the underlying transaction needs the reverse direction, so this is not a lawful `FunctorK`. */
@@ -1433,7 +1430,7 @@ trait KafkaTransactionalProducer[F[_], K, V]:
       override def transactionally[A](use: Transaction[G, K, V] => G[A]): G[A] =
         fk(self.transactionally(transaction => gk(use(transaction.imapK(fk)(gk)))))
 
-/** Says a processed chunk can have its offsets committed, so the commit that follows is visible where the records are handled. */
+/** What a `consumeChunk` handler returns once it has processed its chunk, after which the chunk's offsets are committed. */
 case object CommitNow
 type CommitNow = CommitNow.type
 
@@ -1483,9 +1480,10 @@ trait KafkaConsumer[F[_], K, V]:
         F.productR(process(records))(offsets.commit)
     ).parJoinUnbounded.compile.drain
 
-  /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.
+  /** One stream for each partition this consumer is assigned, ending once the partition is revoked.
     *
-    * Every emitted stream must be consumed concurrently; backpressure from one partition otherwise backpressures the shared record source.
+    * Read the streams concurrently, such as with `parJoinUnbounded`: a stream does not end while its partition is held, and a partition whose stream
+    * goes unread is paused once `maxQueuedRecords` of its records are waiting.
     *
     * @param maxQueuedRecords
     *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
@@ -1521,10 +1519,10 @@ trait KafkaConsumer[F[_], K, V]:
   /** Moves the next fetch for each requested topic-partition past the latest record the broker holds. */
   def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit]
 
-  /** Returns the offset this consumer reads next, or `None` where it has not consumed from the partition yet.
+  /** Returns the offset this consumer reads next.
     *
-    * A backend may settle on a position earlier than that, such as when a seek names an offset, so the value every backend agrees on is the one after
-    * records have been consumed.
+    * It can be `None` until the consumer has consumed from the partition, and right after a seek the platforms can answer differently. Read it after
+    * consuming from the partition for the same answer everywhere.
     */
   def position(topicPartition: TopicPartition): F[Option[Offset]]
 

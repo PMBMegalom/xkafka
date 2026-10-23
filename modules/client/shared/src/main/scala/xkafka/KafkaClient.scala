@@ -31,13 +31,10 @@ trait KafkaClient[F[_]]:
 
   def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]]
 
-  /** Produces records and records consumer offsets atomically.
-    *
-    * A transactional producer writes only inside transactions, so this is separate from `producer`.
-    */
+  /** A producer that writes only inside transactions, which can also commit consumer offsets as part of each. */
   def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]]
 
-  /** Administers topics. It reads and changes cluster metadata only, so it neither produces nor consumes. */
+  /** Administers topics and consumer groups. It neither produces nor consumes. */
   def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]]
 
   final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F])(using MonadCancelThrow[F], MonadCancelThrow[G]): KafkaClient[G] =
@@ -54,4 +51,5 @@ trait KafkaClient[F[_]]:
       override def admin(settings: ClientSettings): Resource[G, KafkaAdminClient[G]] = self.admin(settings).map(_.mapK(fk)).mapK(fk)
 
 object KafkaClient:
+  /** The client for the platform this runs on. */
   def apply[F[_]: Async]: KafkaClient[F] = KafkaClientPlatform[F]

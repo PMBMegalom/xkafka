@@ -8,12 +8,12 @@ libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % "@VERSION@"
 
 The `%%%` operator selects the artifact for the platform being built. The same
 code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
-each selects its platform adapter.
+each one runs on its platform's Kafka client.
 
 Two modules are published:
 
-- `xkafka-kernel` holds the portable data model and the producer and consumer
-  algebras.
+- `xkafka-kernel` holds the data types and the producer, consumer, and
+  administration interfaces, with no backend.
 - `xkafka-client` holds `KafkaClient` and the three backends, and depends on the
   kernel.
 
@@ -47,23 +47,28 @@ import xkafka.*
 val client = KafkaClient[IO]
 ```
 
-The selected artifact supplies the adapter, so this line is the same on every
-platform. The platform's runtime dependencies are described below.
+This line is the same on every platform. What each platform needs at runtime is
+described below.
 
 ## Scala.js
 
-The backend is librdkafka, the same release Scala Native uses, called through
-koffi. sbt-scalajs-bundler installs it from npm as `@xkafka/librdkafka`, which
-brings a prebuilt library for the platform it runs on. Use the Node version
-recorded in `.nvmrc`:
+The backend is librdkafka, the same release Scala Native uses, and it runs on
+Node.js 24. It comes from npm as `@xkafka/librdkafka`, which brings a prebuilt
+library for the platform it runs on. sbt-scalajs-bundler installs it, so enable
+that plugin in the Scala.js project:
 
-```sh
-nvm use
+```scala
+// project/plugins.sbt
+addSbtPlugin("ch.epfl.scala" % "sbt-scalajs-bundler" % "0.21.1")
+```
+
+```scala
+// build.sbt
+.jsConfigure(_.enablePlugins(ScalaJSBundlerPlugin))
 ```
 
 ## Scala Native
 
-The backend is librdkafka, reached through a small C shim that ships inside the
-published artifact. An application needs librdkafka available to its compiler
-and linker. See [Platform notes](platform-notes.md) for the linking recipes,
+The backend is librdkafka, which must be installed where the application's
+compiler and linker can find it. See [Platform notes](platform-notes.md) for the linking recipes,
 including the flags a static link requires.
