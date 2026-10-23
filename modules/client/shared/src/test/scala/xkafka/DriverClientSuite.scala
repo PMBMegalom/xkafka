@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.{NonEmptyList, NonEmptySet}
+import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
@@ -392,7 +392,34 @@ final class DriverClientSuite extends CatsEffectSuite:
         assertEquals(calls.filter(call => call.startsWith("start") || call == "assign"), Vector("start events-0 at 4 in epoch -1", "assign"))
         assertEquals(failed, Left(failure))
 
+  test(
+    "a group's offsets leave out partitions without one, and named partitions answer None for them, whether the backend says so or leaves them out"
+  ):
+    val committed = OffsetAndMetadata(Offset.from(5L).toOption.get, None, "kept")
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).admin(client).use: admin =>
+        (admin.listConsumerGroupOffsets(group), admin.listConsumerGroupOffsets(group, NonEmptySet.of(eventsAt(0), eventsAt(1), eventsAt(2)))).tupled
+    .map: (all, named) =>
+      assertEquals(all, Map(eventsAt(0) -> committed))
+      assertEquals(named, NonEmptyMap.of(eventsAt(0) -> Some(committed), eventsAt(1) -> None, eventsAt(2) -> None))
+
+  test("an administration call the backend answers for a different number of items than asked fails as an invalid response"):
+    val offset = OffsetAndMetadata(Offset.from(1L).toOption.get)
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).admin(client).use: admin =>
+        (
+          admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(eventsAt(0), offset)),
+          admin.alterConsumerGroupOffsets(group, NonEmptyMap.of(eventsAt(0) -> offset, eventsAt(1) -> offset)).attempt
+        ).tupled
+    .map: (one, two) =>
+      assertEquals(one, NonEmptyMap.one(eventsAt(0), Right(())))
+      assert(two.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]), s"a short answer should be refused, got $two")
+
+  private val group = ConsumerGroup.from("fake").toOption.get
+
   private val eventsZero = TopicPartition(events, Partition.from(0).toOption.get)
+
+  private def eventsAt(partition: Int): TopicPartition = TopicPartition(events, Partition.from(partition).toOption.get)
 
   private def startAt(offset: Long, epoch: Option[Int] = None): StartingOffset =
     StartingOffset(Offset.from(offset).toOption.get, epoch.map(LeaderEpoch.from(_).toOption.get))
@@ -507,7 +534,7 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def destroyConsumer(consumer: Client): IO[Unit] = IO.unit
 
-    override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] = unused("admin")
+    override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] = IO.pure("admin")
 
     override def destroyAdmin(admin: Client): IO[Unit] = IO.unit
 
@@ -627,6 +654,41 @@ final class DriverClientSuite extends CatsEffectSuite:
         topics: Vector[Topic],
         timeoutMillis: Int
     ): IO[Vector[Either[KafkaException, TopicConfiguration]]] = unused("describeTopicConfigs")
+
+    override def listGroups(admin: Client, timeoutMillis: Int): IO[Vector[(ConsumerGroup, ConsumerGroupState)]] = unused("listGroups")
+
+    override def describeGroups(
+        admin: Client,
+        groups: Vector[ConsumerGroup],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, ConsumerGroupDescription]]] = unused("describeGroups")
+
+    override def groupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        partitions: Option[Vector[TopicPartition]],
+        timeoutMillis: Int
+    ): IO[Vector[(TopicPartition, StoredOffset)]] =
+      // Partition 0 holds offset 5, partition 1 has none, and any other partition is left out of the answer.
+      val answers = Vector(eventsAt(0) -> StoredOffset(5L, -1, "kept"), eventsAt(1) -> StoredOffset(-1L, -1, ""))
+      IO.pure(partitions.fold(answers)(requested => answers.filter((partition, _) => requested.contains(partition))))
+
+    override def alterGroupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = IO.pure(Vector(Right(()))) // one answer, however many offsets it is given
+
+    override def deleteGroupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        partitions: Vector[TopicPartition],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = unused("deleteGroupOffsets")
+
+    override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): IO[Vector[Either[KafkaException, Unit]]] =
+      unused("deleteGroups")
 
   private object FakeDriver:
     def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false): IO[FakeDriver] =

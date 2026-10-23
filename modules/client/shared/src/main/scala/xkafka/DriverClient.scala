@@ -21,6 +21,7 @@
 
 package xkafka
 
+import cats.Order
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Poll, Ref, Resource}
 import cats.effect.implicits.*
@@ -279,6 +280,53 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       val requested = topics.toSortedSet.toVector
       client(driver.describeTopicConfigs(client.handle, requested, requestTimeoutMillis)).map(answers => requested.zip(answers).toMap)
 
+    override def listConsumerGroups: F[Map[ConsumerGroup, ConsumerGroupState]] =
+      client(driver.listGroups(client.handle, requestTimeoutMillis)).map(_.toMap)
+
+    override def describeConsumerGroups(
+        groups: NonEmptySet[ConsumerGroup]
+    ): F[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]] =
+      val requested = groups.toNonEmptyList
+      client(driver.describeGroups(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
+
+    override def listConsumerGroupOffsets(group: ConsumerGroup): F[Map[TopicPartition, OffsetAndMetadata]] =
+      client(driver.groupOffsets(client.handle, group, None, requestTimeoutMillis))
+        .flatMap(answers => F.delay(answers.collect { case (partition, value) if value.offset >= 0L => partition -> stored(value) }.toMap))
+
+    override def listConsumerGroupOffsets(
+        group: ConsumerGroup,
+        partitions: NonEmptySet[TopicPartition]
+    ): F[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]] =
+      val requested = partitions.toNonEmptyList
+      client(driver.groupOffsets(client.handle, group, Some(requested.toList.toVector), requestTimeoutMillis)).flatMap: answers =>
+        F.delay:
+          val committed = answers.collect { case (partition, value) if value.offset >= 0L => partition -> stored(value) }.toMap
+          requested.map(partition => partition -> committed.get(partition)).toNem
+
+    override def alterConsumerGroupOffsets(
+        group: ConsumerGroup,
+        offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+    ): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] =
+      val requested = offsets.toNel
+      client(driver.alterGroupOffsets(client.handle, group, requested.toList.toVector, requestTimeoutMillis))
+        .flatMap(answeredEach(requested.map(_._1), _))
+
+    override def deleteConsumerGroupOffsets(
+        group: ConsumerGroup,
+        partitions: NonEmptySet[TopicPartition]
+    ): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] =
+      val requested = partitions.toNonEmptyList
+      client(driver.deleteGroupOffsets(client.handle, group, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
+
+    override def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): F[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]] =
+      val requested = groups.toNonEmptyList
+      client(driver.deleteGroups(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
+
+    /** Pairs each requested key with the backend's answer for it, which comes in request order. */
+    private def answeredEach[K: Order, A](requested: NonEmptyList[K], answers: Vector[A]): F[NonEmptyMap[K, A]] =
+      if answers.size == requested.size then F.pure(requested.zipWith(NonEmptyList.fromListUnsafe(answers.toList))(_ -> _).toNem)
+      else F.raiseError(new KafkaException.InvalidBackendResponse(s"expected ${requested.size} answers, got ${answers.size}"))
+
     private def unknownTopic(topic: Topic): KafkaException.BackendFailure =
       new KafkaException.BackendFailure(
         s"the cluster has no topic '${topic.value}'",
@@ -333,6 +381,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   /** A partition the backend named, which is only absent where the backend named one no topic or partition can have. */
   private def topicPartition(key: LeaseKey): Option[TopicPartition] =
     (Topic.from(key.topic).toOption, Partition.from(key.partition).toOption).mapN(TopicPartition(_, _))
+
+  /** Throws where the backend stored a value no offset or epoch can hold, so call it inside an effect. */
+  private def stored(value: StoredOffset): OffsetAndMetadata =
+    OffsetAndMetadata(offset("committed offset", value.offset), epoch("committed leader epoch", value.leaderEpoch), value.metadata)
 
   private def offset(field: String, value: Long): Offset = Offset.from(value).fold(error => throw invalidBackendValue(field, value, error), identity)
 
@@ -596,9 +648,6 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         val entries = topicPartitions.toVector
         client(driver.committed(client.handle, entries, requestTimeoutMillis))
           .flatMap(values => F.delay(entries.zip(values).map((tp, value) => tp -> Option.when(value.offset >= 0L)(stored(value))).toMap))
-
-    private def stored(value: StoredOffset): OffsetAndMetadata =
-      OffsetAndMetadata(offset("committed offset", value.offset), epoch("committed leader epoch", value.leaderEpoch), value.metadata)
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "beginning offset", (low, _) => low)

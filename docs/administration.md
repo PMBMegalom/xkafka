@@ -1,7 +1,8 @@
 # Administration
 
 `KafkaClient[F].admin` is a `Resource` over the topic operations, record
-deletion, and topic configuration. It neither produces nor consumes.
+deletion, topic configuration, and consumer groups. It neither produces nor
+consumes.
 
 ```scala mdoc:compile-only
 import cats.data.{NonEmptyList, NonEmptySet}
@@ -26,6 +27,9 @@ val program =
 - `describeTopics` reports the partitions of each requested topic.
 - `deleteRecords` deletes each partition's records below an offset. See [Deleting records](#deleting-records).
 - `describeTopicConfigurations` reports each topic's effective configuration. See [Topic configuration](#topic-configuration).
+- `listConsumerGroups`, `describeConsumerGroups`, `listConsumerGroupOffsets`,
+  `alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets`, and
+  `deleteConsumerGroups` inspect and change consumer groups. See [Consumer groups](#consumer-groups).
 
 `NewTopic.from` rejects a partition count or replication factor that is not
 positive. `createPartitions` likewise rejects a non-positive count before
@@ -131,7 +135,65 @@ Each `ConfigurationEntry` carries:
 
 A property the broker did not report has no entry, so `get` answers `None`.
 
+## Consumer groups
+
+`listConsumerGroups` answers every group the cluster knows with its
+`ConsumerGroupState`, including a group that has no members but still holds
+committed offsets. `describeConsumerGroups` answers each requested group with
+its state, its members, and the partitions each member is assigned.
+
+```scala mdoc:compile-only
+import cats.data.{NonEmptyList, NonEmptySet}
+import cats.effect.IO
+
+import xkafka.*
+
+val program =
+  for
+    client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    group   <- ConsumerGroup.from("billing").liftTo[IO]
+    answers <- KafkaClient[IO].admin(client).use(_.describeConsumerGroups(NonEmptySet.one(group)))
+    _       <- answers(group) match
+                 case Some(Right(description)) =>
+                   IO.println(s"${description.state}: ${description.members.map(_.clientId).mkString(", ")}")
+                 case Some(Left(failure)) => IO.println(s"not described: ${failure.getMessage}")
+                 case None                => IO.unit
+  yield ()
+```
+
+- A group the cluster does not have answers with `ErrorCode.GroupIdNotFound`,
+  and is not listed.
+- Kafka keeps committed offsets under an empty group name and lists that
+  group, but `listConsumerGroups` leaves it out, because `ConsumerGroup` does
+  not accept an empty name.
+- A group whose members have all left is `Empty`, with no members and no
+  assignor.
+- `simple` is true for a group that holds committed offsets but that no
+  consumer has joined, such as one created by `alterConsumerGroupOffsets`. It
+  is false for a group consumers have joined, including after they all leave.
+
+`listConsumerGroupOffsets` answers the offsets a group has committed. Without
+partitions it answers every one, and is empty for a group the cluster does not
+have. With partitions it answers each of them, with `None` where the group has
+committed nothing.
+
+`alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` answer each
+partition on its own, and `deleteConsumerGroups` each group on its own:
+
+- A group with members refuses `alterConsumerGroupOffsets` as
+  `ErrorCode.UnknownMemberId`, and `deleteConsumerGroups` as
+  `ErrorCode.NonEmptyGroup`. Stop the group's consumers first.
+- `deleteConsumerGroupOffsets` refuses a partition whose topic the group is
+  subscribed to as `ErrorCode.GroupSubscribedToTopic`.
+- `alterConsumerGroupOffsets` creates a group the cluster does not have. It
+  refuses a topic the cluster does not have as
+  `ErrorCode.UnknownTopicOrPartition`, and still answers the other partitions.
+- `deleteConsumerGroupOffsets` and `deleteConsumerGroups` refuse a group the
+  cluster does not have as `ErrorCode.GroupIdNotFound`.
+- A call fails as a whole only when no partition or group got an answer, such
+  as when the cluster cannot be reached in time. That failure is retriable.
+
 ## What it does not do
 
-Access control, quotas, changing configuration, consumer group administration,
-delegation tokens, and log directories are not covered.
+Access control, quotas, changing configuration, delegation tokens, and log
+directories are not covered.

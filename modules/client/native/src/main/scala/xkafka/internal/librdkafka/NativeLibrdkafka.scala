@@ -31,6 +31,7 @@ import scala.scalanative.unsigned.*
 
 import cats.data.NonEmptyList
 import cats.effect.Sync
+import cats.syntax.show.*
 import fs2.Chunk
 import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
@@ -619,6 +620,202 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         try LibrdkafkaAnswers
             .configurations(topics, Vector.tabulate(Bindings.xkafka_configs_resource_count(configs).toInt)(index => resource(configs, index.toUSize)))
         finally Bindings.xkafka_configs_destroy(configs)
+
+  override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val groups             = Bindings.xkafka_admin_list_groups(admin, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
+        if groups == null then throw nativeError(error, errorCode)
+
+        try LibrdkafkaAnswers.listed(
+            Vector.tabulate(Bindings.xkafka_groups_count(groups).toInt): index =>
+              (fromCString(Bindings.xkafka_groups_id_at(groups, index.toUSize)), Bindings.xkafka_groups_state_at(groups, index.toUSize).toInt)
+          )
+        finally Bindings.xkafka_groups_destroy(groups)
+
+  override def describeGroups(
+      admin: Client,
+      groups: Vector[ConsumerGroup],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, ConsumerGroupDescription]]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val descriptions       =
+          Bindings.xkafka_admin_describe_groups(
+            admin,
+            strings(groups.map(_.value)),
+            groups.size.toUSize,
+            timeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if descriptions == null then throw nativeError(error, errorCode)
+
+        try LibrdkafkaAnswers
+            .described(groups, Vector.tabulate(Bindings.xkafka_descriptions_count(descriptions).toInt)(describedGroup(descriptions, _)))
+        finally Bindings.xkafka_descriptions_destroy(descriptions)
+
+  private def describedGroup(descriptions: CVoidPtr, index: Int): DescribedGroup =
+    val group = index.toUSize
+    val error = Bindings.xkafka_description_error(descriptions, group)
+    DescribedGroup(
+      fromCString(Bindings.xkafka_description_group(descriptions, group)),
+      error,
+      fromCString(Bindings.xkafka_description_error_string(descriptions, group)),
+      Bindings.xkafka_description_simple(descriptions, group) != 0,
+      Bindings.xkafka_description_state(descriptions, group),
+      optionalString(Bindings.xkafka_description_assignor(descriptions, group)),
+      Option.when(error == 0 && Bindings.xkafka_description_coordinator_id(descriptions, group) >= 0):
+        Broker(
+          Bindings.xkafka_description_coordinator_id(descriptions, group),
+          fromCString(Bindings.xkafka_description_coordinator_host(descriptions, group)),
+          Bindings.xkafka_description_coordinator_port(descriptions, group),
+          optionalString(Bindings.xkafka_description_coordinator_rack(descriptions, group))
+        )
+      ,
+      if error != 0 then Nil
+      else
+        List.tabulate(Bindings.xkafka_description_member_count(descriptions, group).toInt): memberIndex =>
+          val member = memberIndex.toUSize
+          DescribedMember(
+            fromCString(Bindings.xkafka_member_id(descriptions, group, member)),
+            optionalString(Bindings.xkafka_member_instance_id(descriptions, group, member)),
+            fromCString(Bindings.xkafka_member_client_id(descriptions, group, member)),
+            fromCString(Bindings.xkafka_member_host(descriptions, group, member)),
+            Vector.tabulate(Bindings.xkafka_member_partition_count(descriptions, group, member).toInt): partition =>
+              (
+                fromCString(Bindings.xkafka_member_topic_at(descriptions, group, member, partition.toUSize)),
+                Bindings.xkafka_member_partition_at(descriptions, group, member, partition.toUSize).toInt
+              )
+          )
+    )
+
+  override def groupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Option[Vector[TopicPartition]],
+      timeoutMillis: Int
+  ): F[Vector[(TopicPartition, StoredOffset)]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val named              = partitions.getOrElse(Vector.empty)
+        val (topics, values)   = partitionArrays(named)
+        val (error, errorCode) = errorSlots
+        val committed          =
+          Bindings.xkafka_admin_list_group_offsets(
+            admin,
+            toCString(group.value),
+            topics,
+            values,
+            named.size.toUSize,
+            timeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if committed == null then throw nativeError(error, errorCode)
+
+        try LibrdkafkaAnswers.committed(
+            Vector.tabulate(Bindings.xkafka_assignment_count(committed).toInt): entry =>
+              val index    = entry.toUSize
+              val size     = stackalloc[CSize]()
+              val metadata = Bindings.xkafka_committed_metadata_at(committed, index, size)
+              (
+                fromCString(Bindings.xkafka_assignment_topic_at(committed, index)),
+                Bindings.xkafka_assignment_partition_at(committed, index).toInt,
+                StoredOffset(
+                  Bindings.xkafka_committed_offset_at(committed, index),
+                  Bindings.xkafka_committed_leader_epoch_at(committed, index),
+                  if metadata == null then "" else new String(chunk(metadata, !size).toArray, StandardCharsets.UTF_8)
+                )
+              )
+          )
+        finally Bindings.xkafka_committed_destroy(committed)
+
+  override def alterGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    codedCall(offsets.map(_._1), _.show): (codes, error, errorCode) =>
+      val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
+      Bindings.xkafka_admin_alter_group_offsets(
+        admin,
+        toCString(group.value),
+        topics,
+        partitions,
+        values,
+        epochs,
+        comments,
+        offsets.size.toUSize,
+        timeoutMillis,
+        codes,
+        error,
+        ErrorBufferSize.toUSize,
+        errorCode
+      )
+
+  override def deleteGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Vector[TopicPartition],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    codedCall(partitions, _.show): (codes, error, errorCode) =>
+      val (topics, values) = partitionArrays(partitions)
+      Bindings.xkafka_admin_delete_group_offsets(
+        admin,
+        toCString(group.value),
+        topics,
+        values,
+        partitions.size.toUSize,
+        timeoutMillis,
+        codes,
+        error,
+        ErrorBufferSize.toUSize,
+        errorCode
+      )
+
+  override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    codedCall(groups, _.value): (codes, error, errorCode) =>
+      Bindings.xkafka_admin_delete_groups(
+        admin,
+        strings(groups.map(_.value)),
+        groups.size.toUSize,
+        timeoutMillis,
+        codes,
+        error,
+        ErrorBufferSize.toUSize,
+        errorCode
+      )
+
+  /** A call that writes a code for each requested item, or fails as a whole through the usual out-parameters. */
+  private def codedCall[K](requested: Vector[K], name: K => String)(
+      call: Zone ?=> (Ptr[CInt], CString, Ptr[CInt]) => CInt
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val codes              = alloc[CInt](requested.size.max(1))
+        val (error, errorCode) = errorSlots
+        val answer             =
+          if call(codes, error, errorCode) != 0 then Coded.Refused(nativeError(error, errorCode))
+          else Coded.Answered(Vector.tabulate(requested.size)(index => codes(index)))
+        LibrdkafkaAnswers.eachCoded(requested, answer, name, errorString)
+
+  private def strings(values: Vector[String])(using Zone): Ptr[CString] =
+    val array = alloc[CString](values.size.max(1))
+    values.iterator.zipWithIndex.foreach((value, index) => array(index) = toCString(value))
+    array
+
+  private def optionalString(value: CString): Option[String] = Option(value).map(fromCString(_))
 
   private def resource(configs: CVoidPtr, index: CSize): ConfigResource =
     val error = Bindings.xkafka_configs_resource_error(configs, index)

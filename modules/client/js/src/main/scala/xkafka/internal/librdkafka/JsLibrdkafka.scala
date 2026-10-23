@@ -525,6 +525,173 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
                 .configurations(topics, Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _)))
             finally shim.configsDestroy(configs): Unit
 
+  override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.listGroups)(admin, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+        val groups = result.pointer
+        if groups == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers.listed(
+                Vector.tabulate(int(shim.groupsCount(groups))): index =>
+                  (shim.groupsIdAt(groups, index).asInstanceOf[String], int(shim.groupsStateAt(groups, index)))
+              )
+            finally shim.groupsDestroy(groups): Unit
+
+  override def describeGroups(
+      admin: Client,
+      groups: Vector[ConsumerGroup],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, ConsumerGroupDescription]]] =
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.describeGroups)(
+        admin,
+        strings(groups.map(_.value)),
+        groups.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> F.defer:
+        val descriptions = result.pointer
+        if descriptions == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers.described(groups, Vector.tabulate(int(shim.descriptionsCount(descriptions)))(describedGroup(shim, descriptions, _)))
+            finally shim.descriptionsDestroy(descriptions): Unit
+
+  private def describedGroup(shim: Shim, descriptions: js.Any, group: Int): DescribedGroup =
+    val error = int(shim.descriptionError(descriptions, group))
+    DescribedGroup(
+      shim.descriptionGroup(descriptions, group).asInstanceOf[String],
+      error,
+      shim.descriptionErrorString(descriptions, group).asInstanceOf[String],
+      int(shim.descriptionSimple(descriptions, group)) != 0,
+      int(shim.descriptionState(descriptions, group)),
+      optionalString(shim.descriptionAssignor(descriptions, group)),
+      Option.when(error == 0 && int(shim.descriptionCoordinatorId(descriptions, group)) >= 0):
+        Broker(
+          int(shim.descriptionCoordinatorId(descriptions, group)),
+          shim.descriptionCoordinatorHost(descriptions, group).asInstanceOf[String],
+          int(shim.descriptionCoordinatorPort(descriptions, group)),
+          optionalString(shim.descriptionCoordinatorRack(descriptions, group))
+        )
+      ,
+      if error != 0 then Nil
+      else
+        List.tabulate(int(shim.descriptionMemberCount(descriptions, group))): member =>
+          DescribedMember(
+            shim.memberId(descriptions, group, member).asInstanceOf[String],
+            optionalString(shim.memberInstanceId(descriptions, group, member)),
+            shim.memberClientId(descriptions, group, member).asInstanceOf[String],
+            shim.memberHost(descriptions, group, member).asInstanceOf[String],
+            Vector.tabulate(int(shim.memberPartitionCount(descriptions, group, member))): index =>
+              (
+                shim.memberTopicAt(descriptions, group, member, index).asInstanceOf[String],
+                int(shim.memberPartitionAt(descriptions, group, member, index))
+              )
+          )
+    )
+
+  override def groupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Option[Vector[TopicPartition]],
+      timeoutMillis: Int
+  ): F[Vector[(TopicPartition, StoredOffset)]] =
+    F.defer:
+      val named            = partitions.getOrElse(Vector.empty)
+      val (topics, values) = partitionArrays(named)
+      val error            = ErrorSlot()
+      val result           = Result()
+      background(_.listGroupOffsets)(
+        admin,
+        group.value,
+        topics,
+        values,
+        named.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> F.defer:
+        val committed = result.pointer
+        if committed == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers.committed(
+                Vector.tabulate(int(shim.assignmentCount(committed))): index =>
+                  val size     = js.Array[js.Any](0)
+                  val metadata = chunk(shim.committedMetadataAt(committed, index, size), size(0)).fold("")(bytes => new String(bytes.toArray, UTF_8))
+                  (
+                    shim.assignmentTopicAt(committed, index).asInstanceOf[String],
+                    int(shim.assignmentPartitionAt(committed, index)),
+                    StoredOffset(long(shim.committedOffsetAt(committed, index)), int(shim.committedEpochAt(committed, index)), metadata)
+                  )
+              )
+            finally shim.committedDestroy(committed): Unit
+
+  override def alterGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    val (topics, partitions)       = partitionArrays(offsets.map(_._1))
+    val (values, epochs, comments) = commitArrays(offsets.map(_._2))
+    codedCall(offsets.map(_._1), _.show)((codes, error, result) =>
+      background(_.alterGroupOffsets)(
+        (Seq[js.Any](admin, group.value, topics, partitions, values, epochs, comments, offsets.size, timeoutMillis, codes) ++ errorArguments(error) :+
+          result.value)*
+      )
+    )
+
+  override def deleteGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Vector[TopicPartition],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    val (topics, values) = partitionArrays(partitions)
+    codedCall(partitions, _.show)((codes, error, result) =>
+      background(_.deleteGroupOffsets)(
+        (Seq[js.Any](admin, group.value, topics, values, partitions.size, timeoutMillis, codes) ++ errorArguments(error) :+ result.value)*
+      )
+    )
+
+  override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    codedCall(groups, _.value)((codes, error, result) =>
+      background(_.deleteGroups)(
+        (Seq[js.Any](admin, strings(groups.map(_.value)), groups.size, timeoutMillis, codes) ++ errorArguments(error) :+ result.value)*
+      )
+    )
+
+  /** A call that writes a code for each requested item, or fails as a whole through the usual out-parameters. */
+  private def codedCall[K](requested: Vector[K], name: K => String)(
+      call: (Buffer, ErrorSlot, Result) => F[Unit]
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    F.defer:
+      val codes  = Buffers.alloc(4 * requested.size.max(1))
+      val error  = ErrorSlot()
+      val result = Result()
+      call(codes, error, result) *> F.delay:
+        val answer =
+          if result.int != 0 then Coded.Refused(error.failure)
+          else Coded.Answered(Vector.tabulate(requested.size)(index => codes.readInt32LE(4 * index)))
+        LibrdkafkaAnswers.eachCoded(requested, answer, name, errorString)
+
+  private def errorArguments(error: ErrorSlot): Seq[js.Any] = Seq(error.message, ErrorBufferSize, error.code)
+
+  private def optionalString(value: js.Any): Option[String] = Option(value).map(_.asInstanceOf[String])
+
+  private def int(value: js.Any): Int = value.asInstanceOf[Double].toInt
+
   private def resource(shim: Shim, configs: js.Any, index: Int): ConfigResource =
     val error = shim.configsResourceError(configs, index).asInstanceOf[Int]
     ConfigResource(

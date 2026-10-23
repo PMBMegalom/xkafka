@@ -190,6 +190,54 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val configsEntryReadOnly  = f("int32_t xkafka_configs_entry_is_read_only(void *configs, size_t resource_index, size_t entry_index)")
   val configsDestroy        = f("void xkafka_configs_destroy(void *configs)")
 
+  val listGroups    = f(s"int xkafka_async_admin_list_groups(void *client, int timeout_ms, $Error, void **result, $Done)")
+  val groupsCount   = f("size_t xkafka_groups_count(void *groups)")
+  val groupsIdAt    = f("const char *xkafka_groups_id_at(void *groups, size_t index)")
+  val groupsStateAt = f("int32_t xkafka_groups_state_at(void *groups, size_t index)")
+  val groupsDestroy = f("void xkafka_groups_destroy(void *groups)")
+
+  val describeGroups =
+    f(s"int xkafka_async_admin_describe_groups(void *client, const char **groups, size_t count, int timeout_ms, $Error, void **result, $Done)")
+  val descriptionsCount          = f("size_t xkafka_descriptions_count(void *descriptions)")
+  val descriptionGroup           = f("const char *xkafka_description_group(void *descriptions, size_t group)")
+  val descriptionError           = f("int32_t xkafka_description_error(void *descriptions, size_t group)")
+  val descriptionErrorString     = f("const char *xkafka_description_error_string(void *descriptions, size_t group)")
+  val descriptionSimple          = f("int xkafka_description_simple(void *descriptions, size_t group)")
+  val descriptionState           = f("int32_t xkafka_description_state(void *descriptions, size_t group)")
+  val descriptionAssignor        = f("const char *xkafka_description_assignor(void *descriptions, size_t group)")
+  val descriptionCoordinatorId   = f("int32_t xkafka_description_coordinator_id(void *descriptions, size_t group)")
+  val descriptionCoordinatorHost = f("const char *xkafka_description_coordinator_host(void *descriptions, size_t group)")
+  val descriptionCoordinatorPort = f("int32_t xkafka_description_coordinator_port(void *descriptions, size_t group)")
+  val descriptionCoordinatorRack = f("const char *xkafka_description_coordinator_rack(void *descriptions, size_t group)")
+  val descriptionMemberCount     = f("size_t xkafka_description_member_count(void *descriptions, size_t group)")
+  val memberId                   = f("const char *xkafka_member_id(void *descriptions, size_t group, size_t member)")
+  val memberInstanceId           = f("const char *xkafka_member_instance_id(void *descriptions, size_t group, size_t member)")
+  val memberClientId             = f("const char *xkafka_member_client_id(void *descriptions, size_t group, size_t member)")
+  val memberHost                 = f("const char *xkafka_member_host(void *descriptions, size_t group, size_t member)")
+  val memberPartitionCount       = f("size_t xkafka_member_partition_count(void *descriptions, size_t group, size_t member)")
+  val memberTopicAt              = f("const char *xkafka_member_topic_at(void *descriptions, size_t group, size_t member, size_t index)")
+  val memberPartitionAt          = f("int32_t xkafka_member_partition_at(void *descriptions, size_t group, size_t member, size_t index)")
+  val descriptionsDestroy        = f("void xkafka_descriptions_destroy(void *descriptions)")
+
+  val listGroupOffsets =
+    f(s"int xkafka_async_admin_list_group_offsets(void *client, const char *group, $PartitionNames, int timeout_ms, $Error, void **result, $Done)")
+  val alterGroupOffsets =
+    f(
+      "int xkafka_async_admin_alter_group_offsets(void *client, const char *group, const char **topics, const int32_t *partitions, " +
+        "const int64_t *offsets, const int32_t *leader_epochs, const char **metadata, size_t count, int timeout_ms, int32_t *codes, " +
+        s"$Error, int32_t *result, $Done)"
+    )
+  val deleteGroupOffsets =
+    f(
+      s"int xkafka_async_admin_delete_group_offsets(void *client, const char *group, $PartitionNames, int timeout_ms, int32_t *codes, $Error, " +
+        s"int32_t *result, $Done)"
+    )
+  val deleteGroups =
+    f(
+      s"int xkafka_async_admin_delete_groups(void *client, const char **groups, size_t count, int timeout_ms, int32_t *codes, $Error, " +
+        s"int32_t *result, $Done)"
+    )
+
 private[librdkafka] object Shim:
   /** The callback type every `async` function reports through. */
   val DoneType = "xkafka_done_t"

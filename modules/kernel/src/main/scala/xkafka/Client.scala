@@ -934,10 +934,65 @@ object ConfigurationSource:
       case 5 => Default               // DEFAULT_CONFIG
       case _ => Unknown
 
-/** Topic administration.
+/** A broker of the cluster, as it advertises itself to clients. */
+final case class Broker(id: Int, host: String, port: Int, rack: Option[String])
+
+/** Where a consumer group is in its life. */
+enum ConsumerGroupState derives CanEqual:
+  /** Its members hold their assignments. */
+  case Stable
+
+  /** Members are joining or leaving, so its partitions are about to be assigned again. */
+  case PreparingRebalance
+
+  /** Its members have joined and are waiting for their assignments. */
+  case CompletingRebalance
+
+  /** It has no members, though it may still hold committed offsets. */
+  case Empty
+
+  /** A state none of the other cases describe. */
+  case Unknown
+
+object ConsumerGroupState:
+  /** Classifies librdkafka's `rd_kafka_consumer_group_state_t`. */
+  private[xkafka] def fromLibrdkafka(value: Int): ConsumerGroupState =
+    value match
+      case 1 => PreparingRebalance  // PREPARING_REBALANCE
+      case 2 => CompletingRebalance // COMPLETING_REBALANCE
+      case 3 => Stable              // STABLE
+      case 5 => Empty               // EMPTY
+      case _ => Unknown
+
+/** A member of a consumer group and the partitions it is assigned.
+  *
+  * @param instanceId
+  *   the member's static group instance id, where it has one
+  */
+final case class GroupMember(memberId: String, instanceId: Option[String], clientId: String, host: String, assignment: Set[TopicPartition])
+
+/** What a consumer group is doing and who is in it.
+  *
+  * @param simple
+  *   whether the group holds committed offsets but no consumer has joined it, such as one created by `alterConsumerGroupOffsets`
+  * @param assignor
+  *   the name of the assignor that chose the members' assignments, where the group has one
+  * @param coordinator
+  *   the broker that coordinates the group, where it has one
+  */
+final case class ConsumerGroupDescription(
+    state: ConsumerGroupState,
+    simple: Boolean,
+    assignor: Option[String],
+    coordinator: Option[Broker],
+    members: List[GroupMember]
+)
+
+/** Topic and consumer group administration.
   *
   * Kafka reports an outcome for each topic, and the backends do not agree on whether that detail survives when creating, deleting, or growing topics,
-  * so those report the first failure and nothing more. Deleting records and describing topic configurations answer for each partition or topic.
+  * so those report the first failure and nothing more. Deleting records, describing topic configurations, and the consumer group calls that name
+  * partitions or groups answer for each one.
   */
 trait KafkaAdminClient[F[_]]:
   self =>
@@ -970,6 +1025,59 @@ trait KafkaAdminClient[F[_]]:
     */
   def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]]
 
+  /** Every consumer group the cluster knows, with its state, including a group with no members that still holds committed offsets.
+    *
+    * Kafka keeps committed offsets under an empty group name and lists that group, but it is left out here, because `ConsumerGroup` does not accept
+    * an empty name.
+    */
+  def listConsumerGroups: F[Map[ConsumerGroup, ConsumerGroupState]]
+
+  /** Describes each group, or answers why it could not be described.
+    *
+    * Each group is answered on its own, and one the cluster does not have answers as `ErrorCode.GroupIdNotFound`. The call fails as a whole only when
+    * the cluster answered for none of the groups, such as when it cannot be reached in time.
+    */
+  def describeConsumerGroups(groups: NonEmptySet[ConsumerGroup]): F[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]]
+
+  /** Every offset the group has committed, which is empty where it has committed none or the cluster does not have the group. */
+  def listConsumerGroupOffsets(group: ConsumerGroup): F[Map[TopicPartition, OffsetAndMetadata]]
+
+  /** The offset the group has committed for each partition, or `None` where it has committed none. */
+  def listConsumerGroupOffsets(
+      group: ConsumerGroup,
+      partitions: NonEmptySet[TopicPartition]
+  ): F[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]]
+
+  /** Sets the group's committed offsets, answering for each partition whether it was set.
+    *
+    * Each partition is answered on its own, and a topic the cluster does not have answers as `ErrorCode.UnknownTopicOrPartition`. The call fails as a
+    * whole only when the cluster answered for none of the partitions, such as when it cannot be reached in time. A group the cluster does not have is
+    * created holding these offsets. A group with members refuses them as `ErrorCode.UnknownMemberId`, so stop its consumers first.
+    */
+  def alterConsumerGroupOffsets(
+      group: ConsumerGroup,
+      offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+  ): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]
+
+  /** Deletes the group's committed offsets for these partitions, answering for each partition whether they were deleted.
+    *
+    * Each partition is answered on its own. The call fails as a whole only when the cluster answered for none of the partitions, such as when it
+    * cannot be reached in time. A partition whose topic the group is subscribed to answers as `ErrorCode.GroupSubscribedToTopic`, and every partition
+    * of a group the cluster does not have as `ErrorCode.GroupIdNotFound`.
+    */
+  def deleteConsumerGroupOffsets(
+      group: ConsumerGroup,
+      partitions: NonEmptySet[TopicPartition]
+  ): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]
+
+  /** Deletes each group with its committed offsets, answering for each group whether it was deleted.
+    *
+    * Each group is answered on its own. The call fails as a whole only when the cluster answered for none of the groups, such as when it cannot be
+    * reached in time. A group with members answers as `ErrorCode.NonEmptyGroup`, so stop its consumers first, and one the cluster does not have as
+    * `ErrorCode.GroupIdNotFound`.
+    */
+  def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): F[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]]
+
   final def mapK[G[_]](fk: FunctionK[F, G]): KafkaAdminClient[G] =
     new KafkaAdminClient[G]:
       override def createTopics(topics: NonEmptySet[NewTopic]): G[Unit] = fk(self.createTopics(topics))
@@ -985,6 +1093,33 @@ trait KafkaAdminClient[F[_]]:
 
       override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
         fk(self.describeTopicConfigurations(topics))
+
+      override def listConsumerGroups: G[Map[ConsumerGroup, ConsumerGroupState]] = fk(self.listConsumerGroups)
+
+      override def describeConsumerGroups(
+          groups: NonEmptySet[ConsumerGroup]
+      ): G[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]] = fk(self.describeConsumerGroups(groups))
+
+      override def listConsumerGroupOffsets(group: ConsumerGroup): G[Map[TopicPartition, OffsetAndMetadata]] =
+        fk(self.listConsumerGroupOffsets(group))
+
+      override def listConsumerGroupOffsets(
+          group: ConsumerGroup,
+          partitions: NonEmptySet[TopicPartition]
+      ): G[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]] = fk(self.listConsumerGroupOffsets(group, partitions))
+
+      override def alterConsumerGroupOffsets(
+          group: ConsumerGroup,
+          offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+      ): G[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = fk(self.alterConsumerGroupOffsets(group, offsets))
+
+      override def deleteConsumerGroupOffsets(
+          group: ConsumerGroup,
+          partitions: NonEmptySet[TopicPartition]
+      ): G[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = fk(self.deleteConsumerGroupOffsets(group, partitions))
+
+      override def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): G[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]] =
+        fk(self.deleteConsumerGroups(groups))
 
 object KafkaAdminClient:
   private[xkafka] def validatePartitionCount(value: Int): Either[KafkaException.InvalidValue, Int] =
