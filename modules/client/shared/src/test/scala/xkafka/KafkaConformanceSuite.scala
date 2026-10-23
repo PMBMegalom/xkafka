@@ -1423,6 +1423,169 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           assertEquals(failure.retriable, Some(false), failure.getMessage)
         case other => fail(s"the held record should have been purged, got $other")
 
+  test(conformance("a group is described and listed with its state, its members and their assignments while it has members")):
+    withBroker: server =>
+      val topic = uniqueTopic("groups-active")
+      val group = uniqueGroup("groups-active")
+
+      for
+        _        <- createPartitioned(server, topic, 2)
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        settings <-
+          ConsumerSettings.from(client.withClientId("group-member"), group, optionalDeserializer, optionalDeserializer, AutoOffsetReset.Earliest)
+            .liftTo[IO]
+        seen <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+              assignmentOf(consumer, 2) *> (admin.describeConsumerGroups(NonEmptySet.one(group)), admin.listConsumerGroups).tupled
+          .timeout(90.seconds)
+      yield
+        val (described, listed) = seen
+        described(group) match
+          case Some(Right(description)) =>
+            assertEquals(description.state, ConsumerGroupState.Stable)
+            assert(!description.simple, "a group whose members joined it is not simple")
+            assert(description.assignor.isDefined, "a group with members has an assignor")
+            assert(description.coordinator.isDefined, "a group has a coordinator")
+            assertEquals(description.members.map(_.clientId), List("group-member"))
+            assertEquals(description.members.map(_.instanceId), List(None))
+            assertEquals(
+              description.members.flatMap(_.assignment).toSet,
+              Set(TopicPartition(topic, validPartition(0)), TopicPartition(topic, validPartition(1)))
+            )
+          case other => fail(s"the group should be described, got $other")
+        assertEquals(listed.get(group), Some(ConsumerGroupState.Stable))
+
+  test(conformance("a group whose members left is empty, and one that never existed is not found")):
+    withBroker: server =>
+      val topic   = uniqueTopic("groups-empty")
+      val group   = uniqueGroup("groups-empty")
+      val missing = uniqueGroup("groups-missing")
+
+      for
+        _        <- createPartitioned(server, topic, 1)
+        settings <- consumerSettings(server, group)
+        _        <- PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(assignmentOf(_, 1)).timeout(90.seconds)
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        seen     <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            (admin.describeConsumerGroups(NonEmptySet.of(group, missing)), admin.listConsumerGroups).tupled
+          .timeout(90.seconds)
+      yield
+        val (described, listed) = seen
+        described(group) match
+          case Some(Right(description)) =>
+            assertEquals(description.state, ConsumerGroupState.Empty)
+            assertEquals(description.members, Nil)
+            assert(!description.simple, "a group whose members joined it stays not simple once they leave")
+            assertEquals(description.assignor, None)
+          case other => fail(s"the group should be described, got $other")
+        refusedWith(described(missing), ErrorCode.GroupIdNotFound, "a group that never existed")
+        assertEquals(listed.get(group), Some(ConsumerGroupState.Empty))
+        assertEquals(listed.get(missing), None)
+
+  test(conformance("a group with members refuses changes to its offsets and its deletion")):
+    withBroker: server =>
+      val topic     = uniqueTopic("groups-busy")
+      val group     = uniqueGroup("groups-busy")
+      val partition = TopicPartition(topic, validPartition(0))
+
+      for
+        _        <- createPartitioned(server, topic, 1)
+        settings <- consumerSettings(server, group)
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        answers  <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+              assignmentOf(consumer, 1) *>
+                (
+                  admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(partition, OffsetAndMetadata(validOffset(0L)))),
+                  admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+                  admin.deleteConsumerGroups(NonEmptySet.one(group))
+                ).tupled
+          .timeout(90.seconds)
+      yield
+        val (altered, deletedOffsets, deleted) = answers
+        refusedWith(altered(partition), ErrorCode.UnknownMemberId, "altering a group with members")
+        refusedWith(deletedOffsets(partition), ErrorCode.GroupSubscribedToTopic, "deleting offsets of a topic the group subscribes to")
+        refusedWith(deleted(group), ErrorCode.NonEmptyGroup, "deleting a group with members")
+
+  test(conformance("altering offsets answers each partition, and creates a group that only holds offsets")):
+    withBroker: server =>
+      val topic   = uniqueTopic("groups-alter")
+      val group   = uniqueGroup("groups-alter")
+      val first   = TopicPartition(topic, validPartition(0))
+      val second  = TopicPartition(topic, validPartition(1))
+      val unknown = TopicPartition(uniqueTopic("groups-nowhere"), validPartition(0))
+
+      for
+        _      <- createPartitioned(server, topic, 2)
+        client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        seen   <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            for
+              altered <-
+                admin.alterConsumerGroupOffsets(
+                  group,
+                  NonEmptyMap.of(first -> OffsetAndMetadata(validOffset(3L), None, "kept"), unknown -> OffsetAndMetadata(validOffset(0L)))
+                )
+              all       <- admin.listConsumerGroupOffsets(group)
+              named     <- admin.listConsumerGroupOffsets(group, NonEmptySet.of(first, second))
+              described <- admin.describeConsumerGroups(NonEmptySet.one(group))
+              listed    <- admin.listConsumerGroups
+            yield (altered, all, named, described, listed)
+          .timeout(90.seconds)
+      yield
+        val (altered, all, named, described, listed) = seen
+        assertEquals(altered(first).map(_.leftMap(_.getMessage)), Some(Right(())))
+        refusedWith(altered(unknown), ErrorCode.UnknownTopicOrPartition, "altering the offset of an unknown topic")
+        assertEquals(all, Map(first -> OffsetAndMetadata(validOffset(3L), None, "kept")))
+        assertEquals(named.toSortedMap.toMap, Map(first -> Some(OffsetAndMetadata(validOffset(3L), None, "kept")), second -> None))
+        described(group) match
+          case Some(Right(description)) =>
+            assertEquals(description.state, ConsumerGroupState.Empty)
+            assert(description.simple, "a group that only holds offsets is simple")
+            assertEquals(description.members, Nil)
+          case other => fail(s"the group should be described, got $other")
+        assertEquals(listed.get(group), Some(ConsumerGroupState.Empty))
+
+  test(conformance("deleting offsets and groups answers each one, and a group that never existed is not found")):
+    withBroker: server =>
+      val topic  = uniqueTopic("groups-delete")
+      val group  = uniqueGroup("groups-delete")
+      val never  = uniqueGroup("groups-never")
+      val first  = TopicPartition(topic, validPartition(0))
+      val second = TopicPartition(topic, validPartition(1))
+
+      for
+        _      <- createPartitioned(server, topic, 2)
+        client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        seen   <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            for
+              _ <-
+                admin.alterConsumerGroupOffsets(
+                  group,
+                  NonEmptyMap.of(first -> OffsetAndMetadata(validOffset(1L)), second -> OffsetAndMetadata(validOffset(2L)))
+                )
+              deletedOffsets <- admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(second))
+              remaining      <- admin.listConsumerGroupOffsets(group)
+              neverOffsets   <- admin.deleteConsumerGroupOffsets(never, NonEmptySet.one(second))
+              deleted        <- admin.deleteConsumerGroups(NonEmptySet.of(group, never))
+              listed         <- admin.listConsumerGroups
+              gone           <- admin.listConsumerGroupOffsets(group)
+            yield (deletedOffsets, remaining, neverOffsets, deleted, listed, gone)
+          .timeout(90.seconds)
+      yield
+        val (deletedOffsets, remaining, neverOffsets, deleted, listed, gone) = seen
+        assertEquals(deletedOffsets(second).map(_.leftMap(_.getMessage)), Some(Right(())))
+        assertEquals(remaining, Map(first -> OffsetAndMetadata(validOffset(1L))))
+        refusedWith(neverOffsets(second), ErrorCode.GroupIdNotFound, "deleting offsets of a group that never existed")
+        assertEquals(deleted(group).map(_.leftMap(_.getMessage)), Some(Right(())))
+        refusedWith(deleted(never), ErrorCode.GroupIdNotFound, "deleting a group that never existed")
+        assertEquals(listed.get(group), None)
+        assertEquals(gone, Map.empty)
+
   test(conformance("deleting records removes those below each offset and answers each partition on its own")):
     withBroker: server =>
       val topic = uniqueTopic("delete-records")
@@ -1824,12 +1987,39 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
       PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(topics)).attempt.timeout(150.seconds).map(unreachable)
 
+  test(conformance("consumer group administration against a cluster that cannot be reached fails as a timed out request")):
+    val group     = uniqueGroup("groups-unreachable")
+    val partition = TopicPartition(uniqueTopic("groups-unreachable"), validPartition(0))
+    ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
+      PlatformKafkaClient().admin(client).use: admin =>
+        List[(String, IO[Any])](
+          "listing groups"        -> admin.listConsumerGroups,
+          "describing groups"     -> admin.describeConsumerGroups(NonEmptySet.one(group)),
+          "listing all offsets"   -> admin.listConsumerGroupOffsets(group),
+          "listing named offsets" -> admin.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+          "altering offsets"      -> admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(partition, OffsetAndMetadata(validOffset(0L)))),
+          "deleting offsets"      -> admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+          "deleting groups"       -> admin.deleteConsumerGroups(NonEmptySet.one(group))
+        ).parTraverse((call, run) => run.attempt.map(call -> _))
+      .timeout(150.seconds).map: outcomes =>
+        val wrong =
+          outcomes.collect:
+            case (call, Left(failure: KafkaException.BackendFailure))
+                if failure.code.contains(ErrorCode.RequestTimedOut) && failure.retriable.contains(true) => None
+            case (call, outcome) => Some(s"$call: $outcome")
+        assertEquals(wrong.flatten, Nil, "each call should fail as a retriable timed out request")
+
   private def unreachable(outcome: Either[Throwable, ?]): Unit =
     outcome match
       case Left(failure: KafkaException.BackendFailure) =>
         assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), failure.getMessage)
         assertEquals(failure.retriable, Some(true), failure.getMessage)
       case other => fail(s"a cluster that cannot be reached should fail the call, got $other")
+
+  private def refusedWith(answer: Option[Either[KafkaException, ?]], code: ErrorCode, clue: String): Unit =
+    answer match
+      case Some(Left(failure: KafkaException.BackendFailure)) => assertEquals(failure.code, Some(code), s"$clue: ${failure.getMessage}")
+      case other                                              => fail(s"$clue should be refused as $code, got $other")
 
   private def unknownAnswer(answer: Option[Either[KafkaException, ?]], clue: String): Unit =
     answer match

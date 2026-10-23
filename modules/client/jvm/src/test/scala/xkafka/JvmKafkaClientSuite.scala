@@ -441,11 +441,13 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           else
             calls.add(method.getName): Unit
             throw new IllegalStateException(s"${method.getName} reached the Java client")
-    val admin    = java.lang.reflect.Proxy.newProxyInstance(classOf[Admin].getClassLoader, Array(classOf[Admin]), handler).asInstanceOf[Admin]
-    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
-    val topic    = Topic.from("events").toOption.get
-    val newTopic = NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get
-    val cut      = cats.data.NonEmptyMap.one(TopicPartition(topic, Partition.from(0).toOption.get), Offset.from(1L).toOption.get)
+    val admin     = java.lang.reflect.Proxy.newProxyInstance(classOf[Admin].getClassLoader, Array(classOf[Admin]), handler).asInstanceOf[Admin]
+    val client    = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val topic     = Topic.from("events").toOption.get
+    val newTopic  = NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get
+    val group     = ConsumerGroup.from("workers").toOption.get
+    val partition = TopicPartition(topic, Partition.from(0).toOption.get)
+    val cut       = cats.data.NonEmptyMap.one(partition, Offset.from(1L).toOption.get)
 
     mocked(admin = _ => admin).admin(client).use: client =>
       for
@@ -456,7 +458,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             client.createPartitions(topic, 2),
             client.describeTopics(NonEmptySet.one(topic)),
             client.deleteRecords(cut),
-            client.describeTopicConfigurations(NonEmptySet.one(topic))
+            client.describeTopicConfigurations(NonEmptySet.one(topic)),
+            client.listConsumerGroups,
+            client.describeConsumerGroups(NonEmptySet.one(group)),
+            client.listConsumerGroupOffsets(group),
+            client.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            client.alterConsumerGroupOffsets(group, cats.data.NonEmptyMap.one(partition, xkafka.OffsetAndMetadata(Offset.from(1L).toOption.get))),
+            client.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            client.deleteConsumerGroups(NonEmptySet.one(group))
           ))
         before <- IO.delay(calls.asScala.toList)
         _      <- built.traverse_(_.attempt)
@@ -466,7 +475,21 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(
           calls.asScala.toList,
           // Describing topics lists them first, and deleting records stops at looking up its topic, which the proxy refuses.
-          List.fill(2)(List("createTopics", "deleteTopics", "createPartitions", "listTopics", "describeTopics", "describeConfigs")).flatten,
+          List.fill(2)(List(
+            "createTopics",
+            "deleteTopics",
+            "createPartitions",
+            "listTopics",
+            "describeTopics",
+            "describeConfigs",
+            "listGroups",
+            "describeConsumerGroups",
+            "listConsumerGroupOffsets",
+            "listConsumerGroupOffsets",
+            "alterConsumerGroupOffsets",
+            "deleteConsumerGroupOffsets",
+            "deleteConsumerGroups"
+          )).flatten,
           "each run should make its own call"
         )
 

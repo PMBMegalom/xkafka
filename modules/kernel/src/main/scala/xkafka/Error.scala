@@ -75,6 +75,12 @@ enum ErrorCode derives CanEqual:
   /** The broker has no group of this id, such as one it removed once its last member left and no committed offset kept it. */
   case GroupIdNotFound
 
+  /** The group still has members, so it cannot be deleted. */
+  case NonEmptyGroup
+
+  /** The group is subscribed to the topic, so its offsets for that topic cannot be deleted. */
+  case GroupSubscribedToTopic
+
   /** The group is rebalancing. */
   case RebalanceInProgress
 
@@ -160,7 +166,9 @@ object ErrorCode:
       31 -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
       35 -> UnsupportedVersion,         // UNSUPPORTED_VERSION
       40 -> InvalidConfiguration,       // INVALID_CONFIG
+      68 -> NonEmptyGroup,              // NON_EMPTY_GROUP
       69 -> GroupIdNotFound,            // GROUP_ID_NOT_FOUND
+      86 -> GroupSubscribedToTopic,     // GROUP_SUBSCRIBED_TO_TOPIC
       47 -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
       58 -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
       82 -> Fenced,                     // FENCED_INSTANCE_ID

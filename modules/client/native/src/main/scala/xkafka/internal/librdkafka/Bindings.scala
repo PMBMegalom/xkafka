@@ -346,6 +346,118 @@ private[xkafka] object Bindings:
 
   def xkafka_configs_destroy(configs: CVoidPtr): Unit = extern
 
+  def xkafka_admin_list_groups(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
+
+  def xkafka_groups_count(groups: CVoidPtr): CSize = extern
+
+  def xkafka_groups_id_at(groups: CVoidPtr, index: CSize): CString = extern
+
+  def xkafka_groups_state_at(groups: CVoidPtr, index: CSize): CInt = extern
+
+  def xkafka_groups_destroy(groups: CVoidPtr): Unit = extern
+
+  def xkafka_admin_describe_groups(
+      client: CVoidPtr,
+      groups: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_descriptions_count(descriptions: CVoidPtr): CSize = extern
+
+  def xkafka_description_group(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_error(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_error_string(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_simple(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_state(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_assignor(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_coordinator_id(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_coordinator_host(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_coordinator_port(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_coordinator_rack(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_member_count(descriptions: CVoidPtr, group: CSize): CSize = extern
+
+  def xkafka_member_id(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_instance_id(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_client_id(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_host(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_partition_count(descriptions: CVoidPtr, group: CSize, member: CSize): CSize = extern
+
+  def xkafka_member_topic_at(descriptions: CVoidPtr, group: CSize, member: CSize, index: CSize): CString = extern
+
+  def xkafka_member_partition_at(descriptions: CVoidPtr, group: CSize, member: CSize, index: CSize): CInt = extern
+
+  def xkafka_descriptions_destroy(descriptions: CVoidPtr): Unit = extern
+
+  def xkafka_admin_list_group_offsets(
+      client: CVoidPtr,
+      group: CString,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_admin_alter_group_offsets(
+      client: CVoidPtr,
+      group: CString,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      offsets: Ptr[CLongLong],
+      leaderEpochs: Ptr[CInt],
+      metadata: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_admin_delete_group_offsets(
+      client: CVoidPtr,
+      group: CString,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_admin_delete_groups(
+      client: CVoidPtr,
+      groups: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_consumer_assign(
       consumer: CVoidPtr,
       topics: Ptr[CString],

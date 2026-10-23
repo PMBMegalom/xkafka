@@ -84,18 +84,44 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     val producerSettings = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
     val consumerSettings = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
     val record           = ProducerRecord(topic, "key", "value")
-    val cut              = NonEmptyMap.one(TopicPartition(topic, Partition.from(0).toOption.get), Offset.from(3L).toOption.get)
+    val partition        = TopicPartition(topic, Partition.from(0).toOption.get)
+    val offset           = Offset.from(3L).toOption.get
+    val cut              = NonEmptyMap.one(partition, offset)
 
     for
       produced  <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
       consumed  <- client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.compile.drain).value
       deleted   <- client.admin(clientSettings).use(_.deleteRecords(cut)).value
       inspected <- client.admin(clientSettings).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).value
+      groups    <-
+        client.admin(clientSettings).use: admin =>
+          (
+            admin.listConsumerGroups,
+            admin.describeConsumerGroups(NonEmptySet.one(group)),
+            admin.listConsumerGroupOffsets(group),
+            admin.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(partition, OffsetAndMetadata(offset))),
+            admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            admin.deleteConsumerGroups(NonEmptySet.one(group))
+          ).tupled
+        .value
     yield
       assertEquals(produced, Right(NonEmptyList.one(Produced(record, metadataOf(record)))))
       assertEquals(consumed, Right(()))
       assertEquals(deleted, Right(cut.toSortedMap.view.mapValues(Right(_)).toMap))
       assertEquals(inspected, Right(Map(topic -> Right(TopicConfiguration(Map.empty)))))
+      assertEquals(
+        groups,
+        Right((
+          Map(group -> ConsumerGroupState.Stable),
+          NonEmptyMap.one(group, Right(ConsumerGroupDescription(ConsumerGroupState.Empty, true, None, None, Nil))),
+          Map(partition -> OffsetAndMetadata(offset)),
+          NonEmptyMap.one(partition, None),
+          NonEmptyMap.one(partition, Right(())),
+          NonEmptyMap.one(partition, Right(())),
+          NonEmptyMap.one(group, Right(()))
+        ))
+      )
 
   private val source: KafkaClient[IO] = sourceRecording(_ => IO.unit)
 
@@ -148,6 +174,30 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
               IO.pure(before.toSortedMap.view.mapValues(Right(_)).toMap)
             override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
               IO.pure(topics.toSortedSet.toList.map(_ -> Right(TopicConfiguration(Map.empty))).toMap)
+            override def listConsumerGroups: IO[Map[ConsumerGroup, ConsumerGroupState]] =
+              IO.pure(Map(ConsumerGroup.from("workers").toOption.get -> ConsumerGroupState.Stable))
+            override def describeConsumerGroups(
+                groups: NonEmptySet[ConsumerGroup]
+            ): IO[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]] =
+              IO.pure(groups.toNonEmptyList.map(_ -> Right(ConsumerGroupDescription(ConsumerGroupState.Empty, true, None, None, Nil))).toNem)
+            override def listConsumerGroupOffsets(group: ConsumerGroup): IO[Map[TopicPartition, OffsetAndMetadata]] =
+              IO.pure(Map(
+                TopicPartition(Topic.from("events").toOption.get, Partition.from(0).toOption.get) -> OffsetAndMetadata(Offset.from(3L).toOption.get)
+              ))
+            override def listConsumerGroupOffsets(
+                group: ConsumerGroup,
+                partitions: NonEmptySet[TopicPartition]
+            ): IO[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]] = IO.pure(partitions.toNonEmptyList.map(_ -> None).toNem)
+            override def alterConsumerGroupOffsets(
+                group: ConsumerGroup,
+                offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+            ): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = IO.pure(offsets.map(_ => Right(())))
+            override def deleteConsumerGroupOffsets(
+                group: ConsumerGroup,
+                partitions: NonEmptySet[TopicPartition]
+            ): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = IO.pure(partitions.toNonEmptyList.map(_ -> Right(())).toNem)
+            override def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): IO[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]] =
+              IO.pure(groups.toNonEmptyList.map(_ -> Right(())).toNem)
 
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], selection: Selection): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:

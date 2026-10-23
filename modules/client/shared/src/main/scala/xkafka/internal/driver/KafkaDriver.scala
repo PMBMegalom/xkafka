@@ -168,6 +168,41 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Each topic's configuration, or why it was not described, in request order. */
   def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]]
 
+  /** Every consumer group the cluster knows, with its state. */
+  def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]]
+
+  /** Each group's description, or why it was not described, in request order. */
+  def describeGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, ConsumerGroupDescription]]]
+
+  /** What the group committed for these partitions, or for every partition it committed to where none are named. A partition it committed nothing for
+    * answers with a negative offset.
+    */
+  def groupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Option[Vector[TopicPartition]],
+      timeoutMillis: Int
+  ): F[Vector[(TopicPartition, StoredOffset)]]
+
+  /** Whether each partition's offset was set, in request order. */
+  def alterGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Whether each partition's offset was deleted, in request order. */
+  def deleteGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Vector[TopicPartition],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Whether each group was deleted, in request order. */
+  def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]]
+
 private[xkafka] object KafkaDriver:
   /** The offset `seek` reads as the beginning of a partition's log. */
   val BeginningOffset: Long = -2L

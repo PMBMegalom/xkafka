@@ -33,6 +33,7 @@ final class EffectLazinessSuite extends CatsEffectSuite:
   private val topic     = Topic.from("events").toOption.get
   private val partition = TopicPartition(topic, Partition.from(0).toOption.get)
   private val offset    = Offset.from(1L).toOption.get
+  private val group     = ConsumerGroup.from("group").toOption.get
   private val utf8      = Serializer.utf8[IO]
   private val text      = Deserializer.utf8[IO]
 
@@ -84,7 +85,14 @@ final class EffectLazinessSuite extends CatsEffectSuite:
           admin.createPartitions(topic, 2),
           admin.describeTopics(NonEmptySet.one(topic)),
           admin.deleteRecords(NonEmptyMap.one(partition, offset)),
-          admin.describeTopicConfigurations(NonEmptySet.one(topic))
+          admin.describeTopicConfigurations(NonEmptySet.one(topic)),
+          admin.listConsumerGroups,
+          admin.describeConsumerGroups(NonEmptySet.one(group)),
+          admin.listConsumerGroupOffsets(group),
+          admin.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+          admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(partition, OffsetAndMetadata(offset))),
+          admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+          admin.deleteConsumerGroups(NonEmptySet.one(group))
         )
       .map(called => assertEquals(called, Vector.empty, "building the effects called the driver"))
 
@@ -191,3 +199,35 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         topics: Vector[Topic],
         timeoutMillis: Int
     ): IO[Vector[Either[KafkaException, TopicConfiguration]]] = waiting("describeTopicConfigs")
+
+    override def listGroups(admin: Client, timeoutMillis: Int): IO[Vector[(ConsumerGroup, ConsumerGroupState)]] = waiting("listGroups")
+
+    override def describeGroups(
+        admin: Client,
+        groups: Vector[ConsumerGroup],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, ConsumerGroupDescription]]] = waiting("describeGroups")
+
+    override def groupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        partitions: Option[Vector[TopicPartition]],
+        timeoutMillis: Int
+    ): IO[Vector[(TopicPartition, StoredOffset)]] = waiting("groupOffsets")
+
+    override def alterGroupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("alterGroupOffsets")
+
+    override def deleteGroupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        partitions: Vector[TopicPartition],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("deleteGroupOffsets")
+
+    override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): IO[Vector[Either[KafkaException, Unit]]] =
+      waiting("deleteGroups")

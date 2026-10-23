@@ -38,6 +38,34 @@ private[xkafka] final case class ConfigResource(name: String, error: Int, errorS
 
 private[xkafka] final case class ConfigEntry(name: String, value: Option[String], source: Int, sensitive: Boolean, readOnly: Boolean)
 
+/** What a call that answers each requested item reported. */
+private[xkafka] enum Coded:
+  /** One failure for the whole call, or for the group it names. */
+  case Refused(failure: KafkaException.BackendFailure)
+
+  /** A code for each requested item, in request order; `Failures.NoAnswer` where the result left one out. */
+  case Answered(codes: Vector[Int])
+
+/** One described group: its error code and text, and what it holds when the code is 0. */
+private[xkafka] final case class DescribedGroup(
+    group: String,
+    error: Int,
+    errorString: String,
+    simple: Boolean,
+    state: Int,
+    assignor: Option[String],
+    coordinator: Option[Broker],
+    members: List[DescribedMember]
+)
+
+private[xkafka] final case class DescribedMember(
+    memberId: String,
+    instanceId: Option[String],
+    clientId: String,
+    host: String,
+    assignment: Vector[(String, Int)]
+)
+
 /** How the shim's failures become exceptions, the same on every platform. */
 private[xkafka] object Failures:
   /** What the shim leaves in place of a code for a partition its result does not mention. */
@@ -102,3 +130,55 @@ private[librdkafka] object LibrdkafkaAnswers:
 
   private def invalid(field: String, value: Any, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error")
+
+  /** The groups whose names a `ConsumerGroup` can hold, with their states. */
+  def listed(groups: Vector[(String, Int)]): Vector[(ConsumerGroup, ConsumerGroupState)] =
+    groups.flatMap((name, state) => ConsumerGroup.from(name).toOption.map(_ -> ConsumerGroupState.fromLibrdkafka(state)))
+
+  /** Each requested group's own answer, which librdkafka reports by name. A group it describes as dead does not exist, as the Java client reports it,
+    * and failures that say no group got an answer fail the call.
+    */
+  def described(requested: Vector[ConsumerGroup], groups: Vector[DescribedGroup]): Vector[Either[KafkaException, ConsumerGroupDescription]] =
+    val answers  = groups.map(group => group.group -> group).toMap
+    val failures = groups.map(group => Failures.coded(group.errorString, group.error))
+    if failures.nonEmpty && failures.forall(unreached) then throw failures.head
+    requested.map: group =>
+      answers.get(group.value) match
+        case None                              => throw new KafkaException.InvalidBackendResponse(s"no answer for group ${group.value}")
+        case Some(answer) if answer.error != 0 => Left(Failures.coded(answer.errorString, answer.error))
+        case Some(answer) if answer.state == 4 => Left(Failures.coded(s"Group ${group.value} not found.", 69))
+        case Some(answer)                      => Right(ConsumerGroupDescription(
+            ConsumerGroupState.fromLibrdkafka(answer.state),
+            answer.simple,
+            answer.assignor.filter(_.nonEmpty),
+            answer.coordinator,
+            answer.members.map: member =>
+              GroupMember(member.memberId, member.instanceId, member.clientId, member.host, member.assignment.map(topicPartition).toSet)
+          ))
+
+  /** The offsets a group committed, as librdkafka lists them by topic and partition. */
+  def committed(entries: Vector[(String, Int, driver.StoredOffset)]): Vector[(TopicPartition, driver.StoredOffset)] =
+    entries.map((topic, partition, stored) => topicPartition((topic, partition)) -> stored)
+
+  /** Each requested item's answer. A failure that says the request got no answer fails the call; any other failure for the whole call, or for the
+    * group it names, is every item's answer, as the Java client gives it.
+    */
+  def eachCoded[K](requested: Vector[K], answer: Coded, name: K => String, errorString: Int => String): Vector[Either[KafkaException, Unit]] =
+    answer match
+      case Coded.Refused(failure) if unreached(failure) => throw failure
+      case Coded.Refused(failure)                       => requested.map(_ => Left(failure))
+      case Coded.Answered(codes) if codes.nonEmpty && codes.forall(code => unreached(Failures.coded(errorString(code), code))) =>
+        throw Failures.coded(errorString(codes.head), codes.head)
+      case Coded.Answered(codes) => requested.zip(codes).map:
+          case (key, Failures.NoAnswer) => throw new KafkaException.InvalidBackendResponse(s"no answer for ${name(key)}")
+          case (_, 0)                   => Right(())
+          case (_, code)                => Left(Failures.coded(errorString(code), code))
+
+  private def unreached(failure: KafkaException.BackendFailure): Boolean =
+    failure.code.exists(code => code == ErrorCode.RequestTimedOut || code == ErrorCode.NetworkException || code == ErrorCode.BrokerNotAvailable)
+
+  private def topicPartition(value: (String, Int)): TopicPartition =
+    TopicPartition(
+      Topic.from(value._1).fold(error => throw invalid("topic", value._1, error), identity),
+      Partition.from(value._2).fold(error => throw invalid("partition", value._2, error), identity)
+    )

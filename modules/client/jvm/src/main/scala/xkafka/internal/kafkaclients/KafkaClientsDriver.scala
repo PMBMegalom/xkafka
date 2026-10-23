@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
 import java.util.regex.Pattern
 
 import scala.jdk.CollectionConverters.*
+import scala.jdk.OptionConverters.*
 
 import cats.data.NonEmptyList
 import cats.effect.Async
@@ -37,8 +38,10 @@ import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.Chunk
 import org.apache.kafka.clients.admin.{
-  Admin, ConfigEntry as JavaConfigEntry, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-  DescribeConfigsOptions, DescribeTopicsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete
+  Admin, AlterConsumerGroupOffsetsOptions, ConfigEntry as JavaConfigEntry, ConsumerGroupDescription as JavaConsumerGroupDescription,
+  CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions,
+  DeleteTopicsOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions, ListConsumerGroupOffsetsOptions,
+  ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete
 }
 import org.apache.kafka.clients.consumer.{
   Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer,
@@ -47,7 +50,7 @@ import org.apache.kafka.clients.consumer.{
 import org.apache.kafka.clients.producer.{
   Callback, KafkaProducer as JavaKafkaProducer, Producer as JavaProducer, ProducerRecord as JavaProducerRecord, RecordMetadata as JavaRecordMetadata
 }
-import org.apache.kafka.common.{KafkaFuture, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.{GroupState, KafkaException as JavaKafkaException, KafkaFuture, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
@@ -378,6 +381,112 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
           eachAnswered(topics.map(topic => topic -> answers.get(resource(topic))), _.value)
             .map(_.map((_, answer) => answer.map(config => portableConfiguration(config.entries.asScala))))
 
+  /** Lists the groups of the two kinds a consumer joins, which is what librdkafka lists. */
+  override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
+    administering(admin): value =>
+      javaCall(
+        F.fromCompletionStage(F.delay(value.listGroups(ListGroupsOptions.forConsumerGroups().timeoutMs(timeoutMillis)).all.toCompletionStage))
+          .adaptError(withoutWrapper)
+      ).map:
+        _.asScala.toVector.flatMap: listing =>
+          ConsumerGroup.from(listing.groupId).toOption.map(_ -> listing.groupState.map(portableState).orElse(ConsumerGroupState.Unknown))
+
+  override def describeGroups(
+      admin: Client,
+      groups: Vector[ConsumerGroup],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, ConsumerGroupDescription]]] =
+    administering(admin): value =>
+      F.delay(value.describeConsumerGroups(groups.map(_.value).asJava, new DescribeConsumerGroupsOptions().timeoutMs(timeoutMillis)).describedGroups)
+        .flatMap(answers => eachAnswered(groups.map(group => group -> Option(answers.get(group.value))), _.value))
+        .flatMap(_.traverse((_, answer) => answer.traverse(description => F.delay(portableDescription(description)))))
+
+  override def groupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Option[Vector[TopicPartition]],
+      timeoutMillis: Int
+  ): F[Vector[(TopicPartition, StoredOffset)]] =
+    val spec =
+      partitions
+        .fold(new ListConsumerGroupOffsetsSpec)(named => new ListConsumerGroupOffsetsSpec().topicPartitions(named.map(javaTopicPartition).asJava))
+    administering(admin): value =>
+      answered(
+        value.listConsumerGroupOffsets(Map(group.value -> spec).asJava, new ListConsumerGroupOffsetsOptions().timeoutMs(timeoutMillis))
+          .partitionsToOffsetAndMetadata(group.value)
+      ).flatMap: answers =>
+        F.delay:
+          answers.asScala.toVector.map: (partition, stored) =>
+            portableTopicPartition(partition) -> Option(stored).fold(StoredOffset(-1L, -1, "")): value =>
+              StoredOffset(value.offset, value.leaderEpoch.map(_.intValue).orElse(-1), Option(value.metadata).getOrElse(""))
+
+  override def alterGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      F.delay(
+        value.alterConsumerGroupOffsets(group.value, committedOffsets(offsets), new AlterConsumerGroupOffsetsOptions().timeoutMs(timeoutMillis))
+      ).flatMap(result =>
+        eachAnswered(offsets.map((partition, _) => partition -> Some(result.partitionResult(javaTopicPartition(partition)))), _.show)
+      ).map(_.map((_, answer) => answer.void))
+
+  override def deleteGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Vector[TopicPartition],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      F.delay(value.deleteConsumerGroupOffsets(
+        group.value,
+        partitions.map(javaTopicPartition).toSet.asJava,
+        new DeleteConsumerGroupOffsetsOptions().timeoutMs(timeoutMillis)
+      ))
+      .flatMap(result => eachAnswered(partitions.map(partition => partition -> Some(result.partitionResult(javaTopicPartition(partition)))), _.show))
+      .map(_.map((_, answer) => answer.void))
+
+  override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      F.delay(value.deleteConsumerGroups(groups.map(_.value).asJava, new DeleteConsumerGroupsOptions().timeoutMs(timeoutMillis)).deletedGroups)
+        .flatMap(answers => eachAnswered(groups.map(group => group -> Option(answers.get(group.value))), _.value))
+        .map(_.map((_, answer) => answer.void))
+
+  /** Java reports three further states for groups on the consumer rebalance protocol, which librdkafka does not, so they have no portable meaning. */
+  private def portableState(state: GroupState): ConsumerGroupState =
+    state match
+      case GroupState.STABLE               => ConsumerGroupState.Stable
+      case GroupState.PREPARING_REBALANCE  => ConsumerGroupState.PreparingRebalance
+      case GroupState.COMPLETING_REBALANCE => ConsumerGroupState.CompletingRebalance
+      case GroupState.EMPTY                => ConsumerGroupState.Empty
+      case _                               => ConsumerGroupState.Unknown
+
+  /** Throws where the cluster reports a topic or partition that cannot be named, so call it inside an effect. */
+  private def portableDescription(description: JavaConsumerGroupDescription): ConsumerGroupDescription =
+    ConsumerGroupDescription(
+      Option(description.groupState).fold(ConsumerGroupState.Unknown)(portableState),
+      description.isSimpleConsumerGroup,
+      Option(description.partitionAssignor).filter(_.nonEmpty),
+      Option(description.coordinator).filterNot(_.isEmpty).map(node => Broker(node.id, node.host, node.port, Option.when(node.hasRack)(node.rack))),
+      description.members.asScala.toList.map: member =>
+        GroupMember(
+          member.consumerId,
+          member.groupInstanceId.toScala,
+          member.clientId,
+          member.host,
+          member.assignment.topicPartitions.asScala.map(portableTopicPartition).toSet
+        )
+    )
+
+  /** Throws where the cluster reports a topic or partition that cannot be named, so call it inside an effect. */
+  private def portableTopicPartition(value: JavaTopicPartition): TopicPartition =
+    TopicPartition(
+      Topic.from(value.topic).fold(error => throw invalidBackendValue("topic", error), identity),
+      Partition.from(value.partition).fold(error => throw invalidBackendValue("partition", error), identity)
+    )
+
   /** Waits for each entry's answer, keeping a refusal as that entry's own.
     *
     * The Java client fails every entry's answer where the request as a whole failed, such as when the cluster cannot be reached in time. Nothing is
@@ -395,6 +504,12 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(F.pure(answers))(F.raiseError)
 
   /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
+  /** Listing groups wraps the reason it found no broker in a plain Java client exception, which classifies as nothing. */
+  private val withoutWrapper: PartialFunction[Throwable, Throwable] = {
+    case error: JavaKafkaException if error.getClass == classOf[JavaKafkaException] && error.getCause.isInstanceOf[JavaKafkaException] =>
+      error.getCause
+  }
+
   private def unreached(failure: KafkaException): Boolean =
     failure match
       case backendFailure: KafkaException.BackendFailure => backendFailure.code
