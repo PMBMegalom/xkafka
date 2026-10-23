@@ -81,6 +81,11 @@ private[xkafka] trait KafkaDriver[F[_]]:
     */
   def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit]
 
+  /** Sends what the producer holds without waiting out its linger, and returns once the records sent before the call are done or the timeout passes.
+    * A backend whose wait can be cancelled may wait past the timeout. Where deliveries share a queue, it may serve their reports too.
+    */
+  def flush(producer: Client, timeoutMillis: Int): F[Unit]
+
   /** Waits up to the timeout for the batch's own delivery reports and answers how many are still outstanding. Called only where deliveries do not
     * share a queue.
     */

@@ -249,6 +249,29 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         )
         assertEquals(produced.leftMap(code), Left(Some(ErrorCode.MessageTooLarge)))
 
+  test(conformance("flushing sends records without waiting out the linger and returns once they are delivered")):
+    withBroker: server =>
+      val topic   = uniqueTopic("flush")
+      val records = NonEmptyList.of("a", "b").map(value => record(topic, Some("k"), Some(value), validPartition(0)))
+
+      for
+        _        <- createPartitioned(server, topic, 1)
+        base     <- producerSettings(server)
+        settings <- base.withLinger(60.seconds).liftTo[IO]
+        outcome  <-
+          PlatformKafkaClient().producer(settings).use: producer =>
+            for
+              produced <- producer.produce(records)
+              lingered <- produced.timeout(1.second).attempt
+              _        <- producer.flush.timeout(30.seconds)
+              // Already delivered, so this answers without waiting on the broker.
+              sent <- produced.timeout(1.second)
+            yield (lingered, sent)
+      yield
+        val (lingered, sent) = outcome
+        assert(lingered.isLeft, s"the records were delivered before the linger passed: $lingered")
+        assertEquals(sent.toList.flatMap(_.metadata.offset.map(_.value)), List(0L, 1L))
+
   test(conformance("acknowledgements can be held while further batches are enqueued")):
     withBroker: server =>
       val topic     = uniqueTopic("pipeline")

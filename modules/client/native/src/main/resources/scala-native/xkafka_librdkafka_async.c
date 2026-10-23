@@ -30,6 +30,7 @@ void xkafka_producer_destroy(rd_kafka_t *producer, int timeout_ms);
 void xkafka_consumer_destroy(rd_kafka_t *consumer);
 void xkafka_admin_destroy(rd_kafka_t *client);
 void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms);
+void xkafka_producer_flush(rd_kafka_t *producer, int timeout_ms);
 int xkafka_producer_init_transactions(rd_kafka_t *producer, int timeout_ms, char *error, size_t error_size, int32_t *error_code,
                                       int32_t *is_fatal, int32_t *is_retriable, int32_t *txn_requires_abort);
 int xkafka_producer_commit_transaction(rd_kafka_t *producer, int timeout_ms, char *error, size_t error_size, int32_t *error_code,
@@ -181,7 +182,7 @@ static char **xkafka_copy_strings(const char *const *values, size_t count, int *
         return copy;
 }
 
-/* ---- Destroys and producer polls ---- */
+/* ---- Destroys, producer polls and flushes ---- */
 
 typedef struct {
         xkafka_job_t job;
@@ -190,7 +191,7 @@ typedef struct {
         int kind;
 } xkafka_client_job_t;
 
-enum { XKAFKA_DESTROY_PRODUCER, XKAFKA_DESTROY_CONSUMER, XKAFKA_DESTROY_ADMIN, XKAFKA_POLL_PRODUCER };
+enum { XKAFKA_DESTROY_PRODUCER, XKAFKA_DESTROY_CONSUMER, XKAFKA_DESTROY_ADMIN, XKAFKA_POLL_PRODUCER, XKAFKA_FLUSH_PRODUCER };
 
 static void xkafka_client_job_run(xkafka_job_t *job) {
         xkafka_client_job_t *call = (xkafka_client_job_t *)job;
@@ -204,6 +205,9 @@ static void xkafka_client_job_run(xkafka_job_t *job) {
                 break;
         case XKAFKA_DESTROY_ADMIN:
                 xkafka_admin_destroy(call->client);
+                break;
+        case XKAFKA_FLUSH_PRODUCER:
+                xkafka_producer_flush(call->client, call->timeout_ms);
                 break;
         default:
                 xkafka_producer_poll(call->client, call->timeout_ms);
@@ -237,6 +241,10 @@ int xkafka_async_admin_destroy(rd_kafka_t *client, xkafka_done_t done, int64_t t
 
 int xkafka_async_producer_poll(rd_kafka_t *producer, int timeout_ms, xkafka_done_t done, int64_t token) {
         return xkafka_client_job(producer, timeout_ms, XKAFKA_POLL_PRODUCER, done, token);
+}
+
+int xkafka_async_producer_flush(rd_kafka_t *producer, int timeout_ms, xkafka_done_t done, int64_t token) {
+        return xkafka_client_job(producer, timeout_ms, XKAFKA_FLUSH_PRODUCER, done, token);
 }
 
 /* ---- Transactions ---- */

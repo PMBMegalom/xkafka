@@ -180,6 +180,24 @@ set, each backend keeps its own default, and the two differ: 16384 bytes on the
 JVM, and 1000000 bytes on Scala.js and Scala Native. `withBatchSize` sets the same size on every backend, and
 `withoutBatchSize` goes back to each one's default.
 
+## Flushing
+
+`flush` sends every record enqueued before it without waiting out the linger,
+and completes once each of them has been delivered or has failed:
+
+```scala
+for
+  delivered <- producer.produce(batch)
+  _         <- producer.flush
+  results   <- delivered
+yield results
+```
+
+- A record that fails does not fail the flush. Its own result reports it.
+- Records enqueued while the flush waits are not waited for.
+- Cancelling a flush, for example with `.timeout`, stops the wait. The records
+  stay enqueued.
+
 ## Releasing a producer
 
 Releasing the resource first waits for records the producer has already accepted,

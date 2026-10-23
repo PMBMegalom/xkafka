@@ -1208,6 +1208,13 @@ trait KafkaProducer[F[_], K, V]:
   final def produceAttemptEachAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[NonEmptyList[Attempted[K, V]]] =
     F.flatten(produceAttemptEach(records))
 
+  /** Sends every record enqueued before it without waiting out `linger`, and completes once each of them has been delivered or has failed.
+    *
+    * A record that fails does not fail the flush: its own `produce` or `produceAttemptEach` result reports it. Records enqueued while it waits are
+    * not waited for. Cancelling it stops the wait, and the records stay enqueued.
+    */
+  def flush: F[Unit]
+
   /** Returns the partitions currently known for `topic`, which is what choosing one to produce to needs. */
   def partitionsFor(topic: Topic): F[Set[Partition]]
 
@@ -1246,6 +1253,8 @@ trait KafkaProducer[F[_], K, V]:
 
       override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): G[G[NonEmptyList[Attempted[K, V]]]] =
         G.map(fk(self.produceAttemptEach(records)))(fk.apply)
+
+      override def flush: G[Unit] = fk(self.flush)
 
       override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
 

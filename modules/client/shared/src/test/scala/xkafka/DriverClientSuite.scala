@@ -45,7 +45,8 @@ final class DriverClientSuite extends CatsEffectSuite:
 
   private val producerSettings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get
 
-  // The fake refuses to enqueue a record whose value is "refused", and fails to deliver one whose value is "lost".
+  // The fake refuses to enqueue a record whose value is "refused", and fails to deliver one whose value is "lost". One whose value is "slow" is
+  // delivered once flushed, and one whose value is "stuck" never is.
   private val refused = new KafkaException.BackendFailure("queue full", Some(ErrorCode.Other(-184)))
   private val lost    = new KafkaException.BackendFailure("too large", Some(ErrorCode.MessageTooLarge))
 
@@ -80,6 +81,54 @@ final class DriverClientSuite extends CatsEffectSuite:
     FakeDriver().flatMap: fake =>
       new DriverClient[IO](fake).producer(settings).use(_.produceAttemptEach(values("a", "bad")).attempt).map: outcome =>
         assertEquals(outcome.void.leftMap(_.getMessage), Left("bad"))
+
+  test("flushing sends the records enqueued before it and waits for them, and not for the records enqueued while it waits"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use: producer =>
+        for
+          before   <- producer.produce(values("slow"))
+          unsent   <- before.timeout(100.millis).attempt
+          flushing <- producer.flush.start
+          // The first round reaches the driver once the flush has taken its count, so the next record is enqueued while it waits.
+          _       <- fake.until(_.contains("flush"))
+          during  <- producer.produce(values("stuck"))
+          _       <- flushing.joinWithNever.timeout(10.seconds)
+          sent    <- before.timeout(10.seconds)
+          waiting <- during.timeout(100.millis).attempt
+        yield
+          assert(unsent.isLeft, unsent)
+          assertEquals(sent.toList.map(_.record.value), List("slow"))
+          assert(waiting.isLeft, waiting)
+
+  test("flushing completes where a record fails, which only that record's result reports"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use: producer =>
+        for
+          produced <- producer.produce(values("slow", "lost"))
+          flushed  <- producer.flush.timeout(10.seconds).attempt
+          outcome  <- produced.timeout(10.seconds).attempt
+        yield
+          assertEquals(flushed, Right(()))
+          assertEquals(outcome.void.leftMap(identity[Throwable]), Left(lost))
+
+  test("flushing with nothing enqueued returns at once, and a flush that waits can be cancelled, leaving its records enqueued"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use: producer =>
+        for
+          _         <- producer.flush.timeout(10.seconds)
+          idle      <- fake.calls
+          stuck     <- producer.produce(values("stuck"))
+          cancelled <- producer.flush.timeout(200.millis).attempt
+          held      <- stuck.timeout(100.millis).attempt
+          rounds    <- fake.calls.map(_.count(_ == "flush"))
+          _         <- IO.sleep(100.millis)
+          later     <- fake.calls.map(_.count(_ == "flush"))
+        yield
+          assert(!idle.contains("flush"), idle)
+          assert(cancelled.isLeft, cancelled)
+          assert(held.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), held)
+          assert(rounds > 0, rounds)
+          assertEquals(later, rounds)
 
   private def values(first: String, rest: String*): NonEmptyList[ProducerRecord[String, String]] =
     NonEmptyList(first, rest.toList).map(ProducerRecord(events, "k", _))
@@ -384,6 +433,7 @@ final class DriverClientSuite extends CatsEffectSuite:
 
   private final class FakeDriver(
       batches: Ref[IO, Map[Int, Vector[EncodedRecord]]],
+      flushed: Ref[IO, Set[Int]],
       log: Ref[IO, Vector[String]],
       queued: Ref[IO, List[PolledRecord]],
       pendingRebalances: Ref[IO, List[Rebalance[Int]]],
@@ -471,9 +521,15 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = IO.sleep(5.millis)
 
+    /** Takes a moment, then sends every batch enqueued so far. */
+    override def flush(producer: Client, timeoutMillis: Int): IO[Unit] =
+      log.update(_ :+ "flush") *> IO.sleep(20.millis) *> batches.get.flatMap(held => flushed.update(_ ++ held.keySet))
+
     override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int] = unused("awaitDeliveries")
 
-    override def pending(batch: Batch): IO[Int] = IO.pure(0)
+    override def pending(batch: Batch): IO[Int] =
+      (batches.get, flushed.get)
+        .mapN((held, sent) => held(batch).count(record => valueOf(record) == "stuck" || valueOf(record) == "slow" && !sent(batch)))
 
     override def deliveries(producer: Client, batch: Batch): IO[Vector[Either[KafkaException, Delivery]]] =
       batches.get
@@ -576,12 +632,13 @@ final class DriverClientSuite extends CatsEffectSuite:
     def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
+        Ref.of[IO, Set[Int]](Set.empty),
         Ref.of[IO, Vector[String]](Vector.empty),
         Ref.of[IO, List[PolledRecord]](Nil),
         Ref.of[IO, List[Rebalance[Int]]](Nil),
         Ref.of[IO, Option[IO[Unit]]](None),
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
         Ref.of[IO, Option[Deferred[IO, Unit]]](None)
-      ).mapN((batches, log, queued, rebalances, inPoll, holds, pauseTake) =>
-        new FakeDriver(batches, log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
+      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake) =>
+        new FakeDriver(batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
       )

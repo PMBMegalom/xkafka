@@ -110,11 +110,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       owned  <- Resource.make(Ref.of[F, Set[driver.Batch]](Set.empty))(releaseBatches)
       client <- nativeClient(acquire, destroy)
       // Release cancels acknowledgement fibers before closing the client instead of waiting indefinitely for them.
-      supervisor <- Supervisor[F](await = false)
-      deliveries <- Resource.eval((SignallingRef[F, Int](0), SignallingRef[F, Long](0L), Deferred[F, Throwable]).mapN(Deliveries(_, _, _)))
+      supervisor  <- Supervisor[F](await = false)
+      deliveries  <- Resource.eval((SignallingRef[F, Int](0), SignallingRef[F, Long](0L), Deferred[F, Throwable]).mapN(Deliveries(_, _, _)))
+      outstanding <- Resource.eval(SignallingRef[F, Outstanding](Outstanding(0L, Set.empty)))
       // Started after the client and cancelled before it, so it is not polling when the producer is destroyed.
       _ <- if driver.deliveriesShareQueue then serveDeliveries(client, deliveries).background.void else Resource.unit[F]
-    yield NativeProducerHandle(client, supervisor, deliveries, owned)
+    yield NativeProducerHandle(client, supervisor, deliveries, owned, outstanding)
 
   /** Where one queue carries every batch's delivery reports, one fiber serves it while any batch is waiting, so neither waiting batches nor new
     * enqueues have to take turns at it.
@@ -126,20 +127,24 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   /** How many batches are waiting for their reports, how many times the shared queue has been served, and why serving it stopped, if it has. */
   private final case class Deliveries(waiting: SignallingRef[F, Int], served: SignallingRef[F, Long], failure: Deferred[F, Throwable])
 
+  /** The number the next batch takes, and the numbers of the batches whose deliveries are not done yet. */
+  private final case class Outstanding(next: Long, open: Set[Long])
+
   private def releaseBatches(owned: Ref[F, Set[driver.Batch]]): F[Unit] = owned.getAndSet(Set.empty).flatMap(_.toList.traverse_(driver.freeBatch))
 
   private final case class NativeProducerHandle(
       client: NativeClient,
       supervisor: Supervisor[F],
       deliveries: Deliveries,
-      owned: Ref[F, Set[driver.Batch]]
+      owned: Ref[F, Set[driver.Batch]],
+      outstanding: SignallingRef[F, Outstanding]
   )
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     producerHandle(
       createProducer(settings.client, settings.properties ++ settings.managedProperties),
       handle => driver.destroyProducer(handle, settings.closeTimeout.toMillis.toInt)
-    ).map(handle => new DriverProducer(handle.client, handle.supervisor, handle.deliveries, handle.owned, settings))
+    ).map(handle => new DriverProducer(handle, settings))
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
@@ -205,12 +210,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       _ <- Resource.eval(handle.client(driver.initTransactions(handle.client.handle, timeoutMillis)))
       // One transactional id carries one transaction at a time, so this keeps concurrent callers out of each other's.
       lock <- Resource.eval(Mutex[F])
-    yield new DriverTransactionalProducer(
-      handle.client,
-      new DriverProducer(handle.client, handle.supervisor, handle.deliveries, handle.owned, settings.producer),
-      lock,
-      timeoutMillis
-    )
+    yield new DriverTransactionalProducer(handle.client, new DriverProducer(handle, settings.producer), lock, timeoutMillis)
 
   private final class DriverTransactionalProducer[K, V](client: NativeClient, records: KafkaProducer[F, K, V], lock: Mutex[F], timeoutMillis: Int)
       extends KafkaTransactionalProducer[F, K, V]:
@@ -347,18 +347,24 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       case 2 => Some(RecordTimestamp.LogAppendTime(Timestamp.fromEpochMillis(millis)))
       case _ => None
 
-  private final class DriverProducer[K, V](
-      client: NativeClient,
-      supervisor: Supervisor[F],
-      deliveries: Deliveries,
-      owned: Ref[F, Set[driver.Batch]],
-      settings: ProducerSettings[F, K, V]
-  ) extends KafkaProducer[F, K, V]:
+  private final class DriverProducer[K, V](handle: NativeProducerHandle, settings: ProducerSettings[F, K, V]) extends KafkaProducer[F, K, V]:
+    import handle.*
 
     /** A metadata lookup is a round trip against the cluster, so it is bounded the way the administration calls are. */
     private val metadataTimeoutMillis = settings.client.metadataRefreshInterval.toMillis.toInt.min(AdminTimeoutMillis)
 
     override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic))
+
+    /** Waits for the batches numbered before the call, flushing the backend in short rounds meanwhile, so it can be cancelled between rounds.
+      *
+      * A round on a shared queue may serve its reports, so each one counts as a serving and the batches waiting on it look again.
+      */
+    override def flush: F[Unit] =
+      outstanding.get.flatMap: current =>
+        val sent   = outstanding.discrete.find(_.open.forall(_ >= current.next)).compile.drain
+        val served = if driver.deliveriesShareQueue then deliveries.served.update(_ + 1) else F.unit
+        val rounds = (client(driver.flush(client.handle, DeliveryPollTimeoutMillis)) *> served).foreverM[Unit]
+        F.whenA(current.open.nonEmpty)(F.race(rounds, sent).void)
 
     override def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Produced[K, V]]]] =
       send(records).flatMap: (refused, reported) =>
@@ -384,8 +390,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
           for
             batch    <- client(driver.batch(encoded.size))
             _        <- owned.update(_ + batch)
+            ticket   <- outstanding.modify(current => (current.copy(next = current.next + 1, open = current.open + current.next), current.next))
             enqueued <- client(driver.enqueue(client.handle, batch, encoded)).attempt
-            reported <- superviseBatch(batch, awaitDelivery(batch) *> client(outcomes(batch, records)))
+            done = outstanding.update(current => current.copy(open = current.open - ticket))
+            reported <- superviseBatch(batch, awaitDelivery(batch).guarantee(done) *> client(outcomes(batch, records))).onError(_ => done)
           yield (enqueued.left.toOption, reported)
 
     private def superviseBatch[A](batch: driver.Batch, result: F[A]): F[F[A]] =
