@@ -22,12 +22,12 @@ Construct the client the same way on every platform:
 KafkaClient[IO]
 ```
 
-The selected JVM, Scala.js, or Scala Native artifact supplies the corresponding
-adapter automatically. Producer and consumer settings use the same portable
-model everywhere. The Scala.js adapter installs a prebuilt librdkafka from npm,
-and the Native adapter links to an installed librdkafka; see the
+Add `xkafka-client` for your platform, and `KafkaClient[IO]` gives you that
+platform's client. Settings are the same on every platform. On Scala.js a
+prebuilt librdkafka comes from npm, and on Scala Native your application links
+an installed librdkafka; see the
 [platform notes](https://pmbmegalom.github.io/xkafka/platform-notes.html) for
-runtime requirements. For example:
+what each platform needs. For example:
 
 ```scala
 import cats.data.NonEmptyList
@@ -68,24 +68,13 @@ series.
 
 ## Building
 
-The build uses sbt. Run all ordinary tests with:
-
-```sh
-sbt test
-```
-
-Broker-backed tests need Docker:
-
-```sh
-scripts/integration-test.sh
-```
-
-See [Contributing](https://pmbmegalom.github.io/xkafka/contributing.html).
+To build xkafka or run its tests, see
+[Contributing](https://pmbmegalom.github.io/xkafka/contributing.html).
 
 ## Modules
 
-- `xkafka-kernel` contains the portable data model and producer and consumer
-  algebras.
+- `xkafka-kernel` contains the data types and the producer, consumer, and
+  administration interfaces, with no backend.
 - `xkafka-client` contains `KafkaClient` and the JVM, Scala.js, and Scala Native
   backends.
 

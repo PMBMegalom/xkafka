@@ -33,8 +33,8 @@ is active:
 CommittableOffsetBatch.fromFoldable(offsets).commit
 ```
 
-A batch keeps only the greatest next offset for each topic-partition, and makes
-one backend commit per originating consumer.
+A batch keeps only the greatest next offset for each topic-partition, and
+commits once for each consumer its offsets came from.
 
 ## Offsets and rebalances
 
@@ -197,7 +197,7 @@ attempts, the offsets that were not committed, and the failure from the last
 attempt.
 
 @:callout(info)
-Recovery wraps the committer, so it applies wherever a commit happens: a single
+The recovery policy applies wherever a commit happens: a single
 `CommittableOffset.commit`, a batch, `commitBatchWithin`, and `consumeChunk`.
 @:@
 

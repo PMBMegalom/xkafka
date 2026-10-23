@@ -27,10 +27,10 @@ import cats.ApplicativeThrow
 import cats.data.{NonEmptyList, ValidatedNel}
 import cats.syntax.all.*
 
-/** A portable classification of a backend failure.
+/** What went wrong, classified the same way on every platform.
   *
-  * The named cases are Kafka protocol errors, which every broker reports with the same code, plus the client-side conditions all three backends can
-  * raise on their own. `Other` carries a code that has no portable meaning.
+  * The named cases are Kafka protocol errors, which every broker reports with the same code, plus client-side conditions such as a timed out request.
+  * `Other` carries a code none of them names, whose value can differ between platforms.
   */
 enum ErrorCode derives CanEqual:
   /** The requested offset is outside the partition's log. */
@@ -126,14 +126,12 @@ enum ErrorCode derives CanEqual:
   /** The client could not be built from its settings, such as a client key that its password does not decrypt. */
   case InvalidConfiguration
 
-  /** A code with no portable meaning. */
+  /** A code none of the other cases names, as the platform's client reported it. */
   case Other(value: Int)
 
 object ErrorCode:
-  /** The conditions worth trying again, which are the ones a broker reports while it is moving rather than refusing.
-    *
-    * This is the single answer every backend reports through `KafkaException.BackendFailure.retriable`, so the same condition is retriable on all of
-    * them. The backends' own notions disagree, and one of them does not always have one.
+  /** Whether trying the same request again can succeed, because the broker or group is moving and not refusing. Commit recovery retries exactly
+    * these.
     */
   extension (code: ErrorCode)
     def retriable: Boolean =
@@ -175,10 +173,10 @@ object ErrorCode:
       90 -> Fenced                      // PRODUCER_FENCED
     )
 
-  /** Classifies a Kafka protocol error code, which the JVM and librdkafka both report from the same table. */
+  /** Classifies a Kafka protocol error code. */
   def fromProtocol(value: Int): ErrorCode = protocol.getOrElse(value, Other(value))
 
-  /** Classifies a librdkafka code. Its own client-side errors are negative; the rest are protocol codes. */
+  /** Classifies a librdkafka error code. */
   def fromLibrdkafka(value: Int): ErrorCode =
     value match
       case -195 | -187 | -193 => NetworkException         // _TRANSPORT, _ALL_BROKERS_DOWN, _RESOLVE
@@ -194,9 +192,10 @@ object ErrorCode:
 sealed abstract class KafkaException(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
 
 object KafkaException:
-  /** A failure reported by a Kafka backend.
+  /** A failure Kafka or the platform's client reported.
     *
-    * `None` means that the backend did not make the corresponding classification available.
+    * `code`, `retriable`, `fatal`, and `transactionAbortRequired` are `None` where the platform's client does not report them. For a retry decision
+    * that is the same on every platform, use `code.exists(_.retriable)`.
     */
   final class BackendFailure(
       val detail: String,

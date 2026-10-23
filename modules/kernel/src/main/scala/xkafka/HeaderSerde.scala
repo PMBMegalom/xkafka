@@ -49,7 +49,7 @@ object HeaderSerializer:
 
   given bytes: HeaderSerializer[Chunk[Byte]] = instance(identity)
 
-  /** UTF-8, which is the encoding a header value is read back as on every platform. Leaving the charset to the runtime would not be. */
+  /** Encodes as UTF-8 on every platform, whatever the runtime's own charset. */
   given utf8: HeaderSerializer[String] = instance(value => Chunk.array(value.getBytes(StandardCharsets.UTF_8)))
 
   /** Four bytes, most significant first, which is the order Kafka's own clients write and other languages expect. */
@@ -58,7 +58,7 @@ object HeaderSerializer:
   /** Eight bytes, most significant first. */
   given long: HeaderSerializer[Long] = instance(value => Chunk.array(Array.tabulate(8)(index => (value >>> ((7 - index) * 8)).toByte)))
 
-/** Reads the bytes a header carries. */
+/** Reads the bytes a header carries. Every instance given here fails as `ValidationError.MissingHeaderValue` for a header with no value. */
 trait HeaderDeserializer[A]:
   self =>
 
@@ -80,7 +80,6 @@ object HeaderDeserializer:
     new HeaderDeserializer[A]:
       override def deserialize(value: Option[Chunk[Byte]]): Either[ValidationError, A] = f(value)
 
-  /** A header with no value at all, which Kafka allows, is a failure for every type below. */
   given bytes: HeaderDeserializer[Chunk[Byte]] = instance(_.toRight(ValidationError.MissingHeaderValue))
 
   given utf8: HeaderDeserializer[String] = bytes.map(value => new String(value.toArray, StandardCharsets.UTF_8))

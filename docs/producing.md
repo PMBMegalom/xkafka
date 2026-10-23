@@ -62,12 +62,12 @@ the order the records were given:
 producer.produceAndAwait(batch).map(_.map(produced => produced.metadata.offset))
 ```
 
-`RecordMetadata` carries the topic-partition, and the offset and timestamp when
-the backend supplies them.
+`RecordMetadata` carries the topic-partition, and the offset and timestamp where
+Kafka reports them.
 
 If any record is not delivered, the inner effect fails with the failure of the
-first such record. If the backend refuses to accept a record, the outer effect
-fails instead.
+first such record. If the client refuses a record as it is enqueued, the outer
+effect fails instead.
 
 ## When some records fail
 
@@ -82,10 +82,10 @@ producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
     case Attempted(record, Left(failure))   => retryLater(record, failure)
 ```
 
-- If the backend refuses to accept a record, that record fails with the
+- If the client refuses a record as it is enqueued, that record fails with the
   refusal, and so does every record after it in the batch.
-- Neither effect fails because of a record. They still fail when the whole call
-  does, such as when a record cannot be serialized.
+- A record that is not delivered fails neither effect. The outer effect still
+  fails, with nothing enqueued, where a record cannot be serialized.
 
 `produceAttemptEach` has the same two stages as `produce`, and
 `produceAttemptEachAndAwait` and `pipeAttemptEach` match `produceAndAwait` and
@@ -201,7 +201,7 @@ yield results
 ## Releasing a producer
 
 Releasing the resource first waits for records the producer has already accepted,
-then closes the backend. `closeTimeout` bounds that delivery wait and defaults to
+then closes the producer. `closeTimeout` bounds that delivery wait and defaults to
 sixty seconds:
 
 ```scala mdoc:compile-only
@@ -219,13 +219,10 @@ Like every duration wither, it revalidates and returns
 `ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. See
 [Settings](settings.md).
 
-Records still undelivered when the timeout expires are dropped. Final backend
-teardown happens afterwards, so the complete resource finalizer may take longer
-than `closeTimeout`. Lower the timeout for a faster delivery wait, at the cost of
-losing more on the way out.
+Records still undelivered when the timeout expires are dropped. Closing the
+producer comes after that wait, so releasing can take somewhat longer than
+`closeTimeout`. A shorter timeout releases sooner but can drop more records.
 
 @:callout(info)
-`closeTimeout` applies to producers. There is no equivalent setting for
-consumers: how long a consumer takes to leave its group is decided by the
-platform, not by these settings.
+`closeTimeout` applies to producers. Consumers have no equivalent setting.
 @:@

@@ -40,9 +40,9 @@ has:
 `Selection` says where a consumer's records come from.
 
 `Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a
-`TopicPattern`, which matches complete topic names. Portable patterns should use
-regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular
-expressions. Both join a consumer group, so the partitions a consumer holds
+`TopicPattern`, which matches complete topic names. The JVM matches it as a Java
+regular expression, and Scala.js and Native through librdkafka, so a pattern
+meant for every platform should keep to simple syntax, such as `events-.*`. Both join a consumer group, so the partitions a consumer holds
 follow the group's rebalances.
 
 `Selection.Partitions` takes a non-empty set of topic-partitions and reads
@@ -159,10 +159,9 @@ Within the consumer resource:
 - `stopConsuming` stops fetching and lets the streams drain.
 
 @:callout(info)
-`position` returns `None` until this consumer has consumed from the partition.
-Some backends settle on a position sooner, for instance when a seek names an
-offset, so the value every backend agrees on is the one after records have been
-consumed.
+`position` can return `None` until this consumer has consumed from the
+partition, and right after a seek the platforms can answer differently. Read it
+after consuming from the partition for the same answer everywhere.
 @:@
 
 ## Processing every record
