@@ -56,6 +56,8 @@ final class ProducerPipeSuite extends CatsEffectSuite:
           override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
             unused
 
+          override def flush: IO[Unit] = IO.unit
+
           override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
       running <- Stream.emits(values.map(batch)).through(producer.pipe()).compile.toList.start
       // Nothing has been acknowledged yet, because that waits on a signal this test has not given, so reaching
@@ -86,6 +88,8 @@ final class ProducerPipeSuite extends CatsEffectSuite:
           override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
             unused
 
+          override def flush: IO[Unit] = IO.unit
+
           override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
       running <- Stream.emits(values.map(batch)).through(producer.pipe(maxInFlight = 2)).compile.toList.start
       // Two are held by the bound, so the count cannot climb past it however many batches are offered.
@@ -105,6 +109,8 @@ final class ProducerPipeSuite extends CatsEffectSuite:
 
         override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
           unused
+
+        override def flush: IO[Unit] = IO.unit
 
         override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
 

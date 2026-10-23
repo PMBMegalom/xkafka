@@ -176,6 +176,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = F.blocking(Bindings.xkafka_producer_poll(producer, timeoutMillis))
 
+  override def flush(producer: Client, timeoutMillis: Int): F[Unit] = F.blocking(Bindings.xkafka_producer_flush(producer, timeoutMillis))
+
   /** Reports reach the batch through `serveDeliveries`, so this only reads how many are outstanding. */
   override def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int] = pending(batch)
 

@@ -441,6 +441,8 @@ final class ClientSuite extends FunSuite:
             records: NonEmptyList[ProducerRecord[String, String]]
         ): Option[Option[NonEmptyList[Attempted[String, String]]]] = Some(Some(records.map(Attempted(_, Right(metadata)))))
 
+        override def flush: Option[Unit] = Some(())
+
         override def partitionsFor(value: Topic): Option[Set[Partition]] = Some(Set(partition))
     val mapped = source.mapK(optionToErrorOr)
 
@@ -448,6 +450,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(mapped.produceAndAwait(NonEmptyList.one(producerRecord)), Right(result))
     assertEquals(mapped.produceAttemptEach(NonEmptyList.one(producerRecord)), Right(Right(attempted)))
     assertEquals(mapped.produceAttemptEachAndAwait(NonEmptyList.one(producerRecord)), Right(attempted))
+    assertEquals(mapped.flush, Right(()))
     assertEquals(mapped.partitionsFor(topic), Right(Set(partition)))
 
   test("a produced or attempted record gives back what it holds, by name and by pattern"):

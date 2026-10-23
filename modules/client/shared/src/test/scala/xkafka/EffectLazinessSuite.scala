@@ -61,6 +61,7 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         List(
           producer.produce(record),
           producer.produceAndAwait(record),
+          producer.flush,
           producer.partitionsFor(topic),
           transactional.transactionally(_.produce(record)),
           consumer.assignment,
@@ -139,6 +140,7 @@ final class EffectLazinessSuite extends CatsEffectSuite:
     override def freeBatch(batch: Batch): IO[Unit]                                                       = called("freeBatch")(IO.unit)
     override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] = called("enqueue")(IO.unit)
     override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = called("serveDeliveries")(IO.sleep(timeoutMillis.millis))
+    override def flush(producer: Client, timeoutMillis: Int): IO[Unit]           = called("flush")(IO.sleep(timeoutMillis.millis))
     override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int]      = called("awaitDeliveries")(IO.sleep(timeoutMillis.millis).as(1))
     override def pending(batch: Batch): IO[Int]                                  = called("pending")(IO.pure(1))
     override def deliveries(producer: Client, batch: Batch): IO[Vector[Either[KafkaException, Delivery]]] = waiting("deliveries")

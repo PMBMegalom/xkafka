@@ -133,6 +133,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[NonEmptyList[Attempted[K, V]]]] =
               produce(records).map(_.map(_.map(produced => Attempted(produced.record, Right(produced.metadata)))))
 
+            override def flush: IO[Unit] = IO.unit
+
             override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set.empty)
 
       override def admin(settings: ClientSettings): Resource[IO, KafkaAdminClient[IO]] =

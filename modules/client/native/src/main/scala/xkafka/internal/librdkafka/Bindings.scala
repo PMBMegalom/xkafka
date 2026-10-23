@@ -72,7 +72,8 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_producer_poll(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
+  def xkafka_producer_poll(producer: CVoidPtr, timeoutMs: CInt): Unit  = extern
+  def xkafka_producer_flush(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
 
   def xkafka_batch_pending(batch: CVoidPtr): CSize = extern
 

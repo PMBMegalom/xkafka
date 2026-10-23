@@ -402,6 +402,12 @@ void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms) {
         rd_kafka_poll(producer, timeout_ms);
 }
 
+/* Sends what the producer holds without waiting out its linger, and serves delivery reports, until nothing is
+ * outstanding or the timeout passes. */
+void xkafka_producer_flush(rd_kafka_t *producer, int timeout_ms) {
+        rd_kafka_flush(producer, timeout_ms);
+}
+
 size_t xkafka_batch_pending(const xkafka_batch_t *batch) {
         return batch == NULL ? 0 : __atomic_load_n(&batch->pending, __ATOMIC_ACQUIRE);
 }

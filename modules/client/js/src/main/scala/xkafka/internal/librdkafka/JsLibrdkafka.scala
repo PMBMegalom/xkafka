@@ -159,6 +159,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = background(_.producerPoll)(producer, timeoutMillis).void
 
+  override def flush(producer: Client, timeoutMillis: Int): F[Unit] = background(_.producerFlush)(producer, timeoutMillis)
+
   /** Reports reach the batch through `serveDeliveries`, so this only reads how many are outstanding. */
   override def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int] = pending(batch)
 

@@ -62,6 +62,7 @@ int xkafka_async_producer_destroy(rd_kafka_t *producer, int timeout_ms, DONE_ARG
 int xkafka_async_consumer_destroy(rd_kafka_t *consumer, DONE_ARGUMENTS);
 int xkafka_async_admin_destroy(rd_kafka_t *client, DONE_ARGUMENTS);
 int xkafka_async_producer_poll(rd_kafka_t *producer, int timeout_ms, DONE_ARGUMENTS);
+int xkafka_async_producer_flush(rd_kafka_t *producer, int timeout_ms, DONE_ARGUMENTS);
 int xkafka_async_producer_init_transactions(rd_kafka_t *producer, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result,
                                             DONE_ARGUMENTS);
 int xkafka_async_producer_commit_transaction(rd_kafka_t *producer, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result,
@@ -214,6 +215,7 @@ static void produce(rd_kafka_t *producer, const char *topic, int count) {
                 if (xkafka_batch_add(producer, batch, topic, 0, -1, "key", 3, value, strlen(value), headers, ERRORS) != 0)
                         fail("xkafka_batch_add");
         }
+        await_answer("xkafka_async_producer_flush", xkafka_async_producer_flush(producer, 100, done, next_token()));
         while (xkafka_batch_pending(batch) > 0)
                 await_answer("xkafka_async_producer_poll", xkafka_async_producer_poll(producer, 100, done, next_token()));
         for (index = 0; index < (int)xkafka_batch_count(batch); index++)
