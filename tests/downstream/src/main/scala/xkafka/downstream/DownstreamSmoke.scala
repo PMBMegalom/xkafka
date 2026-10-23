@@ -65,7 +65,7 @@ object DownstreamSmoke extends IOApp.Simple:
                   transaction.commitOffsets(CommittableOffsetBatch.empty[IO].updated(taken.offset))
             yield taken
         .timeout(90.seconds)
-      _ <- IO.raiseUnless(produced.records.size == 1)(new AssertionError("producer did not acknowledge the record"))
+      _ <- IO.raiseUnless(produced.size == 1)(new AssertionError("producer did not acknowledge the record"))
       _ <- IO.raiseUnless(consumed.record.key == expected.key)(new AssertionError(s"unexpected key: ${consumed.record.key}"))
       _ <- IO.raiseUnless(consumed.record.value == expected.value)(new AssertionError(s"unexpected value: ${consumed.record.value}"))
       transacted <- KafkaClient[IO]
