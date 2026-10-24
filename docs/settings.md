@@ -92,7 +92,7 @@ can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
 duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
 `withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
-`withRequestTimeout`, `withLinger`, `withSessionTimeout`,
+`withRequestTimeout`, `withLinger`, `withEnqueueTimeout`, `withSessionTimeout`,
 `withHeartbeatInterval`, `withMaxPollInterval`, `withRebalanceSafeCommits`, and
 `withStartingOffsets`.
 
@@ -138,6 +138,7 @@ Beyond the serializers, `ProducerSettings` carries:
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
 | `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
 | `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
+| `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 
 See [Producing](producing.md) for each of them.
 

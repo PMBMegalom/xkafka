@@ -32,7 +32,7 @@ import cats.data.NonEmptyList
 import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class JsGroupMetadata(pointer: js.Any) extends GroupHandle
@@ -69,7 +69,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
   /** Runs a call that does not wait, on the calling thread. */
   private def direct[A](call: Shim => A): F[A] = shim.flatMap(loaded => F.delay(call(loaded)))
 
-  override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
+  override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String], enqueueTimeoutMillis: Int): F[Client] =
     F.defer:
       val error                  = ErrorSlot()
       val (names, values, count) = nativeProperties(properties)
@@ -117,7 +117,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def freeBatch(batch: Batch): F[Unit] = direct(_.batchFree(batch)).void
 
-  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int] =
+  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Enqueued] =
     direct: shim =>
       val error                                 = ErrorSlot()
       def taken(record: EncodedRecord): Boolean =
@@ -144,7 +144,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
           case 0 => true
           case 1 => false
           case _ => throw error.failure
-      records.iterator.takeWhile(taken).size
+      Enqueued(records.iterator.takeWhile(taken).size, gaveUp = false)
 
   private def nativeHeaders(shim: Shim, headers: Headers, error: ErrorSlot): js.Any =
     val native = shim.headersNew(headers.values.size)

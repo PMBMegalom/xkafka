@@ -287,19 +287,20 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
 
   test(conformance("a record for a partition the topic does not have is answered on its own, also once the client knows the topic")):
     withBroker: server =>
-      val topic = uniqueTopic("unknown-partition")
-      // The Java client waits up to its max.block.ms for the partition to appear, then answers that it timed out.
-      val waiting = if backend == "jvm" then Map("max.block.ms" -> "2000") else Map.empty
+      val topic   = uniqueTopic("unknown-partition")
       val records = NonEmptyList.of(record(topic, Some("k"), Some("a"), validPartition(0)), record(topic, Some("k"), Some("b"), validPartition(3)))
 
       for
-        _        <- createPartitioned(server, topic, 1)
-        settings <- producerSettings(server).flatMap(_.withProperties(waiting).liftTo[IO])
+        _ <- createPartitioned(server, topic, 1)
+        // Short enough that waiting for the partition, where it should be answered at once, would time out within the test.
+        settings <- producerSettings(server).flatMap(_.withEnqueueTimeout(5.seconds).liftTo[IO])
         rounds   <- PlatformKafkaClient().producer(settings).use(_.produceAttemptEachAndAwait(records).replicateA(2)).timeout(60.seconds)
-      yield
-        val missing = if backend == "jvm" then ErrorCode.RequestTimedOut else ErrorCode.UnknownTopicOrPartition
-        rounds.zipWithIndex.foreach: (attempted, round) =>
-          assertEquals(attempted.toList.map(_.outcome.leftMap(codeOf).void), List(Right(()), Left(Some(missing))), s"round $round")
+      yield rounds.zipWithIndex.foreach: (attempted, round) =>
+        assertEquals(
+          attempted.toList.map(_.outcome.leftMap(codeOf).void),
+          List(Right(()), Left(Some(ErrorCode.UnknownTopicOrPartition))),
+          s"round $round"
+        )
 
   test(conformance("flushing sends records without waiting out the linger and returns once they are delivered")):
     withBroker: server =>
@@ -384,6 +385,28 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             (took, acknowledgements) = enqueued
             _ <- acknowledgements.sequence.timeout(30.seconds)
           yield assert(took < 1.second, s"enqueueing 20 batches took $took while their acknowledgements were outstanding")
+
+  test(conformance("starting transactions against an unreachable cluster gives up once the transaction timeout has passed")):
+    for
+      client <- ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO]
+      id     <- TransactionalId.from(s"xkafka-unreachable-$backend").liftTo[IO]
+      // An enqueue timeout that does not divide the transaction timeout, so a wait that ran past it would show.
+      settings <-
+        TransactionalProducerSettings.from(
+          client,
+          id,
+          optionalSerializer,
+          optionalSerializer,
+          transactionTimeout = 4.seconds,
+          closeTimeout = 1.second,
+          enqueueTimeout = 3.seconds
+        ).liftTo[IO]
+      started <- IO.monotonic
+      outcome <- PlatformKafkaClient().transactionalProducer(settings).use_.attempt.timeout(30.seconds)
+      took    <- IO.monotonic.map(_ - started)
+    yield
+      refusedWith(Some(outcome), ErrorCode.RequestTimedOut, "starting transactions")
+      assert(took >= 4.seconds && took < 5500.millis, s"gave up after $took")
 
   test(conformance("an unreachable broker fails with the same portable classification")):
     val unreachable = "127.0.0.1:1"

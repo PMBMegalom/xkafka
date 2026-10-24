@@ -167,7 +167,9 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
     for
       clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer), security = security).liftTo[IO]
       producerSettings <-
-        ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, PlatformKafkaClient.impatientProducerProperties).liftTo[IO]
+        ProducerSettings
+          .from(clientSettings, utf8Serializer, utf8Serializer, PlatformKafkaClient.impatientProducerProperties, enqueueTimeout = 10.seconds)
+          .liftTo[IO]
       outcome <-
         PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
           .timeout(90.seconds).attempt

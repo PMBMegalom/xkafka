@@ -48,9 +48,11 @@ final class DriverClientSuite extends CatsEffectSuite:
 
   // The fake refuses to enqueue a record whose value is "refused", and fails to deliver one whose value is "lost". One whose value is "slow" is
   // delivered once flushed, and one whose value is "stuck" never is. It has room for one whose value is "crowded" once its deliveries have been
-  // served twice, for one whose value is "room at N" once N seconds have passed, and never for one whose value is "never".
+  // served twice, for one whose value is "room at N" once N seconds have passed, and never for one whose value is "never". It takes one whose value
+  // is "given up" and gives up waiting for room for it itself, as the Java client does.
   private val refused = new KafkaException.BackendFailure("refused")
   private val lost    = new KafkaException.BackendFailure("too large", Some(ErrorCode.MessageTooLarge))
+  private val givenUp = new KafkaException.BackendFailure("no room", Some(ErrorCode.RequestTimedOut), Some(true))
 
   test("attempting each record answers every record on its own, and producing fails with the first record that was not delivered"):
     val records = values("a", "lost", "b", "lost")
@@ -102,6 +104,27 @@ final class DriverClientSuite extends CatsEffectSuite:
       new DriverClient[IO](fake).producer(producerSettings)
         .use(producer => producer.produce(values("a", "never")).timeout(500.millis).attempt <* producer.flush).timeout(10.seconds)
     .map(outcome => assert(outcome.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"the wait should be cancelled, got $outcome"))
+
+  test("where the client gives up waiting for room for a record, the records after it time out without waiting again"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use(_.produceAttemptEachAndAwait(values("a", "given up", "b", "c"))).timeout(5.seconds)
+    .map: attempted =>
+      assertEquals(
+        attempted.toList.map(each => each.record.value -> each.outcome.leftMap(timedOut).void),
+        List("a" -> Right(()), "given up" -> Left(true), "b" -> Left(true), "c" -> Left(true))
+      )
+
+  test("a record waits for room as long as the enqueue timeout says"):
+    val settings = producerSettings.withEnqueueTimeout(10.seconds).toOption.get
+    val waited   =
+      FakeDriver(servingTakes = 1.second).flatMap: fake =>
+        new DriverClient[IO](fake).producer(settings).use: producer =>
+          IO.monotonic.flatMap: started =>
+            producer.produceAttemptEachAndAwait(values("room at 30"))
+              .flatMap(attempted => IO.monotonic.map(ended => (attempted.head.outcome, ended - started)))
+    TestControl.executeEmbed(waited.timeout(10.minutes)).map: (outcome, took) =>
+      assertEquals(outcome.leftMap(timedOut).void, Left(true))
+      assert(took >= 10.seconds && took < 12.seconds, s"gave up after $took")
 
   private def timedOut(failure: KafkaException): Boolean =
     failure match
@@ -582,7 +605,12 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override val deliveriesShareQueue: Boolean = true
 
-    override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] = IO.pure("producer")
+    override def producer(
+        bootstrapServers: String,
+        clientId: Option[String],
+        properties: Map[String, String],
+        enqueueTimeoutMillis: Int
+    ): IO[Client] = IO.pure("producer")
 
     override def destroyProducer(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
 
@@ -604,13 +632,15 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def freeBatch(batch: Batch): IO[Unit] = IO.unit
 
-    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Int] =
-      def from(rest: List[EncodedRecord], taken: Int): IO[Int] =
+    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Enqueued] =
+      def from(rest: List[EncodedRecord], taken: Int): IO[Enqueued] =
         rest match
-          case Nil                                         => IO.pure(taken)
+          case Nil                                         => IO.pure(Enqueued(taken, gaveUp = false))
           case record :: _ if valueOf(record) == "refused" => IO.raiseError(refused)
-          case record :: next                              => hasRoom(record)
-              .ifM(batches.update(held => held.updated(batch, held(batch) :+ record)) *> from(next, taken + 1), IO.pure(taken))
+          case record :: next                              =>
+            val held = batches.update(held => held.updated(batch, held(batch) :+ record))
+            if valueOf(record) == "given up" then held.as(Enqueued(taken + 1, gaveUp = true))
+            else hasRoom(record).ifM(held *> from(next, taken + 1), IO.pure(Enqueued(taken, gaveUp = false)))
       from(records.toList, 0)
 
     private def hasRoom(record: EncodedRecord): IO[Boolean] =
@@ -633,8 +663,13 @@ final class DriverClientSuite extends CatsEffectSuite:
         .mapN((held, sent) => held(batch).count(record => valueOf(record) == "stuck" || valueOf(record) == "slow" && !sent(batch)))
 
     override def deliveries(producer: Client, batch: Batch): IO[Vector[Either[KafkaException, Delivery]]] =
-      batches.get
-        .map(_(batch).zipWithIndex.map((record, index) => if valueOf(record) == "lost" then Left(lost) else Right(Delivery(0, index.toLong, -1L))))
+      batches.get.map(
+        _(batch).zipWithIndex.map: (record, index) =>
+          valueOf(record) match
+            case "lost"     => Left(lost)
+            case "given up" => Left(givenUp)
+            case _          => Right(Delivery(0, index.toLong, -1L))
+      )
 
     private def valueOf(record: EncodedRecord): String = record.value.fold("")(value => new String(value.toArray))
 

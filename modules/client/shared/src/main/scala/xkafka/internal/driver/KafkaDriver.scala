@@ -50,7 +50,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
     */
   def deliveriesShareQueue: Boolean
 
-  def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client]
+  /** `enqueueTimeoutMillis` is how long the client may wait for room for a record itself. librdkafka never waits, so only the Java client uses it. */
+  def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String], enqueueTimeoutMillis: Int): F[Client]
 
   /** Delivers what the producer already accepted for up to the timeout, then destroys it. */
   def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit]
@@ -73,10 +74,11 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def freeBatch(batch: Batch): F[Unit]
 
-  /** Enqueues the records in order until the producer has no room for the next one, and answers how many it took. It fails at the first record the
-    * producer refuses for any other reason; the records before it stay enqueued.
+  /** Enqueues the records in order until the producer has no room for the next one. It fails at the first record the producer refuses for any other
+    * reason; the records before it stay enqueued. Called again with the records it did not take, it goes on with the same batch, unless the client
+    * gave up on one itself.
     */
-  def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int]
+  def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Enqueued]
 
   /** Serves the shared queue's delivery reports for up to the timeout. Called only where deliveries share a queue, by one fiber at a time, while
     * enqueues go on alongside it.
@@ -240,6 +242,11 @@ private[xkafka] final case class EncodedRecord(
 
 /** Where a record was delivered. A negative offset or timestamp is one the broker did not report. */
 private[xkafka] final case class Delivery(partition: Int, offset: Long, timestamp: Long)
+
+/** How many records an enqueue took, and whether the client itself gave up waiting for room for the last of them, which is then reported as timed out
+  * like any delivery.
+  */
+private[xkafka] final case class Enqueued(taken: Int, gaveUp: Boolean)
 
 /** A committed offset as the broker stores it. A negative offset or leader epoch is one that is not there. */
 private[xkafka] final case class StoredOffset(offset: Long, leaderEpoch: Int, metadata: String)

@@ -118,8 +118,10 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
       ).toOption.get.withCloseTimeout(100.millis).toOption.get
     val record = ProducerRecord(Topic.from("events").toOption.get, "key", "value")
 
-    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).timeout(1.second).attempt).timeout(5.seconds).map: outcome =>
+    // A wait that cannot be cancelled holds up any timeout until it gives up, so the time it took is what tells.
+    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).timeout(1.second).attempt).timed.map: (took, outcome) =>
       assert(outcome.left.exists(_.isInstanceOf[TimeoutException]), s"the second record should wait for room in the one-message queue, got $outcome")
+      assert(took < 10.seconds, s"cancelling the wait took $took")
 
   /** librdkafka names idempotence as the reason it refuses too many requests in flight. */
   private def refusedForIdempotence(outcome: Either[Throwable, Unit]): Boolean =

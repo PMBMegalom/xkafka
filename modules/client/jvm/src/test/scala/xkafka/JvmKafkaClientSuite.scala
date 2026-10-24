@@ -22,8 +22,8 @@
 package xkafka
 
 import java.nio.charset.StandardCharsets
-import java.util.{List as JavaList, Map as JavaMap}
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.{List as JavaList, Map as JavaMap, Set as JavaSet}
+import java.util.concurrent.{CompletableFuture, CountDownLatch, Future, TimeUnit}
 
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -39,8 +39,10 @@ import org.apache.kafka.clients.consumer.{
   CommitFailedException, ConsumerGroupMetadata, ConsumerRecord as JavaConsumerRecord, MockConsumer, NoOffsetForPartitionException, OffsetAndMetadata,
   OffsetAndTimestamp
 }
-import org.apache.kafka.clients.producer.{MockProducer, Partitioner}
-import org.apache.kafka.common.{PartitionInfo, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.clients.producer.{
+  BufferExhaustedException, Callback, MockProducer, Partitioner, ProducerRecord as JavaProducerRecord, RecordMetadata as JavaRecordMetadata
+}
+import org.apache.kafka.common.{Cluster, PartitionInfo, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.errors.TimeoutException
 import org.apache.kafka.common.protocol.Errors
 import org.apache.kafka.common.serialization.ByteArraySerializer
@@ -79,6 +81,54 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       )
     )
 
+  test("a producer that cannot learn a topic gives up on its record after the enqueue timeout, and on the records after it at once"):
+    val client   = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
+    val settings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO], enqueueTimeout = 2.seconds).toOption.get
+    val record   = ProducerRecord(Topic.from("events").toOption.get, "key", "value")
+    val timedOut: Throwable => Boolean =
+      case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.RequestTimedOut)
+      case _                                      => false
+
+    KafkaClient[IO].producer(settings).use: producer =>
+      IO.monotonic.flatMap: started =>
+        producer.produceAttemptEachAndAwait(NonEmptyList.of(record, record, record))
+          .flatMap(attempted => IO.monotonic.map(ended => (attempted, ended - started)))
+    .timeout(30.seconds).map: (attempted, took) =>
+      assertEquals(attempted.toList.map(_.outcome.leftMap(timedOut).void), List.fill(3)(Left(true)))
+      assert(took >= 2.seconds && took < 4.seconds, s"gave up after $took")
+
+  test("where the Java client runs out of room for a record, the batch ends there and the records after it time out"):
+    // The Java client reports a record it gave up waiting for room for to its callback before the send returns.
+    val mock =
+      new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+        override def send(record: JavaProducerRecord[Array[Byte], Array[Byte]], callback: Callback): Future[JavaRecordMetadata] =
+          if new String(record.value(), StandardCharsets.UTF_8) != "full" then super.send(record, callback)
+          else
+            val exhausted = new BufferExhaustedException("no room")
+            callback.onCompletion(null, exhausted)
+            CompletableFuture.failedFuture(exhausted)
+    val utf8     = Serializer.utf8[IO]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings = ProducerSettings.from(client, utf8, utf8).toOption.get
+    val records  = NonEmptyList.of("a", "full", "b").map(value => ProducerRecord(Topic.from("events").toOption.get, "key", value))
+    val timedOut: Throwable => Boolean =
+      case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.RequestTimedOut)
+      case _                                      => false
+
+    mocked(producer = _ => mock).producer(settings).use(_.produceAttemptEachAndAwait(records)).timeout(10.seconds).map: attempted =>
+      assertEquals(attempted.toList.map(_.outcome.leftMap(timedOut).void), List(Right(()), Left(true), Left(true)))
+      assertEquals(mock.history.size, 1, "only the record before the full buffer should be sent")
+
+  test("a produce waiting on the Java client can be cancelled"):
+    val client   = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
+    val settings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get.withCloseTimeout(100.millis).toOption.get
+    val record   = ProducerRecord(Topic.from("events").toOption.get, "key", "value")
+
+    // A wait that cannot be cancelled holds up any timeout until the client gives up, so the time it took is what tells.
+    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).timeout(1.second).attempt).timed.map: (took, outcome) =>
+      assert(outcome.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"the wait should be cancelled, got $outcome")
+      assert(took < 10.seconds, s"cancelling the wait took $took")
+
   test("wraps Kafka client failures"):
     val cause = new TimeoutException("timed out")
 
@@ -91,7 +141,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(error.getCause, cause)
 
   test("producer delegates serialization and production to the Java producer"):
-    val mock    = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+    val mock    = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
     val backend =
       mocked(producer =
         properties =>
@@ -103,6 +153,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           // A value other than the default, so this proves the mapping rather than agreeing with it by chance.
           assertEquals(properties.get("acks"), Some("1"))
           assertEquals(properties.get("enable.idempotence"), Some("false"))
+          assertEquals(properties.get("max.block.ms"), Some("7000"))
           mock
       )
 
@@ -117,7 +168,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("retry.backoff.ms" -> "1")).toOption.get
     val settings =
       ProducerSettings.from(client, keySerializer, valueSerializer, Map("retry.backoff.ms" -> "2"), compression = Compression.Lz4).toOption.get
-        .withoutIdempotence.withAcks(Acks.Leader).toOption.get
+        .withoutIdempotence.withAcks(Acks.Leader).andThen(_.withEnqueueTimeout(7.seconds)).toOption.get
     val record =
       ProducerRecord(
         topic = topic,
@@ -250,7 +301,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       addRecord(consumer, 2L)
       reassigned.countDown()
     )
-    val producer = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+    val producer = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
 
     withMocks(consumer, producer): (transactional, reading) =>
       // Nothing after the first record is taken until the partition has been assigned again, so a record that took the lease current when it
@@ -269,7 +320,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       mocked(producer =
         received =>
           properties.set(received.get("acks").zip(received.get("enable.idempotence")).map(_.toString + "," + _.toString))
-          new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+          new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
             override def close(timeout: java.time.Duration): Unit =
               closedWith.set(Some(timeout))
               super.close(timeout)
@@ -299,7 +350,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       addRecord(consumer, 2L)
       reassigned.countDown()
     )
-    val producer = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+    val producer = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
 
     withMocks(consumer, producer): (_, reading) =>
       reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(3).compile.toList.flatMap: records =>
@@ -333,7 +384,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       else consumer.schedulePollTask(() => revokeOnceSending())
     consumer.schedulePollTask(() => revokeOnceSending())
     val producer =
-      new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+      new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
         override def sendOffsetsToTransaction(offsets: JavaMap[JavaTopicPartition, OffsetAndMetadata], metadata: ConsumerGroupMetadata): Unit =
           sending.countDown()
           release.await()
@@ -376,7 +427,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val topic = Topic.from("events").toOption.get
 
     cases.traverse: (failure, expected) =>
-      val mock = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+      val mock = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
       mock.sendOffsetsToTransactionException = failure
       val readUnder =
         new GroupMembership.Backend[IO](
@@ -501,7 +552,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         )
 
   test("a producer effect calls the Java client only when it runs"):
-    val mock     = new MockProducer[Array[Byte], Array[Byte]](true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
+    val mock     = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
     val utf8     = Serializer.utf8[IO]
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
     val settings = ProducerSettings.from(client, utf8, utf8).toOption.get
@@ -516,6 +567,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       yield
         assertEquals(before, 0, "building the effects should not send anything")
         assertEquals(mock.history.size, 2, "running them should send each record")
+
+  /** A cluster where `events` has the one partition the tests produce to, which the producer looks up before producing to a partition. */
+  private def knownEvents: Cluster =
+    new Cluster("mock", JavaList.of(), JavaList.of(new PartitionInfo("events", 0, null, Array.empty, Array.empty)), JavaSet.of(), JavaSet.of())
 
   private def mocked(
       producer: Map[String, AnyRef] => org.apache.kafka.clients.producer.Producer[Array[Byte], Array[Byte]] = _ => fail("no producer expected"),

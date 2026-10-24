@@ -718,6 +718,25 @@ final class ClientSuite extends FunSuite:
       Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.LingerLimit)))
     )
 
+  test("the enqueue timeout is a minute unless set, must be positive, and owns max.block.ms"):
+    val serializer    = Serializer.const[IO, String](None)
+    val id            = TransactionalId.from("writer").toOption.get
+    val settings      = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, enqueueTimeout = 5.seconds).toOption.get
+
+    assertEquals(settings.enqueueTimeout, 1.minute)
+    assertEquals(settings.withEnqueueTimeout(2.seconds).toOption.map(_.enqueueTimeout), Some(2.seconds))
+    assertEquals(transactional.producer.enqueueTimeout, 5.seconds)
+    assertEquals(transactional.withEnqueueTimeout(3.seconds).toOption.map(_.producer.enqueueTimeout), Some(3.seconds))
+    assertEquals(
+      settings.withEnqueueTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.EnqueueTimeout, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withProperty("max.block.ms", "1000").toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("max.block.ms", SettingsError.PropertyScope.Producer)))
+    )
+
   test("the batch size is left to the backend unless it is set, and must be positive"):
     val serializer    = Serializer.const[IO, String](None)
     val id            = TransactionalId.from("writer").toOption.get

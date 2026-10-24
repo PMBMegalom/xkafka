@@ -75,14 +75,13 @@ as records that are not delivered do:
 - A record larger than the client takes fails with
   `ErrorCode.MessageTooLarge`.
 - A record for a partition the topic does not have fails with
-  `ErrorCode.UnknownTopicOrPartition`. On the JVM, the Java client first waits
-  up to its `max.block.ms`, a minute by default, for the partition to appear,
-  and the record then fails with `ErrorCode.RequestTimedOut`.
+  `ErrorCode.UnknownTopicOrPartition`.
 
 While the client's buffer is full, the outer effect waits for room, then
-enqueues the rest of the records. On JavaScript and Native, a record that finds
-no room for a minute fails with `ErrorCode.RequestTimedOut`, and so does every
-record after it in the batch.
+enqueues the rest of the records. A record that finds no room within the
+enqueue timeout, a minute unless set with `withEnqueueTimeout`, fails with
+`ErrorCode.RequestTimedOut`, and so does every record after it in the batch.
+Cancelling the outer effect stops the wait.
 
 ## When some records fail
 

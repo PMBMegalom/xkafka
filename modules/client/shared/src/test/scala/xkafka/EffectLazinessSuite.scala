@@ -26,7 +26,7 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.IO
 import munit.CatsEffectSuite
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import internal.driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** Every effect the client hands out is a description: building one asks nothing of the driver, so nothing reaches a broker until it runs. */
 final class EffectLazinessSuite extends CatsEffectSuite:
@@ -133,8 +133,12 @@ final class EffectLazinessSuite extends CatsEffectSuite:
 
     override val deliveriesShareQueue: Boolean = true
 
-    override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] =
-      called("producer")(IO.pure("producer"))
+    override def producer(
+        bootstrapServers: String,
+        clientId: Option[String],
+        properties: Map[String, String],
+        enqueueTimeoutMillis: Int
+    ): IO[Client]                                                                = called("producer")(IO.pure("producer"))
     override def destroyProducer(producer: Client, timeoutMillis: Int): IO[Unit] = called("destroyProducer")(IO.unit)
     override def consumer(
         bootstrapServers: String,
@@ -146,10 +150,11 @@ final class EffectLazinessSuite extends CatsEffectSuite:
     override def destroyConsumer(consumer: Client): IO[Unit] = called("destroyConsumer")(IO.unit)
     override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] =
       called("admin")(IO.pure("admin"))
-    override def destroyAdmin(admin: Client): IO[Unit]                                                  = called("destroyAdmin")(IO.unit)
-    override def batch(capacity: Int): IO[Batch]                                                        = called("batch")(IO.pure(capacity))
-    override def freeBatch(batch: Batch): IO[Unit]                                                      = called("freeBatch")(IO.unit)
-    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Int] = called("enqueue")(IO.pure(records.size))
+    override def destroyAdmin(admin: Client): IO[Unit]                                                       = called("destroyAdmin")(IO.unit)
+    override def batch(capacity: Int): IO[Batch]                                                             = called("batch")(IO.pure(capacity))
+    override def freeBatch(batch: Batch): IO[Unit]                                                           = called("freeBatch")(IO.unit)
+    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Enqueued] =
+      called("enqueue")(IO.pure(Enqueued(records.size, gaveUp = false)))
     override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = called("serveDeliveries")(IO.sleep(timeoutMillis.millis))
     override def flush(producer: Client, timeoutMillis: Int): IO[Unit]           = called("flush")(IO.sleep(timeoutMillis.millis))
     override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int]      = called("awaitDeliveries")(IO.sleep(timeoutMillis.millis).as(1))

@@ -52,6 +52,7 @@ val ManagedProperties: Set[String] =
     "compression.type",
     "compression.codec",
     "linger.ms",
+    "max.block.ms",
     "group.instance.id",
     "session.timeout.ms",
     "heartbeat.interval.ms",
@@ -146,6 +147,7 @@ object SettingsError:
     case PollTimeout              extends DurationField("pollTimeout")
     case RequestTimeout           extends DurationField("requestTimeout")
     case Linger                   extends DurationField("linger")
+    case EnqueueTimeout           extends DurationField("enqueueTimeout")
     case SessionTimeout           extends DurationField("sessionTimeout")
     case HeartbeatInterval        extends DurationField("heartbeatInterval")
     case MaxPollInterval          extends DurationField("maxPollInterval")
@@ -253,7 +255,8 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     idempotence: Boolean,
     compression: Compression,
     linger: FiniteDuration,
-    batchSize: Option[Int]
+    batchSize: Option[Int],
+    enqueueTimeout: FiniteDuration
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
     new ProducerSettings(
@@ -266,49 +269,108 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
       idempotence,
       compression,
       linger,
-      batchSize
+      batchSize,
+      enqueueTimeout
     ) {}
 
   def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
-    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize) {}
+    new ProducerSettings(
+      value,
+      keySerializer,
+      valueSerializer,
+      properties,
+      acks,
+      closeTimeout,
+      idempotence,
+      compression,
+      linger,
+      batchSize,
+      enqueueTimeout
+    ) {}
 
   /** How many replicas must have a record before the broker answers for it. Anything short of `AllReplicas` needs idempotence turned off first. */
   def withAcks(value: Acks): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence, compression, linger, batchSize)
+    ProducerSettings
+      .from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence, compression, linger, batchSize, enqueueTimeout)
 
   /** Turns on Kafka's idempotent producer, `enable.idempotence`, which is the default. It needs `acks` to be `AllReplicas`. */
   def withIdempotence: ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, true, compression, linger, batchSize)
+    ProducerSettings
+      .from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, true, compression, linger, batchSize, enqueueTimeout)
 
   /** Turns off Kafka's idempotent producer, `enable.idempotence`, which any `acks` short of `AllReplicas` needs. */
   def withoutIdempotence: ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, false, compression, linger, batchSize) {}
+    new ProducerSettings(
+      client,
+      keySerializer,
+      valueSerializer,
+      properties,
+      acks,
+      closeTimeout,
+      false,
+      compression,
+      linger,
+      batchSize,
+      enqueueTimeout
+    ) {}
 
   /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value, idempotence, compression, linger, batchSize)
+    ProducerSettings
+      .from(client, keySerializer, valueSerializer, properties, acks, value, idempotence, compression, linger, batchSize, enqueueTimeout)
 
   /** How record batches are compressed on their way to the broker. */
   def withCompression(value: Compression): ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, value, linger, batchSize) {}
+    new ProducerSettings(
+      client,
+      keySerializer,
+      valueSerializer,
+      properties,
+      acks,
+      closeTimeout,
+      idempotence,
+      value,
+      linger,
+      batchSize,
+      enqueueTimeout
+    ) {}
 
   /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value, batchSize)
+    ProducerSettings
+      .from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value, batchSize, enqueueTimeout)
 
   /** The most bytes of records one batch holds before it is sent without waiting out the linger. */
   def withBatchSize(value: Int): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, Some(value))
+    ProducerSettings
+      .from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, Some(value), enqueueTimeout)
 
   /** Leaves the batch size to the backend, which is the default. */
   def withoutBatchSize: ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, None) {}
+    new ProducerSettings(
+      client,
+      keySerializer,
+      valueSerializer,
+      properties,
+      acks,
+      closeTimeout,
+      idempotence,
+      compression,
+      linger,
+      None,
+      enqueueTimeout
+    ) {}
+
+  /** How long `produce` waits for room for a record while the client's buffer is full, before that record and the ones after it time out. */
+  def withEnqueueTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize, value)
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence, compression, linger, batchSize)
+    ProducerSettings
+      .from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence, compression, linger, batchSize, enqueueTimeout)
 
   /** The Kafka properties these settings own, spelled the same for both clients. */
   private[xkafka] def managedProperties: Map[String, String] =
@@ -322,7 +384,7 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
   override def toString: String =
     s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(
         properties
-      )},$acks,$closeTimeout,$idempotence,$compression,$linger,$batchSize)"
+      )},$acks,$closeTimeout,$idempotence,$compression,$linger,$batchSize,$enqueueTimeout)"
 
 object ProducerSettings:
   /** What both backends already ask for, and the only setting that survives losing a leader. */
@@ -337,6 +399,9 @@ object ProducerSettings:
   /** The longest linger the settings accept. */
   val LingerLimit: FiniteDuration = 15.minutes
 
+  /** What the Java client waits for room by default, its `max.block.ms`. */
+  val DefaultEnqueueTimeout: FiniteDuration = 1.minute
+
   def from[F[_], K, V](
       client: ClientSettings,
       keySerializer: Serializer[F, K],
@@ -347,15 +412,28 @@ object ProducerSettings:
       idempotence: Boolean = true,
       compression: Compression = Compression.Uncompressed,
       linger: FiniteDuration = ProducerSettings.DefaultLinger,
-      batchSize: Option[Int] = None
+      batchSize: Option[Int] = None,
+      enqueueTimeout: FiniteDuration = ProducerSettings.DefaultEnqueueTimeout
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
         Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++
         boundedDurationErrors(SettingsError.DurationField.Linger, linger, LingerLimit) ++ batchSize.filter(_ <= 0)
-          .map(SettingsError.NonPositiveBatchSize(_))
+          .map(SettingsError.NonPositiveBatchSize(_)) ++ durationErrors(SettingsError.DurationField.EnqueueTimeout, enqueueTimeout)
     validateSettings(errors).map(_ =>
-      new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize) {}
+      new ProducerSettings(
+        client,
+        keySerializer,
+        valueSerializer,
+        properties,
+        acks,
+        closeTimeout,
+        idempotence,
+        compression,
+        linger,
+        batchSize,
+        enqueueTimeout
+      ) {}
     )
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
@@ -401,6 +479,10 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withoutBatchSize: TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withoutBatchSize, transactionalId, transactionTimeout) {}
 
+  /** How long `produce` waits for room for a record while the client's buffer is full, before that record and the ones after it time out. */
+  def withEnqueueTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withEnqueueTimeout(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     withProperties(producer.properties.updated(name, value))
 
@@ -421,7 +503,8 @@ object TransactionalProducerSettings:
       closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout,
       compression: Compression = Compression.Uncompressed,
       linger: FiniteDuration = ProducerSettings.DefaultLinger,
-      batchSize: Option[Int] = None
+      batchSize: Option[Int] = None,
+      enqueueTimeout: FiniteDuration = ProducerSettings.DefaultEnqueueTimeout
   ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     (
       ProducerSettings.from(
@@ -432,7 +515,8 @@ object TransactionalProducerSettings:
         closeTimeout = closeTimeout,
         compression = compression,
         linger = linger,
-        batchSize = batchSize
+        batchSize = batchSize,
+        enqueueTimeout = enqueueTimeout
       ),
       validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, transactionTimeout))
     ).mapN((producer, _) => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})

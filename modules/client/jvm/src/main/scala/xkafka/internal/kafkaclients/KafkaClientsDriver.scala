@@ -29,6 +29,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
 import java.util.regex.Pattern
 
+import scala.concurrent.duration.DurationInt
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 
@@ -56,12 +57,12 @@ import org.apache.kafka.common.{
   ElectionType, GroupState, KafkaException as JavaKafkaException, KafkaFuture, Node, TopicPartition as JavaTopicPartition
 }
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
-import org.apache.kafka.common.errors.{ElectionNotNeededException, UnknownTopicOrPartitionException}
+import org.apache.kafka.common.errors.{ElectionNotNeededException, TimeoutException as JavaTimeoutException, UnknownTopicOrPartitionException}
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
 private[xkafka] final case class JavaClients(
@@ -120,8 +121,10 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override val deliveriesShareQueue: Boolean = false
 
-  override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
-    javaCall(F.blocking(JavaClient.Producer(clients.producer(connection(bootstrapServers, clientId, properties)))))
+  /** The Java client waits for room, and for a topic's metadata, up to its `max.block.ms`, which is the enqueue timeout. */
+  override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String], enqueueTimeoutMillis: Int): F[Client] =
+    val configured = connection(bootstrapServers, clientId, properties) + ("max.block.ms" -> enqueueTimeoutMillis.toString)
+    javaCall(F.blocking(JavaClient.Producer(clients.producer(configured))))
 
   override def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit] =
     producing(producer)(value => F.blocking(value.close(Duration.ofMillis(timeoutMillis.toLong))))
@@ -154,22 +157,50 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def freeBatch(batch: Batch): F[Unit] = F.unit
 
-  /** The Java client waits for room itself, so this takes every record. */
-  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int] =
+  /** The Java client waits for room itself, so this takes every record unless the client gives up on one. A record it gives up on is reported as
+    * timed out before its send returns, and the batch ends there. Interrupting the wait leaves the records before it enqueued.
+    *
+    * A record for a partition its topic does not have is answered at once from the client's metadata, as librdkafka answers it, where the Java client
+    * would wait for the partition to appear.
+    */
+  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Enqueued] =
     producing(producer): value =>
-      F.blocking:
-        try records.toList.foreach: record =>
-            val index = batch.enqueued.get
-            batch.outstanding.incrementAndGet()
-            val callback: Callback = (metadata, error) => batch.report(index, Option(error).toLeft(metadata))
-            try value.send(javaRecord(record), callback): Unit
-            catch
-              case error: Throwable =>
-                batch.outstanding.decrementAndGet()
-                throw error
-            batch.enqueued.incrementAndGet()
+      F.interruptible:
+        def sent(record: EncodedRecord, partitions: Map[String, Int]): (Boolean, Map[String, Int]) =
+          val index = batch.enqueued.get
+          batch.outstanding.incrementAndGet()
+          def answered(failure: Throwable) =
+            batch.report(index, Left(failure))
+            batch.enqueued.incrementAndGet(): Unit
+          try
+            val topic   = record.topic.value
+            val counted = record.partition.fold(partitions)(_ => partitions.updatedWith(topic)(_.orElse(Some(value.partitionsFor(topic).size))))
+            record.partition.filter(partition => counted.get(topic).exists(partition.value >= _)) match
+              case Some(partition) =>
+                answered(new UnknownTopicOrPartitionException(s"partition ${partition.value} of topic $topic is not present in metadata"))
+                (false, counted)
+              case None =>
+                val callback: Callback = (metadata, error) => batch.report(index, Option(error).toLeft(metadata))
+                value.send(javaRecord(record), callback): Unit
+                batch.enqueued.incrementAndGet()
+                // A report this early is the client giving up before the record was sent: its delivery cannot have timed out yet.
+                (Option(batch.reports.get(index)).exists(_.left.exists(_.isInstanceOf[JavaTimeoutException])), counted)
+          catch
+            // Looking up the partitions waits as a send does, and gives up the same way.
+            case timedOut: JavaTimeoutException =>
+              answered(timedOut)
+              (true, partitions)
+            case error: Throwable =>
+              batch.outstanding.decrementAndGet()
+              throw error
+        def from(rest: List[EncodedRecord], partitions: Map[String, Int], taken: Int): Enqueued =
+          rest match
+            case Nil            => Enqueued(taken, gaveUp = false)
+            case record :: next =>
+              val (gaveUp, counted) = sent(record, partitions)
+              if gaveUp then Enqueued(taken + 1, gaveUp = true) else from(next, counted, taken + 1)
+        try from(records.toList, Map.empty, 0)
         finally batch.seal()
-        records.size
 
   /** The Java client reports each record on its own thread, so there is no queue to serve. */
   override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = F.unit
@@ -194,13 +225,29 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
           ))
         case Left(error) => Left(JavaFailures.delivery(error))
 
-  override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.initTransactions()))
+  override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] =
+    producing(producer)(value => withinTimeout(timeoutMillis)(value.initTransactions()))
 
   override def beginTransaction(producer: Client): F[Unit] = producing(producer)(value => F.blocking(value.beginTransaction()))
 
-  override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.commitTransaction()))
+  override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
+    producing(producer)(value => withinTimeout(timeoutMillis)(value.commitTransaction()))
 
-  override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.abortTransaction()))
+  override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
+    producing(producer)(value => withinTimeout(timeoutMillis)(value.abortTransaction()))
+
+  /** The Java client bounds a transaction call by its `max.block.ms`, the enqueue timeout, and a call that timed out or was interrupted is safe to
+    * make again. So it is made again until `timeoutMillis` has passed, when the one still waiting is interrupted, as librdkafka's call gives up then.
+    */
+  private def withinTimeout(timeoutMillis: Int)(call: => Unit): F[Unit] =
+    F.monotonic.flatMap: started =>
+      val deadline         = started + timeoutMillis.millis
+      def attempt: F[Unit] =
+        F.monotonic.flatMap: now =>
+          val timedOut = new JavaTimeoutException(s"the transaction call did not complete within $timeoutMillis ms")
+          F.interruptible(call).timeoutTo(deadline - now, F.raiseError(timedOut)).recoverWith:
+            case _: JavaTimeoutException => F.monotonic.flatMap(now => if now < deadline then attempt else F.raiseError(timedOut))
+      attempt
 
   override def sendOffsets(
       producer: Client,
