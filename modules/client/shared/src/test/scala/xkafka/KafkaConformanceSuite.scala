@@ -518,7 +518,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
         newTopic <- NewTopic.from(topic, partitions = 2, replicationFactor = 1).liftTo[IO]
         _        <- PlatformKafkaClient().admin(client).use(admin => admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 2))
-        _        <- produce(server, records)
+        _        <- produce(server, records).timed.flatMap((took, _) => IO.println(s"[$backend] producing the unread records took $took"))
         reader   <- consumerSettings(server, group)
         idle <- reader.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds)).liftTo[IO]
         history <- Ref.of[IO, Vector[(FiniteDuration, Int)]](Vector.empty)
@@ -533,10 +533,11 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           PlatformKafkaClient().consumer(reader, selection).use: other =>
             val watching = other.assignmentChanges.evalMap(changed => IO.monotonic.flatMap(at => history.update(_ :+ (at -> changed.size))))
             (other.records.compile.drain, watching.compile.drain).parTupled.background.surround:
-              holdsBoth.timeout(60.seconds) *> PlatformKafkaClient().consumer(idle, selection).use: _ =>
-                (IO.sleep(250.millis) *> handedOver).iterateWhile(_.isEmpty).map(_.get).timeout(90.seconds)
-                  .onError(_ => history.get.flatMap(changes => IO.println(s"[$backend] the reading member's assignments: $changes")))
-          .timeout(120.seconds)
+              holdsBoth.timeout(60.seconds).adaptError(failure => new AssertionError("the reading member never held both partitions", failure)) *>
+                PlatformKafkaClient().consumer(idle, selection).use: _ =>
+                  (IO.sleep(250.millis) *> handedOver).iterateWhile(_.isEmpty).map(_.get).timeout(90.seconds)
+                    .adaptError(failure => new AssertionError("the reading member was not handed both partitions back", failure))
+          .timeout(120.seconds).onError(_ => history.get.flatMap(changes => IO.println(s"[$backend] the reading member's assignments: $changes")))
       yield assert(outcome >= 4.seconds, s"the reading member took both partitions after $outcome, before the poll interval could pass")
 
   test(conformance("a consumer answers queries while its records are being consumed")):
