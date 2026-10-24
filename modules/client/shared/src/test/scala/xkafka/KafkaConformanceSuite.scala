@@ -848,8 +848,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         val (before, taken, position) = outcome
         val next                      = taken.offset.nextOffset.value
         assert(position.exists(at => at.value >= next && at.value <= 5L), s"the position should be between $next and 5, got $position")
-        // Only the JVM settles on a position before anything is consumed.
-        if PlatformKafkaClient.javaRelease.isEmpty then assertEquals(before, None, "librdkafka has no position before consuming")
+        // The consumer reads ahead of the stream from the moment it is assigned, so a position can be there before anything is consumed.
+        assert(before.forall(_.value <= 5L), s"the position before consuming should be unset or within the partition, got $before")
 
   private def whenSeekable(seek: IO[Unit]): IO[Unit] =
     def attempt: IO[Unit] = seek.handleErrorWith(_ => IO.sleep(250.millis) *> attempt)

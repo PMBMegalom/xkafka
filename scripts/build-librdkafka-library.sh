@@ -29,6 +29,14 @@ if [ ! -f "$marker" ] || [ ! -f "$source/src/librdkafka-static.a" ]; then
   rm -rf "$source"
   mkdir -p "$source"
   tar -xzf "$archive" --strip-components=1 -C "$source"
+  # zlib.net has served a page in place of the release archive, which the checksum then refuses, so zlib comes from its own GitHub
+  # release, checked against the same checksum.
+  zlib_module="$source/mklove/modules/configure.zlib"
+  sed -i.orig 's#https://zlib.net/fossils/zlib-${ver}.tar.gz#https://github.com/madler/zlib/releases/download/v${ver}/zlib-${ver}.tar.gz#' "$zlib_module"
+  if ! grep -q 'github.com/madler/zlib' "$zlib_module"; then
+    echo "could not point the zlib download at its GitHub release" >&2
+    exit 1
+  fi
   (
     cd "$source"
     ./configure --install-deps --source-deps-only --enable-static --enable-ssl --enable-zlib --enable-zstd \
