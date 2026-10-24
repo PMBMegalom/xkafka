@@ -684,6 +684,66 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         case Right(())                             => fail("expected a non-positive queue threshold to fail")
 
   /** librdkafka refuses a seek until the partition it names is being fetched, which holding the assignment does not yet mean. */
+  test(conformance("a seek of a partition not assigned is refused as unknown, and one of a partition assigned succeeds once it is fetched")):
+    withBroker: server =>
+      val topic      = uniqueTopic("early-seek")
+      val partition  = TopicPartition(topic, validPartition(0))
+      val unassigned = TopicPartition(uniqueTopic("early-seek-unassigned"), validPartition(0))
+
+      for
+        _        <- produceValues(server, partition, 3)
+        settings <- consumerSettings(server, uniqueGroup("early-seek"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            (assignmentOf(consumer, 1) *> consumer.seek(unassigned, validOffset(1L)).attempt) <*
+              whenSeekable(consumer.seek(partition, validOffset(1L)))
+          .timeout(90.seconds)
+      yield refusedWith(Some(outcome), ErrorCode.UnknownTopicOrPartition, "a seek of a partition not assigned")
+
+  test(conformance("after a seek, the next record handed out of the partition is the one sought, and none fetched before it")):
+    withBroker: server =>
+      val topic     = uniqueTopic("seek-buffered")
+      val partition = TopicPartition(topic, validPartition(0))
+      // Each seek is made once the record before it is handed out, when the records fetched after that one are already waiting.
+      def seekAfter(consumer: KafkaConsumer[IO, ?, ?], index: Long): IO[Unit] =
+        index match
+          case 0 => consumer.seek(partition, validOffset(6L))
+          case 2 => consumer.seek(partition, validOffset(2L))
+          case 4 => consumer.seekToBeginning(Set(partition))
+          case 6 => consumer.seekToEnd(Set(partition))
+          case _ => IO.unit
+
+      for
+        _        <- produceValues(server, partition, 10)
+        settings <- consumerSettings(server, uniqueGroup("seek-buffered"))
+        offsets  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            // Past the end there is nothing more to read, so the stream is given a while to hand out a record it should not.
+            consumer.records.map(_.record.offset.value).zipWithIndex.evalTap((_, index) => seekAfter(consumer, index)).map(_._1).take(8)
+              .interruptAfter(20.seconds).compile.toList
+          .timeout(90.seconds)
+      yield assertEquals(offsets, List(0L, 6L, 7L, 2L, 3L, 0L, 1L))
+
+  test(conformance("the position can be unset before consuming, and after consuming is at or past the offset after the record consumed")):
+    withBroker: server =>
+      val topic     = uniqueTopic("position-ahead")
+      val partition = TopicPartition(topic, validPartition(0))
+
+      for
+        _        <- produceValues(server, partition, 5)
+        settings <- consumerSettings(server, uniqueGroup("position-ahead"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            (assignmentOf(consumer, 1) *> consumer.position(partition), consumer.records.take(1).compile.lastOrError, consumer.position(partition))
+              .tupled
+          .timeout(90.seconds)
+      yield
+        val (before, taken, position) = outcome
+        val next                      = taken.offset.nextOffset.value
+        assert(position.exists(at => at.value >= next && at.value <= 5L), s"the position should be between $next and 5, got $position")
+        // Only the JVM settles on a position before anything is consumed.
+        if PlatformKafkaClient.javaRelease.isEmpty then assertEquals(before, None, "librdkafka has no position before consuming")
+
   private def whenSeekable(seek: IO[Unit]): IO[Unit] =
     def attempt: IO[Unit] = seek.handleErrorWith(_ => IO.sleep(250.millis) *> attempt)
     attempt.timeout(30.seconds)
@@ -1423,6 +1483,61 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           assertEquals(failure.retriable, Some(false), failure.getMessage)
         case other => fail(s"the held record should have been purged, got $other")
 
+  test(conformance("with the default assignment strategy, a rebalance refuses every offset read before it, including those of partitions kept")):
+    withBroker: server =>
+      val topic      = uniqueTopic("eager")
+      val group      = uniqueGroup("eager")
+      val partitions = (0 until 4).toList.map(index => TopicPartition(topic, validPartition(index)))
+
+      for
+        _        <- createPartitioned(server, topic, 4)
+        _        <- partitions.traverse_(produceValues(server, _, 3))
+        settings <- consumerSettings(server, group)
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: first =>
+            for
+              _       <- assignmentOf(first, 4)
+              records <- first.records.take(12).compile.toList
+              held = records.groupBy(_.offset.topicPartition).view.mapValues(_.head.offset).toMap
+              outcome <-
+                PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: second =>
+                  for
+                    _ <-
+                      (first.assignmentChanges.filter(held => held.nonEmpty && held.size < 4).head.compile.lastOrError, assignmentOf(second, 2))
+                        .parTupled
+                    kept    <- first.assignment
+                    commits <- held.toList.traverse((partition, offset) => offset.commit.attempt.map(partition -> _))
+                  yield (held.keySet, kept, commits.toMap)
+            yield outcome
+          .timeout(120.seconds)
+      yield
+        val (held, kept, commits) = outcome
+        assertEquals(held, partitions.toSet, "the first consumer should hold an offset of every partition")
+        assert(kept.nonEmpty, "the first consumer should keep some partitions")
+        commits.foreach((partition, commit) => refusedWith(Some(commit), ErrorCode.IllegalGeneration, s"the offset of $partition"))
+
+  test(conformance("under the consumer group protocol, a consumer with a session timeout or heartbeat interval fails as invalid configuration")):
+    withBroker: server =>
+      val topic                                                                    = uniqueTopic("group-protocol")
+      val protocol                                                                 = Map("group.protocol" -> "consumer")
+      def consumed(settings: ConsumerSettings[IO, Option[String], Option[String]]) =
+        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.lastOrError)
+          .timeout(90.seconds)
+
+      for
+        _             <- createPartitioned(server, topic, 1)
+        _             <- produceValues(server, TopicPartition(topic, validPartition(0)), 1)
+        plain         <- consumerSettings(server, uniqueGroup("group-protocol")).flatMap(_.withProperties(protocol).liftTo[IO])
+        timed         <- plain.withSessionTimeout(10.seconds).liftTo[IO]
+        beating       <- plain.withHeartbeatInterval(1.second).liftTo[IO]
+        unset         <- consumed(plain).attempt
+        withTimeout   <- consumed(timed).void.attempt
+        withHeartbeat <- consumed(beating).void.attempt
+      yield
+        assert(unset.isRight, s"a consumer leaving both unset should consume, got $unset")
+        refusedWith(Some(withTimeout), ErrorCode.InvalidConfiguration, "a session timeout")
+        refusedWith(Some(withHeartbeat), ErrorCode.InvalidConfiguration, "a heartbeat interval")
+
   test(conformance("a group is described and listed with its state, its members and their assignments while it has members")):
     withBroker: server =>
       val topic = uniqueTopic("groups-active")
@@ -2016,7 +2131,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(failure.retriable, Some(true), failure.getMessage)
       case other => fail(s"a cluster that cannot be reached should fail the call, got $other")
 
-  private def refusedWith(answer: Option[Either[KafkaException, ?]], code: ErrorCode, clue: String): Unit =
+  private def refusedWith(answer: Option[Either[Throwable, ?]], code: ErrorCode, clue: String): Unit =
     answer match
       case Some(Left(failure: KafkaException.BackendFailure)) => assertEquals(failure.code, Some(code), s"$clue: ${failure.getMessage}")
       case other                                              => fail(s"$clue should be refused as $code, got $other")

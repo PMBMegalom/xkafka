@@ -29,3 +29,15 @@ final class LibrdkafkaAnswersSuite extends munit.FunSuite:
       LibrdkafkaAnswers.listed(Vector("" -> 5, "workers" -> 3)),
       Vector(ConsumerGroup.from("workers").toOption.get -> ConsumerGroupState.Stable)
     )
+
+  test("a transactional failure is retriable as its code says, whatever librdkafka's own flag"):
+    val timedOut = Failures.classified("timed out", -185, fatal = 0, transactionAbortRequired = 1)
+    val fenced   = Failures.classified("fenced", -144, fatal = 1, transactionAbortRequired = -1)
+    assertEquals(
+      (timedOut.code, timedOut.retriable, timedOut.fatal, timedOut.transactionAbortRequired),
+      (Some(ErrorCode.RequestTimedOut), Some(true), Some(false), Some(true))
+    )
+    assertEquals(
+      (fenced.code, fenced.retriable, fenced.fatal, fenced.transactionAbortRequired),
+      (Some(ErrorCode.Fenced), Some(false), Some(true), None)
+    )

@@ -76,9 +76,12 @@ private[xkafka] object Failures:
     val classified = ErrorCode.fromLibrdkafka(code)
     new KafkaException.BackendFailure(message, Some(classified), retriable = Some(classified.retriable))
 
-  /** A transactional failure, whose flags are -1 when librdkafka did not say. */
-  def classified(message: String, code: Int, fatal: Int, retriable: Int, transactionAbortRequired: Int): KafkaException.BackendFailure =
-    new KafkaException.BackendFailure(message, Some(ErrorCode.fromLibrdkafka(code)), flag(retriable), flag(fatal), flag(transactionAbortRequired))
+  /** A transactional failure, whose flags are -1 when librdkafka did not say. Whether it is retriable comes from its code, as on the JVM, so the same
+    * failure is retriable on every platform.
+    */
+  def classified(message: String, code: Int, fatal: Int, transactionAbortRequired: Int): KafkaException.BackendFailure =
+    val classified = ErrorCode.fromLibrdkafka(code)
+    new KafkaException.BackendFailure(message, Some(classified), Some(classified.retriable), flag(fatal), flag(transactionAbortRequired))
 
   def plain(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
 

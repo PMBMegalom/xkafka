@@ -174,10 +174,10 @@ object ErrorCode:
     )
 
   /** Classifies a Kafka protocol error code. */
-  def fromProtocol(value: Int): ErrorCode = protocol.getOrElse(value, Other(value))
+  private[xkafka] def fromProtocol(value: Int): ErrorCode = protocol.getOrElse(value, Other(value))
 
   /** Classifies a librdkafka error code. */
-  def fromLibrdkafka(value: Int): ErrorCode =
+  private[xkafka] def fromLibrdkafka(value: Int): ErrorCode =
     value match
       case -195 | -187 | -193 => NetworkException         // _TRANSPORT, _ALL_BROKERS_DOWN, _RESOLVE
       case -185 | -192        => RequestTimedOut          // _TIMED_OUT, _MSG_TIMED_OUT
@@ -194,8 +194,8 @@ sealed abstract class KafkaException(message: String, cause: Throwable = null) e
 object KafkaException:
   /** A failure Kafka or the platform's client reported.
     *
-    * `code`, `retriable`, `fatal`, and `transactionAbortRequired` are `None` where the platform's client does not report them. For a retry decision
-    * that is the same on every platform, use `code.exists(_.retriable)`.
+    * `retriable` is what `code` says through `ErrorCode.retriable`, the same on every platform, and `None` only where there is no code. `code`,
+    * `fatal`, and `transactionAbortRequired` are `None` where the platform's client does not report them.
     */
   final class BackendFailure(
       val detail: String,

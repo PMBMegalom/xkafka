@@ -35,7 +35,10 @@ A `CertificateAuthority` is one of:
 | `Pem` | PEM text held in memory |
 
 Scala.js and Scala Native also accept a directory of certificates as a
-`PemFile`.
+`PemFile`. Each certificate must be named by its subject hash, as
+`openssl rehash` names it; under any other name it is not found, and the broker
+is refused as `ErrorCode.SslAuthenticationFailed`. On the JVM a directory fails
+as `ErrorCode.InvalidConfiguration`.
 
 `TlsSettings` verifies the broker hostname by default. Call
 `withoutHostnameVerification` to turn that off.

@@ -66,7 +66,16 @@ openssl pkcs8 -topk8 -v1 PBE-SHA1-3DES -in "$secrets_dir/client.key" \
   -out "$secrets_dir/client-encrypted.key" -passout "pass:$key_password" >/dev/null 2>&1
 cat "$secrets_dir/client.key" "$secrets_dir/client.crt" > "$secrets_dir/client.pem"
 cat "$secrets_dir/client-encrypted.key" "$secrets_dir/client.crt" > "$secrets_dir/client-encrypted.pem"
-chmod a+r "$secrets_dir"/*.pem
+# The same key encrypted with PBES2, the scheme openssl uses by default.
+openssl pkcs8 -topk8 -in "$secrets_dir/client.key" \
+  -out "$secrets_dir/client-pbes2.key" -passout "pass:$key_password" >/dev/null 2>&1
+cat "$secrets_dir/client-pbes2.key" "$secrets_dir/client.crt" > "$secrets_dir/client-pbes2.pem"
+# The authority as a directory of certificates: once as a plain file, once under OpenSSL's hashed name.
+mkdir -p "$secrets_dir/authorities-plain" "$secrets_dir/authorities-hashed"
+cp "$secrets_dir/ca.pem" "$secrets_dir/authorities-plain/ca.pem"
+cp "$secrets_dir/ca.pem" "$secrets_dir/authorities-hashed/$(openssl x509 -hash -noout -in "$secrets_dir/ca.pem").0"
+chmod a+r "$secrets_dir"/*.pem "$secrets_dir"/authorities-*/*
+chmod a+rx "$secrets_dir"/authorities-*
 
 docker run --detach --rm \
   --name "$container_name" \
@@ -145,6 +154,9 @@ export XKAFKA_SECURITY_CERTIFICATE_AUTHORITY_PEM
 export XKAFKA_SECURITY_MTLS_BOOTSTRAP_SERVERS="127.0.0.1:$mtls_port"
 export XKAFKA_SECURITY_CLIENT_PEM="$secrets_dir/client.pem"
 export XKAFKA_SECURITY_CLIENT_ENCRYPTED_PEM="$secrets_dir/client-encrypted.pem"
+export XKAFKA_SECURITY_CLIENT_PBES2_PEM="$secrets_dir/client-pbes2.pem"
+export XKAFKA_SECURITY_CERTIFICATE_AUTHORITY_PLAIN_DIRECTORY="$secrets_dir/authorities-plain"
+export XKAFKA_SECURITY_CERTIFICATE_AUTHORITY_HASHED_DIRECTORY="$secrets_dir/authorities-hashed"
 XKAFKA_SECURITY_CLIENT_CERTIFICATE="$(cat "$secrets_dir/client.crt")"
 export XKAFKA_SECURITY_CLIENT_CERTIFICATE
 XKAFKA_SECURITY_CLIENT_KEY="$(cat "$secrets_dir/client.key")"

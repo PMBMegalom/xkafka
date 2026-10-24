@@ -909,7 +909,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     !fatal = -1
     !retriable = -1
     !abort = -1
-    if call(error, code, fatal, retriable, abort) != 0 then throw Failures.classified(fromCString(error), !code, !fatal, !retriable, !abort)
+    if call(error, code, fatal, retriable, abort) != 0 then throw Failures.classified(fromCString(error), !code, !fatal, !abort)
 
   /** Builds a failure from the message and code the call wrote into its own out-parameters. */
   private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure = Failures.coded(fromCString(error), !code)

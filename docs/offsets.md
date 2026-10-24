@@ -57,7 +57,10 @@ How many offsets a rebalance affects depends on the partition assignment strateg
   them again, so offsets read before any rebalance are refused, even for the
   partitions the consumer keeps.
 - With a cooperative strategy, only the partitions that move are revoked, so
-  offsets for the partitions a consumer keeps can still be committed.
+  offsets for the partitions a consumer keeps can still be committed. Choose
+  one through the `partition.assignment.strategy` property:
+  `org.apache.kafka.clients.consumer.CooperativeStickyAssignor` on the JVM, and
+  `cooperative-sticky` on Scala.js and Native.
 
 `committer.commit(offsets)` takes offsets that did not come from a record, so it
 can only check that the consumer owns each partition at the time of the commit.

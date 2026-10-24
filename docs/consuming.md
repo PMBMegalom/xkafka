@@ -64,9 +64,12 @@ meant to share a position.
 @:@
 
 @:callout(info)
-A seek is refused until the partition it names is being fetched, which happens
-after the assignment arrives. Retry briefly if you seek immediately after
-starting a consumer.
+After a seek, the next record the stream hands out of that partition comes from
+the offset sought, and no record fetched before the seek is handed out. A seek
+of a partition the consumer has not been assigned fails with
+`ErrorCode.UnknownTopicOrPartition`. A seek is also refused until the partition
+it names is being fetched, which happens after the assignment arrives. Retry
+briefly if you seek immediately after starting a consumer.
 @:@
 
 By default a consumer delivers records from transactions that have not
@@ -91,10 +94,11 @@ built, so a combination either backend would refuse is a `SettingsError`:
   session timeout.
 - `groupInstanceId` makes the consumer a static member of its group.
 
-Unless they are set, the session timeout and heartbeat interval are left to the
-backend, and both backends use the same defaults: 45 seconds and 3 seconds.
-Leave them unset when the group uses the newer consumer group protocol, where the
-broker decides them.
+Unless they are set, the session timeout and heartbeat interval are 45 seconds
+and 3 seconds on every platform. Under the consumer group protocol, which the
+`group.protocol` property set to `consumer` selects, the broker decides both, so
+leave them unset: a consumer with either one set fails as
+`ErrorCode.InvalidConfiguration`.
 
 ```scala mdoc:compile-only
 import scala.concurrent.duration.*
@@ -159,9 +163,11 @@ Within the consumer resource:
 - `stopConsuming` stops fetching and lets the streams drain.
 
 @:callout(info)
-`position` can return `None` until this consumer has consumed from the
-partition, and right after a seek the platforms can answer differently. Read it
-after consuming from the partition for the same answer everywhere.
+`position` is where the client fetches the partition next. The client reads
+ahead of the records the stream has handed out, so after consuming, `position`
+is at or past the offset after the last record consumed, by an amount that
+differs between platforms. Before the consumer has consumed from the partition,
+it can be `None`.
 @:@
 
 ## Processing every record

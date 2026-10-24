@@ -39,7 +39,9 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
       saslServer <- PlatformKafkaClient.environment("XKAFKA_SECURITY_SASL_BOOTSTRAP_SERVERS")
       user       <- PlatformKafkaClient.environment("XKAFKA_SECURITY_USERNAME")
       secret     <- PlatformKafkaClient.environment("XKAFKA_SECURITY_PASSWORD")
-    yield (authority, pem, tlsServer, saslServer, user, secret)
+      plainDir   <- PlatformKafkaClient.environment("XKAFKA_SECURITY_CERTIFICATE_AUTHORITY_PLAIN_DIRECTORY")
+      hashedDir  <- PlatformKafkaClient.environment("XKAFKA_SECURITY_CERTIFICATE_AUTHORITY_HASHED_DIRECTORY")
+    yield (authority, pem, tlsServer, saslServer, user, secret, plainDir, hashedDir)
 
   private val mutualConfiguration =
     for
@@ -50,7 +52,8 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
       certificate <- PlatformKafkaClient.environment("XKAFKA_SECURITY_CLIENT_CERTIFICATE")
       key         <- PlatformKafkaClient.environment("XKAFKA_SECURITY_CLIENT_KEY")
       password    <- PlatformKafkaClient.environment("XKAFKA_SECURITY_CLIENT_KEY_PASSWORD")
-    yield (authority, server, file, encrypted, certificate, key, password)
+      pbes2       <- PlatformKafkaClient.environment("XKAFKA_SECURITY_CLIENT_PBES2_PEM")
+    yield (authority, server, file, encrypted, certificate, key, password, pbes2)
 
   mutualConfiguration match
     case None =>
@@ -59,7 +62,8 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
       test("round trip over TLS with an encrypted client key".ignore)(IO.unit)
       test("refuse a client that presents no certificate where one is required".ignore)(IO.unit)
       test("refuse an encrypted client key with the wrong password".ignore)(IO.unit)
-    case Some((authority, server, file, encrypted, certificate, key, password)) =>
+      test("a client key encrypted with PBES2 is read on Scala.js, Scala Native, and Java 21 or newer, and refused on Java 17".ignore)(IO.unit)
+    case Some((authority, server, file, encrypted, certificate, key, password, pbes2)) =>
       def presenting(clientCertificate: ClientCertificate): SecuritySettings =
         SecuritySettings.Tls(
           TlsSettings.from(CertificateAuthority.PemFile(authority), clientCertificate = Some(clientCertificate))
@@ -74,6 +78,12 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
         roundTrip(server, presenting(ClientCertificate.PemFile(encrypted, Some(password))))
       test("refuse a client that presents no certificate where one is required"):
         refuse(server, SecuritySettings.Tls(validTls(CertificateAuthority.PemFile(authority))), ErrorCode.SslAuthenticationFailed)
+      test("a client key encrypted with PBES2 is read on Scala.js, Scala Native, and Java 21 or newer, and refused on Java 17"):
+        val security = presenting(ClientCertificate.PemFile(pbes2, Some(password)))
+        PlatformKafkaClient.javaRelease match
+          case Some(17)                      => refuse(server, security, ErrorCode.InvalidConfiguration)
+          case Some(release) if release < 21 => IO.unit
+          case _                             => roundTrip(server, security)
       test("refuse an encrypted client key with the wrong password"):
         val wrong                                                      = presenting(ClientCertificate.PemFile(encrypted, Some(s"$password-wrong")))
         val topic                                                      = validTopic("xkafka-security-undecryptable")
@@ -101,7 +111,11 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
       test("round trip over SASL over TLS".ignore)(IO.unit)
       test("refuse a broker certificate from an unknown authority".ignore)(IO.unit)
       test("refuse incorrect SASL credentials".ignore)(IO.unit)
-    case Some((authority, pem, tlsServer, saslServer, user, secret)) =>
+      test("a directory of certificate authorities under their hashed names is read on Scala.js and Scala Native, and refused on the JVM".ignore)(
+        IO.unit
+      )
+      test("a directory of certificate authorities under other names does not verify the broker on Scala.js and Scala Native".ignore)(IO.unit)
+    case Some((authority, pem, tlsServer, saslServer, user, secret, plainDir, hashedDir)) =>
       val tls  = validTls(CertificateAuthority.PemFile(authority))
       val sasl = validSasl(user, secret)
 
@@ -117,6 +131,13 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
         refuse(tlsServer, SecuritySettings.Tls(validTls(CertificateAuthority.SystemDefault)), ErrorCode.SslAuthenticationFailed)
       test("refuse incorrect SASL credentials"):
         refuse(saslServer, SecuritySettings.SaslTls(tls, validSasl(user, s"$secret-wrong")), ErrorCode.SaslAuthenticationFailed)
+      test("a directory of certificate authorities under their hashed names is read on Scala.js and Scala Native, and refused on the JVM"):
+        val security = SecuritySettings.Tls(validTls(CertificateAuthority.PemFile(hashedDir)))
+        if PlatformKafkaClient.javaRelease.isDefined then refuse(tlsServer, security, ErrorCode.InvalidConfiguration)
+        else roundTrip(tlsServer, security)
+      test("a directory of certificate authorities under other names does not verify the broker on Scala.js and Scala Native"):
+        if PlatformKafkaClient.javaRelease.isDefined then IO.unit
+        else refuse(tlsServer, SecuritySettings.Tls(validTls(CertificateAuthority.PemFile(plainDir))), ErrorCode.SslAuthenticationFailed)
 
   private def roundTrip(bootstrapServer: String, security: SecuritySettings): IO[Unit] =
     val suffix = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
