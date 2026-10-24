@@ -433,6 +433,14 @@ final class DriverClientSuite extends CatsEffectSuite:
         s"a listed topic without partitions should be refused, got $listed"
       )
 
+  test("a producer asked about a topic the broker is still creating waits for it"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use(_.partitionsFor(Topic.from("creating").toOption.get)).timeout(10.seconds)
+        .product(fake.count("metadata"))
+    .map: (partitions, lookups) =>
+      assertEquals(partitions, NonEmptySet.one(Partition.from(0).toOption.get))
+      assertEquals(lookups, 3)
+
   private val group = ConsumerGroup.from("fake").toOption.get
 
   private val eventsZero = TopicPartition(events, Partition.from(0).toOption.get)
@@ -653,12 +661,13 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): IO[Unit] = unused("seek")
 
-    /** Knows `events` with one partition, and lists `bare` without any, which no Kafka cluster answers. */
+    /** Knows `events` with one partition, and lists `bare` without any, which no Kafka cluster answers. `creating` has its partition from the third
+      * lookup on, as a topic the broker creates when asked about does.
+      */
     override def metadata(client: Client, topic: Option[String], timeoutMillis: Int): IO[Vector[(String, Vector[Int])]] =
-      IO.pure(
-        topic
-          .fold(Vector("events" -> Vector(0), "bare" -> Vector.empty))(name => Vector(name -> (if name == "events" then Vector(0) else Vector.empty)))
-      )
+      record("metadata") *> count("metadata").map: lookups =>
+        topic.fold(Vector("events" -> Vector(0), "bare" -> Vector.empty)): name =>
+          Vector(name -> (if name == "events" || (name == "creating" && lookups >= 3) then Vector(0) else Vector.empty))
 
     override def createTopics(admin: Client, topics: Vector[NewTopic], timeoutMillis: Int): IO[Unit] = unused("createTopics")
 
