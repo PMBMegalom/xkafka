@@ -73,8 +73,10 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def freeBatch(batch: Batch): F[Unit]
 
-  /** Enqueues every record in order, failing at the first one the producer refuses; the records before it stay enqueued. */
-  def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit]
+  /** Enqueues the records in order until the producer has no room for the next one, and answers how many it took. It fails at the first record the
+    * producer refuses for any other reason; the records before it stay enqueued.
+    */
+  def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int]
 
   /** Serves the shared queue's delivery reports for up to the timeout. Called only where deliveries share a queue, by one fiber at a time, while
     * enqueues go on alongside it.

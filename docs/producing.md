@@ -69,6 +69,21 @@ If any record is not delivered, the inner effect fails with the failure of the
 first such record. If the client refuses a record as it is enqueued, the outer
 effect fails instead.
 
+These records are not refused as they are enqueued. They fail the inner effect,
+as records that are not delivered do:
+
+- A record larger than the client takes fails with
+  `ErrorCode.MessageTooLarge`.
+- A record for a partition the topic does not have fails with
+  `ErrorCode.UnknownTopicOrPartition`. On the JVM, the Java client first waits
+  up to its `max.block.ms`, a minute by default, for the partition to appear,
+  and the record then fails with `ErrorCode.RequestTimedOut`.
+
+While the client's buffer is full, the outer effect waits for room, then
+enqueues the rest of the records. On JavaScript and Native, a record that finds
+no room for a minute fails with `ErrorCode.RequestTimedOut`, and so does every
+record after it in the batch.
+
 ## When some records fail
 
 `produceAttemptEach` answers for every record, so you can tell which records

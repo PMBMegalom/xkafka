@@ -443,14 +443,15 @@ val commonSettings = Seq(
   scalacOptions += "-Wnonunit-statement",
   Compile / packageBin / mappings += (repositoryRoot / "LICENSE" -> "META-INF/LICENSE"),
   libraryDependencies ++= Seq(
-    "org.typelevel" %%% "cats-effect"       % catsEffectVersion,
-    "org.typelevel" %%% "cats-tagless-core" % catsTaglessVersion,
-    "co.fs2"        %%% "fs2-core"          % fs2Version,
-    "org.scalameta" %%% "munit"             % munitVersion           % Test,
-    "org.typelevel" %%% "munit-cats-effect" % munitCatsEffectVersion % Test,
-    "org.scalameta" %%% "munit-scalacheck"  % munitScalacheckVersion % Test,
-    "org.typelevel" %%% "cats-laws"         % catsLawsVersion        % Test,
-    "org.typelevel" %%% "discipline-munit"  % disciplineMunitVersion % Test
+    "org.typelevel" %%% "cats-effect"         % catsEffectVersion,
+    "org.typelevel" %%% "cats-tagless-core"   % catsTaglessVersion,
+    "co.fs2"        %%% "fs2-core"            % fs2Version,
+    "org.scalameta" %%% "munit"               % munitVersion           % Test,
+    "org.typelevel" %%% "munit-cats-effect"   % munitCatsEffectVersion % Test,
+    "org.typelevel" %%% "cats-effect-testkit" % catsEffectVersion      % Test,
+    "org.scalameta" %%% "munit-scalacheck"    % munitScalacheckVersion % Test,
+    "org.typelevel" %%% "cats-laws"           % catsLawsVersion        % Test,
+    "org.typelevel" %%% "discipline-munit"    % disciplineMunitVersion % Test
   )
 )
 

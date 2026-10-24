@@ -271,6 +271,27 @@ static void produce(rd_kafka_t *producer, const char *topic, int count) {
         xkafka_batch_free(batch);
 }
 
+/* Sends one record with a header that is too large for the producer, which takes it and answers it as refused. */
+static void produce_too_large(rd_kafka_t *producer, const char *topic) {
+        void *batch = xkafka_batch_new(1);
+        void *headers = xkafka_headers_new(1);
+        size_t size = 2000000;
+        char *value = calloc(size, 1);
+
+        if (value == NULL)
+                fail("calloc");
+        if (xkafka_headers_add(headers, "index", "large", 5, ERRORS) != 0)
+                fail("xkafka_headers_add");
+        if (xkafka_batch_add(producer, batch, topic, 0, -1, "key", 3, value, size, headers, ERRORS) != 0)
+                fail("xkafka_batch_add");
+        if (xkafka_batch_pending(batch) != 0 || xkafka_batch_count(batch) != 1)
+                fail("xkafka_batch_add of a record too large");
+        if (xkafka_batch_error_at(producer, batch, 0, ERRORS) == 0 || error_code != 10)
+                fail("xkafka_batch_error_at of a record too large");
+        free(value);
+        xkafka_batch_free(batch);
+}
+
 /* Describes the group, and fails unless it has the members expected, each holding at least one partition. */
 static void describe_group(rd_kafka_t *admin, const char *group, size_t members) {
         const char *groups[1] = {group};
@@ -397,6 +418,7 @@ int main(int argc, char **argv) {
         if (xkafka_producer_begin_transaction(producer, ERRORS, FLAGS) != 0)
                 fail("xkafka_producer_begin_transaction");
         produce(producer, topic, RECORDS);
+        produce_too_large(producer, topic);
         CALL(xkafka_async_producer_commit_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
 
         consumer = xkafka_consumer_new(brokers, "xkafka-js-leaks", group, "earliest", NULL, NULL, 0, ERRORS);
