@@ -105,7 +105,12 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       described <- client.admin(clientSettings).use(admin => admin.describeCluster.product(admin.describeTopics(NonEmptySet.one(topic)))).value
       deleted   <- client.admin(clientSettings).use(_.deleteRecords(cut)).value
       inspected <- client.admin(clientSettings).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).value
-      groups    <-
+      changed   <-
+        client.admin(clientSettings).use: admin =>
+          admin.alterTopicConfigurations(NonEmptyMap.one(topic, NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1000"))))
+            .product(admin.electPreferredLeaders(NonEmptySet.one(partition)))
+        .value
+      groups <-
         client.admin(clientSettings).use: admin =>
           (
             admin.listConsumerGroups,
@@ -123,6 +128,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       assertEquals(described, Right((cluster, NonEmptyMap.one(topic, Right(topicDescription)))))
       assertEquals(deleted, Right(cut.map(Right(_))))
       assertEquals(inspected, Right(NonEmptyMap.one(topic, Right(TopicConfiguration(Map.empty)))))
+      assertEquals(changed, Right((NonEmptyMap.one(topic, Right(())), NonEmptyMap.one(partition, Right(())))))
       assertEquals(
         groups,
         Right((
@@ -189,6 +195,12 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
               IO.pure(before.map(Right(_)))
             override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
               IO.pure(topics.toNonEmptyList.map(_ -> Right(TopicConfiguration(Map.empty))).toNem)
+            override def alterTopicConfigurations(
+                changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+            ): IO[NonEmptyMap[Topic, Either[KafkaException, Unit]]] = IO.pure(changes.map(_ => Right(())))
+            override def electPreferredLeaders(
+                partitions: NonEmptySet[TopicPartition]
+            ): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]            = IO.pure(partitions.toNonEmptyList.map(_ -> Right(())).toNem)
             override def listConsumerGroups: IO[Map[ConsumerGroup, ConsumerGroupState]] =
               IO.pure(Map(ConsumerGroup.from("workers").toOption.get -> ConsumerGroupState.Stable))
             override def describeConsumerGroups(

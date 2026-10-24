@@ -324,6 +324,31 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  def xkafka_admin_alter_topic_configs(
+      client: CVoidPtr,
+      topics: Ptr[CString],
+      names: Ptr[CString],
+      values: Ptr[CString],
+      operations: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_admin_elect_preferred_leaders(
+      client: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_configs_resource_count(configs: CVoidPtr): CSize = extern
 
   def xkafka_configs_resource_name(configs: CVoidPtr, resourceIndex: CSize): CString = extern

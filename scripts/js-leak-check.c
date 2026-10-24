@@ -55,6 +55,8 @@ void xkafka_consumer_group_metadata_destroy(void *metadata);
 size_t xkafka_metadata_partition_count_at(const void *metadata, size_t index);
 void xkafka_metadata_destroy(void *metadata);
 size_t xkafka_configs_entry_count(void *configs, size_t index);
+size_t xkafka_configs_resource_count(void *configs);
+int32_t xkafka_configs_resource_error(void *configs, size_t index);
 void xkafka_configs_destroy(void *configs);
 const char *xkafka_cluster_id(void *cluster);
 const void *xkafka_cluster_controller(void *cluster);
@@ -133,6 +135,11 @@ int xkafka_async_admin_describe_groups(rd_kafka_t *client, const char *const *gr
                                        void **result, DONE_ARGUMENTS);
 int xkafka_async_admin_delete_groups(rd_kafka_t *client, const char *const *groups, size_t count, int timeout_ms, int32_t *codes,
                                      ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+int xkafka_async_admin_alter_topic_configs(rd_kafka_t *client, const char *const *topics, const char *const *names,
+                                           const char *const *values, const int32_t *operations, size_t count, int timeout_ms,
+                                           ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_elect_preferred_leaders(rd_kafka_t *client, const char *const *topics, const int32_t *partitions, size_t count,
+                                               int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_admin_list_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
                                           size_t count, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
 int xkafka_async_admin_alter_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
@@ -338,6 +345,25 @@ int main(int argc, char **argv) {
         if (configs == NULL || xkafka_configs_entry_count(configs, 0) == 0)
                 fail("xkafka_async_admin_describe_topic_configs");
         xkafka_configs_destroy(configs);
+        {
+                /* One property set and one unset, whose value is NULL. */
+                const char *changed_topics[] = {topic, topic};
+                const char *changed_names[] = {"retention.ms", "retention.bytes"};
+                const char *changed_values[] = {"700000", NULL};
+                const int32_t operations[] = {0, 1};
+
+                configs = NULL;
+                await_answer("xkafka_async_admin_alter_topic_configs",
+                             xkafka_async_admin_alter_topic_configs(admin, changed_topics, changed_names, changed_values, operations, 2,
+                                                                    TIMEOUT_MS, ERRORS, &configs, done, next_token()));
+                if (configs == NULL || xkafka_configs_resource_count(configs) != 1 || xkafka_configs_resource_error(configs, 0) != 0)
+                        fail("xkafka_async_admin_alter_topic_configs");
+                xkafka_configs_destroy(configs);
+        }
+        /* A single broker already leads every partition it has, which the broker answers as ELECTION_NOT_NEEDED. */
+        CALL(xkafka_async_admin_elect_preferred_leaders, admin, topics, first_partition, 1, TIMEOUT_MS, codes, ERRORS, &result);
+        if (codes[0] != 0 && codes[0] != 84)
+                fail("xkafka_async_admin_elect_preferred_leaders");
         {
                 void *cluster = NULL, *described = NULL;
                 size_t partition;

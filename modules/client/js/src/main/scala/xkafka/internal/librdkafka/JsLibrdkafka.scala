@@ -525,6 +525,50 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
                 .configurations(topics, Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _)))
             finally shim.configsDestroy(configs): Unit
 
+  override def alterTopicConfigs(
+      admin: Client,
+      changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    F.defer:
+      val entries = LibrdkafkaAnswers.configurationChanges(changes)
+      val error   = ErrorSlot()
+      val result  = Result()
+      background(_.alterTopicConfigs)(
+        (Seq[js.Any](
+          admin,
+          strings(entries.map(_._1)),
+          strings(entries.map(_._2)),
+          js.Array(entries.map(_._3.orNull)*),
+          ints(entries.map(_._4)),
+          entries.size,
+          timeoutMillis
+        ) ++ errorArguments(error) :+ result.value)*
+      ) *> F.defer:
+        val configs = result.pointer
+        if configs == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers.changed(
+                changes.map(_._1),
+                Vector.tabulate(shim.configsResourceCount(configs).asInstanceOf[Double].toInt)(resource(shim, configs, _))
+              )
+            finally shim.configsDestroy(configs): Unit
+
+  override def electPreferredLeaders(admin: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    val (topics, values) = partitionArrays(partitions)
+    F.defer:
+      val codes  = Buffers.alloc(4 * partitions.size.max(1))
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.electPreferredLeaders)(
+        (Seq[js.Any](admin, topics, values, partitions.size, timeoutMillis, codes) ++ errorArguments(error) :+ result.value)*
+      ) *> F.delay:
+        val answer =
+          if result.int != 0 then Coded.Refused(error.failure)
+          else Coded.Answered(Vector.tabulate(partitions.size)(index => codes.readInt32LE(4 * index)))
+        LibrdkafkaAnswers.elected(partitions, answer, errorString)
+
   override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
     F.defer:
       val error  = ErrorSlot()

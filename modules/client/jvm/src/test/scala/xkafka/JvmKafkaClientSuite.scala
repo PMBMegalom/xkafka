@@ -460,6 +460,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             client.describeTopics(NonEmptySet.one(topic)),
             client.deleteRecords(cut),
             client.describeTopicConfigurations(NonEmptySet.one(topic)),
+            client
+              .alterTopicConfigurations(cats.data.NonEmptyMap.one(topic, cats.data.NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1000")))),
+            client.electPreferredLeaders(NonEmptySet.one(partition)),
             client.listConsumerGroups,
             client.describeConsumerGroups(NonEmptySet.one(group)),
             client.listConsumerGroupOffsets(group),
@@ -484,6 +487,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             "describeTopics",
             "describeTopics",
             "describeConfigs",
+            "incrementalAlterConfigs",
+            "electLeaders",
             "listGroups",
             "describeConsumerGroups",
             "listConsumerGroupOffsets",

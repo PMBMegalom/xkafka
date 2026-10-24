@@ -266,6 +266,15 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
       s"int xkafka_async_admin_delete_groups(void *client, const char **groups, size_t count, int timeout_ms, int32_t *codes, $Error, " +
         s"int32_t *result, $Done)"
     )
+  val alterTopicConfigs =
+    f(
+      "int xkafka_async_admin_alter_topic_configs(void *client, const char **topics, const char **names, const char **values, " +
+        s"const int32_t *operations, size_t count, int timeout_ms, $Error, void **result, $Done)"
+    )
+  val electPreferredLeaders =
+    f(
+      s"int xkafka_async_admin_elect_preferred_leaders(void *client, $PartitionNames, int timeout_ms, int32_t *codes, $Error, int32_t *result, $Done)"
+    )
 
 private[librdkafka] object Shim:
   /** The callback type every `async` function reports through. */

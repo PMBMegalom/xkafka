@@ -123,7 +123,9 @@ enum ErrorCode derives CanEqual:
   /** A committed offset's metadata is longer than the broker keeps, which its `offset.metadata.max.bytes` sets. */
   case OffsetMetadataTooLarge
 
-  /** The client could not be built from its settings, such as a client key that its password does not decrypt. */
+  /** A configuration was refused: the client's own, such as a client key that its password does not decrypt, or a change to a topic's, such as one to
+    * a property Kafka does not have.
+    */
   case InvalidConfiguration
 
   /** A code none of the other cases names, as the platform's client reported it. */

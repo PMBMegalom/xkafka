@@ -284,6 +284,16 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       val requested = topics.toNonEmptyList
       client(driver.describeTopicConfigs(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
 
+    override def alterTopicConfigurations(
+        changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+    ): F[NonEmptyMap[Topic, Either[KafkaException, Unit]]] =
+      val requested = changes.toNel.map((topic, properties) => topic -> properties.toNel)
+      client(driver.alterTopicConfigs(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested.map(_._1), _))
+
+    override def electPreferredLeaders(partitions: NonEmptySet[TopicPartition]): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] =
+      val requested = partitions.toNonEmptyList
+      client(driver.electPreferredLeaders(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
+
     override def listConsumerGroups: F[Map[ConsumerGroup, ConsumerGroupState]] =
       client(driver.listGroups(client.handle, requestTimeoutMillis)).map(_.toMap)
 

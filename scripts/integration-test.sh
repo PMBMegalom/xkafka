@@ -4,7 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-suites='xkafka.KafkaIntegrationSuite xkafka.KafkaConformanceSuite xkafka.KafkaSecuritySuite xkafka.PartitionPausingSuite'
+suites='xkafka.KafkaIntegrationSuite xkafka.KafkaConformanceSuite xkafka.KafkaSecuritySuite xkafka.PartitionPausingSuite xkafka.KafkaClusterSuite'
 
 exec "$script_dir/with-kafka.sh" sbt \
   "clientJVM/Test/testOnly $suites" \

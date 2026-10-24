@@ -87,6 +87,8 @@ final class EffectLazinessSuite extends CatsEffectSuite:
           admin.describeTopics(NonEmptySet.one(topic)),
           admin.deleteRecords(NonEmptyMap.one(partition, offset)),
           admin.describeTopicConfigurations(NonEmptySet.one(topic)),
+          admin.alterTopicConfigurations(NonEmptyMap.one(topic, NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1000")))),
+          admin.electPreferredLeaders(NonEmptySet.one(partition)),
           admin.listConsumerGroups,
           admin.describeConsumerGroups(NonEmptySet.one(group)),
           admin.listConsumerGroupOffsets(group),
@@ -205,6 +207,18 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         topics: Vector[Topic],
         timeoutMillis: Int
     ): IO[Vector[Either[KafkaException, TopicConfiguration]]] = waiting("describeTopicConfigs")
+
+    override def alterTopicConfigs(
+        admin: Client,
+        changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("alterTopicConfigs")
+
+    override def electPreferredLeaders(
+        admin: Client,
+        partitions: Vector[TopicPartition],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("electPreferredLeaders")
 
     override def listGroups(admin: Client, timeoutMillis: Int): IO[Vector[(ConsumerGroup, ConsumerGroupState)]] = waiting("listGroups")
 
