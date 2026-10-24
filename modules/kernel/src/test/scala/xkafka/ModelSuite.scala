@@ -64,6 +64,10 @@ final class ModelSuite extends FunSuite:
   test("partition rejects a negative value"):
     assertEquals(Partition.from(-1), Left(ValidationError.NegativePartition(-1)))
 
+  test("broker id rejects a negative value and accepts zero"):
+    assertEquals(BrokerId.from(-1), Left(ValidationError.NegativeBrokerId(-1)))
+    assertEquals(BrokerId.from(0).map(_.value), Right(0))
+
   test("offset next detects overflow"):
     val offset = Offset.from(Long.MaxValue).toOption.get
 

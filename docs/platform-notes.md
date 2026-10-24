@@ -4,24 +4,21 @@ The API is the same everywhere. These are the places the runtimes differ.
 
 ## Record delivery
 
-Every backend has one record source for each consumer: a single poll owned by
-the consumer, feeding both the record stream and the assignment. The poll starts
-when the consumer is made, so a consumer joins its group and takes its share of
-the partitions even before anything reads its records. A partition whose buffer
-fills is paused at the broker until its reader catches up, so a slow partition
-does not hold up the others.
+On every platform a consumer joins its group and takes its share of the
+partitions as soon as it is acquired, even before anything reads its records. A
+partition whose buffer fills is paused until its reader catches up, so a slow
+partition does not hold up the others.
 
-A consumer which stops reading records for long enough stops seeing rebalances
-too, because both come from that one poll.
+A consumer whose records go unread for longer than its `maxPollInterval` leaves
+its group. See [Group membership](consuming.md#group-membership).
 
-On the JVM each consumer has a thread of its own, which makes every call to the
-Java client.
+On the JVM each consumer uses one thread of its own.
 
 ## Scala Native
 
 The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
-OAUTHBEARER, and gzip and zstd compression enabled, so it can reach
-authenticated brokers and read compressed topics.
+OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
+and read and write records in any compression.
 
 librdkafka links these against system libraries, so any application linking the
 Native backend needs OpenSSL, zlib, and zstd available:
@@ -56,9 +53,8 @@ On macOS add a `-L` for the OpenSSL installation as well.
 
 ## Scala.js
 
-The backend is librdkafka, the same release and the same C shim Scala Native
-uses, called from Node.js through koffi. It targets Node.js rather than
-browsers.
+The backend is librdkafka, the same release Scala Native uses. It runs on
+Node.js, not in browsers.
 
 The library comes from npm as `@xkafka/librdkafka`, which sbt-scalajs-bundler
 installs. npm adds the prebuilt library for the platform it runs on:
@@ -73,15 +69,16 @@ installs. npm adds the prebuilt library for the platform it runs on:
 | Linux arm64 with musl | `@xkafka/librdkafka-linux-arm64-musl` |
 
 Nothing else needs installing: each library carries its own OpenSSL, zlib and
-zstd. Each xkafka release depends on the library built from its own shim, and
-refuses to start with any other.
+zstd. Each xkafka release needs the exact `@xkafka/librdkafka` version it was
+published with, so do not pin or override that package. With any other version,
+acquiring a client fails with a `BackendFailure` naming both versions.
 
 ## Transformations
 
-Serializers, deserializers, producer and consumer settings, committable offsets
-and records, partition record streams, and consumers have cats-tagless
-`FunctorK` instances. `KafkaProducer` has `mapK` but no `FunctorK` instance,
-because translating the acknowledgement nested inside the enqueue needs a
-`Functor` for the target effect. `KafkaClient.imapK` transforms a complete
+Serializers, deserializers, producer, transactional producer, and consumer
+settings, offset committers, committable offsets, batches, and records,
+partition record streams, consumers, and administration clients have
+cats-tagless `FunctorK` instances. `KafkaProducer` has `mapK`, which needs a
+`Functor` for the target effect, and so no `FunctorK` instance. `KafkaClient.imapK` transforms a complete
 client between effects in both directions while preserving `Resource`
 cancellation semantics.

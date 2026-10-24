@@ -23,14 +23,26 @@ val program =
   yield records
 ```
 
+## What a record carries
+
+Besides its topic-partition, offset, key, value and headers, a `ConsumerRecord`
+has:
+
+| field | meaning |
+| --- | --- |
+| `timestamp` | `RecordTimestamp.CreateTime` where the producer set the time, or `LogAppendTime` where the topic's `message.timestamp.type` is `LogAppendTime` and the broker set it |
+| `leaderEpoch` | the leader epoch of the partition when the record was written |
+| `serializedKeySize` | the key's size in bytes as it was read, or `None` for a record without a key |
+| `serializedValueSize` | the value's size in bytes as it was read, or `None` for a record without a value |
+
 ## What a consumer reads
 
 `Selection` says where a consumer's records come from.
 
 `Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a
-`TopicPattern`, which matches complete topic names. Portable patterns should use
-regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular
-expressions. Both join a consumer group, so the partitions a consumer holds
+`TopicPattern`, which matches complete topic names. The JVM matches it as a Java
+regular expression, and Scala.js and Native through librdkafka, so a pattern
+meant for every platform should keep to simple syntax, such as `events-.*`. Both join a consumer group, so the partitions a consumer holds
 follow the group's rebalances.
 
 `Selection.Partitions` takes a non-empty set of topic-partitions and reads
@@ -52,14 +64,68 @@ meant to share a position.
 @:@
 
 @:callout(info)
-A seek is refused until the partition it names is being fetched, which happens
-after the assignment arrives. Retry briefly if you seek immediately after
-starting a consumer.
+After a seek, the next record the stream hands out of that partition comes from
+the offset sought, and no record fetched before the seek is handed out. A seek
+of a partition the consumer has not been assigned fails with
+`ErrorCode.UnknownTopicOrPartition`. A seek is also refused until the partition
+it names is being fetched, which happens after the assignment arrives. Retry
+briefly if you seek immediately after starting a consumer.
 @:@
 
 By default a consumer delivers records from transactions that have not
 committed. Set `isolationLevel` to change that. See
 [Transactions](transactions.md).
+
+## Group membership
+
+A consumer that joins a group stays in it while it keeps in touch with the
+group. Four settings govern that, and each is checked when the settings are
+built, so a combination either backend would refuse is a `SettingsError`:
+
+- `sessionTimeout` is how long the group waits to hear from the consumer before
+  handing its partitions to the others. The broker also bounds it, through its
+  `group.min.session.timeout.ms` and `group.max.session.timeout.ms`, which
+  default to six seconds and thirty minutes.
+- `heartbeatInterval` is how often the consumer tells the group it is alive. It
+  must be less than the session timeout.
+- `maxPollInterval` is how long the consumer can go without fetching records.
+  Fetching stops while too many records wait unread, so a consumer whose records
+  go unread for longer than this leaves its group. It must be at least the
+  session timeout.
+- `groupInstanceId` makes the consumer a static member of its group.
+
+Unless they are set, the session timeout and heartbeat interval are 45 seconds
+and 3 seconds on every platform. Under the consumer group protocol, which the
+`group.protocol` property set to `consumer` selects, the broker decides both, so
+leave them unset: a consumer with either one set fails as
+`ErrorCode.InvalidConfiguration`.
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def staticMember[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
+  settings.withGroupInstanceId("orders-1").andThen(_.withSessionTimeout(2.minutes)).andThen(_.withMaxPollInterval(5.minutes)).liftTo[IO]
+```
+
+Each wither revalidates the settings as a whole, so raising the session timeout
+above the maximum poll interval fails unless the poll interval is raised first.
+
+### Static members
+
+A dynamic member leaves its group when it is released, and the others take its
+partitions at once. A static member does not: the group keeps its partitions
+for it until its session times out. One that comes back under the same
+`groupInstanceId` within the session timeout gets the same partitions back, and
+the rest of the group carries on with theirs. One that stays away loses its
+partitions once its session times out.
+
+Give each static member an identity of its own. A longer session timeout gives a
+restarting member more time to come back, at the cost of leaving its partitions
+unread for that long if it does not.
 
 ## Where a consumer starts
 
@@ -85,20 +151,26 @@ Within the consumer resource:
 
 - `assignment` reports the currently assigned topic-partitions.
 - `assignmentChanges` emits the current assignment and then each distinct one.
-- `committed` returns broker-stored next offsets, without sentinel values.
+- `committed` returns broker-stored next offsets, with the leader epoch and
+  metadata each was committed with, and `None` for a partition with no
+  committed offset.
 - `beginningOffsets` and `endOffsets` query the available offset range.
 - `offsetsForTimes` finds the earliest available offsets at or after timestamps.
-- `partitionsFor` and `listTopics` expose visible topic metadata.
+- `partitionsFor` returns a topic's partitions. For a topic the cluster does
+  not have, it fails with `ErrorCode.UnknownTopicOrPartition` and creates
+  nothing.
+- `listTopics` returns every topic the consumer can see, with its partitions.
 - `seek` changes the next offset fetched for an assigned topic-partition.
 - `seekToBeginning` and `seekToEnd` move to either end of an assigned topic-partition.
 - `position` reports the offset a topic-partition reads next.
 - `stopConsuming` stops fetching and lets the streams drain.
 
 @:callout(info)
-`position` returns `None` until this consumer has consumed from the partition.
-Some backends settle on a position sooner, for instance when a seek names an
-offset, so the value every backend agrees on is the one after records have been
-consumed.
+`position` is where the client fetches the partition next. The client reads
+ahead of the records the stream has handed out, so after consuming, `position`
+is at or past the offset after the last record consumed, by an amount that
+differs between platforms. Before the consumer has consumed from the partition,
+it can be `None`.
 @:@
 
 ## Processing every record

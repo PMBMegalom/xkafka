@@ -74,7 +74,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         partition = Some(partition),
         headers = headers
       )
-    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, Map("linger.ms" -> "0")).toOption.get
+    val producerSettings = ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, linger = Duration.Zero).toOption.get
     val consumerSettings =
       ConsumerSettings
         .from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "1"))
@@ -88,7 +88,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       (consumedFirst, observedSecond) = consumed
       consumedSecond <- consumeOne(consumerSettings, Selection.Pattern(topicPattern))
     yield
-      assertEquals(produced.records.size, 2)
+      assertEquals(produced.size, 2)
       assertEquals(consumedFirst.record.topicPartition, TopicPartition(topic, partition))
       assertEquals(consumedFirst.record.key, first.key)
       assertEquals(consumedFirst.record.value, first.value)
@@ -143,7 +143,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
             case (value, 0L) =>
               for
                 assignment <- consumer.assignment
-                before     <- consumer.committed(Set(topicPartition))
+                before     <- consumer.committed(Set(topicPartition)).map(_.offsetsOnly)
                 beginning  <- consumer.beginningOffsets(Set(topicPartition))
                 end        <- consumer.endOffsets(Set(topicPartition))
                 timed      <- consumer.offsetsForTimes(Map(topicPartition -> timestamp))
@@ -151,7 +151,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
                 partitions <- consumer.partitionsFor(topic)
                 topics     <- consumer.listTopics
                 _          <- value.offset.commit
-                stored     <- consumer.committed(Set(topicPartition))
+                stored     <- consumer.committed(Set(topicPartition)).map(_.offsetsOnly)
                 _          <- consumer.seek(topicPartition, value.record.offset)
               yield (value, Some((assignment, before, stored, beginning, end, timed, missing, partitions, topics)))
             case (value, _) => IO.pure((value, None))
@@ -168,7 +168,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(end, Map(topicPartition -> first._1.offset.nextOffset))
       assertEquals(timed, Map(topicPartition -> Some(first._1.record.offset)))
       assertEquals(missing, Map(topicPartition -> None))
-      assertEquals(partitions, Set(partition))
+      assertEquals(partitions, NonEmptySet.one(partition))
       assertEquals(topics.get(topic), Some(partitions))
       assertEquals(replayed._1.record.offset, first._1.record.offset)
       assertEquals(replayed._1.record.value, "control-value")

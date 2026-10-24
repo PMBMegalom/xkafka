@@ -26,7 +26,10 @@ import scala.scalajs.js
 import cats.effect.IO
 
 private[xkafka] object PlatformKafkaClient:
-  val name: String                                = "js"
+  val name: String = "js"
+
+  /** The Java release the tests run on, on the JVM. */
+  val javaRelease: Option[Int]                    = None
   val integrationBootstrapServers: Option[String] = environment("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS")
 
   def environment(name: String): Option[String] = js.Dynamic.global.process.env.selectDynamic(name).asInstanceOf[js.UndefOr[String]].toOption

@@ -24,7 +24,6 @@ package xkafka
 import scala.concurrent.duration.FiniteDuration
 
 import cats.{Order, Show}
-import cats.data.NonEmptyList
 import fs2.Chunk
 
 enum ValidationError derives CanEqual:
@@ -36,6 +35,7 @@ enum ValidationError derives CanEqual:
   case NegativePartition(value: Int)
   case NegativeOffset(value: Long)
   case OffsetOverflow
+  case NegativeLeaderEpoch(value: Int)
   case EmptyConsumerGroup
   case EmptyTransactionalId
   case MissingHeaderValue
@@ -45,6 +45,7 @@ enum ValidationError derives CanEqual:
   case JitterOutOfRange(value: Double)
   case NonPositivePartitionCount(value: Int)
   case NonPositiveReplicationFactor(value: Short)
+  case NegativeBrokerId(value: Int)
 
   def message: String =
     this match
@@ -56,6 +57,7 @@ enum ValidationError derives CanEqual:
       case NegativePartition(value)              => s"partition must not be negative, was $value"
       case NegativeOffset(value)                 => s"offset must not be negative, was $value"
       case OffsetOverflow                        => "offset cannot be advanced past Long.MaxValue"
+      case NegativeLeaderEpoch(value)            => s"leader epoch must not be negative, was $value"
       case EmptyConsumerGroup                    => "consumer group must not be empty"
       case EmptyTransactionalId                  => "transactional id must not be empty"
       case MissingHeaderValue                    => "header has no value"
@@ -65,6 +67,7 @@ enum ValidationError derives CanEqual:
       case JitterOutOfRange(value)               => s"jitter must be between 0 and 1, was $value"
       case NonPositivePartitionCount(value)      => s"partition count must be positive, was $value"
       case NonPositiveReplicationFactor(value)   => s"replication factor must be positive, was $value"
+      case NegativeBrokerId(value)               => s"broker id must not be negative, was $value"
 
 object ValidationError:
   given Show[ValidationError] = Show.show(_.message)
@@ -97,7 +100,8 @@ object Topic:
 
 /** A non-empty regular expression matched against complete topic names.
   *
-  * Portable patterns should use syntax supported by Java, ECMAScript, and POSIX extended regular expressions.
+  * The JVM matches it as a Java regular expression, and Scala.js and Native through librdkafka, so a pattern meant for every platform should keep to
+  * simple syntax, such as `events-.*`.
   */
 opaque type TopicPattern = String
 
@@ -122,6 +126,30 @@ object Partition:
   given Order[Partition] = Order.from((x, y) => Integer.compare(x.value, y.value))
   given Show[Partition]  = Show.show(_.value.toString)
 
+/** A broker's id within its cluster. */
+opaque type BrokerId = Int
+
+object BrokerId:
+  def from(value: Int): Either[ValidationError, BrokerId] = Either.cond(value >= 0, value, ValidationError.NegativeBrokerId(value))
+
+  extension (id: BrokerId) def value: Int = id
+
+  given Order[BrokerId] = Order.from((x, y) => Integer.compare(x.value, y.value))
+  given Show[BrokerId]  = Show.show(_.value.toString)
+
+/** The id the cluster gives a topic when it creates it, in the base64 form Kafka prints it in. A topic deleted and created again under the same name
+  * gets a new one.
+  */
+opaque type TopicId = String
+
+object TopicId:
+  private[xkafka] def apply(value: String): TopicId = value
+
+  extension (id: TopicId) def value: String = id
+
+  given Order[TopicId] = Order.from((x, y) => x.value.compareTo(y.value))
+  given Show[TopicId]  = Show.show(_.value)
+
 opaque type Offset = Long
 
 object Offset:
@@ -135,10 +163,21 @@ object Offset:
   given Order[Offset] = Order.from((x, y) => java.lang.Long.compare(x.value, y.value))
   given Show[Offset]  = Show.show(_.value.toString)
 
+/** The generation of a partition's leadership, which the broker raises each time a new leader takes the partition over. */
+opaque type LeaderEpoch = Int
+
+object LeaderEpoch:
+  def from(value: Int): Either[ValidationError, LeaderEpoch] = Either.cond(value >= 0, value, ValidationError.NegativeLeaderEpoch(value))
+
+  extension (epoch: LeaderEpoch) def value: Int = epoch
+
+  given Order[LeaderEpoch] = Order.from((x, y) => Integer.compare(x.value, y.value))
+  given Show[LeaderEpoch]  = Show.show(_.value.toString)
+
 opaque type ConsumerGroup = String
 
 object ConsumerGroup:
-  /** Rejects blank names. Brokers accept them, but they make group ownership impossible to attribute. */
+  /** Rejects a blank name. */
   def from(value: String): Either[ValidationError, ConsumerGroup] = Either.cond(value.trim.nonEmpty, value, ValidationError.EmptyConsumerGroup)
 
   extension (group: ConsumerGroup) def value: String = group
@@ -210,20 +249,65 @@ final case class ProducerRecord[K, V](
 
 final case class RecordMetadata(topicPartition: TopicPartition, offset: Option[Offset], timestamp: Option[Timestamp])
 
-/** The acknowledged result of producing a non-empty collection of records, pairing each record with the metadata its backend reported for it.
-  *
-  * A `None` means the backend acknowledged the record but did not attribute metadata to it individually, so the absence is visible to the caller
-  * instead of being inferred from a shorter list.
-  */
-final case class ProducerResult[K, V](records: NonEmptyList[(ProducerRecord[K, V], Option[RecordMetadata])]):
-  /** Every record that the backend attributed metadata to, in the order the records were produced. */
-  def metadata: List[RecordMetadata] = records.toList.flatMap((_, value) => value)
+/** A record that was delivered, with the metadata its backend reported for it. */
+opaque type Produced[K, V] = (ProducerRecord[K, V], RecordMetadata)
 
+object Produced:
+  def apply[K, V](record: ProducerRecord[K, V], metadata: RecordMetadata): Produced[K, V] = (record, metadata)
+
+  def unapply[K, V](produced: Produced[K, V]): (ProducerRecord[K, V], RecordMetadata) = produced
+
+  extension [K, V](produced: Produced[K, V])
+    def record: ProducerRecord[K, V] = produced._1
+
+    def metadata: RecordMetadata = produced._2
+
+/** A record that was attempted, with the metadata its backend reported for it where it was delivered, or why it was not. */
+opaque type Attempted[K, V] = (ProducerRecord[K, V], Either[KafkaException, RecordMetadata])
+
+object Attempted:
+  def apply[K, V](record: ProducerRecord[K, V], outcome: Either[KafkaException, RecordMetadata]): Attempted[K, V] = (record, outcome)
+
+  def unapply[K, V](attempted: Attempted[K, V]): (ProducerRecord[K, V], Either[KafkaException, RecordMetadata]) = attempted
+
+  extension [K, V](attempted: Attempted[K, V])
+    def record: ProducerRecord[K, V] = attempted._1
+
+    def outcome: Either[KafkaException, RecordMetadata] = attempted._2
+
+    /** The record as delivered, or why it was not. */
+    def produced: Either[KafkaException, Produced[K, V]] = attempted._2.map(Produced(attempted._1, _))
+
+/** A consumed record's timestamp, and which of the two kinds it is. */
+enum RecordTimestamp:
+  /** Set by the producer, or by its client when the producer gave none. */
+  case CreateTime(value: Timestamp)
+
+  /** Set by the broker as it appended the record, for a topic whose `message.timestamp.type` is `LogAppendTime`. */
+  case LogAppendTime(value: Timestamp)
+
+  def value: Timestamp
+
+object RecordTimestamp:
+  given Show[RecordTimestamp] = Show.fromToString
+
+/** A consumed record.
+  *
+  * @param leaderEpoch
+  *   the leader epoch of the partition when the record was written, where the backend reported one
+  * @param serializedKeySize
+  *   the size in bytes of the key as it was read, or `None` for a record without a key
+  * @param serializedValueSize
+  *   the size in bytes of the value as it was read, or `None` for a record without a value
+  */
 final case class ConsumerRecord[K, V](
     topicPartition: TopicPartition,
     offset: Offset,
-    timestamp: Option[Timestamp],
+    timestamp: Option[RecordTimestamp],
     key: K,
     value: V,
-    headers: Headers
+    headers: Headers,
+    leaderEpoch: Option[LeaderEpoch] = None,
+    serializedKeySize: Option[Int] = None,
+    serializedValueSize: Option[Int] = None
 )

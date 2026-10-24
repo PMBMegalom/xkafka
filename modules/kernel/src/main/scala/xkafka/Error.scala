@@ -21,14 +21,16 @@
 
 package xkafka
 
+import scala.concurrent.duration.FiniteDuration
+
 import cats.ApplicativeThrow
 import cats.data.{NonEmptyList, ValidatedNel}
 import cats.syntax.all.*
 
-/** A portable classification of a backend failure.
+/** What went wrong, classified the same way on every platform.
   *
-  * The named cases are Kafka protocol errors, which every broker reports with the same code, plus the client-side conditions all three backends can
-  * raise on their own. `Other` carries a code that has no portable meaning.
+  * The named cases are Kafka protocol errors, which every broker reports with the same code, plus client-side conditions such as a timed out request.
+  * `Other` carries a code none of them names, whose value can differ between platforms.
   */
 enum ErrorCode derives CanEqual:
   /** The requested offset is outside the partition's log. */
@@ -70,6 +72,15 @@ enum ErrorCode derives CanEqual:
   /** The group does not know this member. */
   case UnknownMemberId
 
+  /** The broker has no group of this id, such as one it removed once its last member left and no committed offset kept it. */
+  case GroupIdNotFound
+
+  /** The group still has members, so it cannot be deleted. */
+  case NonEmptyGroup
+
+  /** The group is subscribed to the topic, so its offsets for that topic cannot be deleted. */
+  case GroupSubscribedToTopic
+
   /** The group is rebalancing. */
   case RebalanceInProgress
 
@@ -109,14 +120,20 @@ enum ErrorCode derives CanEqual:
   /** A consumer has no committed offset for a partition, or one outside its log, and its `AutoOffsetReset` is `Fail`. */
   case OffsetResetRequired
 
-  /** A code with no portable meaning. */
+  /** A committed offset's metadata is longer than the broker keeps, which its `offset.metadata.max.bytes` sets. */
+  case OffsetMetadataTooLarge
+
+  /** A configuration was refused: the client's own, such as a client key that its password does not decrypt, or a change to a topic's, such as one to
+    * a property Kafka does not have.
+    */
+  case InvalidConfiguration
+
+  /** A code none of the other cases names, as the platform's client reported it. */
   case Other(value: Int)
 
 object ErrorCode:
-  /** The conditions worth trying again, which are the ones a broker reports while it is moving rather than refusing.
-    *
-    * This is the single answer every backend reports through `KafkaException.BackendFailure.retriable`, so the same condition is retriable on all of
-    * them. The backends' own notions disagree, and one of them does not always have one.
+  /** Whether trying the same request again can succeed, because the broker or group is moving and not refusing. Commit recovery retries exactly
+    * these.
     */
   extension (code: ErrorCode)
     def retriable: Boolean =
@@ -134,6 +151,7 @@ object ErrorCode:
       7  -> RequestTimedOut,            // REQUEST_TIMED_OUT
       8  -> BrokerNotAvailable,         // BROKER_NOT_AVAILABLE
       10 -> MessageTooLarge,            // MESSAGE_TOO_LARGE
+      12 -> OffsetMetadataTooLarge,     // OFFSET_METADATA_TOO_LARGE
       13 -> NetworkException,           // NETWORK_EXCEPTION
       14 -> CoordinatorLoadInProgress,  // COORDINATOR_LOAD_IN_PROGRESS
       15 -> CoordinatorNotAvailable,    // COORDINATOR_NOT_AVAILABLE
@@ -147,17 +165,21 @@ object ErrorCode:
       30 -> GroupAuthorizationFailed,   // GROUP_AUTHORIZATION_FAILED
       31 -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
       35 -> UnsupportedVersion,         // UNSUPPORTED_VERSION
+      40 -> InvalidConfiguration,       // INVALID_CONFIG
+      68 -> NonEmptyGroup,              // NON_EMPTY_GROUP
+      69 -> GroupIdNotFound,            // GROUP_ID_NOT_FOUND
+      86 -> GroupSubscribedToTopic,     // GROUP_SUBSCRIBED_TO_TOPIC
       47 -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
       58 -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
       82 -> Fenced,                     // FENCED_INSTANCE_ID
       90 -> Fenced                      // PRODUCER_FENCED
     )
 
-  /** Classifies a Kafka protocol error code, which the JVM and librdkafka both report from the same table. */
-  def fromProtocol(value: Int): ErrorCode = protocol.getOrElse(value, Other(value))
+  /** Classifies a Kafka protocol error code. */
+  private[xkafka] def fromProtocol(value: Int): ErrorCode = protocol.getOrElse(value, Other(value))
 
-  /** Classifies a librdkafka code. Its own client-side errors are negative; the rest are protocol codes. */
-  def fromLibrdkafka(value: Int): ErrorCode =
+  /** Classifies a librdkafka error code. */
+  private[xkafka] def fromLibrdkafka(value: Int): ErrorCode =
     value match
       case -195 | -187 | -193 => NetworkException         // _TRANSPORT, _ALL_BROKERS_DOWN, _RESOLVE
       case -185 | -192        => RequestTimedOut          // _TIMED_OUT, _MSG_TIMED_OUT
@@ -172,9 +194,10 @@ object ErrorCode:
 sealed abstract class KafkaException(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
 
 object KafkaException:
-  /** A failure reported by a Kafka backend.
+  /** A failure Kafka or the platform's client reported.
     *
-    * `None` means that the backend did not make the corresponding classification available.
+    * `retriable` is what `code` says through `ErrorCode.retriable`, the same on every platform, and `None` only where there is no code. `code`,
+    * `fatal`, and `transactionAbortRequired` are `None` where the platform's client does not report them.
     */
   final class BackendFailure(
       val detail: String,
@@ -197,6 +220,14 @@ object KafkaException:
   /** Offsets that could not be committed, after every attempt the recovery policy allowed. */
   final class CommitFailed(val attempts: Int, val offsets: Map[TopicPartition, Offset], cause: Throwable)
       extends KafkaException(s"committing ${offsets.size} offsets failed after $attempts attempts", cause)
+
+  /** Partitions revoked while records a consumer handed out from them were still uncommitted, after the rebalance-safe commit limit passed. */
+  final class UncommittedRevocation(val topicPartitions: Set[TopicPartition])
+      extends KafkaException(s"${topicPartitions.size} partitions were revoked with records still uncommitted")
+
+  /** Starting offsets that were not supplied within their limit, for the partitions they were asked for. */
+  final class StartingOffsetsTimedOut(val topicPartitions: Set[TopicPartition], val limit: FiniteDuration)
+      extends KafkaException(s"the starting offsets of ${topicPartitions.size} partitions were not supplied within $limit")
 
   /** An operation the portable API cannot carry out with what it was given. */
   final class Unsupported(val detail: String) extends KafkaException(detail)

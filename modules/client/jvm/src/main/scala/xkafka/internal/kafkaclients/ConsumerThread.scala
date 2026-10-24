@@ -72,7 +72,7 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
     new ConsumerRebalanceListener:
       override def onPartitionsRevoked(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Revoked, partitions)
 
-      override def onPartitionsLost(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Revoked, partitions)
+      override def onPartitionsLost(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Lost, partitions)
 
       override def onPartitionsAssigned(partitions: JavaCollection[JavaTopicPartition]): Unit = rebalanced(Assigned, partitions)
 
@@ -85,11 +85,22 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
   /** The records of one poll, or the records an earlier poll kept. */
   def poll(timeout: Duration)(reply: Either[Throwable, List[Record]] => Unit): Unit = send(Poll(timeout, reply), reply)
 
+  /** Makes a seek of `partition`, and drops the records kept for it, which were fetched before the seek. */
+  def seek(partition: JavaTopicPartition)(task: JavaConsumer[Array[Byte], Array[Byte]] => Unit)(reply: Either[Throwable, Unit] => Unit): Unit =
+    call(consumer =>
+      task(consumer)
+      buffered.filterInPlace(record => record.topic != partition.topic || record.partition != partition.partition): Unit
+    )(reply)
+
   /** Every rebalance the listener raised since the last take, oldest first. */
   def takeRebalances(reply: Either[Throwable, List[Rebalancing]] => Unit): Unit = call(_ => raised.removeAll().toList)(reply)
 
-  /** Lets the listener holding `rebalancing` return. */
-  def apply(rebalancing: Rebalancing)(reply: Either[Throwable, Unit] => Unit): Unit = call(_ => rebalancing.applied.set(true))(reply)
+  /** Makes `before` and lets the listener holding `rebalancing` return, which it does even where `before` fails. */
+  def apply(rebalancing: Rebalancing, before: JavaConsumer[Array[Byte], Array[Byte]] => Unit)(reply: Either[Throwable, Unit] => Unit): Unit =
+    call(consumer =>
+      try before(consumer)
+      finally rebalancing.applied.set(true)
+    )(reply)
 
   /** Closes the consumer, once the poll it may be inside has returned, and stops the thread. */
   def close(reply: Either[Throwable, Unit] => Unit): Unit = send(Close(reply), reply)
@@ -167,6 +178,7 @@ private[kafkaclients] object ConsumerThread:
   /** The kinds `Rebalance` reports. */
   val Assigned = 1
   val Revoked  = 0
+  val Lost     = 2
 
   /** A rebalance the listener is holding until the shared client applies it. */
   final class Rebalancing(val kind: Int, val partitions: List[LeaseKey]):

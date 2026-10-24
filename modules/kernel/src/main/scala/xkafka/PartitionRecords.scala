@@ -29,7 +29,7 @@ import cats.tagless.FunctorK
 import fs2.Stream
 import fs2.concurrent.Channel
 
-/** Records from one observed topic-partition assignment. `records` drains its queue and terminates after the partition is revoked. */
+/** The records of one partition for as long as this consumer holds it. `records` ends once the partition is revoked. */
 final case class PartitionRecords[F[_], K, V](topicPartition: TopicPartition, records: Stream[F, CommittableConsumerRecord[F, K, V]]):
   def mapK[G[_]](fk: FunctionK[F, G]): PartitionRecords[G, K, V] = PartitionRecords(topicPartition, records.map(_.mapK(fk)).translate(fk))
 

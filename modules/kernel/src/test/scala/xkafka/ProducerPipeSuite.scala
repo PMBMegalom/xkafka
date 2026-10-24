@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
@@ -35,6 +35,11 @@ final class ProducerPipeSuite extends CatsEffectSuite:
 
   private def batch(value: String): NonEmptyList[ProducerRecord[String, String]] = NonEmptyList.one(ProducerRecord(topic, "key", value))
 
+  private def delivered(records: NonEmptyList[ProducerRecord[String, String]]): NonEmptyList[Produced[String, String]] =
+    records.map(Produced(_, RecordMetadata(TopicPartition(topic, partition), None, None)))
+
+  private def unused[A]: IO[A] = IO.raiseError(new UnsupportedOperationException("not part of this test"))
+
   test("the pipe enqueues later batches while earlier ones are still waiting for the broker"):
     val values = List("a", "b", "c")
 
@@ -44,11 +49,16 @@ final class ProducerPipeSuite extends CatsEffectSuite:
       acknowledge <- Deferred[IO, Unit]
       producer =
         new KafkaProducer[IO, String, String]:
-          override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[ProducerResult[String, String]]] =
+          override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Produced[String, String]]]] =
             enqueued.updateAndGet(_ + 1).flatMap(count => allEnqueued.complete(()).attempt.void.whenA(count == values.size))
-              .as(acknowledge.get.as(ProducerResult(records.map(_ -> None))))
+              .as(acknowledge.get.as(delivered(records)))
 
-          override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
+          override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
+            unused
+
+          override def flush: IO[Unit] = IO.unit
+
+          override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
       running <- Stream.emits(values.map(batch)).through(producer.pipe()).compile.toList.start
       // Nothing has been acknowledged yet, because that waits on a signal this test has not given, so reaching
       // here is what shows the enqueueing did not wait for it.
@@ -58,7 +68,7 @@ final class ProducerPipeSuite extends CatsEffectSuite:
       results  <- running.joinWithNever.timeout(10.seconds)
     yield
       assertEquals(observed, values.size, "every batch should be enqueued before any is acknowledged")
-      assertEquals(results.flatMap(_.records.toList.map(_._1.value)), values, "results should arrive in the order the batches did")
+      assertEquals(results.flatMap(_.toList.map(_.record.value)), values, "results should arrive in the order the batches did")
 
   test("the pipe bounds how many batches wait for the broker at once"):
     val values = List("a", "b", "c", "d")
@@ -69,13 +79,18 @@ final class ProducerPipeSuite extends CatsEffectSuite:
       acknowledge <- Deferred[IO, Unit]
       producer =
         new KafkaProducer[IO, String, String]:
-          override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[ProducerResult[String, String]]] =
+          override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Produced[String, String]]]] =
             IO.pure(
               waiting.updateAndGet(_ + 1).flatMap(count => highest.update(_.max(count))) >> acknowledge.get >> waiting.update(_ - 1)
-                .as(ProducerResult(records.map(_ -> None)))
+                .as(delivered(records))
             )
 
-          override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
+          override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
+            unused
+
+          override def flush: IO[Unit] = IO.unit
+
+          override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
       running <- Stream.emits(values.map(batch)).through(producer.pipe(maxInFlight = 2)).compile.toList.start
       // Two are held by the bound, so the count cannot climb past it however many batches are offered.
       _        <- waiting.get.iterateUntil(_ == 2).timeout(10.seconds)
@@ -89,10 +104,15 @@ final class ProducerPipeSuite extends CatsEffectSuite:
   test("the pipe rejects a non-positive bound"):
     val producer =
       new KafkaProducer[IO, String, String]:
-        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[ProducerResult[String, String]]] =
-          IO.pure(IO.pure(ProducerResult(records.map(_ -> None))))
+        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Produced[String, String]]]] =
+          IO.pure(IO.pure(delivered(records)))
 
-        override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
+        override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
+          unused
+
+        override def flush: IO[Unit] = IO.unit
+
+        override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
 
     Stream.emits(List(batch("a"))).through(producer.pipe(0)).compile.drain.attempt.map:
       case Left(error: IllegalArgumentException) => assertEquals(error.getMessage, "maxInFlight must be positive")

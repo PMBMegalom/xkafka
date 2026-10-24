@@ -25,7 +25,7 @@ import scala.compiletime.testing.typeCheckErrors
 import scala.concurrent.duration.*
 
 import cats.arrow.FunctionK
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{IO, SyncIO}
 import cats.syntax.all.*
 import cats.tagless.FunctorK
@@ -54,7 +54,7 @@ final class ClientSuite extends FunSuite:
       override def apply[A](value: Option[A]): SyncIO[A] = value.fold(SyncIO.raiseError(new NoSuchElementException("empty")))(SyncIO.pure)
 
   test("valid settings succeed"):
-    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.key.password" -> ""))
+    val settings = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.truststore.password" -> ""))
 
     assert(settings.isValid)
 
@@ -69,17 +69,19 @@ final class ClientSuite extends FunSuite:
 
   test("settings retain structural case-class semantics without exposing property values"):
     val firstClient =
-      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.keystore.password" -> "client-secret")).toOption.get
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.truststore.password" -> "client-secret")).toOption.get
     val secondClient =
-      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.keystore.password" -> "client-secret")).toOption.get
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("ssl.truststore.password" -> "client-secret")).toOption.get
     val serializer     = Serializer.const[IO, String](None)
-    val firstProducer  = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
-    val secondProducer = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.key.password" -> "producer-secret")).toOption.get
+    val firstProducer  = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.truststore.password" -> "producer-secret")).toOption.get
+    val secondProducer = ProducerSettings.from(firstClient, serializer, serializer, Map("ssl.truststore.password" -> "producer-secret")).toOption.get
     val deserializer   = Deserializer.utf8[IO]
     val firstConsumer  =
-      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.key.password" -> "consumer-secret")).toOption.get
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.truststore.password" -> "consumer-secret")).toOption
+        .get
     val secondConsumer =
-      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.key.password" -> "consumer-secret")).toOption.get
+      ConsumerSettings.from(firstClient, group, deserializer, deserializer, properties = Map("ssl.truststore.password" -> "consumer-secret")).toOption
+        .get
     val renderedSettings = List(firstClient.toString, firstProducer.toString, firstConsumer.toString)
 
     assertEquals(firstClient, secondClient)
@@ -232,6 +234,36 @@ final class ClientSuite extends FunSuite:
     assertEquals(TlsSettings.from(CertificateAuthority.Pem("")).toEither, Left(NonEmptyList.one(SettingsError.BlankCertificateAuthority)))
     assert(TlsSettings.from(CertificateAuthority.SystemDefault).isValid)
 
+  test("a client certificate is checked when the TLS settings are built"):
+    val key                                   = "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+    val chain                                 = "-----BEGIN CERTIFICATE-----\nchain\n-----END CERTIFICATE-----"
+    def built(certificate: ClientCertificate) = TlsSettings.from(clientCertificate = Some(certificate)).toEither.left.map(_.toList)
+
+    assert(built(ClientCertificate.PemFile("client.pem", None)).isRight)
+    assert(built(ClientCertificate.Pem(chain, key, None)).isRight)
+    assert(built(ClientCertificate.Pem(chain, key.replace("PRIVATE KEY", "ENCRYPTED PRIVATE KEY"), Some("secret"))).isRight)
+    assertEquals(built(ClientCertificate.PemFile(" ", None)), Left(List(SettingsError.BlankClientCertificate)))
+    assertEquals(built(ClientCertificate.Pem(chain, "", None)), Left(List(SettingsError.BlankClientCertificate)))
+    // The Java client reads only PKCS#8 keys, so an older RSA key is refused for every backend.
+    assertEquals(
+      built(ClientCertificate.Pem(chain, key.replace("PRIVATE KEY", "RSA PRIVATE KEY"), None)),
+      Left(List(SettingsError.PrivateKeyNotPkcs8))
+    )
+    assertEquals(built(ClientCertificate.PemFile("client.pem", Some(""))), Left(List(SettingsError.BlankKeyPassword)))
+
+  test("a client certificate is carried by the TLS withers and kept out of toString"):
+    val key        = "-----BEGIN PRIVATE KEY-----\nsecret-key\n-----END PRIVATE KEY-----"
+    val inline     = ClientCertificate.Pem("-----BEGIN CERTIFICATE-----", key, Some("key-password"))
+    val tls        = TlsSettings.from().toOption.get
+    val presenting = tls.withClientCertificate(inline).toOption.get
+
+    assertEquals(presenting.clientCertificate, Some(inline))
+    assertEquals(presenting.withoutHostnameVerification.clientCertificate, Some(inline))
+    assertEquals(presenting.withCertificateAuthority(CertificateAuthority.PemFile("ca.pem")).toOption.flatMap(_.clientCertificate), Some(inline))
+    assertEquals(presenting.withoutClientCertificate.clientCertificate, None)
+    assert(!presenting.toString.contains("secret-key"), presenting.toString)
+    assert(!presenting.toString.contains("key-password"), presenting.toString)
+
   test("SASL settings accumulate blank credential errors"):
     assertEquals(
       SaslSettings.from(SaslMechanism.ScramSha256, " ", "").toEither,
@@ -268,13 +300,31 @@ final class ClientSuite extends FunSuite:
       ))
     )
 
+  test("settings reject the client certificate properties of either backend"):
+    List(
+      "ssl.keystore.type",
+      "ssl.keystore.location",
+      "ssl.keystore.password",
+      "ssl.keystore.key",
+      "ssl.keystore.certificate.chain",
+      "ssl.key.password",
+      "ssl.key.location",
+      "ssl.key.pem",
+      "ssl.certificate.location",
+      "ssl.certificate.pem"
+    ).foreach: name =>
+      assertEquals(
+        ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map(name -> "value")).toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Client)))
+      )
+
   test("client settings carry security through the withers"):
     val tls    = TlsSettings.from(CertificateAuthority.PemFile("ca.pem")).toOption.get
     val secure = clientSettings.withSecurity(SecuritySettings.Tls(tls))
 
     assertEquals(secure.security, SecuritySettings.Tls(tls))
     assertEquals(secure.withClientId("id").security, SecuritySettings.Tls(tls))
-    assertEquals(secure.withProperty("linger.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
+    assertEquals(secure.withProperty("retry.backoff.ms", "5").toOption.get.security, SecuritySettings.Tls(tls))
 
   test("the consumer request timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
@@ -307,10 +357,10 @@ final class ClientSuite extends FunSuite:
     assertEquals(updated.withProperty("fetch.min.bytes", "1").toOption.get.pollTimeout, 25.millis)
 
   test("withers revalidate and preserve the remaining settings"):
-    val updated = clientSettings.withClientId("probe").withProperty("linger.ms", "5")
+    val updated = clientSettings.withClientId("probe").withProperty("retry.backoff.ms", "5")
 
     assertEquals(updated.toEither.map(_.clientId), Right(Some("probe")))
-    assertEquals(updated.toEither.map(_.properties), Right(Map("linger.ms" -> "5")))
+    assertEquals(updated.toEither.map(_.properties), Right(Map("retry.backoff.ms" -> "5")))
     assertEquals(
       clientSettings.withProperty("group.id", "mine").toEither,
       Left(NonEmptyList.one(SettingsError.ManagedProperty("group.id", SettingsError.PropertyScope.Client)))
@@ -379,18 +429,42 @@ final class ClientSuite extends FunSuite:
     assertEquals(batch.commit, Right(()))
 
   test("KafkaProducer transforms both the enqueue and the acknowledgement"):
-    val result = ProducerResult(NonEmptyList.one(producerRecord -> None))
-    val source =
+    val metadata  = RecordMetadata(TopicPartition(topic, partition), None, None)
+    val result    = NonEmptyList.one(Produced(producerRecord, metadata))
+    val attempted = NonEmptyList.one(Attempted(producerRecord, Right(metadata)))
+    val source    =
       new KafkaProducer[Option, String, String]:
-        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[Option[ProducerResult[String, String]]] =
-          Some(Some(ProducerResult(records.map(_ -> None))))
+        override def produce(records: NonEmptyList[ProducerRecord[String, String]]): Option[Option[NonEmptyList[Produced[String, String]]]] =
+          Some(Some(records.map(Produced(_, metadata))))
 
-        override def partitionsFor(value: Topic): Option[Set[Partition]] = Some(Set(partition))
+        override def produceAttemptEach(
+            records: NonEmptyList[ProducerRecord[String, String]]
+        ): Option[Option[NonEmptyList[Attempted[String, String]]]] = Some(Some(records.map(Attempted(_, Right(metadata)))))
+
+        override def flush: Option[Unit] = Some(())
+
+        override def partitionsFor(value: Topic): Option[NonEmptySet[Partition]] = Some(NonEmptySet.one(partition))
     val mapped = source.mapK(optionToErrorOr)
 
     assertEquals(mapped.produce(NonEmptyList.one(producerRecord)), Right(Right(result)))
     assertEquals(mapped.produceAndAwait(NonEmptyList.one(producerRecord)), Right(result))
-    assertEquals(mapped.partitionsFor(topic), Right(Set(partition)))
+    assertEquals(mapped.produceAttemptEach(NonEmptyList.one(producerRecord)), Right(Right(attempted)))
+    assertEquals(mapped.produceAttemptEachAndAwait(NonEmptyList.one(producerRecord)), Right(attempted))
+    assertEquals(mapped.flush, Right(()))
+    assertEquals(mapped.partitionsFor(topic), Right(NonEmptySet.one(partition)))
+
+  test("a produced or attempted record gives back what it holds, by name and by pattern"):
+    val metadata = RecordMetadata(TopicPartition(topic, partition), None, None)
+    val failure  = new KafkaException.BackendFailure("refused", Some(ErrorCode.MessageTooLarge))
+    val produced = Produced(producerRecord, metadata)
+
+    assertEquals((produced.record, produced.metadata), (producerRecord, metadata))
+    produced match
+      case Produced(record, value) => assertEquals((record, value), (producerRecord, metadata))
+    Attempted(producerRecord, Left(failure)) match
+      case Attempted(record, outcome) => assertEquals((record, outcome), (producerRecord, Left(failure)))
+    assertEquals(Attempted(producerRecord, Right(metadata)).produced, Right(produced))
+    assertEquals(Attempted(producerRecord, Left(failure)).produced, Left(failure))
 
   test("KafkaConsumer transforms both its stream and committable offsets"):
     val sourceRecord = CommittableConsumerRecord(consumerRecord, committableOffset)
@@ -400,16 +474,16 @@ final class ClientSuite extends FunSuite:
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
         override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
         override def stopConsuming: Option[Unit]                                                = Some(())
-        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] =
-          Some(topicPartitions.map(_ -> Some(nextOffset)).toMap)
+        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[OffsetAndMetadata]]] =
+          Some(topicPartitions.map(_ -> Some(OffsetAndMetadata(nextOffset))).toMap)
         override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =
           Some(topicPartitions.map(_ -> offset).toMap)
         override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]] =
           Some(topicPartitions.map(_ -> nextOffset).toMap)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(timestampsToSearch.keys.map(_ -> Some(offset)).toMap)
-        override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
-        override def listTopics: Option[Map[Topic, Set[Partition]]]                      = Some(Map(topic -> Set(partition)))
+        override def partitionsFor(topic: Topic): Option[NonEmptySet[Partition]]         = Some(NonEmptySet.one(partition))
+        override def listTopics: Option[Map[Topic, NonEmptySet[Partition]]]              = Some(Map(topic -> NonEmptySet.one(partition)))
         override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit]  = Some(())
         override def seekToBeginning(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
         override def seekToEnd(topicPartitions: Set[TopicPartition]): Option[Unit]       = Some(())
@@ -434,14 +508,14 @@ final class ClientSuite extends FunSuite:
       (
         consumerRecord,
         Set(consumerRecord.topicPartition),
-        Map(consumerRecord.topicPartition -> Some(nextOffset)),
+        Map(consumerRecord.topicPartition -> Some(OffsetAndMetadata(nextOffset))),
         Map(consumerRecord.topicPartition -> offset),
         Map(consumerRecord.topicPartition -> nextOffset),
         Map(consumerRecord.topicPartition -> Some(offset))
       )
     )
-    assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), Set(partition))
-    assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> Set(partition)))
+    assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), NonEmptySet.one(partition))
+    assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> NonEmptySet.one(partition)))
     assertEquals(mapped.position(consumerRecord.topicPartition).unsafeRunSync(), Some(nextOffset))
     assertEquals(mapped.seekToBeginning(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
     assertEquals(mapped.seekToEnd(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
@@ -455,13 +529,13 @@ final class ClientSuite extends FunSuite:
         override def assignment: Option[Set[TopicPartition]]                                    = Some(Set(consumerRecord.topicPartition))
         override val assignmentChanges: Stream[Option, Set[TopicPartition]]                     = Stream.emit(Set(consumerRecord.topicPartition))
         override def stopConsuming: Option[Unit]                                                = Some(())
-        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[Offset]]] = Some(Map.empty)
-        override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]  = Some(Map.empty)
-        override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]        = Some(Map.empty)
+        override def committed(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Option[OffsetAndMetadata]]] = Some(Map.empty)
+        override def beginningOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]             = Some(Map.empty)
+        override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]                   = Some(Map.empty)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(Map.empty)
-        override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
-        override def listTopics: Option[Map[Topic, Set[Partition]]]                      = Some(Map.empty)
+        override def partitionsFor(topic: Topic): Option[NonEmptySet[Partition]]         = Some(NonEmptySet.one(partition))
+        override def listTopics: Option[Map[Topic, NonEmptySet[Partition]]]              = Some(Map.empty)
         override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit]  = Some(())
         override def seekToBeginning(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
         override def seekToEnd(topicPartitions: Set[TopicPartition]): Option[Unit]       = Some(())
@@ -482,7 +556,7 @@ final class ClientSuite extends FunSuite:
   test("a committer transformed between effects keeps the group its offsets belong to"):
     val source =
       new OffsetCommitter[Option]:
-        override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Option[Unit] = Some(())
 
         override private[xkafka] val membership: GroupMembership[Option] = GroupMembership.Backend(Some(TestGroupHandle("workers")), _ => Some(()))
 
@@ -491,7 +565,7 @@ final class ClientSuite extends FunSuite:
   test("a committer that did not come from a consumer names no group"):
     val source =
       new OffsetCommitter[Option]:
-        override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Option[Unit] = Some(())
 
     assertEquals(source.membership.handle, None)
     assertEquals(source.mapK(optionToSyncIO).membership.handle, None)
@@ -505,8 +579,8 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.transactionalId, id)
     assertEquals(settings.transactionTimeout, TransactionalProducerSettings.DefaultTransactionTimeout)
     assertEquals(updated.transactionTimeout, 5.seconds)
-    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.transactionTimeout, 5.seconds)
-    assertEquals(settings.withProperty("linger.ms", "5").toOption.get.producer.properties, Map("linger.ms" -> "5"))
+    assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.transactionTimeout, 5.seconds)
+    assertEquals(settings.withProperty("retry.backoff.ms", "5").toOption.get.producer.properties, Map("retry.backoff.ms" -> "5"))
 
   test("transactional producer settings carry a close timeout, which the other withers keep"):
     val serializer = Serializer.const[IO, String](None)
@@ -519,7 +593,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(shorter.producer.closeTimeout, 5.seconds)
     assertEquals(updated.producer.closeTimeout, 5.seconds)
     assertEquals(updated.withTransactionTimeout(10.seconds).toOption.get.producer.closeTimeout, 5.seconds)
-    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.producer.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.producer.closeTimeout, 5.seconds)
     assertEquals(
       settings.withCloseTimeout(Duration.Zero).toEither,
       Left(NonEmptyList.one(SettingsError.NonPositiveDuration(SettingsError.DurationField.CloseTimeout, Duration.Zero)))
@@ -556,19 +630,19 @@ final class ClientSuite extends FunSuite:
     val rejected   = SettingsError.IdempotenceRequiresAllReplicas(Acks.Leader)
 
     assert(settings.idempotence)
-    assertEquals(settings.managedProperties, Map("acks" -> "all", "enable.idempotence" -> "true"))
+    assertEquals(settings.managedProperties, Map("acks" -> "all", "enable.idempotence" -> "true", "compression.type" -> "none", "linger.ms" -> "5"))
     assertEquals(settings.withAcks(Acks.Leader).toEither, Left(NonEmptyList.one(rejected)))
     assertEquals(ProducerSettings.from(clientSettings, serializer, serializer, acks = Acks.Leader).toEither, Left(NonEmptyList.one(rejected)))
     assertEquals(
       ProducerSettings.from(clientSettings, serializer, serializer, acks = Acks.Leader, idempotence = false).toOption.map(_.managedProperties),
-      Some(Map("acks" -> "1", "enable.idempotence" -> "false"))
+      Some(Map("acks" -> "1", "enable.idempotence" -> "false", "compression.type" -> "none", "linger.ms" -> "5"))
     )
     val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
     assertEquals(leader.withIdempotence.toEither, Left(NonEmptyList.one(rejected)))
     assert(settings.withoutIdempotence.withIdempotence.toOption.exists(_.idempotence))
     // The withers that revalidate keep idempotence off.
     assertEquals(
-      List(leader.withCloseTimeout(1.second), leader.withProperty("linger.ms", "5"), leader.withAcks(Acks.NoAcknowledgement))
+      List(leader.withCloseTimeout(1.second), leader.withProperty("retry.backoff.ms", "5"), leader.withAcks(Acks.NoAcknowledgement))
         .map(_.toOption.map(_.idempotence)),
       List.fill(3)(Some(false))
     )
@@ -585,7 +659,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.acks, Acks.AllReplicas)
     val leader = settings.withoutIdempotence.withAcks(Acks.Leader).toOption.get
     assertEquals(leader.acks, Acks.Leader)
-    assertEquals(leader.withProperty("linger.ms", "5").toOption.get.acks, Acks.Leader)
+    assertEquals(leader.withProperty("retry.backoff.ms", "5").toOption.get.acks, Acks.Leader)
     // The three values Kafka itself accepts, which both backends read from the same property.
     assertEquals(Acks.values.toList.map(_.property), List("0", "1", "all"))
 
@@ -609,7 +683,217 @@ final class ClientSuite extends FunSuite:
     assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
     assertEquals(updated.closeTimeout, 5.seconds)
     assertEquals(updated.withClient(clientSettings).closeTimeout, 5.seconds)
-    assertEquals(updated.withProperty("linger.ms", "5").toOption.get.closeTimeout, 5.seconds)
+    assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.closeTimeout, 5.seconds)
+
+  test("compression and linger default to what both backends do, and are carried by their withers"):
+    val serializer    = Serializer.const[IO, String](None)
+    val id            = TransactionalId.from("writer").toOption.get
+    val settings      = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val updated       = settings.withCompression(Compression.Zstd).withLinger(Duration.Zero).toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, compression = Compression.Gzip).toOption.get
+
+    assertEquals(settings.compression, Compression.Uncompressed)
+    assertEquals(settings.linger, ProducerSettings.DefaultLinger)
+    assertEquals(updated.managedProperties.get("compression.type"), Some("zstd"))
+    assertEquals(updated.managedProperties.get("linger.ms"), Some("0"))
+    assertEquals(updated.withCloseTimeout(1.second).toOption.map(p => (p.compression, p.linger)), Some((Compression.Zstd, Duration.Zero)))
+    assertEquals(transactional.producer.compression, Compression.Gzip)
+    assertEquals(transactional.withLinger(1.second).toOption.map(_.producer.linger), Some(1.second))
+    assertEquals(transactional.withCompression(Compression.Snappy).producer.compression, Compression.Snappy)
+    // The names both backends read from the same property.
+    assertEquals(Compression.values.toList.map(_.property), List("none", "gzip", "snappy", "lz4", "zstd"))
+
+  test("linger runs from zero to the longest librdkafka accepts"):
+    val serializer = Serializer.const[IO, String](None)
+    val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val tooLong    = ProducerSettings.LingerLimit + 1.milli
+
+    assert(settings.withLinger(ProducerSettings.LingerLimit).isValid)
+    assertEquals(
+      settings.withLinger((-1).milli).toEither,
+      Left(NonEmptyList.one(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, (-1).milli)))
+    )
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, linger = tooLong).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.LingerLimit)))
+    )
+
+  test("the batch size is left to the backend unless it is set, and must be positive"):
+    val serializer    = Serializer.const[IO, String](None)
+    val id            = TransactionalId.from("writer").toOption.get
+    val settings      = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
+    val sized         = settings.withBatchSize(1024).toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, batchSize = Some(2048)).toOption.get
+
+    assertEquals(settings.batchSize, None)
+    assertEquals(settings.managedProperties.get("batch.size"), None)
+    assertEquals(sized.managedProperties.get("batch.size"), Some("1024"))
+    assertEquals(sized.withLinger(1.second).toOption.flatMap(_.batchSize), Some(1024))
+    assertEquals(sized.withoutBatchSize.batchSize, None)
+    assertEquals(transactional.producer.batchSize, Some(2048))
+    assertEquals(transactional.withoutBatchSize.producer.batchSize, None)
+    assertEquals(transactional.withBatchSize(4096).toOption.flatMap(_.producer.batchSize), Some(4096))
+    assertEquals(settings.withBatchSize(0).toEither, Left(NonEmptyList.one(SettingsError.NonPositiveBatchSize(0))))
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, batchSize = Some(-1)).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveBatchSize(-1)))
+    )
+
+  test("settings reject the batching and compression properties, under either backend's name"):
+    val serializer = Serializer.const[IO, String](None)
+
+    List("compression.type", "compression.codec", "linger.ms", "queue.buffering.max.ms", "batch.size").foreach: name =>
+      assertEquals(
+        ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "1")).toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Producer)))
+      )
+
+  test("group membership is left to the backends unless it is set, apart from the poll interval both share"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.groupInstanceId, None)
+    assertEquals(settings.sessionTimeout, None)
+    assertEquals(settings.heartbeatInterval, None)
+    assertEquals(settings.maxPollInterval, ConsumerSettings.DefaultMaxPollInterval)
+    assertEquals(settings.managedProperties, Map("max.poll.interval.ms" -> "300000"))
+
+  test("group membership settings are carried by their withers and read as Kafka reads them"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val updated      =
+      settings.withGroupInstanceId("instance-1").andThen(_.withSessionTimeout(10.seconds)).andThen(_.withHeartbeatInterval(2.seconds))
+        .andThen(_.withMaxPollInterval(1.minute)).toOption.get
+
+    assertEquals(
+      updated.managedProperties,
+      Map("group.instance.id" -> "instance-1", "session.timeout.ms" -> "10000", "heartbeat.interval.ms" -> "2000", "max.poll.interval.ms" -> "60000")
+    )
+    // The other withers keep them.
+    assertEquals(updated.withIsolationLevel(IsolationLevel.ReadCommitted).managedProperties, updated.managedProperties)
+    assertEquals(updated.withCommitTimeout(1.second).toOption.map(_.managedProperties), Some(updated.managedProperties))
+    assertEquals(updated.withoutGroupInstanceId.groupInstanceId, None)
+    assertEquals(updated.withoutHeartbeatInterval.toOption.flatMap(_.heartbeatInterval), None)
+    assertEquals(
+      updated.withoutHeartbeatInterval.andThen(_.withoutSessionTimeout).toOption.map(_.managedProperties.keySet),
+      Some(Set("group.instance.id", "max.poll.interval.ms"))
+    )
+
+  test("group membership settings are refused where either backend would refuse them"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField
+
+    assertEquals(settings.withGroupInstanceId(" ").toEither, Left(NonEmptyList.one(SettingsError.BlankGroupInstanceId)))
+    assertEquals(
+      settings.withSessionTimeout(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(field.SessionTimeout, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withHeartbeatInterval(ConsumerSettings.HeartbeatIntervalLimit + 1.milli).toEither.left.map(_.head),
+      Left(
+        SettingsError
+          .DurationAboveLimit(field.HeartbeatInterval, ConsumerSettings.HeartbeatIntervalLimit + 1.milli, ConsumerSettings.HeartbeatIntervalLimit)
+      )
+    )
+    assertEquals(
+      settings.withMaxPollInterval(ConsumerSettings.MaxPollIntervalLimit + 1.milli).toEither,
+      Left(NonEmptyList.one(
+        SettingsError
+          .DurationAboveLimit(field.MaxPollInterval, ConsumerSettings.MaxPollIntervalLimit + 1.milli, ConsumerSettings.MaxPollIntervalLimit)
+      ))
+    )
+    // Raising the session timeout past the poll interval needs both at once, since each wither revalidates the whole.
+    assert(settings.withSessionTimeout(ConsumerSettings.SessionTimeoutLimit).isInvalid)
+    assert(
+      ConsumerSettings.from(
+        clientSettings,
+        group,
+        deserializer,
+        deserializer,
+        sessionTimeout = Some(ConsumerSettings.SessionTimeoutLimit),
+        maxPollInterval = ConsumerSettings.SessionTimeoutLimit
+      ).isValid
+    )
+    // The Java client refuses a heartbeat that is not below the session timeout, counted against the default when the timeout is left to it.
+    assertEquals(
+      settings.withSessionTimeout(3.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.HeartbeatNotBelowSessionTimeout(3.seconds, 3.seconds)))
+    )
+    assertEquals(
+      settings.withHeartbeatInterval(45.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.HeartbeatNotBelowSessionTimeout(45.seconds, 45.seconds)))
+    )
+    // librdkafka refuses a poll interval below the session timeout.
+    assertEquals(
+      settings.withMaxPollInterval(44.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(44.seconds, 45.seconds)))
+    )
+    assert(settings.withSessionTimeout(10.seconds).andThen(_.withMaxPollInterval(10.seconds)).isValid)
+
+  test("rebalance-safe commits are off unless turned on, and their limit must be positive and below the poll interval"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField.RebalanceSafeCommitLimit
+
+    assertEquals(settings.rebalanceSafeCommits, None)
+    assertEquals(
+      settings.withRebalanceSafeCommits(30.seconds).toOption.flatMap(_.rebalanceSafeCommits),
+      Some(RebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Proceed))
+    )
+    assertEquals(
+      settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail).toOption.flatMap(_.rebalanceSafeCommits),
+      Some(RebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail))
+    )
+    assertEquals(settings.withRebalanceSafeCommits(30.seconds).toOption.get.withoutRebalanceSafeCommits.rebalanceSafeCommits, None)
+    assertEquals(
+      settings.withRebalanceSafeCommits(Duration.Zero).toEither,
+      Left(NonEmptyList.one(SettingsError.NonPositiveDuration(field, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withRebalanceSafeCommits(ConsumerSettings.DefaultMaxPollInterval).toEither,
+      Left(NonEmptyList.one(
+        SettingsError
+          .RebalanceSafeCommitLimitNotBelowMaxPollInterval(ConsumerSettings.DefaultMaxPollInterval, ConsumerSettings.DefaultMaxPollInterval)
+      ))
+    )
+    // Lowering the poll interval revalidates the limit already set.
+    assertEquals(
+      settings.withRebalanceSafeCommits(1.minute).andThen(_.withMaxPollInterval(1.minute)).toEither,
+      Left(NonEmptyList.one(SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(1.minute, 1.minute)))
+    )
+
+  test("starting offsets are off unless supplied, their limit must be positive and below the poll interval, and mapK carries them over"):
+    val deserializer = Deserializer.utf8[SyncIO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField.StartingOffsetsLimit
+    val partition    = TopicPartition(Topic.from("events").toOption.get, Partition.from(0).toOption.get)
+    val start        = StartingOffset(Offset.from(7L).toOption.get)
+    val offsets      = (_: Set[TopicPartition]) => SyncIO.pure(Map(partition -> start))
+
+    assertEquals(settings.startingOffsets, None)
+    assertEquals(settings.withStartingOffsets(30.seconds)(offsets).toOption.flatMap(_.startingOffsets).map(_.limit), Some(30.seconds))
+    assertEquals(settings.withStartingOffsets(30.seconds)(offsets).toOption.get.withoutStartingOffsets.startingOffsets, None)
+    assertEquals(
+      settings.withStartingOffsets(Duration.Zero)(offsets).toEither.leftMap(_.toList),
+      Left(List(SettingsError.NonPositiveDuration(field, Duration.Zero)))
+    )
+    assertEquals(
+      settings.withStartingOffsets(1.minute)(offsets).andThen(_.withMaxPollInterval(1.minute)).toEither.leftMap(_.toList),
+      Left(List(SettingsError.StartingOffsetsLimitNotBelowMaxPollInterval(1.minute, 1.minute)))
+    )
+    val mapped = settings.withStartingOffsets(30.seconds)(offsets).toOption.get.mapK(FunctionK.id[SyncIO])
+    assertEquals(mapped.startingOffsets.traverse(_.offsets(Set(partition))).unsafeRunSync(), Some(Map(partition -> start)))
+    assert(settings.withRebalanceSafeCommits(1.minute).andThen(_.withMaxPollInterval(2.minutes)).isValid)
+
+  test("settings reject the group membership properties the typed model owns"):
+    val deserializer = Deserializer.utf8[IO]
+
+    List("group.instance.id", "session.timeout.ms", "heartbeat.interval.ms", "max.poll.interval.ms").foreach: name =>
+      assertEquals(
+        ConsumerSettings.from(clientSettings, group, deserializer, deserializer, properties = Map(name -> "1")).toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Consumer)))
+      )
 
   test("the commit timeout defaults and is carried by its wither"):
     val deserializer = Deserializer.utf8[IO]
@@ -643,7 +927,7 @@ final class ClientSuite extends FunSuite:
 
   private val optionCommitter: OffsetCommitter[Option] =
     new OffsetCommitter[Option]:
-      override def commit(offsets: Map[TopicPartition, Offset]): Option[Unit] = Some(())
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): Option[Unit] = Some(())
 
   private def offsetAt(partition: Partition, nextOffsetValue: Offset): CommittableOffset[Option] =
     new CommittableOffset[Option]:

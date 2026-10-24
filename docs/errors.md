@@ -1,6 +1,6 @@
 # Errors
 
-Failures xkafka classifies from Kafka or its portable data model are
+Failures Kafka reports, and values or settings xkafka rejects, are
 `KafkaException` values. User-supplied effects keep their own failures, and
 ordinary method precondition failures such as a non-positive partition-stream
 queue threshold use their usual exception type.
@@ -8,9 +8,13 @@ queue threshold use their usual exception type.
 | case | raised when |
 | --- | --- |
 | `BackendFailure` | the backend reported a failure |
-| `InvalidBackendResponse` | a backend returned data the portable API cannot represent |
+| `InvalidBackendResponse` | the client returned data xkafka cannot represent, which is a bug in xkafka worth reporting |
 | `InvalidValue` | a value did not meet the rules of the type it was to become |
 | `InvalidSettings` | settings could not be constructed |
+| `StartingOffsetsTimedOut` | a consumer's [starting offsets](offsets.md#starting-from-offsets-you-keep) were not supplied within their limit |
+| `CommitFailed` | a commit kept failing as retriable after every retry its [recovery policy](offsets.md#retrying-a-failed-commit) allowed |
+| `Unsupported` | a transaction was asked to record offsets that came from a consumer of another client |
+| `UncommittedRevocation` | a consumer whose [rebalance-safe commits](offsets.md#committing-before-a-partition-moves) fail at their limit gave up partitions with records still uncommitted |
 
 `InvalidValue` carries the `ValidationError` that rejected the value, and
 `InvalidSettings` carries every `SettingsError`, so accumulated validation
@@ -18,30 +22,28 @@ survives being lifted into an effect.
 
 ## Backend failures
 
-`BackendFailure` preserves an original cause when one is available and carries a portable
-`ErrorCode` along with retriable, fatal, and transaction-abort-required
-classifications. A `None` for any of those means the backend did not make that
-classification available.
-
-The classifications preserve what a backend reports. When a backend supplies
-only a code, `retriable` falls back to the portable `ErrorCode.retriable` answer.
-`fatal` is always `true` for `ErrorCode.Fenced`; otherwise it, like
-`transactionAbortRequired`, remains `None` when unavailable. Code that
-needs one portable retry decision should use `ErrorCode.retriable`; commit
-recovery does so as well:
+`BackendFailure` keeps the original failure as its cause, where there is one,
+and carries an `ErrorCode` with three flags: `retriable`, `fatal`, and
+`transactionAbortRequired`. `retriable` is what the code's `retriable` says, so
+it is the same on every platform, and `None` only where there is no code.
+`fatal` and `transactionAbortRequired` are `None` where the platform's client
+does not report them. `fatal` is always `true` for `ErrorCode.Fenced`.
 
 ```scala
-if failure.code.exists(_.retriable) then retry else give up
+if failure.retriable.contains(true) then retry else give up
 ```
 
-It is true for an unavailable or loading coordinator, a leader that has moved, a
-rebalance in progress, a network failure, and a timed out request.
+`ErrorCode.retriable` is true for an unavailable or loading coordinator, a
+leader that has moved, a rebalance in progress, a network failure, and a timed
+out request.
 
 ## Portable codes
 
 The named `ErrorCode` cases are Kafka protocol errors, which every broker
-reports under the same code, plus the client-side conditions each backend raises
-on its own. `ErrorCode.Other` carries a code with no portable meaning.
+reports under the same code, plus client-side conditions such as a timed out
+request. `ErrorCode.Other(value)` carries a code xkafka does not name. Its value
+comes from the platform's client and can differ between the JVM and Scala.js or
+Native, so code meant for every platform should not match on it.
 
 ```scala
 failure.code match

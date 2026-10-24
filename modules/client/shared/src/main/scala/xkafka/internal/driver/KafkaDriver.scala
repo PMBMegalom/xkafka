@@ -45,8 +45,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** A consumer's group identity, owned until destroyed, which a transaction records offsets against. */
   type GroupMetadata <: GroupHandle
 
-  /** Whether serving one batch's delivery reports serves every other batch's too, so that batches are served one at a time. librdkafka reports every
-    * delivery through one queue; the Java client reports each record on its own thread as the broker acknowledges it.
+  /** Whether every batch's delivery reports arrive through one queue that has to be served, as librdkafka's do. The Java client reports each record
+    * on its own thread as the broker acknowledges it.
     */
   def deliveriesShareQueue: Boolean
 
@@ -76,13 +76,25 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Enqueues every record in order, failing at the first one the producer refuses; the records before it stay enqueued. */
   def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit]
 
-  /** Serves delivery reports for up to the timeout and answers how many of the batch's reports are still outstanding. */
-  def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): F[Int]
+  /** Serves the shared queue's delivery reports for up to the timeout. Called only where deliveries share a queue, by one fiber at a time, while
+    * enqueues go on alongside it.
+    */
+  def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit]
+
+  /** Sends what the producer holds without waiting out its linger, and returns once the records sent before the call are done or the timeout passes.
+    * A backend whose wait can be cancelled may wait past the timeout. Where deliveries share a queue, it may serve their reports too.
+    */
+  def flush(producer: Client, timeoutMillis: Int): F[Unit]
+
+  /** Waits up to the timeout for the batch's own delivery reports and answers how many are still outstanding. Called only where deliveries do not
+    * share a queue.
+    */
+  def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int]
 
   def pending(batch: Batch): F[Int]
 
-  /** What each record of a fully reported batch was delivered as, in enqueue order, failing with the first failed delivery. */
-  def deliveries(producer: Client, batch: Batch): F[Vector[Delivery]]
+  /** What each record of a fully reported batch was delivered as, or why it was not, in enqueue order. */
+  def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]]
 
   def initTransactions(producer: Client, timeoutMillis: Int): F[Unit]
 
@@ -92,7 +104,7 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit]
 
-  def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit]
+  def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit]
 
   def groupMetadata(consumer: Client): F[GroupMetadata]
 
@@ -101,7 +113,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** The handle as group metadata of this platform, if it is one. Handles from every client on the platform qualify. */
   def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata]
 
-  def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
+  /** Assigns `partitions`, each of `starts` starting at its offset and the rest where they would. */
+  def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit]
 
   /** Subscribes to topic names, or to one pattern, which starts with `^` as no topic name can. */
   def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit]
@@ -112,20 +125,21 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Every rebalance the consumer received since the last call, oldest first. */
   def takeRebalances(consumer: Client): F[List[Rebalance[Event]]]
 
-  def applyRebalance(consumer: Client, event: Event): F[Unit]
+  /** Applies a rebalance, and for an assignment starts each of `starts` at its offset and the rest where they would. */
+  def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit]
 
   def cooperative(consumer: Client): F[Boolean]
 
   def assignment(consumer: Client): F[Vector[(String, Int)]]
 
-  def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit]
+  def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit]
 
   def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
 
   def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit]
 
-  /** The committed offset of each partition in request order, negative where none is committed. */
-  def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]]
+  /** What is committed for each partition, in request order. */
+  def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]]
 
   /** The low and high watermarks of one partition. */
   def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)]
@@ -151,8 +165,59 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Each partition's new low watermark, or why it was not cut, in request order. */
   def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Vector[Either[KafkaException, Offset]]]
 
+  /** The cluster's id, its brokers, and its controller. */
+  def describeCluster(admin: Client, timeoutMillis: Int): F[ClusterDescription]
+
+  /** Each topic's description, or why it was not described, in request order. */
+  def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicDescription]]]
+
   /** Each topic's configuration, or why it was not described, in request order. */
   def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]]
+
+  /** Whether each topic's changes were made, in request order. */
+  def alterTopicConfigs(
+      admin: Client,
+      changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Whether each partition's preferred replica leads it now, in request order, with one that already led it answering `Right(())`. */
+  def electPreferredLeaders(admin: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Every consumer group the cluster knows, with its state. */
+  def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]]
+
+  /** Each group's description, or why it was not described, in request order. */
+  def describeGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, ConsumerGroupDescription]]]
+
+  /** What the group committed for these partitions, or for every partition it committed to where none are named. A partition it committed nothing for
+    * answers with a negative offset.
+    */
+  def groupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Option[Vector[TopicPartition]],
+      timeoutMillis: Int
+  ): F[Vector[(TopicPartition, StoredOffset)]]
+
+  /** Whether each partition's offset was set, in request order. */
+  def alterGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Whether each partition's offset was deleted, in request order. */
+  def deleteGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Vector[TopicPartition],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Whether each group was deleted, in request order. */
+  def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]]
 
 private[xkafka] object KafkaDriver:
   /** The offset `seek` reads as the beginning of a partition's log. */
@@ -174,16 +239,30 @@ private[xkafka] final case class EncodedRecord(
 /** Where a record was delivered. A negative offset or timestamp is one the broker did not report. */
 private[xkafka] final case class Delivery(partition: Int, offset: Long, timestamp: Long)
 
-/** A record the consumer polled, copied out of the client's own memory. */
+/** A committed offset as the broker stores it. A negative offset or leader epoch is one that is not there. */
+private[xkafka] final case class StoredOffset(offset: Long, leaderEpoch: Int, metadata: String)
+
+/** A record the consumer polled, copied out of the client's own memory.
+  *
+  * `timestampType` is 1 for a creation time and 2 for a log append time, as librdkafka numbers them, and anything else where the record has no
+  * timestamp. A negative `leaderEpoch` is one the backend did not report.
+  */
 private[xkafka] final case class PolledRecord(
     topic: String,
     partition: Int,
     offset: Long,
     timestamp: Option[Long],
+    timestampType: Int,
+    leaderEpoch: Int,
     key: Option[Chunk[Byte]],
     value: Option[Chunk[Byte]],
     headers: Headers
 )
 
-/** A rebalance and the partitions it names. `kind` is 1 for an assignment, 0 for a revocation, and anything else for a failure to resynchronise. */
+/** Where an assigned partition starts. `leaderEpoch` is negative where none is known. */
+private[xkafka] final case class StartAt(partition: TopicPartition, offset: Long, leaderEpoch: Int)
+
+/** A rebalance and the partitions it names. `kind` is 1 for an assignment, 0 for a revocation, 2 for a revocation of partitions the group has already
+  * given away, and anything else for a failure to resynchronise.
+  */
 private[xkafka] final case class Rebalance[E](event: E, kind: Int, partitions: List[LeaseKey])

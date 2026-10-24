@@ -26,13 +26,14 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.IO
 import munit.CatsEffectSuite
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** Every effect the client hands out is a description: building one asks nothing of the driver, so nothing reaches a broker until it runs. */
 final class EffectLazinessSuite extends CatsEffectSuite:
   private val topic     = Topic.from("events").toOption.get
   private val partition = TopicPartition(topic, Partition.from(0).toOption.get)
   private val offset    = Offset.from(1L).toOption.get
+  private val group     = ConsumerGroup.from("group").toOption.get
   private val utf8      = Serializer.utf8[IO]
   private val text      = Deserializer.utf8[IO]
 
@@ -61,6 +62,7 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         List(
           producer.produce(record),
           producer.produceAndAwait(record),
+          producer.flush,
           producer.partitionsFor(topic),
           transactional.transactionally(_.produce(record)),
           consumer.assignment,
@@ -81,9 +83,19 @@ final class EffectLazinessSuite extends CatsEffectSuite:
           admin.createTopics(NonEmptySet.one(NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get)),
           admin.deleteTopics(NonEmptySet.one(topic)),
           admin.createPartitions(topic, 2),
+          admin.describeCluster,
           admin.describeTopics(NonEmptySet.one(topic)),
           admin.deleteRecords(NonEmptyMap.one(partition, offset)),
-          admin.describeTopicConfigurations(NonEmptySet.one(topic))
+          admin.describeTopicConfigurations(NonEmptySet.one(topic)),
+          admin.alterTopicConfigurations(NonEmptyMap.one(topic, NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1000")))),
+          admin.electPreferredLeaders(NonEmptySet.one(partition)),
+          admin.listConsumerGroups,
+          admin.describeConsumerGroups(NonEmptySet.one(group)),
+          admin.listConsumerGroupOffsets(group),
+          admin.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+          admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(partition, OffsetAndMetadata(offset))),
+          admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+          admin.deleteConsumerGroups(NonEmptySet.one(group))
         )
       .map(called => assertEquals(called, Vector.empty, "building the effects called the driver"))
 
@@ -138,34 +150,40 @@ final class EffectLazinessSuite extends CatsEffectSuite:
     override def batch(capacity: Int): IO[Batch]                                                         = called("batch")(IO.pure(capacity))
     override def freeBatch(batch: Batch): IO[Unit]                                                       = called("freeBatch")(IO.unit)
     override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] = called("enqueue")(IO.unit)
-    override def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): IO[Int]            =
-      called("serveDeliveries")(IO.sleep(timeoutMillis.millis).as(1))
-    override def pending(batch: Batch): IO[Int]                                    = called("pending")(IO.pure(1))
-    override def deliveries(producer: Client, batch: Batch): IO[Vector[Delivery]]  = waiting("deliveries")
-    override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit]  = called("initTransactions")(IO.unit)
-    override def beginTransaction(producer: Client): IO[Unit]                      = called("beginTransaction")(IO.unit)
-    override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = called("commitTransaction")(IO.unit)
-    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit]  = called("abortTransaction")(IO.unit)
-    override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[Unit] =
-      called("sendOffsets")(IO.unit)
+    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = called("serveDeliveries")(IO.sleep(timeoutMillis.millis))
+    override def flush(producer: Client, timeoutMillis: Int): IO[Unit]           = called("flush")(IO.sleep(timeoutMillis.millis))
+    override def awaitDeliveries(batch: Batch, timeoutMillis: Int): IO[Int]      = called("awaitDeliveries")(IO.sleep(timeoutMillis.millis).as(1))
+    override def pending(batch: Batch): IO[Int]                                  = called("pending")(IO.pure(1))
+    override def deliveries(producer: Client, batch: Batch): IO[Vector[Either[KafkaException, Delivery]]] = waiting("deliveries")
+    override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit]                         = called("initTransactions")(IO.unit)
+    override def beginTransaction(producer: Client): IO[Unit]                                             = called("beginTransaction")(IO.unit)
+    override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit]                        = called("commitTransaction")(IO.unit)
+    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit]                         = called("abortTransaction")(IO.unit)
+    override def sendOffsets(
+        producer: Client,
+        metadata: GroupMetadata,
+        offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+        timeoutMillis: Int
+    ): IO[Unit]                                                              = called("sendOffsets")(IO.unit)
     override def groupMetadata(consumer: Client): IO[GroupMetadata]          = called("groupMetadata")(IO.pure(RecordedGroup(consumer)))
     override def destroyGroupMetadata(metadata: GroupMetadata): IO[Unit]     = called("destroyGroupMetadata")(IO.unit)
     override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =
       handle match
         case group: RecordedGroup => Some(group)
         case _                    => None
-    override def assign(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = called("assign")(IO.unit)
-    override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit]    = called("subscribe")(IO.unit)
-    override def poll(consumer: Client, timeoutMillis: Int): IO[List[PolledRecord]]     = called("poll")(IO.sleep(timeoutMillis.millis).as(Nil))
-    override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]]           = called("takeRebalances")(IO.pure(Nil))
-    override def applyRebalance(consumer: Client, event: Event): IO[Unit]               = called("applyRebalance")(IO.unit)
-    override def cooperative(consumer: Client): IO[Boolean]                             = called("cooperative")(IO.pure(true))
-    override def assignment(consumer: Client): IO[Vector[(String, Int)]]                = called("assignment")(IO.pure(Vector.empty))
-    override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): IO[Unit]     = called("commit")(IO.unit)
-    override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]                                 = called("pause")(IO.unit)
-    override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]                                = called("resume")(IO.unit)
-    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[Long]] = waiting("committed")
-    override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)]         = waiting("watermarks")
+    override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): IO[Unit] = called("assign")(IO.unit)
+    override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit]                             = called("subscribe")(IO.unit)
+    override def poll(consumer: Client, timeoutMillis: Int): IO[List[PolledRecord]] = called("poll")(IO.sleep(timeoutMillis.millis).as(Nil))
+    override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]]       = called("takeRebalances")(IO.pure(Nil))
+    override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): IO[Unit] = called("applyRebalance")(IO.unit)
+    override def cooperative(consumer: Client): IO[Boolean]                                        = called("cooperative")(IO.pure(true))
+    override def assignment(consumer: Client): IO[Vector[(String, Int)]]                           = called("assignment")(IO.pure(Vector.empty))
+    override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
+      called("commit")(IO.unit)
+    override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]  = called("pause")(IO.unit)
+    override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = called("resume")(IO.unit)
+    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = waiting("committed")
+    override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)]                 = waiting("watermarks")
     override def offsetsForTimes(consumer: Client, searches: Vector[(TopicPartition, Timestamp)], timeoutMillis: Int): IO[Vector[Long]] =
       waiting("offsetsForTimes")
     override def positions(consumer: Client, partitions: Vector[TopicPartition]): IO[Vector[Long]]                      = waiting("positions")
@@ -178,9 +196,58 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         admin: Client,
         cuts: Vector[(TopicPartition, Offset)],
         timeoutMillis: Int
-    ): IO[Vector[Either[KafkaException, Offset]]] = waiting("deleteRecords")
+    ): IO[Vector[Either[KafkaException, Offset]]]                                           = waiting("deleteRecords")
+    override def describeCluster(admin: Client, timeoutMillis: Int): IO[ClusterDescription] = waiting("describeCluster")
+
+    override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): IO[Vector[Either[KafkaException, TopicDescription]]] =
+      waiting("describeTopics")
+
     override def describeTopicConfigs(
         admin: Client,
         topics: Vector[Topic],
         timeoutMillis: Int
     ): IO[Vector[Either[KafkaException, TopicConfiguration]]] = waiting("describeTopicConfigs")
+
+    override def alterTopicConfigs(
+        admin: Client,
+        changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("alterTopicConfigs")
+
+    override def electPreferredLeaders(
+        admin: Client,
+        partitions: Vector[TopicPartition],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("electPreferredLeaders")
+
+    override def listGroups(admin: Client, timeoutMillis: Int): IO[Vector[(ConsumerGroup, ConsumerGroupState)]] = waiting("listGroups")
+
+    override def describeGroups(
+        admin: Client,
+        groups: Vector[ConsumerGroup],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, ConsumerGroupDescription]]] = waiting("describeGroups")
+
+    override def groupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        partitions: Option[Vector[TopicPartition]],
+        timeoutMillis: Int
+    ): IO[Vector[(TopicPartition, StoredOffset)]] = waiting("groupOffsets")
+
+    override def alterGroupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("alterGroupOffsets")
+
+    override def deleteGroupOffsets(
+        admin: Client,
+        group: ConsumerGroup,
+        partitions: Vector[TopicPartition],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = waiting("deleteGroupOffsets")
+
+    override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): IO[Vector[Either[KafkaException, Unit]]] =
+      waiting("deleteGroups")

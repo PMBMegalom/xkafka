@@ -35,7 +35,8 @@ void *xkafka_batch_new(size_t capacity);
 int xkafka_batch_add(rd_kafka_t *producer, void *batch, const char *topic, int32_t partition, int64_t timestamp, const void *key,
                      size_t key_size, const void *value, size_t value_size, void *headers, ERROR_ARGUMENTS);
 size_t xkafka_batch_pending(const void *batch);
-int xkafka_batch_await(rd_kafka_t *producer, void *batch, ERROR_ARGUMENTS);
+size_t xkafka_batch_count(const void *batch);
+int xkafka_batch_error_at(rd_kafka_t *producer, void *batch, size_t index, ERROR_ARGUMENTS);
 void xkafka_batch_free(void *batch);
 int xkafka_producer_begin_transaction(rd_kafka_t *producer, ERROR_ARGUMENTS, FLAG_ARGUMENTS);
 void *xkafka_subscription_new(size_t count);
@@ -43,7 +44,9 @@ void xkafka_subscription_add(void *subscription, const char *topic);
 void xkafka_subscription_destroy(void *subscription);
 int xkafka_consumer_subscribe(rd_kafka_t *consumer, const void *subscription, ERROR_ARGUMENTS);
 void *xkafka_consumer_take_rebalance(rd_kafka_t *consumer);
-void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer, void *event);
+void xkafka_consumer_apply_rebalance(rd_kafka_t *consumer, void *event, const char *const *start_topics,
+                                     const int32_t *start_partitions, const int64_t *start_offsets,
+                                     const int32_t *start_leader_epochs, size_t start_count);
 int64_t xkafka_message_offset(const void *message);
 int32_t xkafka_message_partition(const void *message);
 void xkafka_message_destroy(void *message);
@@ -52,13 +55,39 @@ void xkafka_consumer_group_metadata_destroy(void *metadata);
 size_t xkafka_metadata_partition_count_at(const void *metadata, size_t index);
 void xkafka_metadata_destroy(void *metadata);
 size_t xkafka_configs_entry_count(void *configs, size_t index);
+size_t xkafka_configs_resource_count(void *configs);
+int32_t xkafka_configs_resource_error(void *configs, size_t index);
 void xkafka_configs_destroy(void *configs);
+const char *xkafka_cluster_id(void *cluster);
+const void *xkafka_cluster_controller(void *cluster);
+size_t xkafka_cluster_broker_count(void *cluster);
+const void *xkafka_cluster_broker_at(void *cluster, size_t index);
+void xkafka_cluster_destroy(void *cluster);
+const char *xkafka_node_host(const void *node);
+size_t xkafka_topics_count(void *topics);
+int32_t xkafka_topic_error(void *topics, size_t topic);
+int64_t xkafka_topic_id_most(void *topics, size_t topic);
+int64_t xkafka_topic_id_least(void *topics, size_t topic);
+size_t xkafka_topic_partition_count(void *topics, size_t topic);
+size_t xkafka_topic_replica_count(void *topics, size_t topic, size_t partition);
+size_t xkafka_topic_in_sync_count(void *topics, size_t topic, size_t partition);
+void xkafka_topics_destroy(void *topics);
+size_t xkafka_groups_count(void *groups);
+const char *xkafka_groups_id_at(void *groups, size_t index);
+void xkafka_groups_destroy(void *groups);
+size_t xkafka_descriptions_count(void *descriptions);
+int32_t xkafka_description_error(void *descriptions, size_t group);
+size_t xkafka_description_member_count(void *descriptions, size_t group);
+size_t xkafka_member_partition_count(void *descriptions, size_t group, size_t member);
+void xkafka_descriptions_destroy(void *descriptions);
+size_t xkafka_assignment_count(const void *assignment);
 
 /* The calls that run on threads of their own. */
 int xkafka_async_producer_destroy(rd_kafka_t *producer, int timeout_ms, DONE_ARGUMENTS);
 int xkafka_async_consumer_destroy(rd_kafka_t *consumer, DONE_ARGUMENTS);
 int xkafka_async_admin_destroy(rd_kafka_t *client, DONE_ARGUMENTS);
 int xkafka_async_producer_poll(rd_kafka_t *producer, int timeout_ms, DONE_ARGUMENTS);
+int xkafka_async_producer_flush(rd_kafka_t *producer, int timeout_ms, DONE_ARGUMENTS);
 int xkafka_async_producer_init_transactions(rd_kafka_t *producer, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result,
                                             DONE_ARGUMENTS);
 int xkafka_async_producer_commit_transaction(rd_kafka_t *producer, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result,
@@ -66,14 +95,17 @@ int xkafka_async_producer_commit_transaction(rd_kafka_t *producer, int timeout_m
 int xkafka_async_producer_abort_transaction(rd_kafka_t *producer, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result,
                                             DONE_ARGUMENTS);
 int xkafka_async_producer_send_offsets(rd_kafka_t *producer, void *metadata, const char *const *topics, const int32_t *partitions,
-                                       const int64_t *offset_values, size_t count, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS,
-                                       int32_t *result, DONE_ARGUMENTS);
+                                       const int64_t *offset_values, const int32_t *leader_epochs, const char *const *offset_metadata,
+                                       size_t count, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_consumer_poll(rd_kafka_t *consumer, int timeout_ms, int *status, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
 int xkafka_async_consumer_commit(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions,
-                                 const int64_t *offset_values, size_t count, int timeout_ms, ERROR_ARGUMENTS, int32_t *result,
-                                 DONE_ARGUMENTS);
+                                 const int64_t *offset_values, const int32_t *leader_epochs, const char *const *metadata, size_t count,
+                                 int timeout_ms, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_consumer_committed(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, size_t count,
-                                    int64_t *offset_values, int timeout_ms, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+                                    int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int64_t xkafka_committed_offset_at(const void *committed, size_t index);
+const char *xkafka_committed_metadata_at(const void *committed, size_t index, size_t *size);
+void xkafka_committed_destroy(void *committed);
 int xkafka_async_consumer_offsets_for_times(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions,
                                             const int64_t *timestamps, size_t count, int64_t *offset_values, int timeout_ms,
                                             ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
@@ -95,6 +127,28 @@ int xkafka_async_admin_delete_records(rd_kafka_t *client, const char *const *top
                                       int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_admin_describe_topic_configs(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms,
                                               ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_describe_cluster(rd_kafka_t *client, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_describe_topics(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms, ERROR_ARGUMENTS,
+                                       void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_list_groups(rd_kafka_t *client, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_describe_groups(rd_kafka_t *client, const char *const *groups, size_t count, int timeout_ms, ERROR_ARGUMENTS,
+                                       void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_delete_groups(rd_kafka_t *client, const char *const *groups, size_t count, int timeout_ms, int32_t *codes,
+                                     ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+int xkafka_async_admin_alter_topic_configs(rd_kafka_t *client, const char *const *topics, const char *const *names,
+                                           const char *const *values, const int32_t *operations, size_t count, int timeout_ms,
+                                           ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_elect_preferred_leaders(rd_kafka_t *client, const char *const *topics, const int32_t *partitions, size_t count,
+                                               int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+int xkafka_async_admin_list_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
+                                          size_t count, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_alter_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
+                                           const int64_t *offset_values, const int32_t *leader_epochs, const char *const *metadata,
+                                           size_t count, int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result,
+                                           DONE_ARGUMENTS);
+int xkafka_async_admin_delete_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
+                                            size_t count, int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result,
+                                            DONE_ARGUMENTS);
 
 enum { TIMEOUT_MS = 30000, RECORDS = 20 };
 
@@ -157,7 +211,7 @@ static void apply_rebalances(rd_kafka_t *consumer) {
         void *event;
 
         while ((event = xkafka_consumer_take_rebalance(consumer)) != NULL)
-                xkafka_consumer_apply_rebalance(consumer, event);
+                xkafka_consumer_apply_rebalance(consumer, event, NULL, NULL, NULL, NULL, 0);
 }
 
 /* Polls until `wanted` records have arrived, and reports the next offset of the last one. */
@@ -208,11 +262,43 @@ static void produce(rd_kafka_t *producer, const char *topic, int count) {
                 if (xkafka_batch_add(producer, batch, topic, 0, -1, "key", 3, value, strlen(value), headers, ERRORS) != 0)
                         fail("xkafka_batch_add");
         }
+        await_answer("xkafka_async_producer_flush", xkafka_async_producer_flush(producer, 100, done, next_token()));
         while (xkafka_batch_pending(batch) > 0)
                 await_answer("xkafka_async_producer_poll", xkafka_async_producer_poll(producer, 100, done, next_token()));
-        if (xkafka_batch_await(producer, batch, ERRORS) != 0)
-                fail("xkafka_batch_await");
+        for (index = 0; index < (int)xkafka_batch_count(batch); index++)
+                if (xkafka_batch_error_at(producer, batch, (size_t)index, ERRORS) != 0)
+                        fail("xkafka_batch_error_at");
         xkafka_batch_free(batch);
+}
+
+/* Describes the group, and fails unless it has the members expected, each holding at least one partition. */
+static void describe_group(rd_kafka_t *admin, const char *group, size_t members) {
+        const char *groups[1] = {group};
+        void *descriptions = NULL;
+        size_t member;
+
+        await_answer("xkafka_async_admin_describe_groups",
+                     xkafka_async_admin_describe_groups(admin, groups, 1, TIMEOUT_MS, ERRORS, &descriptions, done, next_token()));
+        if (descriptions == NULL || xkafka_descriptions_count(descriptions) != 1 || xkafka_description_error(descriptions, 0) != 0 ||
+            xkafka_description_member_count(descriptions, 0) != members)
+                fail("xkafka_async_admin_describe_groups");
+        for (member = 0; member < members; member++)
+                if (xkafka_member_partition_count(descriptions, 0, member) == 0)
+                        fail("xkafka_async_admin_describe_groups");
+        xkafka_descriptions_destroy(descriptions);
+}
+
+/* Lists the group's committed offsets, all of them or the first partition's, and fails unless there are as many as expected. */
+static void group_offsets(rd_kafka_t *admin, const char *group, const char *const *topics, const int32_t *partitions, size_t count,
+                          size_t expected) {
+        void *offsets = NULL;
+
+        await_answer("xkafka_async_admin_list_group_offsets",
+                     xkafka_async_admin_list_group_offsets(admin, group, topics, partitions, count, TIMEOUT_MS, ERRORS, &offsets, done,
+                                                           next_token()));
+        if (offsets == NULL || xkafka_assignment_count(offsets) != expected)
+                fail("xkafka_async_admin_list_group_offsets");
+        xkafka_committed_destroy(offsets);
 }
 
 int main(int argc, char **argv) {
@@ -223,6 +309,11 @@ int main(int argc, char **argv) {
         rd_kafka_t *admin, *producer, *consumer;
         void *subscription, *metadata, *configs, *group_metadata;
         int64_t next, committed, low, high, found, low_watermark;
+        const int32_t no_epoch[1] = {-1};
+        const char *const notes[1] = {"leak check"};
+        void *stored;
+        const char *note;
+        size_t note_size;
         int64_t timestamps[1];
         int32_t codes[1];
 
@@ -254,6 +345,46 @@ int main(int argc, char **argv) {
         if (configs == NULL || xkafka_configs_entry_count(configs, 0) == 0)
                 fail("xkafka_async_admin_describe_topic_configs");
         xkafka_configs_destroy(configs);
+        {
+                /* One property set and one unset, whose value is NULL. */
+                const char *changed_topics[] = {topic, topic};
+                const char *changed_names[] = {"retention.ms", "retention.bytes"};
+                const char *changed_values[] = {"700000", NULL};
+                const int32_t operations[] = {0, 1};
+
+                configs = NULL;
+                await_answer("xkafka_async_admin_alter_topic_configs",
+                             xkafka_async_admin_alter_topic_configs(admin, changed_topics, changed_names, changed_values, operations, 2,
+                                                                    TIMEOUT_MS, ERRORS, &configs, done, next_token()));
+                if (configs == NULL || xkafka_configs_resource_count(configs) != 1 || xkafka_configs_resource_error(configs, 0) != 0)
+                        fail("xkafka_async_admin_alter_topic_configs");
+                xkafka_configs_destroy(configs);
+        }
+        /* A single broker already leads every partition it has, which the broker answers as ELECTION_NOT_NEEDED. */
+        CALL(xkafka_async_admin_elect_preferred_leaders, admin, topics, first_partition, 1, TIMEOUT_MS, codes, ERRORS, &result);
+        if (codes[0] != 0 && codes[0] != 84)
+                fail("xkafka_async_admin_elect_preferred_leaders");
+        {
+                void *cluster = NULL, *described = NULL;
+                size_t partition;
+
+                await_answer("xkafka_async_admin_describe_cluster",
+                             xkafka_async_admin_describe_cluster(admin, TIMEOUT_MS, ERRORS, &cluster, done, next_token()));
+                if (cluster == NULL || xkafka_cluster_id(cluster) == NULL || xkafka_cluster_controller(cluster) == NULL ||
+                    xkafka_cluster_broker_count(cluster) != 1 || xkafka_node_host(xkafka_cluster_broker_at(cluster, 0)) == NULL)
+                        fail("xkafka_async_admin_describe_cluster");
+                xkafka_cluster_destroy(cluster);
+                await_answer("xkafka_async_admin_describe_topics",
+                             xkafka_async_admin_describe_topics(admin, topics, 1, TIMEOUT_MS, ERRORS, &described, done, next_token()));
+                if (described == NULL || xkafka_topics_count(described) != 1 || xkafka_topic_error(described, 0) != 0 ||
+                    (xkafka_topic_id_most(described, 0) == 0 && xkafka_topic_id_least(described, 0) == 0) ||
+                    xkafka_topic_partition_count(described, 0) != 2)
+                        fail("xkafka_async_admin_describe_topics");
+                for (partition = 0; partition < 2; partition++)
+                        if (xkafka_topic_replica_count(described, 0, partition) != 1 || xkafka_topic_in_sync_count(described, 0, partition) != 1)
+                                fail("xkafka_async_admin_describe_topics");
+                xkafka_topics_destroy(described);
+        }
 
         {
                 const char *names[] = {"transactional.id"}, *values[] = {transactional_id};
@@ -278,13 +409,19 @@ int main(int argc, char **argv) {
         xkafka_subscription_destroy(subscription);
         next = consume(consumer, RECORDS);
 
-        CALL(xkafka_async_consumer_commit, consumer, topics, first_partition, &next, 1, TIMEOUT_MS, ERRORS, &result);
-        committed = -1;
-        CALL(xkafka_async_consumer_committed, consumer, topics, first_partition, 1, &committed, TIMEOUT_MS, ERRORS, &result);
-        if (committed != next) {
+        CALL(xkafka_async_consumer_commit, consumer, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS, ERRORS, &result);
+        stored = NULL;
+        await_answer("xkafka_async_consumer_committed", xkafka_async_consumer_committed(consumer, topics, first_partition, 1,
+                                                                                        TIMEOUT_MS, ERRORS, &stored, done, next_token()));
+        if (stored == NULL)
+                fail("xkafka_async_consumer_committed");
+        committed = xkafka_committed_offset_at(stored, 0);
+        note = xkafka_committed_metadata_at(stored, 0, &note_size);
+        if (committed != next || note_size != strlen(notes[0]) || memcmp(note, notes[0], note_size) != 0) {
                 fprintf(stderr, "committed %lld, expected %lld\n", (long long)committed, (long long)next);
                 return 1;
         }
+        xkafka_committed_destroy(stored);
         CALL(xkafka_async_consumer_watermark_offsets, consumer, topic, 0, &low, &high, TIMEOUT_MS, ERRORS, &result);
         timestamps[0] = 0;
         CALL(xkafka_async_consumer_offsets_for_times, consumer, topics, first_partition, timestamps, 1, &found, TIMEOUT_MS, ERRORS,
@@ -297,16 +434,50 @@ int main(int argc, char **argv) {
                 fail("xkafka_async_consumer_metadata");
         xkafka_metadata_destroy(metadata);
 
+        describe_group(admin, group, 1);
+
         /* A transaction that records the consumer's offsets, then is abandoned. */
         group_metadata = xkafka_consumer_group_metadata(consumer);
         if (xkafka_producer_begin_transaction(producer, ERRORS, FLAGS) != 0)
                 fail("xkafka_producer_begin_transaction");
         produce(producer, topic, 1);
-        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, 1, TIMEOUT_MS, ERRORS, FLAGS,
-             &result);
+        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS,
+             ERRORS, FLAGS, &result);
         CALL(xkafka_async_producer_abort_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
         xkafka_consumer_group_metadata_destroy(group_metadata);
         await_answer("xkafka_async_consumer_destroy", xkafka_async_consumer_destroy(consumer, done, next_token()));
+
+        /* The group, now without members. */
+        {
+                const char *groups[1] = {group};
+                void *listed = NULL;
+                size_t index, found_group = 0;
+
+                await_answer("xkafka_async_admin_list_groups",
+                             xkafka_async_admin_list_groups(admin, TIMEOUT_MS, ERRORS, &listed, done, next_token()));
+                if (listed == NULL)
+                        fail("xkafka_async_admin_list_groups");
+                for (index = 0; index < xkafka_groups_count(listed); index++)
+                        if (strcmp(xkafka_groups_id_at(listed, index), group) == 0)
+                                found_group = 1;
+                xkafka_groups_destroy(listed);
+                if (!found_group)
+                        fail("xkafka_async_admin_list_groups");
+                describe_group(admin, group, 0);
+                group_offsets(admin, group, NULL, NULL, 0, 1);
+                group_offsets(admin, group, topics, first_partition, 1, 1);
+                CALL(xkafka_async_admin_alter_group_offsets, admin, group, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS,
+                     codes, ERRORS, &result);
+                if (codes[0] != 0)
+                        fail("xkafka_async_admin_alter_group_offsets");
+                CALL(xkafka_async_admin_delete_group_offsets, admin, group, topics, first_partition, 1, TIMEOUT_MS, codes, ERRORS, &result);
+                if (codes[0] != 0)
+                        fail("xkafka_async_admin_delete_group_offsets");
+                group_offsets(admin, group, NULL, NULL, 0, 0);
+                CALL(xkafka_async_admin_delete_groups, admin, groups, 1, TIMEOUT_MS, codes, ERRORS, &result);
+                if (codes[0] != 0)
+                        fail("xkafka_async_admin_delete_groups");
+        }
 
         {
                 const int64_t cut[] = {-1};

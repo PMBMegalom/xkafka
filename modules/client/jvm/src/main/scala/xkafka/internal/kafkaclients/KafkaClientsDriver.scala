@@ -24,11 +24,13 @@ package internal
 package kafkaclients
 
 import java.time.Duration
+import java.util.Optional
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReferenceArray}
 import java.util.regex.Pattern
 
 import scala.jdk.CollectionConverters.*
+import scala.jdk.OptionConverters.*
 
 import cats.data.NonEmptyList
 import cats.effect.Async
@@ -36,21 +38,30 @@ import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.Chunk
 import org.apache.kafka.clients.admin.{
-  Admin, ConfigEntry as JavaConfigEntry, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-  DescribeConfigsOptions, DescribeTopicsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete
+  Admin, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, ConfigEntry as JavaConfigEntry,
+  ConsumerGroupDescription as JavaConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
+  DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions,
+  DescribeConsumerGroupsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+  ListGroupsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete,
+  TopicDescription as JavaTopicDescription
 }
 import org.apache.kafka.clients.consumer.{
-  Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer, OffsetAndMetadata
+  Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer,
+  OffsetAndMetadata as JavaOffsetAndMetadata
 }
 import org.apache.kafka.clients.producer.{
   Callback, KafkaProducer as JavaKafkaProducer, Producer as JavaProducer, ProducerRecord as JavaProducerRecord, RecordMetadata as JavaRecordMetadata
 }
-import org.apache.kafka.common.{KafkaFuture, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.{
+  ElectionType, GroupState, KafkaException as JavaKafkaException, KafkaFuture, Node, TopicPartition as JavaTopicPartition
+}
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
+import org.apache.kafka.common.errors.{ElectionNotNeededException, UnknownTopicOrPartitionException}
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
+import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance}
+import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
 private[xkafka] final case class JavaClients(
@@ -158,23 +169,28 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             batch.enqueued.incrementAndGet()
         finally batch.seal()
 
-  override def serveDeliveries(producer: Client, batch: Batch, timeoutMillis: Int): F[Int] =
+  /** The Java client reports each record on its own thread, so there is no queue to serve. */
+  override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = F.unit
+
+  /** Java waits only for the records sent before the call, so this returns once they are done, and cancelling it interrupts the wait. */
+  override def flush(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.interruptible(value.flush()))
+
+  override def awaitDeliveries(batch: Batch, timeoutMillis: Int): F[Int] =
     // The batch's own future is shared by every wait, so a wait that times out gives up on a copy of it.
     F.fromCompletableFuture(F.delay(batch.delivered.thenApply(identity)))
       .timeoutTo(scala.concurrent.duration.FiniteDuration(timeoutMillis.toLong, "ms"), F.unit) *> pending(batch)
 
   override def pending(batch: Batch): F[Int] = F.delay(batch.outstanding.get)
 
-  override def deliveries(producer: Client, batch: Batch): F[Vector[Delivery]] =
-    javaCall:
-      F.delay:
-        Vector.tabulate(batch.enqueued.get)(batch.reports.get).map:
-          case Right(metadata) => Delivery(
-              metadata.partition,
-              if metadata.hasOffset then metadata.offset else -1L,
-              if metadata.hasTimestamp then metadata.timestamp else -1L
-            )
-          case Left(error) => throw error
+  override def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]] =
+    F.delay:
+      Vector.tabulate(batch.enqueued.get)(batch.reports.get).map:
+        case Right(metadata) => Right(Delivery(
+            metadata.partition,
+            if metadata.hasOffset then metadata.offset else -1L,
+            if metadata.hasTimestamp then metadata.timestamp else -1L
+          ))
+        case Left(error) => Left(JavaFailures.delivery(error))
 
   override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.initTransactions()))
 
@@ -184,8 +200,12 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] = producing(producer)(value => F.blocking(value.abortTransaction()))
 
-  override def sendOffsets(producer: Client, metadata: GroupMetadata, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
-    producing(producer)(value => F.blocking(value.sendOffsetsToTransaction(committedOffsets(offsets), metadata.metadata)))
+  override def sendOffsets(
+      producer: Client,
+      metadata: GroupMetadata,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Unit] = producing(producer)(value => F.blocking(value.sendOffsetsToTransaction(committedOffsets(offsets), metadata.metadata)))
 
   override def groupMetadata(consumer: Client): F[GroupMetadata] = onConsumer(consumer)(value => JavaGroupMetadata(value.groupMetadata()))
 
@@ -196,8 +216,10 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       case metadata: JavaGroupMetadata => Some(metadata)
       case _                           => None
 
-  override def assign(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    onConsumer(consumer)(_.assign(partitions.map(javaTopicPartition).asJava))
+  override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit] =
+    onConsumer(consumer): value =>
+      value.assign(partitions.map(javaTopicPartition).asJava)
+      startAt(value, starts)
 
   /** A subscription the shared client spells as a pattern starts with `^`, which no topic name can. */
   override def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit] =
@@ -215,7 +237,14 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
     onThread(consumer): thread =>
       F.async_[List[ConsumerThread.Rebalancing]](thread.takeRebalances).map(_.map(taken => Rebalance(taken, taken.kind, taken.partitions)))
 
-  override def applyRebalance(consumer: Client, event: Event): F[Unit] = onThread(consumer)(thread => F.async_[Unit](thread.apply(event)))
+  /** Inside the listener, which an assignment is still waiting in, a seek decides where the partition starts. */
+  override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit] =
+    onThread(consumer)(thread => F.async_[Unit](thread.apply(event, startAt(_, starts))))
+
+  private def startAt(consumer: JavaConsumer[Array[Byte], Array[Byte]], starts: Vector[StartAt]): Unit =
+    starts.foreach: start =>
+      val epoch = if start.leaderEpoch < 0 then Optional.empty[Integer] else Optional.of(Integer.valueOf(start.leaderEpoch))
+      consumer.seek(javaTopicPartition(start.partition), new JavaOffsetAndMetadata(start.offset, epoch, ""))
 
   /** The listener hears a revocation before every assignment, whichever protocol the group uses, so an assignment only ever adds partitions. */
   override def cooperative(consumer: Client): F[Boolean] = F.pure(true)
@@ -223,7 +252,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def assignment(consumer: Client): F[Vector[(String, Int)]] =
     onConsumer(consumer)(_.assignment.asScala.toVector.map(value => value.topic -> value.partition))
 
-  override def commit(consumer: Client, offsets: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Unit] =
+  override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     onConsumer(consumer)(_.commitSync(committedOffsets(offsets), Duration.ofMillis(timeoutMillis.toLong)))
 
   override def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
@@ -232,10 +261,12 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
     onConsumer(consumer)(_.resume(partitions.map(javaTopicPartition).asJava))
 
-  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Long]] =
+  override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]] =
     onConsumer(consumer): value =>
       val answers = value.committed(partitions.map(javaTopicPartition).toSet.asJava, Duration.ofMillis(timeoutMillis.toLong))
-      partitions.map(partition => Option(answers.get(javaTopicPartition(partition))).fold(-1L)(_.offset))
+      partitions.map: partition =>
+        Option(answers.get(javaTopicPartition(partition))).fold(StoredOffset(-1L, -1, "")): stored =>
+          StoredOffset(stored.offset, stored.leaderEpoch.map(_.intValue).orElse(-1), Option(stored.metadata).getOrElse(""))
 
   override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)] =
     onConsumer(consumer): value =>
@@ -256,13 +287,19 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def positions(consumer: Client, partitions: Vector[TopicPartition]): F[Vector[Long]] =
     onConsumer(consumer)(value => partitions.map(partition => value.position(javaTopicPartition(partition))))
 
+  /** The Java consumer refuses a partition it is not fetching with an `IllegalStateException`, where librdkafka answers that the partition is
+    * unknown, so the same answer is given here.
+    */
   override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): F[Unit] =
-    onConsumer(consumer): value =>
-      val target = javaTopicPartition(partition)
-      offset match
-        case KafkaDriver.BeginningOffset => value.seekToBeginning(List(target).asJava)
-        case KafkaDriver.EndOffset       => value.seekToEnd(List(target).asJava)
-        case _                           => value.seek(target, offset)
+    val target = javaTopicPartition(partition)
+    onThread(consumer): thread =>
+      javaCall(F.async_[Unit](thread.seek(target)(value =>
+        if !value.assignment.contains(target) then throw new UnknownTopicOrPartitionException(s"No current assignment for partition $target")
+        offset match
+          case KafkaDriver.BeginningOffset => value.seekToBeginning(List(target).asJava)
+          case KafkaDriver.EndOffset       => value.seekToEnd(List(target).asJava)
+          case _                           => value.seek(target, offset)
+      )))
 
   override def metadata(client: Client, topic: Option[String], timeoutMillis: Int): F[Vector[(String, Vector[Int])]] =
     val timeout                                                                   = Duration.ofMillis(timeoutMillis.toLong)
@@ -347,6 +384,43 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       retriable = Some(ErrorCode.UnknownTopicOrPartition.retriable)
     )
 
+  override def describeCluster(admin: Client, timeoutMillis: Int): F[ClusterDescription] =
+    administering(admin): value =>
+      F.delay(value.describeCluster(new DescribeClusterOptions().timeoutMs(timeoutMillis))).flatMap: result =>
+        (answered(result.clusterId), answered(result.controller), answered(result.nodes)).tupled.flatMap: (id, controller, nodes) =>
+          F.delay:
+            ClusterDescription(
+              Option(id).getOrElse(throw new KafkaException.InvalidBackendResponse("the cluster reported no id")),
+              Option(controller).filterNot(_.isEmpty).map(portableBroker),
+              NonEmptyList.fromList(nodes.asScala.toList.map(portableBroker)).map(_.toNes)
+                .getOrElse(throw new KafkaException.InvalidBackendResponse("the cluster reported no brokers"))
+            )
+
+  override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicDescription]]] =
+    administering(admin): value =>
+      F.delay(value.describeTopics(topics.map(_.value).asJava, new DescribeTopicsOptions().timeoutMs(timeoutMillis)).topicNameValues.asScala.toMap)
+        .flatMap(answers => eachAnswered(topics.map(topic => topic -> answers.get(topic.value)), _.value))
+        .flatMap(_.traverse((_, answer) => answer.traverse(description => F.delay(portableTopic(description)))))
+
+  private def portableTopic(description: JavaTopicDescription): TopicDescription =
+    val partitions =
+      description.partitions.asScala.toList.map: info =>
+        val partition = Partition.from(info.partition).fold(error => throw invalidBackendValue("partition", error), identity)
+        val replicas  =
+          NonEmptyList.fromList(info.replicas.asScala.toList.map(brokerId))
+            .getOrElse(throw new KafkaException.InvalidBackendResponse(s"partition ${info.partition} of ${description.name} has no replicas"))
+        partition -> PartitionDescription(Option(info.leader).filterNot(_.isEmpty).map(brokerId), replicas, info.isr.asScala.toList.map(brokerId))
+    TopicDescription(
+      TopicId(description.topicId.toString),
+      description.isInternal,
+      NonEmptyList.fromList(partitions).map(_.toNem)
+        .getOrElse(throw new KafkaException.InvalidBackendResponse(s"topic ${description.name} has no partitions"))
+    )
+
+  private def brokerId(node: Node): BrokerId = BrokerId.from(node.id).fold(error => throw invalidBackendValue("broker id", error), identity)
+
+  private def portableBroker(node: Node): Broker = Broker(brokerId(node), node.host, node.port, Option.when(node.hasRack)(node.rack))
+
   override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]] =
     def resource(topic: Topic) = new JavaConfigResource(JavaConfigResource.Type.TOPIC, topic.value)
     administering(admin): value =>
@@ -354,6 +428,142 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
         answers =>
           eachAnswered(topics.map(topic => topic -> answers.get(resource(topic))), _.value)
             .map(_.map((_, answer) => answer.map(config => portableConfiguration(config.entries.asScala))))
+
+  override def alterTopicConfigs(
+      admin: Client,
+      changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    def resource(topic: Topic)                               = new JavaConfigResource(JavaConfigResource.Type.TOPIC, topic.value)
+    def operation(name: String, change: ConfigurationChange) =
+      change match
+        case ConfigurationChange.Set(value)      => new AlterConfigOp(new JavaConfigEntry(name, value), AlterConfigOp.OpType.SET)
+        case ConfigurationChange.Unset           => new AlterConfigOp(new JavaConfigEntry(name, null), AlterConfigOp.OpType.DELETE)
+        case ConfigurationChange.Append(value)   => new AlterConfigOp(new JavaConfigEntry(name, value), AlterConfigOp.OpType.APPEND)
+        case ConfigurationChange.Subtract(value) => new AlterConfigOp(new JavaConfigEntry(name, value), AlterConfigOp.OpType.SUBTRACT)
+    val requested = changes.map((topic, properties) => resource(topic) -> properties.toList.map(operation).asJavaCollection).toMap.asJava
+    administering(admin): value =>
+      F.delay(value.incrementalAlterConfigs(requested, new AlterConfigsOptions().timeoutMs(timeoutMillis)).values.asScala.toMap).flatMap: answers =>
+        eachAnswered(changes.map((topic, _) => topic -> answers.get(resource(topic))), _.value).map(_.map((_, answer) => answer.void))
+
+  /** A partition already led by its preferred replica is answered with `ElectionNotNeededException`, which says what was asked for holds. */
+  override def electPreferredLeaders(admin: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      val requested = partitions.map(javaTopicPartition)
+      answered(value.electLeaders(ElectionType.PREFERRED, requested.toSet.asJava, new ElectLeadersOptions().timeoutMs(timeoutMillis)).partitions)
+        .flatMap: results =>
+          partitions.zip(requested).traverse: (partition, java) =>
+            Option(results.get(java)).map(_.toScala) match
+              case None => F.raiseError(new KafkaException.InvalidBackendResponse(s"no answer for partition ${partition.show}"))
+              case Some(None | Some(_: ElectionNotNeededException)) => F.pure(Right(()))
+              case Some(Some(failure))                              => F.pure(Left(portableFailure(failure)))
+          .flatMap(wholeUnlessAllUnreached)
+
+  /** Lists the groups of the two kinds a consumer joins, which is what librdkafka lists. */
+  override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
+    administering(admin): value =>
+      javaCall(
+        F.fromCompletionStage(F.delay(value.listGroups(ListGroupsOptions.forConsumerGroups().timeoutMs(timeoutMillis)).all.toCompletionStage))
+          .adaptError(withoutWrapper)
+      ).map:
+        _.asScala.toVector.flatMap: listing =>
+          ConsumerGroup.from(listing.groupId).toOption.map(_ -> listing.groupState.map(portableState).orElse(ConsumerGroupState.Unknown))
+
+  override def describeGroups(
+      admin: Client,
+      groups: Vector[ConsumerGroup],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, ConsumerGroupDescription]]] =
+    administering(admin): value =>
+      F.delay(value.describeConsumerGroups(groups.map(_.value).asJava, new DescribeConsumerGroupsOptions().timeoutMs(timeoutMillis)).describedGroups)
+        .flatMap(answers => eachAnswered(groups.map(group => group -> Option(answers.get(group.value))), _.value))
+        .flatMap(_.traverse((_, answer) => answer.traverse(description => F.delay(portableDescription(description)))))
+
+  override def groupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Option[Vector[TopicPartition]],
+      timeoutMillis: Int
+  ): F[Vector[(TopicPartition, StoredOffset)]] =
+    val spec =
+      partitions
+        .fold(new ListConsumerGroupOffsetsSpec)(named => new ListConsumerGroupOffsetsSpec().topicPartitions(named.map(javaTopicPartition).asJava))
+    administering(admin): value =>
+      answered(
+        value.listConsumerGroupOffsets(Map(group.value -> spec).asJava, new ListConsumerGroupOffsetsOptions().timeoutMs(timeoutMillis))
+          .partitionsToOffsetAndMetadata(group.value)
+      ).flatMap: answers =>
+        F.delay:
+          answers.asScala.toVector.map: (partition, stored) =>
+            portableTopicPartition(partition) -> Option(stored).fold(StoredOffset(-1L, -1, "")): value =>
+              StoredOffset(value.offset, value.leaderEpoch.map(_.intValue).orElse(-1), Option(value.metadata).getOrElse(""))
+
+  override def alterGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      offsets: Vector[(TopicPartition, OffsetAndMetadata)],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      F.delay(
+        value.alterConsumerGroupOffsets(group.value, committedOffsets(offsets), new AlterConsumerGroupOffsetsOptions().timeoutMs(timeoutMillis))
+      ).flatMap(result =>
+        eachAnswered(offsets.map((partition, _) => partition -> Some(result.partitionResult(javaTopicPartition(partition)))), _.show)
+      ).map(_.map((_, answer) => answer.void))
+
+  override def deleteGroupOffsets(
+      admin: Client,
+      group: ConsumerGroup,
+      partitions: Vector[TopicPartition],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      F.delay(value.deleteConsumerGroupOffsets(
+        group.value,
+        partitions.map(javaTopicPartition).toSet.asJava,
+        new DeleteConsumerGroupOffsetsOptions().timeoutMs(timeoutMillis)
+      ))
+      .flatMap(result => eachAnswered(partitions.map(partition => partition -> Some(result.partitionResult(javaTopicPartition(partition)))), _.show))
+      .map(_.map((_, answer) => answer.void))
+
+  override def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      F.delay(value.deleteConsumerGroups(groups.map(_.value).asJava, new DeleteConsumerGroupsOptions().timeoutMs(timeoutMillis)).deletedGroups)
+        .flatMap(answers => eachAnswered(groups.map(group => group -> Option(answers.get(group.value))), _.value))
+        .map(_.map((_, answer) => answer.void))
+
+  /** Java reports three further states for groups on the consumer rebalance protocol, which librdkafka does not, so they have no portable meaning. */
+  private def portableState(state: GroupState): ConsumerGroupState =
+    state match
+      case GroupState.STABLE               => ConsumerGroupState.Stable
+      case GroupState.PREPARING_REBALANCE  => ConsumerGroupState.PreparingRebalance
+      case GroupState.COMPLETING_REBALANCE => ConsumerGroupState.CompletingRebalance
+      case GroupState.EMPTY                => ConsumerGroupState.Empty
+      case _                               => ConsumerGroupState.Unknown
+
+  /** Throws where the cluster reports a topic or partition that cannot be named, so call it inside an effect. */
+  private def portableDescription(description: JavaConsumerGroupDescription): ConsumerGroupDescription =
+    ConsumerGroupDescription(
+      Option(description.groupState).fold(ConsumerGroupState.Unknown)(portableState),
+      description.isSimpleConsumerGroup,
+      Option(description.partitionAssignor).filter(_.nonEmpty),
+      Option(description.coordinator).filterNot(_.isEmpty).map(portableBroker),
+      description.members.asScala.toList.map: member =>
+        GroupMember(
+          member.consumerId,
+          member.groupInstanceId.toScala,
+          member.clientId,
+          member.host,
+          member.assignment.topicPartitions.asScala.map(portableTopicPartition).toSet
+        )
+    )
+
+  /** Throws where the cluster reports a topic or partition that cannot be named, so call it inside an effect. */
+  private def portableTopicPartition(value: JavaTopicPartition): TopicPartition =
+    TopicPartition(
+      Topic.from(value.topic).fold(error => throw invalidBackendValue("topic", error), identity),
+      Partition.from(value.partition).fold(error => throw invalidBackendValue("partition", error), identity)
+    )
 
   /** Waits for each entry's answer, keeping a refusal as that entry's own.
     *
@@ -367,11 +577,25 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
           case Right(value)                  => F.pure(key -> Right(value))
           case Left(failure: KafkaException) => F.pure(key -> Left(failure))
           case Left(other)                   => F.raiseError(other)
-    .flatMap: answers =>
-      val failures = answers.collect { case (_, Left(failure)) => failure }
-      failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(F.pure(answers))(F.raiseError)
+    .flatMap(answers => wholeUnlessAllUnreached(answers.map(_._2)).as(answers))
+
+  /** The answers, unless every one says the request got none, which fails the call as a whole. */
+  private def wholeUnlessAllUnreached[A](answers: Vector[Either[KafkaException, A]]): F[Vector[Either[KafkaException, A]]] =
+    val failures = answers.collect { case Left(failure) => failure }
+    failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(F.pure(answers))(F.raiseError)
+
+  private def portableFailure(failure: Throwable): KafkaException =
+    JavaFailures.portable.applyOrElse(failure, other => new KafkaException.BackendFailure(other.toString, cause = other)) match
+      case portable: KafkaException => portable
+      case other                    => new KafkaException.BackendFailure(other.toString, cause = other)
 
   /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
+  /** Listing groups wraps the reason it found no broker in a plain Java client exception, which classifies as nothing. */
+  private val withoutWrapper: PartialFunction[Throwable, Throwable] = {
+    case error: JavaKafkaException if error.getClass == classOf[JavaKafkaException] && error.getCause.isInstanceOf[JavaKafkaException] =>
+      error.getCause
+  }
+
   private def unreached(failure: KafkaException): Boolean =
     failure match
       case backendFailure: KafkaException.BackendFailure => backendFailure.code
@@ -410,8 +634,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def javaTopicPartition(value: TopicPartition): JavaTopicPartition = new JavaTopicPartition(value.topic.value, value.partition.value)
 
-  private def committedOffsets(offsets: Vector[(TopicPartition, Offset)]): java.util.Map[JavaTopicPartition, OffsetAndMetadata] =
-    offsets.map((partition, offset) => javaTopicPartition(partition) -> new OffsetAndMetadata(offset.value)).toMap.asJava
+  private def committedOffsets(offsets: Vector[(TopicPartition, OffsetAndMetadata)]): java.util.Map[JavaTopicPartition, JavaOffsetAndMetadata] =
+    offsets.map: (partition, offset) =>
+      val epoch = offset.leaderEpoch.fold(java.util.Optional.empty[Integer])(value => java.util.Optional.of(Int.box(value.value)))
+      javaTopicPartition(partition) -> new JavaOffsetAndMetadata(offset.offset.value, epoch, offset.metadata)
+    .toMap.asJava
 
   private def javaRecord(record: EncodedRecord): JavaProducerRecord[Array[Byte], Array[Byte]] =
     val headers: java.lang.Iterable[JavaHeader] =
@@ -431,10 +658,19 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       partition = record.partition,
       offset = record.offset,
       timestamp = Option.when(record.timestamp >= 0L)(record.timestamp),
+      timestampType = timestampKind(record.timestampType),
+      leaderEpoch = record.leaderEpoch.map(_.intValue).orElse(-1),
       key = Option(record.key).map(Chunk.array),
       value = Option(record.value).map(Chunk.array),
       headers = Headers.fromVector(record.headers.toArray.toVector.map(header => Header(header.key, Option(header.value).map(Chunk.array))))
     )
+
+  /** Numbered as librdkafka numbers them, which is what the shared client reads. */
+  private def timestampKind(value: TimestampType): Int =
+    value match
+      case TimestampType.CREATE_TIME     => 1
+      case TimestampType.LOG_APPEND_TIME => 2
+      case _                             => 0
 
   private def invalidBackendValue(field: String, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field: $error")

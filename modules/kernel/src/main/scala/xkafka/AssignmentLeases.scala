@@ -92,7 +92,7 @@ private[xkafka] sealed trait AssignmentLeases[F[_]]:
   def held: F[LeaseKey => Option[Lease]]
 
   /** Offsets that came with no lease of their own, paired with each partition's current lease, so they commit only for a partition held now. */
-  final def current(offsets: Map[TopicPartition, Offset])(using cats.Functor[F]): F[Map[TopicPartition, (Offset, Option[Lease])]] =
+  final def current[A](offsets: Map[TopicPartition, A])(using cats.Functor[F]): F[Map[TopicPartition, (A, Option[Lease])]] =
     held.map(now =>
       offsets.map((topicPartition, offset) => topicPartition -> (offset, now(LeaseKey(topicPartition.topic.value, topicPartition.partition.value))))
     )
@@ -100,7 +100,13 @@ private[xkafka] sealed trait AssignmentLeases[F[_]]:
   /** What a transaction records an offset read under `lease` against. `owner` tells one consumer's leases from another's, and `handle` names the
     * consumer's current membership, which is what the backend sends.
     */
-  def membership(owner: AnyRef, lease: Option[Lease], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F]
+  def membership(
+      owner: AnyRef,
+      lease: Option[Lease],
+      handle: F[GroupHandle],
+      release: GroupHandle => F[Unit],
+      onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]]
+  ): GroupMembership[F]
 
   /** Runs one attempt at a plain commit of offsets read under `leases`, holding them for as long as it runs, so a revocation waits for it. */
   def holding[A](leases: List[Option[Lease]])(attempt: F[A]): F[A]
@@ -137,14 +143,21 @@ private[xkafka] object AssignmentLeases:
 
       override def held: F[LeaseKey => Option[Lease]] = leases.get.map(_.current.get)
 
-      override def membership(owner: AnyRef, lease: Option[Lease], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F] =
+      override def membership(
+          owner: AnyRef,
+          lease: Option[Lease],
+          handle: F[GroupHandle],
+          release: GroupHandle => F[Unit],
+          onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]]
+      ): GroupMembership[F] =
         val acquire =
           lease.fold(F.raiseError[GroupHandle](revokedAssignment)): held =>
             leases.modify(_.acquire(held)).ifM(handle.onError(_ => leases.update(_.release(held))), F.raiseError(revokedAssignment))
         new GroupMembership.Backend(
           owner -> lease,
           acquire,
-          value => release(value).guarantee(lease.traverse_(held => leases.update(_.release(held))))
+          value => release(value).guarantee(lease.traverse_(held => leases.update(_.release(held)))),
+          onCommitted
         )
 
       override def holding[A](held: List[Option[Lease]])(attempt: F[A]): F[A] =
@@ -164,7 +177,12 @@ private[xkafka] object AssignmentLeases:
 
       override def held: F[LeaseKey => Option[Lease]] = F.pure(_ => None)
 
-      override def membership(owner: AnyRef, lease: Option[Lease], handle: F[GroupHandle], release: GroupHandle => F[Unit]): GroupMembership[F] =
-        new GroupMembership.Backend(owner, handle, release)
+      override def membership(
+          owner: AnyRef,
+          lease: Option[Lease],
+          handle: F[GroupHandle],
+          release: GroupHandle => F[Unit],
+          onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]]
+      ): GroupMembership[F] = new GroupMembership.Backend(owner, handle, release, onCommitted)
 
       override def holding[A](leases: List[Option[Lease]])(attempt: F[A]): F[A] = attempt

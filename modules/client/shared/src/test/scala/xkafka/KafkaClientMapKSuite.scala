@@ -49,7 +49,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
     val committer =
       new OffsetCommitter[ErrorIO]:
-        override def commit(offsets: Map[TopicPartition, Offset]): ErrorIO[Unit] = EitherT.pure(())
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): ErrorIO[Unit] = EitherT.pure(())
 
         override private[xkafka] val membership: GroupMembership[ErrorIO] =
           GroupMembership.Backend(EitherT.pure(TestGroupHandle("workers")), _ => EitherT.pure(()))
@@ -64,6 +64,17 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     .map: (result, recorded) =>
       assertEquals(result, Right(()))
       assertEquals(recorded, List(TestGroupHandle("workers")))
+
+  private val broker = Broker(BrokerId.from(1).toOption.get, "localhost", 9092, None)
+
+  private val cluster = ClusterDescription("cluster", Some(broker), NonEmptySet.one(broker))
+
+  private val topicDescription =
+    TopicDescription(
+      TopicId("AAAAAAAAAAAAAAAAAAAAAQ"),
+      internal = false,
+      NonEmptyMap.one(Partition.from(0).toOption.get, PartitionDescription(Some(broker.id), NonEmptyList.one(broker.id), List(broker.id)))
+    )
 
   /** Stands in for a backend's own handle, which only that backend can name. */
   private final case class TestGroupHandle(group: String) extends GroupHandle
@@ -84,20 +95,57 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     val producerSettings = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
     val consumerSettings = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
     val record           = ProducerRecord(topic, "key", "value")
-    val cut              = NonEmptyMap.one(TopicPartition(topic, Partition.from(0).toOption.get), Offset.from(3L).toOption.get)
+    val partition        = TopicPartition(topic, Partition.from(0).toOption.get)
+    val offset           = Offset.from(3L).toOption.get
+    val cut              = NonEmptyMap.one(partition, offset)
 
     for
       produced  <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
       consumed  <- client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.compile.drain).value
+      described <- client.admin(clientSettings).use(admin => admin.describeCluster.product(admin.describeTopics(NonEmptySet.one(topic)))).value
       deleted   <- client.admin(clientSettings).use(_.deleteRecords(cut)).value
       inspected <- client.admin(clientSettings).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).value
+      changed   <-
+        client.admin(clientSettings).use: admin =>
+          admin.alterTopicConfigurations(NonEmptyMap.one(topic, NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1000"))))
+            .product(admin.electPreferredLeaders(NonEmptySet.one(partition)))
+        .value
+      groups <-
+        client.admin(clientSettings).use: admin =>
+          (
+            admin.listConsumerGroups,
+            admin.describeConsumerGroups(NonEmptySet.one(group)),
+            admin.listConsumerGroupOffsets(group),
+            admin.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            admin.alterConsumerGroupOffsets(group, NonEmptyMap.one(partition, OffsetAndMetadata(offset))),
+            admin.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            admin.deleteConsumerGroups(NonEmptySet.one(group))
+          ).tupled
+        .value
     yield
-      assertEquals(produced, Right(ProducerResult(NonEmptyList.one(record -> None))))
+      assertEquals(produced, Right(NonEmptyList.one(Produced(record, metadataOf(record)))))
       assertEquals(consumed, Right(()))
-      assertEquals(deleted, Right(cut.toSortedMap.view.mapValues(Right(_)).toMap))
-      assertEquals(inspected, Right(Map(topic -> Right(TopicConfiguration(Map.empty)))))
+      assertEquals(described, Right((cluster, NonEmptyMap.one(topic, Right(topicDescription)))))
+      assertEquals(deleted, Right(cut.map(Right(_))))
+      assertEquals(inspected, Right(NonEmptyMap.one(topic, Right(TopicConfiguration(Map.empty)))))
+      assertEquals(changed, Right((NonEmptyMap.one(topic, Right(())), NonEmptyMap.one(partition, Right(())))))
+      assertEquals(
+        groups,
+        Right((
+          Map(group -> ConsumerGroupState.Stable),
+          NonEmptyMap.one(group, Right(ConsumerGroupDescription(ConsumerGroupState.Empty, true, None, None, Nil))),
+          Map(partition -> OffsetAndMetadata(offset)),
+          NonEmptyMap.one(partition, None),
+          NonEmptyMap.one(partition, Right(())),
+          NonEmptyMap.one(partition, Right(())),
+          NonEmptyMap.one(group, Right(()))
+        ))
+      )
 
   private val source: KafkaClient[IO] = sourceRecording(_ => IO.unit)
+
+  private def metadataOf(record: ProducerRecord[?, ?]): RecordMetadata =
+    RecordMetadata(TopicPartition(record.topic, Partition.from(0).toOption.get), None, None)
 
   private def sourceRecording(record: GroupHandle => IO[Unit]): KafkaClient[IO] =
     new KafkaClient[IO]:
@@ -109,8 +157,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def transactionally[A](use: Transaction[IO, K, V] => IO[A]): IO[A] =
               use:
                 new Transaction[IO, K, V]:
-                  override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[ProducerResult[K, V]] =
-                    IO.pure(ProducerResult(records.map(_ -> None)))
+                  override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[NonEmptyList[Produced[K, V]]] =
+                    IO.pure(records.map(record => Produced(record, metadataOf(record))))
 
                   override def commitOffsets(batch: CommittableOffsetBatch[IO]): IO[Unit] =
                     batch.offsets.toList.traverse_ { (committer, _) =>
@@ -120,42 +168,79 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override def producer[K, V](settings: ProducerSettings[IO, K, V]): Resource[IO, KafkaProducer[IO, K, V]] =
         Resource.pure:
           new KafkaProducer[IO, K, V]:
-            override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[ProducerResult[K, V]]] =
+            override def produce(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[NonEmptyList[Produced[K, V]]]] =
               val first = records.head
               (
                 settings.keySerializer.serialize(first.topic, first.headers, first.key),
                 settings.valueSerializer.serialize(first.topic, first.headers, first.value)
-              ).tupled.as(IO.pure(ProducerResult(records.map(_ -> None))))
+              ).tupled.as(IO.pure(records.map(record => Produced(record, metadataOf(record)))))
 
-            override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set.empty)
+            override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): IO[IO[NonEmptyList[Attempted[K, V]]]] =
+              produce(records).map(_.map(_.map(produced => Attempted(produced.record, Right(produced.metadata)))))
+
+            override def flush: IO[Unit] = IO.unit
+
+            override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(Partition.from(0).toOption.get))
 
       override def admin(settings: ClientSettings): Resource[IO, KafkaAdminClient[IO]] =
         Resource.pure:
           new KafkaAdminClient[IO]:
-            override def createTopics(topics: NonEmptySet[NewTopic]): IO[Unit]                      = IO.unit
-            override def deleteTopics(topics: NonEmptySet[Topic]): IO[Unit]                         = IO.unit
-            override def createPartitions(topic: Topic, count: Int): IO[Unit]                       = IO.unit
-            override def describeTopics(topics: NonEmptySet[Topic]): IO[Map[Topic, Set[Partition]]] = IO.pure(Map.empty)
-            override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): IO[Map[TopicPartition, Either[KafkaException, Offset]]] =
-              IO.pure(before.toSortedMap.view.mapValues(Right(_)).toMap)
-            override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
-              IO.pure(topics.toSortedSet.toList.map(_ -> Right(TopicConfiguration(Map.empty))).toMap)
+            override def createTopics(topics: NonEmptySet[NewTopic]): IO[Unit] = IO.unit
+            override def deleteTopics(topics: NonEmptySet[Topic]): IO[Unit]    = IO.unit
+            override def createPartitions(topic: Topic, count: Int): IO[Unit]  = IO.unit
+            override def describeCluster: IO[ClusterDescription]               = IO.pure(cluster)
+            override def describeTopics(topics: NonEmptySet[Topic]): IO[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]] =
+              IO.pure(topics.toNonEmptyList.map(_ -> Right(topicDescription)).toNem)
+            override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]] =
+              IO.pure(before.map(Right(_)))
+            override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
+              IO.pure(topics.toNonEmptyList.map(_ -> Right(TopicConfiguration(Map.empty))).toNem)
+            override def alterTopicConfigurations(
+                changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+            ): IO[NonEmptyMap[Topic, Either[KafkaException, Unit]]] = IO.pure(changes.map(_ => Right(())))
+            override def electPreferredLeaders(
+                partitions: NonEmptySet[TopicPartition]
+            ): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]            = IO.pure(partitions.toNonEmptyList.map(_ -> Right(())).toNem)
+            override def listConsumerGroups: IO[Map[ConsumerGroup, ConsumerGroupState]] =
+              IO.pure(Map(ConsumerGroup.from("workers").toOption.get -> ConsumerGroupState.Stable))
+            override def describeConsumerGroups(
+                groups: NonEmptySet[ConsumerGroup]
+            ): IO[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]] =
+              IO.pure(groups.toNonEmptyList.map(_ -> Right(ConsumerGroupDescription(ConsumerGroupState.Empty, true, None, None, Nil))).toNem)
+            override def listConsumerGroupOffsets(group: ConsumerGroup): IO[Map[TopicPartition, OffsetAndMetadata]] =
+              IO.pure(Map(
+                TopicPartition(Topic.from("events").toOption.get, Partition.from(0).toOption.get) -> OffsetAndMetadata(Offset.from(3L).toOption.get)
+              ))
+            override def listConsumerGroupOffsets(
+                group: ConsumerGroup,
+                partitions: NonEmptySet[TopicPartition]
+            ): IO[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]] = IO.pure(partitions.toNonEmptyList.map(_ -> None).toNem)
+            override def alterConsumerGroupOffsets(
+                group: ConsumerGroup,
+                offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+            ): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = IO.pure(offsets.map(_ => Right(())))
+            override def deleteConsumerGroupOffsets(
+                group: ConsumerGroup,
+                partitions: NonEmptySet[TopicPartition]
+            ): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = IO.pure(partitions.toNonEmptyList.map(_ -> Right(())).toNem)
+            override def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): IO[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]] =
+              IO.pure(groups.toNonEmptyList.map(_ -> Right(())).toNem)
 
       override def consumer[K, V](settings: ConsumerSettings[IO, K, V], selection: Selection): Resource[IO, KafkaConsumer[IO, K, V]] =
         Resource.pure:
           new KafkaConsumer[IO, K, V]:
-            override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                 = Stream.empty
-            override def assignment: IO[Set[TopicPartition]]                                                      = IO.pure(Set.empty)
-            override val assignmentChanges: Stream[IO, Set[TopicPartition]]                                       = Stream.empty
-            override def stopConsuming: IO[Unit]                                                                  = IO.unit
-            override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[Offset]]] =
+            override val records: Stream[IO, CommittableConsumerRecord[IO, K, V]]                                            = Stream.empty
+            override def assignment: IO[Set[TopicPartition]]                                                                 = IO.pure(Set.empty)
+            override val assignmentChanges: Stream[IO, Set[TopicPartition]]                                                  = Stream.empty
+            override def stopConsuming: IO[Unit]                                                                             = IO.unit
+            override def committed(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Option[OffsetAndMetadata]]] =
               IO.pure(topicPartitions.map(_ -> None).toMap)
             override def beginningOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]] = IO.pure(Map.empty)
             override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]       = IO.pure(Map.empty)
             override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] =
               IO.pure(Map.empty)
-            override def partitionsFor(topic: Topic): IO[Set[Partition]]                 = IO.pure(Set.empty)
-            override def listTopics: IO[Map[Topic, Set[Partition]]]                      = IO.pure(Map.empty)
+            override def partitionsFor(topic: Topic): IO[NonEmptySet[Partition]]         = IO.pure(NonEmptySet.one(Partition.from(0).toOption.get))
+            override def listTopics: IO[Map[Topic, NonEmptySet[Partition]]]              = IO.pure(Map.empty)
             override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]  = IO.unit
             override def seekToBeginning(topicPartitions: Set[TopicPartition]): IO[Unit] = IO.unit
             override def seekToEnd(topicPartitions: Set[TopicPartition]): IO[Unit]       = IO.unit

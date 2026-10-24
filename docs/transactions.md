@@ -26,9 +26,8 @@ val program =
 `transactionally` commits the transaction if its body succeeds, and aborts it if
 the body fails or is cancelled.
 
-A transactional producer only writes inside transactions, which is why
-`transactionalProducer` is a separate constructor rather than an option on
-`producer`.
+A transactional producer only writes inside transactions. Create one with
+`transactionalProducer`, from `TransactionalProducerSettings`.
 
 Kafka allows one transaction at a time per transactional id, so concurrent calls
 to `transactionally` on one producer run one after another.
@@ -86,9 +85,9 @@ from transactions that have not committed, including ones that later abort.
 @:@
 
 @:callout(info)
-`produce` inside a transaction returns `F[ProducerResult]` rather than the two
-stages a plain producer offers. A transaction cannot commit records the broker
-has not acknowledged, so the call waits for them.
+`produce` inside a transaction returns `F[NonEmptyList[Produced]]` rather than
+the two stages a plain producer offers. A transaction cannot commit records the
+broker has not acknowledged, so the call waits for them.
 @:@
 
 ## Settings
@@ -101,6 +100,9 @@ properties, along with these values:
 | `transactionalId` | required | Kafka's `transactional.id` |
 | `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms` |
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
+| `compression` | `Compression.Uncompressed` | how record batches are compressed |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
 
 A transactional producer always uses `Acks.AllReplicas` and idempotence, because
 Kafka requires both for transactions, so neither can be changed.

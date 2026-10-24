@@ -46,8 +46,12 @@ accumulation survives the lift.
 
 Bootstrap servers must be `host:port`, including bracketed IPv6 literals.
 Property names must not be blank. Every duration must be positive and at most
-`Int.MaxValue` milliseconds (about 24.9 days), which is the largest timeout the
-JavaScript and Native backend calls can represent without overflow.
+`Int.MaxValue` milliseconds (about 24.9 days). Some have a lower limit:
+`linger` may be zero and at most `ProducerSettings.LingerLimit` (15 minutes),
+and the group membership intervals are limited by
+`ConsumerSettings.SessionTimeoutLimit` (1 hour),
+`ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
+`ConsumerSettings.MaxPollIntervalLimit` (24 hours).
 
 ## Properties
 
@@ -67,7 +71,7 @@ val settings =
     bootstrapServers = NonEmptyList.one("localhost:9092"),
     properties = Map("client.rack" -> "eu-west-1a")
   ).andThen: client =>
-    ProducerSettings.from(client, utf8, utf8, properties = Map("linger.ms" -> "5"))
+    ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 
 Producer or consumer properties override client properties. Names and values are
@@ -76,12 +80,10 @@ properties supported with the same meaning by each one.
 
 ## Managed properties
 
-`ManagedProperties` lists the names xkafka derives from the typed settings:
-bootstrap servers, client and group IDs, offset reset, automatic commits, the
-default API timeout, the metadata refresh names, the isolation level, the
-acknowledgement and transaction names, and the TLS and SASL names.
-Supplying one through the map is a `SettingsError`, so the typed settings and the
-map cannot disagree.
+`ManagedProperties` is the set of property names xkafka sets from the typed
+settings, such as `bootstrap.servers`, `group.id`, `acks`, `linger.ms`, and the
+TLS and SASL names. Supplying one of them through the map is a `SettingsError`;
+use the typed setting instead.
 
 ## Withers
 
@@ -89,8 +91,10 @@ Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
 duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
-`withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`, and
-`withRequestTimeout`.
+`withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
+`withRequestTimeout`, `withLinger`, `withSessionTimeout`,
+`withHeartbeatInterval`, `withMaxPollInterval`, `withRebalanceSafeCommits`, and
+`withStartingOffsets`.
 
 ## Consumer settings
 
@@ -105,13 +109,22 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for an answer |
 | `commitTimeout` | 15s | how long a commit waits before failing as a timed out request |
 | `assignmentFencing` | `true` | whether offsets from a partition this consumer no longer owns are refused |
+| `groupInstanceId` | none | an identity that makes the consumer a static member of its group |
+| `sessionTimeout` | unset, which is 45s on every platform | how long the group waits to hear from the consumer before handing its partitions on |
+| `heartbeatInterval` | unset, which is 3s on every platform | how often the consumer tells the group it is alive |
+| `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
+| `rebalanceSafeCommits` | none | how long a partition being taken away waits for the records handed out from it to be committed |
+| `startingOffsets` | none | where each assigned partition starts, from offsets the application keeps |
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
-`offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`. Its default matches
+`offsetsForTimes`, `partitionsFor`, `listTopics`, `seek`, `seekToBeginning`, and
+`seekToEnd`. Its default matches
 what Kafka's own clients use.
 
-See [Offsets](offsets.md) for commit recovery, the commit timeout, and assignment
-fencing, and [Transactions](transactions.md) for the isolation level.
+See [Offsets](offsets.md) for commit recovery, the commit timeout, assignment
+fencing, rebalance-safe commits, and starting offsets, [Transactions](transactions.md) for the isolation level, and
+[Group membership](consuming.md#group-membership) for `groupInstanceId` and the
+three intervals.
 
 ## Producer settings
 
@@ -122,8 +135,11 @@ Beyond the serializers, `ProducerSettings` carries:
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
 | `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
 | `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
+| `compression` | `Compression.Uncompressed` | how record batches are compressed |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
 
-See [Producing](producing.md) for all three.
+See [Producing](producing.md) for each of them.
 
 ## Client settings
 

@@ -41,6 +41,8 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   private val Done           = s"${Shim.DoneType} *done, int64_t token"
   private val Properties     = "const char **property_names, const char **property_values, size_t property_count"
   private val PartitionNames = "const char **topics, const int32_t *partitions, size_t count"
+  private val Starts         =
+    "const char **start_topics, const int32_t *start_partitions, const int64_t *start_offsets, const int32_t *start_leader_epochs, size_t start_count"
 
   val versionStr  = f("const char *xkafka_version_str(void)")
   val shimId      = f("const char *xkafka_shim_id(void)")
@@ -67,8 +69,9 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
         s"const void *value, size_t value_size, void *headers, $Error)"
     )
   val producerPoll     = f(s"int xkafka_async_producer_poll(void *producer, int timeout_ms, $Done)")
+  val producerFlush    = f(s"int xkafka_async_producer_flush(void *producer, int timeout_ms, $Done)")
   val batchPending     = f("size_t xkafka_batch_pending(void *batch)")
-  val batchAwait       = f(s"int xkafka_batch_await(void *producer, void *batch, $Error)")
+  val batchErrorAt     = f(s"int xkafka_batch_error_at(void *producer, void *batch, size_t index, $Error)")
   val batchCount       = f("size_t xkafka_batch_count(void *batch)")
   val batchPartitionAt = f("int32_t xkafka_batch_partition_at(void *batch, size_t index)")
   val batchOffsetAt    = f("int64_t xkafka_batch_offset_at(void *batch, size_t index)")
@@ -82,7 +85,7 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val sendOffsets       =
     f(
       "int xkafka_async_producer_send_offsets(void *producer, void *metadata, const char **topics, const int32_t *partitions, const int64_t *offsets, " +
-        s"size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
+        s"const int32_t *leader_epochs, const char **offset_metadata, size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
     )
   val groupMetadata        = f("void *xkafka_consumer_group_metadata(void *consumer)")
   val groupMetadataDestroy = f("void xkafka_consumer_group_metadata_destroy(void *metadata)")
@@ -91,13 +94,13 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val rebalanceKind       = f("int xkafka_rebalance_kind(void *event)")
   val rebalancePartitions = f("void *xkafka_rebalance_partitions(void *event)")
   val cooperative         = f("int xkafka_consumer_cooperative(void *consumer)")
-  val applyRebalance      = f("void xkafka_consumer_apply_rebalance(void *consumer, void *event)")
+  val applyRebalance      = f(s"void xkafka_consumer_apply_rebalance(void *consumer, void *event, $Starts)")
 
   val subscriptionNew     = f("void *xkafka_subscription_new(size_t count)")
   val subscriptionDestroy = f("void xkafka_subscription_destroy(void *subscription)")
   val subscriptionAdd     = f("void xkafka_subscription_add(void *subscription, const char *topic)")
   val subscribe           = f(s"int xkafka_consumer_subscribe(void *consumer, void *subscription, $Error)")
-  val assign              = f(s"int xkafka_consumer_assign(void *consumer, $PartitionNames, $Error)")
+  val assign              = f(s"int xkafka_consumer_assign(void *consumer, $PartitionNames, $Starts, $Error)")
   val pause               = f(s"int xkafka_consumer_pause(void *consumer, $PartitionNames, $Error)")
   val resume              = f(s"int xkafka_consumer_resume(void *consumer, $PartitionNames, $Error)")
 
@@ -107,6 +110,8 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val messagePartition = f("int32_t xkafka_message_partition(void *message)")
   val messageOffset    = f("int64_t xkafka_message_offset(void *message)")
   val messageTimestamp = f("int64_t xkafka_message_timestamp(void *message)")
+  val messageTimeType  = f("int32_t xkafka_message_timestamp_type(void *message)")
+  val messageEpoch     = f("int32_t xkafka_message_leader_epoch(void *message)")
   val messageKey       = f("void *xkafka_message_key(void *message)")
   val messageKeySize   = f("size_t xkafka_message_key_size(void *message)")
   val messageValue     = f("void *xkafka_message_value(void *message)")
@@ -125,13 +130,16 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
 
   val commit =
     f(
-      "int xkafka_async_consumer_commit(void *consumer, const char **topics, const int32_t *partitions, const int64_t *offsets, size_t count, " +
-        s"int timeout_ms, $Error, int32_t *result, $Done)"
+      "int xkafka_async_consumer_commit(void *consumer, const char **topics, const int32_t *partitions, const int64_t *offsets, " +
+        s"const int32_t *leader_epochs, const char **metadata, size_t count, int timeout_ms, $Error, int32_t *result, $Done)"
     )
-  val committed =
-    f(s"int xkafka_async_consumer_committed(void *consumer, $PartitionNames, int64_t *offsets, int timeout_ms, $Error, int32_t *result, $Done)")
-  val position   = f(s"int xkafka_consumer_position(void *consumer, $PartitionNames, int64_t *offsets, $Error)")
-  val watermarks =
+  val committed           = f(s"int xkafka_async_consumer_committed(void *consumer, $PartitionNames, int timeout_ms, $Error, void **result, $Done)")
+  val committedOffsetAt   = f("int64_t xkafka_committed_offset_at(void *committed, size_t index)")
+  val committedEpochAt    = f("int32_t xkafka_committed_leader_epoch_at(void *committed, size_t index)")
+  val committedMetadataAt = f("void *xkafka_committed_metadata_at(void *committed, size_t index, _Out_ size_t *size)")
+  val committedDestroy    = f("void xkafka_committed_destroy(void *committed)")
+  val position            = f(s"int xkafka_consumer_position(void *consumer, $PartitionNames, int64_t *offsets, $Error)")
+  val watermarks          =
     f(
       "int xkafka_async_consumer_watermark_offsets(void *consumer, const char *topic, int32_t partition, int64_t *low, int64_t *high, " +
         s"int timeout_ms, $Error, int32_t *result, $Done)"
@@ -181,6 +189,92 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val configsEntrySensitive = f("int32_t xkafka_configs_entry_is_sensitive(void *configs, size_t resource_index, size_t entry_index)")
   val configsEntryReadOnly  = f("int32_t xkafka_configs_entry_is_read_only(void *configs, size_t resource_index, size_t entry_index)")
   val configsDestroy        = f("void xkafka_configs_destroy(void *configs)")
+
+  val describeCluster    = f(s"int xkafka_async_admin_describe_cluster(void *client, int timeout_ms, $Error, void **result, $Done)")
+  val clusterId          = f("const char *xkafka_cluster_id(void *cluster)")
+  val clusterController  = f("const void *xkafka_cluster_controller(void *cluster)")
+  val clusterBrokerCount = f("size_t xkafka_cluster_broker_count(void *cluster)")
+  val clusterBrokerAt    = f("const void *xkafka_cluster_broker_at(void *cluster, size_t index)")
+  val clusterDestroy     = f("void xkafka_cluster_destroy(void *cluster)")
+  val nodeId             = f("int32_t xkafka_node_id(const void *node)")
+  val nodeHost           = f("const char *xkafka_node_host(const void *node)")
+  val nodePort           = f("int32_t xkafka_node_port(const void *node)")
+  val nodeRack           = f("const char *xkafka_node_rack(const void *node)")
+
+  val describeTopics =
+    f(s"int xkafka_async_admin_describe_topics(void *client, const char **names, size_t count, int timeout_ms, $Error, void **result, $Done)")
+  val topicsCount          = f("size_t xkafka_topics_count(void *topics)")
+  val topicName            = f("const char *xkafka_topic_name(void *topics, size_t topic)")
+  val topicError           = f("int32_t xkafka_topic_error(void *topics, size_t topic)")
+  val topicErrorString     = f("const char *xkafka_topic_error_string(void *topics, size_t topic)")
+  val topicIdMost          = f("int64_t xkafka_topic_id_most(void *topics, size_t topic)")
+  val topicIdLeast         = f("int64_t xkafka_topic_id_least(void *topics, size_t topic)")
+  val topicInternal        = f("int xkafka_topic_internal(void *topics, size_t topic)")
+  val topicPartitionCount  = f("size_t xkafka_topic_partition_count(void *topics, size_t topic)")
+  val topicPartitionAt     = f("int32_t xkafka_topic_partition_at(void *topics, size_t topic, size_t partition)")
+  val topicPartitionLeader = f("int32_t xkafka_topic_partition_leader(void *topics, size_t topic, size_t partition)")
+  val topicReplicaCount    = f("size_t xkafka_topic_replica_count(void *topics, size_t topic, size_t partition)")
+  val topicReplicaAt       = f("int32_t xkafka_topic_replica_at(void *topics, size_t topic, size_t partition, size_t replica)")
+  val topicInSyncCount     = f("size_t xkafka_topic_in_sync_count(void *topics, size_t topic, size_t partition)")
+  val topicInSyncAt        = f("int32_t xkafka_topic_in_sync_at(void *topics, size_t topic, size_t partition, size_t replica)")
+  val topicsDestroy        = f("void xkafka_topics_destroy(void *topics)")
+
+  val listGroups    = f(s"int xkafka_async_admin_list_groups(void *client, int timeout_ms, $Error, void **result, $Done)")
+  val groupsCount   = f("size_t xkafka_groups_count(void *groups)")
+  val groupsIdAt    = f("const char *xkafka_groups_id_at(void *groups, size_t index)")
+  val groupsStateAt = f("int32_t xkafka_groups_state_at(void *groups, size_t index)")
+  val groupsDestroy = f("void xkafka_groups_destroy(void *groups)")
+
+  val describeGroups =
+    f(s"int xkafka_async_admin_describe_groups(void *client, const char **groups, size_t count, int timeout_ms, $Error, void **result, $Done)")
+  val descriptionsCount          = f("size_t xkafka_descriptions_count(void *descriptions)")
+  val descriptionGroup           = f("const char *xkafka_description_group(void *descriptions, size_t group)")
+  val descriptionError           = f("int32_t xkafka_description_error(void *descriptions, size_t group)")
+  val descriptionErrorString     = f("const char *xkafka_description_error_string(void *descriptions, size_t group)")
+  val descriptionSimple          = f("int xkafka_description_simple(void *descriptions, size_t group)")
+  val descriptionState           = f("int32_t xkafka_description_state(void *descriptions, size_t group)")
+  val descriptionAssignor        = f("const char *xkafka_description_assignor(void *descriptions, size_t group)")
+  val descriptionCoordinatorId   = f("int32_t xkafka_description_coordinator_id(void *descriptions, size_t group)")
+  val descriptionCoordinatorHost = f("const char *xkafka_description_coordinator_host(void *descriptions, size_t group)")
+  val descriptionCoordinatorPort = f("int32_t xkafka_description_coordinator_port(void *descriptions, size_t group)")
+  val descriptionCoordinatorRack = f("const char *xkafka_description_coordinator_rack(void *descriptions, size_t group)")
+  val descriptionMemberCount     = f("size_t xkafka_description_member_count(void *descriptions, size_t group)")
+  val memberId                   = f("const char *xkafka_member_id(void *descriptions, size_t group, size_t member)")
+  val memberInstanceId           = f("const char *xkafka_member_instance_id(void *descriptions, size_t group, size_t member)")
+  val memberClientId             = f("const char *xkafka_member_client_id(void *descriptions, size_t group, size_t member)")
+  val memberHost                 = f("const char *xkafka_member_host(void *descriptions, size_t group, size_t member)")
+  val memberPartitionCount       = f("size_t xkafka_member_partition_count(void *descriptions, size_t group, size_t member)")
+  val memberTopicAt              = f("const char *xkafka_member_topic_at(void *descriptions, size_t group, size_t member, size_t index)")
+  val memberPartitionAt          = f("int32_t xkafka_member_partition_at(void *descriptions, size_t group, size_t member, size_t index)")
+  val descriptionsDestroy        = f("void xkafka_descriptions_destroy(void *descriptions)")
+
+  val listGroupOffsets =
+    f(s"int xkafka_async_admin_list_group_offsets(void *client, const char *group, $PartitionNames, int timeout_ms, $Error, void **result, $Done)")
+  val alterGroupOffsets =
+    f(
+      "int xkafka_async_admin_alter_group_offsets(void *client, const char *group, const char **topics, const int32_t *partitions, " +
+        "const int64_t *offsets, const int32_t *leader_epochs, const char **metadata, size_t count, int timeout_ms, int32_t *codes, " +
+        s"$Error, int32_t *result, $Done)"
+    )
+  val deleteGroupOffsets =
+    f(
+      s"int xkafka_async_admin_delete_group_offsets(void *client, const char *group, $PartitionNames, int timeout_ms, int32_t *codes, $Error, " +
+        s"int32_t *result, $Done)"
+    )
+  val deleteGroups =
+    f(
+      s"int xkafka_async_admin_delete_groups(void *client, const char **groups, size_t count, int timeout_ms, int32_t *codes, $Error, " +
+        s"int32_t *result, $Done)"
+    )
+  val alterTopicConfigs =
+    f(
+      "int xkafka_async_admin_alter_topic_configs(void *client, const char **topics, const char **names, const char **values, " +
+        s"const int32_t *operations, size_t count, int timeout_ms, $Error, void **result, $Done)"
+    )
+  val electPreferredLeaders =
+    f(
+      s"int xkafka_async_admin_elect_preferred_leaders(void *client, $PartitionNames, int timeout_ms, int32_t *codes, $Error, int32_t *result, $Done)"
+    )
 
 private[librdkafka] object Shim:
   /** The callback type every `async` function reports through. */

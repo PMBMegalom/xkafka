@@ -143,11 +143,11 @@ final class CommitRecoverySuite extends CatsEffectSuite:
       random <- Random.scalaUtilRandom[IO]
       checking =
         new OffsetCommitter[IO]:
-          override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.raiseError(retriableFailure)
+          override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.raiseError(retriableFailure)
 
-          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): IO[Unit] =
-            checks.update(_ + 1) *> commit(offsets.view.mapValues(_._1).toMap)
-      outcome  <- CommitRecovery.recovering(checking, policy, random).commitLeased(offsets.view.mapValues(_ -> None).toMap).attempt
+          override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): IO[Unit] =
+            checks.update(_ + 1) *> commitWithMetadata(offsets.view.mapValues(_._1).toMap)
+      outcome  <- CommitRecovery.recovering(checking, policy, random).commitLeased(offsets.view.mapValues(OffsetAndMetadata(_) -> None).toMap).attempt
       observed <- checks.get
     yield
       // One first attempt and three retries, each checked again rather than checked once around all of them.
@@ -194,7 +194,7 @@ final class CommitRecoverySuite extends CatsEffectSuite:
 
   private def managedCommitter(acquire: IO[GroupHandle], release: IO[Unit]): OffsetCommitter[IO] =
     new OffsetCommitter[IO]:
-      override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
 
       override private[xkafka] val membership: GroupMembership[IO] = GroupMembership.Backend(acquire, _ => release)
 
@@ -212,7 +212,7 @@ final class CommitRecoverySuite extends CatsEffectSuite:
   /** Fails its first `failures` commits and succeeds afterwards, counting every attempt. */
   private def failing(attempts: Ref[IO, Int], failures: Int, failure: Throwable): OffsetCommitter[IO] =
     new OffsetCommitter[IO]:
-      override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] =
+      override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] =
         attempts.updateAndGet(_ + 1).flatMap(attempt => IO.raiseError(failure).whenA(attempt <= failures))
 
       override private[xkafka] val membership: GroupMembership[IO] = GroupMembership.Backend(IO.pure(TestGroupHandle), _ => IO.unit)

@@ -57,7 +57,7 @@ final class ConsumerThreadSuite extends FunSuite:
     val taken = answer(thread.takeRebalances)
     assertEquals(taken.map(rebalance => rebalance.kind -> rebalance.partitions), List(ConsumerThread.Assigned -> List(LeaseKey(topic, 0))))
     assertEquals(answer(thread.call(_.assignment.asScala.toSet)), Set(partition))
-    answer(thread.apply(taken.head))
+    answer(thread.apply(taken.head, _ => ()))
     // The records the poll went on to return once the listener was done reach the next poll.
     assertEquals(answer(thread.poll(Duration.ofSeconds(5))).map(_.offset), List(0L))
     answer(thread.close)

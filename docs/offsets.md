@@ -7,6 +7,23 @@ policy stay in the calling effect.
 A successful `record.offset.commit` stores `record.offset.nextOffset`, the
 offset after the one just handled.
 
+## Leader epoch and metadata
+
+An offset commits with the leader epoch of the record it was read with. It can
+also carry text of your own, which the broker stores beside it and `committed`
+returns:
+
+```scala
+record.offset.withMetadata("processed by worker 3").commit
+```
+
+The broker keeps no difference between empty metadata and none, so empty means
+none. It refuses metadata longer than its `offset.metadata.max.bytes`, 4096
+bytes by default, and the commit fails with `ErrorCode.OffsetMetadataTooLarge`.
+A batch keeps the metadata of the offset it keeps, and a
+[transaction](transactions.md) stores both the epoch and the metadata of the
+offsets it records.
+
 ## Batches
 
 Offsets can be accumulated and committed together while the consumer resource
@@ -16,8 +33,8 @@ is active:
 CommittableOffsetBatch.fromFoldable(offsets).commit
 ```
 
-A batch keeps only the greatest next offset for each topic-partition, and makes
-one backend commit per originating consumer.
+A batch keeps only the greatest next offset for each topic-partition, and
+commits once for each consumer its offsets came from.
 
 ## Offsets and rebalances
 
@@ -40,10 +57,15 @@ How many offsets a rebalance affects depends on the partition assignment strateg
   them again, so offsets read before any rebalance are refused, even for the
   partitions the consumer keeps.
 - With a cooperative strategy, only the partitions that move are revoked, so
-  offsets for the partitions a consumer keeps can still be committed.
+  offsets for the partitions a consumer keeps can still be committed. Choose
+  one through the `partition.assignment.strategy` property:
+  `org.apache.kafka.clients.consumer.CooperativeStickyAssignor` on the JVM, and
+  `cooperative-sticky` on Scala.js and Native.
 
 `committer.commit(offsets)` takes offsets that did not come from a record, so it
 can only check that the consumer owns each partition at the time of the commit.
+It commits them with no leader epoch and no metadata;
+`committer.commitWithMetadata` takes an `OffsetAndMetadata` for each partition.
 
 To turn fencing off:
 
@@ -54,6 +76,75 @@ settings.withoutAssignmentFencing
 Without fencing, an offset read before a rebalance can still be committed after its
 partition has moved to another consumer, which moves that partition back to an
 earlier position.
+
+## Committing before a partition moves
+
+When a partition moves, the records your consumer is still handling from it can
+no longer be committed, so the consumer that gets the partition reads them
+again. Rebalance-safe commits give those records time to be committed first:
+
+```scala
+settings.withRebalanceSafeCommits(30.seconds)
+```
+
+Before the consumer gives up a partition, it waits until every record it has
+handed out from that partition is committed, for at most the limit. While it
+waits:
+
+- committing those records succeeds, one at a time, in a batch, or in a
+  [transaction](transactions.md) once the transaction commits;
+- the consumer hands out no further records of that partition, and the consumer
+  that gets the partition reads them instead;
+- the rest of the group waits for the rebalance to finish.
+
+Keep the limit short for that last reason. It must be less than
+`maxPollInterval`.
+
+If the limit passes with records still uncommitted, the consumer gives up the
+partition anyway, and those records are read again. To stop consuming instead:
+
+```scala
+settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail)
+```
+
+The record stream then fails with `KafkaException.UncommittedRevocation`, whose
+`topicPartitions` names the partitions that still had records uncommitted.
+
+A consumer that has already been removed from its group, for instance because
+it went longer than `maxPollInterval` without fetching, gives up its partitions
+without waiting. Committing a record it read before it was removed fails with
+`ErrorCode.UnknownMemberId`. If it was the group's only member, the broker may
+already have removed the empty group, and the commit fails with
+`ErrorCode.GroupIdNotFound` instead.
+
+## Starting from offsets you keep
+
+An application that stores how far it has got itself, for example in the same
+database transaction as its results, can tell the consumer where each partition
+starts:
+
+```scala
+settings.withStartingOffsets(10.seconds): partitions =>
+  loadPositions(partitions) // F[Map[TopicPartition, StartingOffset]]
+```
+
+The consumer calls the function with the partitions each rebalance assigns,
+before it reads any of their records, and once at the start with partitions
+named directly. Each partition it answers for starts at the offset given, and
+no earlier record of it is handed out. A `StartingOffset` can also carry the
+leader epoch of the last record you handled, `record.offset.leaderEpoch`, if
+you stored it.
+
+- A partition the function answers nothing for starts as it would without the
+  function: at its committed offset, or where `autoOffsetReset` says if it has
+  none.
+- An offset past the end of the partition also starts where `autoOffsetReset`
+  says.
+- The function must answer within its limit, which must be less than
+  `maxPollInterval`. If it fails or passes the limit, the record stream fails,
+  with the function's own failure or with
+  `KafkaException.StartingOffsetsTimedOut`. For partitions named directly,
+  creating the consumer fails instead.
 
 ## Committing on a schedule
 
@@ -109,7 +200,7 @@ attempts, the offsets that were not committed, and the failure from the last
 attempt.
 
 @:callout(info)
-Recovery wraps the committer, so it applies wherever a commit happens: a single
+The recovery policy applies wherever a commit happens: a single
 `CommittableOffset.commit`, a batch, `commitBatchWithin`, and `consumeChunk`.
 @:@
 

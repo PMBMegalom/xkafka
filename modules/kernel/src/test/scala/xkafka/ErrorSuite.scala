@@ -55,6 +55,15 @@ final class ErrorSuite extends FunSuite:
     assertEquals(ErrorCode.fromProtocol(90), ErrorCode.Fenced)
     assertEquals(ErrorCode.fromProtocol(82), ErrorCode.Fenced)
     assert(!ErrorCode.Fenced.retriable && !ErrorCode.Purged.retriable && !ErrorCode.InvalidProducerEpoch.retriable)
+    assertEquals(ErrorCode.fromProtocol(40), ErrorCode.InvalidConfiguration)
+    assertEquals(ErrorCode.fromProtocol(12), ErrorCode.OffsetMetadataTooLarge)
+    assert(!ErrorCode.OffsetMetadataTooLarge.retriable)
+    assert(!ErrorCode.InvalidConfiguration.retriable)
+    assertEquals(ErrorCode.fromProtocol(69), ErrorCode.GroupIdNotFound)
+    assert(!ErrorCode.GroupIdNotFound.retriable)
+    assertEquals(ErrorCode.fromProtocol(68), ErrorCode.NonEmptyGroup)
+    assertEquals(ErrorCode.fromProtocol(86), ErrorCode.GroupSubscribedToTopic)
+    assert(!ErrorCode.NonEmptyGroup.retriable && !ErrorCode.GroupSubscribedToTopic.retriable)
 
   test("librdkafka client-side codes map onto the portable ones"):
     assertEquals(ErrorCode.fromLibrdkafka(-195), ErrorCode.NetworkException)

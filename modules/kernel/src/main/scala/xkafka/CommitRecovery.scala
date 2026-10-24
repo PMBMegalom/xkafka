@@ -32,7 +32,8 @@ import cats.syntax.all.*
   *
   * A commit fails for two kinds of reason. Some say the broker is moving, such as a coordinator that is loading or a group that is rebalancing, and
   * those are worth trying again. The rest say the commit will never be accepted, and retrying one only delays the failure. Only the first kind is
-  * retried, and `ErrorCode.retriable` is what decides which is which, so every backend retries the same conditions.
+  * retried, and `ErrorCode.retriable` decides which is which, so every platform retries the same conditions. A retriable failure that outlasts the
+  * policy fails as `KafkaException.CommitFailed`; any other failure fails as reported.
   *
   * The delay before attempt `n` grows from `initialDelay` by doubling, stops growing at `maxDelay`, and is then spread by `jitter` so that consumers
   * hitting one condition together do not return together. Spreading happens after the cap, so a delay may exceed `maxDelay` by that fraction.
@@ -51,10 +52,10 @@ sealed abstract case class CommitRecovery private (maxAttempts: Int, initialDela
     if maxAttempts == 0 then "none" else s"exponential(maxAttempts=$maxAttempts, initialDelay=$initialDelay, maxDelay=$maxDelay, jitter=$jitter)"
 
 object CommitRecovery:
-  /** Ten attempts, doubling from 10ms, held at 10s, spread by a fifth. */
+  /** Ten retries after the first failure, doubling from 10ms, held at 10s, spread by a fifth. */
   val Default: CommitRecovery = new CommitRecovery(10, 10.millis, 10.seconds, 0.2) {}
 
-  /** A failed commit fails. */
+  /** Never retries: a failed commit fails as reported. */
   val none: CommitRecovery = new CommitRecovery(0, 10.millis, 10.seconds, 0d) {}
 
   /** @param maxAttempts
@@ -90,13 +91,14 @@ object CommitRecovery:
     if policy.maxAttempts == 0 then committer
     else
       new OffsetCommitter[F]:
-        override def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = retrying(offsets, committer.commit(offsets), 1)
+        override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
+          retrying(offsets.view.mapValues(_.offset).toMap, committer.commitWithMetadata(offsets), 1)
 
         /** Each attempt goes through the committer's own check, so a partition revoked during a backoff fails the next attempt instead of being held
           * across every retry.
           */
-        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] =
-          retrying(offsets.view.mapValues(_._1).toMap, committer.commitLeased(offsets), 1)
+        override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): F[Unit] =
+          retrying(offsets.view.mapValues(_._1.offset).toMap, committer.commitLeased(offsets), 1)
 
         /** The membership travels with the committer, so a transaction still reaches the group these offsets came from. */
         override private[xkafka] def membership: GroupMembership[F] = committer.membership

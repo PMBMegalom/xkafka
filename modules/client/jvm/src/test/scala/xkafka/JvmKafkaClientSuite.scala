@@ -97,6 +97,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         properties =>
           assertEquals(properties.get("bootstrap.servers"), Some("unused:9092"))
           assertEquals(properties.get("client.id"), Some("client"))
+          // The producer's own properties override the client's.
+          assertEquals(properties.get("retry.backoff.ms"), Some("2"))
           assertEquals(properties.get("compression.type"), Some("lz4"))
           // A value other than the default, so this proves the mapping rather than agreeing with it by chance.
           assertEquals(properties.get("acks"), Some("1"))
@@ -112,10 +114,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val valueSerializer =
       Serializer.instance[IO, String]: (_, _, value) =>
         IO.pure(Some(Chunk.array(value.getBytes("UTF-8"))))
-    val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("compression.type" -> "gzip")).toOption.get
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), Some("client"), Map("retry.backoff.ms" -> "1")).toOption.get
     val settings =
-      ProducerSettings.from(client, keySerializer, valueSerializer, Map("compression.type" -> "lz4")).toOption.get.withoutIdempotence
-        .withAcks(Acks.Leader).toOption.get
+      ProducerSettings.from(client, keySerializer, valueSerializer, Map("retry.backoff.ms" -> "2"), compression = Compression.Lz4).toOption.get
+        .withoutIdempotence.withAcks(Acks.Leader).toOption.get
     val record =
       ProducerRecord(
         topic = topic,
@@ -132,10 +134,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(new String(produced.value(), StandardCharsets.UTF_8), "value")
       val headerKeys: List[String] = produced.headers().toArray.toList.map(_.key())
       assertEquals(headerKeys, List("trace", "trace"))
-      assertEquals(result.metadata.head.topicPartition, TopicPartition(topic, partition))
-      assertEquals(result.metadata.head.offset.map(_.value), Some(0L))
-      assertEquals(result.records.size, 1)
-      assert(result.records.forall((_, metadata) => metadata.isDefined))
+      assertEquals(result.head.metadata.topicPartition, TopicPartition(topic, partition))
+      assertEquals(result.head.metadata.offset.map(_.value), Some(0L))
+      assertEquals(result.size, 1)
 
   test("consumer delegates streaming and offset commits to the Java consumer"):
     val topic              = Topic.from("events").toOption.get
@@ -188,7 +189,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         consumed   <- consumer.records.take(1).compile.lastOrError
         assignment <- consumer.assignment
         _          <- consumed.offset.commit
-        committed  <- consumer.committed(Set(consumed.record.topicPartition))
+        committed  <- consumer.committed(Set(consumed.record.topicPartition)).map(_.offsetsOnly)
         beginning  <- consumer.beginningOffsets(Set(consumed.record.topicPartition))
         end        <- consumer.endOffsets(Set(consumed.record.topicPartition))
         timed      <- consumer.offsetsForTimes(Map(consumed.record.topicPartition -> Timestamp.fromEpochMillis(1234L)))
@@ -206,7 +207,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(beginning, Map(consumed.record.topicPartition -> consumed.record.offset))
         assertEquals(end, Map(consumed.record.topicPartition -> consumed.offset.nextOffset))
         assertEquals(timed, Map(consumed.record.topicPartition -> Some(consumed.record.offset)))
-        assertEquals(partitions, Set(consumed.record.topicPartition.partition))
+        assertEquals(partitions, NonEmptySet.one(consumed.record.topicPartition.partition))
         assertEquals(topics.get(topic), Some(partitions))
         assertEquals(position, 0L)
         // The consumer polls in slices within the poll timeout.
@@ -352,7 +353,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assert(!early, "the revocation went through while a transaction was still recording its offset")
         assertEquals(recorded, Right(()))
 
-  test("a transaction's offsets the group rejects as another generation's are classified the way librdkafka reports them"):
+  test("offsets the group rejects as another generation's, or refused outside the group, are classified the way librdkafka reports them"):
     // Worded as the Java client words it, which appends the broker's own description of its answer.
     def rejected(error: Errors) =
       new CommitFailedException(s"Transaction offset Commit failed due to consumer group metadata mismatch: ${error.exception.getMessage}")
@@ -360,6 +361,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       List(
         rejected(Errors.ILLEGAL_GENERATION) -> Some(ErrorCode.IllegalGeneration),
         rejected(Errors.UNKNOWN_MEMBER_ID)  -> Some(ErrorCode.UnknownMemberId),
+        // Worded as the Java client words a commit it refuses once the consumer has left its group.
+        new CommitFailedException(
+          "Offset commit cannot be completed since the consumer is not part of an active group for auto partition assignment; it is likely that the consumer was kicked out of the group."
+        ) -> Some(ErrorCode.UnknownMemberId),
         // Any other wording is left as before: Kafka's table has no entry for the exception, so it stays an unknown error.
         new CommitFailedException("the group has already rebalanced") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
       )
@@ -385,7 +390,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           override def nextOffset: Offset             = Offset.from(1L).toOption.get
           override def committer: OffsetCommitter[IO] =
             new OffsetCommitter[IO]:
-              override def commit(offsets: Map[TopicPartition, Offset]): IO[Unit] = IO.unit
+              override def commitWithMetadata(offsets: Map[TopicPartition, xkafka.OffsetAndMetadata]): IO[Unit] = IO.unit
           override private[xkafka] def membership: GroupMembership[IO] = readUnder
       mocked(producer = _ => mock).transactionalProducer(settings)
         .use(_.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(offset)))).attempt.map:
@@ -436,11 +441,13 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           else
             calls.add(method.getName): Unit
             throw new IllegalStateException(s"${method.getName} reached the Java client")
-    val admin    = java.lang.reflect.Proxy.newProxyInstance(classOf[Admin].getClassLoader, Array(classOf[Admin]), handler).asInstanceOf[Admin]
-    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
-    val topic    = Topic.from("events").toOption.get
-    val newTopic = NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get
-    val cut      = cats.data.NonEmptyMap.one(TopicPartition(topic, Partition.from(0).toOption.get), Offset.from(1L).toOption.get)
+    val admin     = java.lang.reflect.Proxy.newProxyInstance(classOf[Admin].getClassLoader, Array(classOf[Admin]), handler).asInstanceOf[Admin]
+    val client    = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val topic     = Topic.from("events").toOption.get
+    val newTopic  = NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get
+    val group     = ConsumerGroup.from("workers").toOption.get
+    val partition = TopicPartition(topic, Partition.from(0).toOption.get)
+    val cut       = cats.data.NonEmptyMap.one(partition, Offset.from(1L).toOption.get)
 
     mocked(admin = _ => admin).admin(client).use: client =>
       for
@@ -449,9 +456,20 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             client.createTopics(NonEmptySet.one(newTopic)),
             client.deleteTopics(NonEmptySet.one(topic)),
             client.createPartitions(topic, 2),
+            client.describeCluster,
             client.describeTopics(NonEmptySet.one(topic)),
             client.deleteRecords(cut),
-            client.describeTopicConfigurations(NonEmptySet.one(topic))
+            client.describeTopicConfigurations(NonEmptySet.one(topic)),
+            client
+              .alterTopicConfigurations(cats.data.NonEmptyMap.one(topic, cats.data.NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1000")))),
+            client.electPreferredLeaders(NonEmptySet.one(partition)),
+            client.listConsumerGroups,
+            client.describeConsumerGroups(NonEmptySet.one(group)),
+            client.listConsumerGroupOffsets(group),
+            client.listConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            client.alterConsumerGroupOffsets(group, cats.data.NonEmptyMap.one(partition, xkafka.OffsetAndMetadata(Offset.from(1L).toOption.get))),
+            client.deleteConsumerGroupOffsets(group, NonEmptySet.one(partition)),
+            client.deleteConsumerGroups(NonEmptySet.one(group))
           ))
         before <- IO.delay(calls.asScala.toList)
         _      <- built.traverse_(_.attempt)
@@ -460,8 +478,25 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(before, Nil, "building the effects should not call the Java client")
         assertEquals(
           calls.asScala.toList,
-          // Describing topics lists them first, and deleting records stops at looking up its topic, which the proxy refuses.
-          List.fill(2)(List("createTopics", "deleteTopics", "createPartitions", "listTopics", "describeTopics", "describeConfigs")).flatten,
+          // Deleting records stops at looking up its topic, which the proxy refuses.
+          List.fill(2)(List(
+            "createTopics",
+            "deleteTopics",
+            "createPartitions",
+            "describeCluster",
+            "describeTopics",
+            "describeTopics",
+            "describeConfigs",
+            "incrementalAlterConfigs",
+            "electLeaders",
+            "listGroups",
+            "describeConsumerGroups",
+            "listConsumerGroupOffsets",
+            "listConsumerGroupOffsets",
+            "alterConsumerGroupOffsets",
+            "deleteConsumerGroupOffsets",
+            "deleteConsumerGroups"
+          )).flatten,
           "each run should make its own call"
         )
 

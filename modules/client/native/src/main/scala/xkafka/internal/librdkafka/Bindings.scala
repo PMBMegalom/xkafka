@@ -72,11 +72,12 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_producer_poll(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
+  def xkafka_producer_poll(producer: CVoidPtr, timeoutMs: CInt): Unit  = extern
+  def xkafka_producer_flush(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
 
   def xkafka_batch_pending(batch: CVoidPtr): CSize = extern
 
-  def xkafka_batch_await(producer: CVoidPtr, batch: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
+  def xkafka_batch_error_at(producer: CVoidPtr, batch: CVoidPtr, index: CSize, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
 
   def xkafka_batch_count(batch: CVoidPtr): CSize = extern
 
@@ -111,7 +112,15 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_cooperative(consumer: CVoidPtr): CInt = extern
 
-  def xkafka_consumer_apply_rebalance(consumer: CVoidPtr, event: CVoidPtr): Unit = extern
+  def xkafka_consumer_apply_rebalance(
+      consumer: CVoidPtr,
+      event: CVoidPtr,
+      startTopics: Ptr[CString],
+      startPartitions: Ptr[CInt],
+      startOffsets: Ptr[CLongLong],
+      startLeaderEpochs: Ptr[CInt],
+      startCount: CSize
+  ): Unit = extern
 
   def xkafka_subscription_new(count: CSize): CVoidPtr = extern
 
@@ -133,6 +142,10 @@ private[xkafka] object Bindings:
   def xkafka_message_offset(message: CVoidPtr): CLongLong = extern
 
   def xkafka_message_timestamp(message: CVoidPtr): CLongLong = extern
+
+  def xkafka_message_timestamp_type(message: CVoidPtr): CInt = extern
+
+  def xkafka_message_leader_epoch(message: CVoidPtr): CInt = extern
 
   def xkafka_message_key(message: CVoidPtr): CVoidPtr = extern
 
@@ -168,12 +181,19 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       count: CSize,
-      offsets: Ptr[CLongLong],
       timeoutMs: CInt,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]
-  ): CInt = extern
+  ): CVoidPtr = extern
+
+  def xkafka_committed_offset_at(committed: CVoidPtr, index: CSize): CLongLong = extern
+
+  def xkafka_committed_leader_epoch_at(committed: CVoidPtr, index: CSize): CInt = extern
+
+  def xkafka_committed_metadata_at(committed: CVoidPtr, index: CSize, size: Ptr[CSize]): CVoidPtr = extern
+
+  def xkafka_committed_destroy(committed: CVoidPtr): Unit = extern
 
   def xkafka_consumer_position(
       consumer: CVoidPtr,
@@ -304,6 +324,31 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  def xkafka_admin_alter_topic_configs(
+      client: CVoidPtr,
+      topics: Ptr[CString],
+      names: Ptr[CString],
+      values: Ptr[CString],
+      operations: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_admin_elect_preferred_leaders(
+      client: CVoidPtr,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_configs_resource_count(configs: CVoidPtr): CSize = extern
 
   def xkafka_configs_resource_name(configs: CVoidPtr, resourceIndex: CSize): CString = extern
@@ -326,11 +371,188 @@ private[xkafka] object Bindings:
 
   def xkafka_configs_destroy(configs: CVoidPtr): Unit = extern
 
+  def xkafka_admin_describe_cluster(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
+
+  def xkafka_cluster_id(cluster: CVoidPtr): CString = extern
+
+  def xkafka_cluster_controller(cluster: CVoidPtr): CVoidPtr = extern
+
+  def xkafka_cluster_broker_count(cluster: CVoidPtr): CSize = extern
+
+  def xkafka_cluster_broker_at(cluster: CVoidPtr, index: CSize): CVoidPtr = extern
+
+  def xkafka_cluster_destroy(cluster: CVoidPtr): Unit = extern
+
+  def xkafka_node_id(node: CVoidPtr): CInt = extern
+
+  def xkafka_node_host(node: CVoidPtr): CString = extern
+
+  def xkafka_node_port(node: CVoidPtr): CInt = extern
+
+  def xkafka_node_rack(node: CVoidPtr): CString = extern
+
+  def xkafka_admin_describe_topics(
+      client: CVoidPtr,
+      names: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_topics_count(topics: CVoidPtr): CSize = extern
+
+  def xkafka_topic_name(topics: CVoidPtr, topic: CSize): CString = extern
+
+  def xkafka_topic_error(topics: CVoidPtr, topic: CSize): CInt = extern
+
+  def xkafka_topic_error_string(topics: CVoidPtr, topic: CSize): CString = extern
+
+  def xkafka_topic_id_most(topics: CVoidPtr, topic: CSize): CLongLong = extern
+
+  def xkafka_topic_id_least(topics: CVoidPtr, topic: CSize): CLongLong = extern
+
+  def xkafka_topic_internal(topics: CVoidPtr, topic: CSize): CInt = extern
+
+  def xkafka_topic_partition_count(topics: CVoidPtr, topic: CSize): CSize = extern
+
+  def xkafka_topic_partition_at(topics: CVoidPtr, topic: CSize, partition: CSize): CInt = extern
+
+  def xkafka_topic_partition_leader(topics: CVoidPtr, topic: CSize, partition: CSize): CInt = extern
+
+  def xkafka_topic_replica_count(topics: CVoidPtr, topic: CSize, partition: CSize): CSize = extern
+
+  def xkafka_topic_replica_at(topics: CVoidPtr, topic: CSize, partition: CSize, replica: CSize): CInt = extern
+
+  def xkafka_topic_in_sync_count(topics: CVoidPtr, topic: CSize, partition: CSize): CSize = extern
+
+  def xkafka_topic_in_sync_at(topics: CVoidPtr, topic: CSize, partition: CSize, replica: CSize): CInt = extern
+
+  def xkafka_topics_destroy(topics: CVoidPtr): Unit = extern
+
+  def xkafka_admin_list_groups(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
+
+  def xkafka_groups_count(groups: CVoidPtr): CSize = extern
+
+  def xkafka_groups_id_at(groups: CVoidPtr, index: CSize): CString = extern
+
+  def xkafka_groups_state_at(groups: CVoidPtr, index: CSize): CInt = extern
+
+  def xkafka_groups_destroy(groups: CVoidPtr): Unit = extern
+
+  def xkafka_admin_describe_groups(
+      client: CVoidPtr,
+      groups: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_descriptions_count(descriptions: CVoidPtr): CSize = extern
+
+  def xkafka_description_group(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_error(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_error_string(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_simple(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_state(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_assignor(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_coordinator_id(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_coordinator_host(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_coordinator_port(descriptions: CVoidPtr, group: CSize): CInt = extern
+
+  def xkafka_description_coordinator_rack(descriptions: CVoidPtr, group: CSize): CString = extern
+
+  def xkafka_description_member_count(descriptions: CVoidPtr, group: CSize): CSize = extern
+
+  def xkafka_member_id(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_instance_id(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_client_id(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_host(descriptions: CVoidPtr, group: CSize, member: CSize): CString = extern
+
+  def xkafka_member_partition_count(descriptions: CVoidPtr, group: CSize, member: CSize): CSize = extern
+
+  def xkafka_member_topic_at(descriptions: CVoidPtr, group: CSize, member: CSize, index: CSize): CString = extern
+
+  def xkafka_member_partition_at(descriptions: CVoidPtr, group: CSize, member: CSize, index: CSize): CInt = extern
+
+  def xkafka_descriptions_destroy(descriptions: CVoidPtr): Unit = extern
+
+  def xkafka_admin_list_group_offsets(
+      client: CVoidPtr,
+      group: CString,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_admin_alter_group_offsets(
+      client: CVoidPtr,
+      group: CString,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      offsets: Ptr[CLongLong],
+      leaderEpochs: Ptr[CInt],
+      metadata: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_admin_delete_group_offsets(
+      client: CVoidPtr,
+      group: CString,
+      topics: Ptr[CString],
+      partitions: Ptr[CInt],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
+  def xkafka_admin_delete_groups(
+      client: CVoidPtr,
+      groups: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      codes: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_consumer_assign(
       consumer: CVoidPtr,
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       count: CSize,
+      startTopics: Ptr[CString],
+      startPartitions: Ptr[CInt],
+      startOffsets: Ptr[CLongLong],
+      startLeaderEpochs: Ptr[CInt],
+      startCount: CSize,
       error: CString,
       errorSize: CSize,
       errorCode: Ptr[CInt]
@@ -420,6 +642,8 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       offsets: Ptr[CLongLong],
+      leaderEpochs: Ptr[CInt],
+      offsetMetadata: Ptr[CString],
       count: CSize,
       timeoutMs: CInt,
       error: CString,
@@ -435,6 +659,8 @@ private[xkafka] object Bindings:
       topics: Ptr[CString],
       partitions: Ptr[CInt],
       offsets: Ptr[CLongLong],
+      leaderEpochs: Ptr[CInt],
+      metadata: Ptr[CString],
       count: CSize,
       timeoutMs: CInt,
       error: CString,

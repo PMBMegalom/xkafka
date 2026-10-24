@@ -31,9 +31,9 @@ import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.{Chunk, Pipe, Stream}
 
-/** Backend property names xkafka derives from the typed settings.
+/** Kafka property names xkafka sets from the typed settings.
   *
-  * Settings construction rejects them, so the portable model stays the single source for these values.
+  * Passing one through `properties` or `withProperty` fails as `SettingsError.ManagedProperty`; use the typed setting instead.
   */
 val ManagedProperties: Set[String] =
   Set(
@@ -49,6 +49,15 @@ val ManagedProperties: Set[String] =
     "isolation.level",
     "transactional.id",
     "transaction.timeout.ms",
+    "compression.type",
+    "compression.codec",
+    "linger.ms",
+    "group.instance.id",
+    "session.timeout.ms",
+    "heartbeat.interval.ms",
+    "max.poll.interval.ms",
+    "batch.size",
+    "queue.buffering.max.ms",
     "default.api.timeout.ms",
     "metadata.max.age.ms",
     "topic.metadata.refresh.interval.ms",
@@ -63,7 +72,17 @@ val ManagedProperties: Set[String] =
     "ssl.truststore.location",
     "ssl.truststore.certificates",
     "ssl.truststore.type",
-    "ssl.endpoint.identification.algorithm"
+    "ssl.endpoint.identification.algorithm",
+    "ssl.keystore.type",
+    "ssl.keystore.location",
+    "ssl.keystore.password",
+    "ssl.keystore.key",
+    "ssl.keystore.certificate.chain",
+    "ssl.key.password",
+    "ssl.key.location",
+    "ssl.key.pem",
+    "ssl.certificate.location",
+    "ssl.certificate.pem"
   )
 
 enum SettingsError derives CanEqual:
@@ -72,35 +91,66 @@ enum SettingsError derives CanEqual:
   case BlankPropertyName(scope: SettingsError.PropertyScope)
   case ManagedProperty(name: String, scope: SettingsError.PropertyScope)
   case BlankCertificateAuthority
+  case BlankClientCertificate
+  case PrivateKeyNotPkcs8
+  case BlankKeyPassword
   case BlankSaslUsername
   case BlankSaslPassword
   case NonPositiveDuration(field: SettingsError.DurationField, value: FiniteDuration)
   case DurationExceedsMaximum(field: SettingsError.DurationField, value: FiniteDuration)
   case IdempotenceRequiresAllReplicas(acks: Acks)
+  case NegativeDuration(field: SettingsError.DurationField, value: FiniteDuration)
+  case DurationAboveLimit(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration)
+  case NonPositiveBatchSize(value: Int)
+  case BlankGroupInstanceId
+  case HeartbeatNotBelowSessionTimeout(heartbeatInterval: FiniteDuration, sessionTimeout: FiniteDuration)
+  case MaxPollIntervalBelowSessionTimeout(maxPollInterval: FiniteDuration, sessionTimeout: FiniteDuration)
+  case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
+  case StartingOffsetsLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
 
   def message: String =
     this match
-      case BlankBootstrapServer(index)          => s"bootstrapServers[$index] must not be blank"
-      case InvalidBootstrapServer(index, value) => s"bootstrapServers[$index] must be host:port, was '$value'"
-      case BlankPropertyName(scope)             => s"${scope.label} properties must not contain a blank name"
-      case ManagedProperty(name, scope)         => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
-      case BlankCertificateAuthority            => "certificate authority must not be blank"
-      case BlankSaslUsername                    => "SASL username must not be blank"
-      case BlankSaslPassword                    => "SASL password must not be blank"
-      case NonPositiveDuration(field, value)    => s"${field.label} must be positive, was $value"
-      case DurationExceedsMaximum(field, value) => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
-      case IdempotenceRequiresAllReplicas(acks) => s"acks must be AllReplicas while idempotence is on, was $acks"
+      case BlankBootstrapServer(index)             => s"bootstrapServers[$index] must not be blank"
+      case InvalidBootstrapServer(index, value)    => s"bootstrapServers[$index] must be host:port, was '$value'"
+      case BlankPropertyName(scope)                => s"${scope.label} properties must not contain a blank name"
+      case ManagedProperty(name, scope)            => s"${scope.label} property '$name' is managed by xkafka and must be set through typed settings"
+      case BlankCertificateAuthority               => "certificate authority must not be blank"
+      case BlankClientCertificate                  => "client certificate must not be blank"
+      case PrivateKeyNotPkcs8                      => "client private key must be PKCS#8, a PEM PRIVATE KEY or ENCRYPTED PRIVATE KEY"
+      case BlankKeyPassword                        => "client key password must not be empty; leave it out for a key that has none"
+      case BlankSaslUsername                       => "SASL username must not be blank"
+      case BlankSaslPassword                       => "SASL password must not be blank"
+      case NonPositiveDuration(field, value)       => s"${field.label} must be positive, was $value"
+      case DurationExceedsMaximum(field, value)    => s"${field.label} must not exceed ${SettingsError.MaxDuration}, was $value"
+      case IdempotenceRequiresAllReplicas(acks)    => s"acks must be AllReplicas while idempotence is on, was $acks"
+      case NegativeDuration(field, value)          => s"${field.label} must not be negative, was $value"
+      case DurationAboveLimit(field, value, limit) => s"${field.label} must not exceed $limit, was $value"
+      case NonPositiveBatchSize(value)             => s"batchSize must be positive, was $value"
+      case BlankGroupInstanceId                    => "group instance id must not be blank"
+      case HeartbeatNotBelowSessionTimeout(heartbeat, session) =>
+        s"heartbeatInterval must be less than sessionTimeout, was $heartbeat against $session"
+      case MaxPollIntervalBelowSessionTimeout(maxPoll, session) => s"maxPollInterval must be at least sessionTimeout, was $maxPoll against $session"
+      case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit, maxPoll) =>
+        s"the rebalance-safe commit limit must be less than maxPollInterval, was $limit against $maxPoll"
+      case StartingOffsetsLimitNotBelowMaxPollInterval(limit, maxPoll) =>
+        s"the starting offsets limit must be less than maxPollInterval, was $limit against $maxPoll"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
 
   enum DurationField(val label: String) derives CanEqual:
-    case MetadataRefreshInterval extends DurationField("metadataRefreshInterval")
-    case CloseTimeout            extends DurationField("closeTimeout")
-    case TransactionTimeout      extends DurationField("transactionTimeout")
-    case CommitTimeout           extends DurationField("commitTimeout")
-    case PollTimeout             extends DurationField("pollTimeout")
-    case RequestTimeout          extends DurationField("requestTimeout")
+    case MetadataRefreshInterval  extends DurationField("metadataRefreshInterval")
+    case CloseTimeout             extends DurationField("closeTimeout")
+    case TransactionTimeout       extends DurationField("transactionTimeout")
+    case CommitTimeout            extends DurationField("commitTimeout")
+    case PollTimeout              extends DurationField("pollTimeout")
+    case RequestTimeout           extends DurationField("requestTimeout")
+    case Linger                   extends DurationField("linger")
+    case SessionTimeout           extends DurationField("sessionTimeout")
+    case HeartbeatInterval        extends DurationField("heartbeatInterval")
+    case MaxPollInterval          extends DurationField("maxPollInterval")
+    case RebalanceSafeCommitLimit extends DurationField("rebalanceSafeCommits.limit")
+    case StartingOffsetsLimit     extends DurationField("startingOffsets.limit")
 
   enum PropertyScope(val label: String) derives CanEqual:
     case Client   extends PropertyScope("client")
@@ -120,6 +170,18 @@ private def propertyErrors(properties: Map[String, String], scope: SettingsError
 private def durationErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > SettingsError.MaxDuration then List(SettingsError.DurationExceedsMaximum(field, value))
+  else Nil
+
+/** Checks a positive duration both backends accept up to a limit, which is the lower of their two maximums. */
+private def limitedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
+  if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
+  else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
+  else Nil
+
+/** Checks a duration both backends accept from zero up to a limit, which is the lower of their two maximums. */
+private def boundedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
+  if value < Duration.Zero then List(SettingsError.NegativeDuration(field, value))
+  else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
   else Nil
 
 /** Accepts `host:port`, including bracketed IPv6 literals, so an unusable endpoint is caught at construction. */
@@ -153,7 +215,7 @@ sealed abstract case class ClientSettings private (
   def withSecurity(value: SecuritySettings): ClientSettings =
     new ClientSettings(bootstrapServers, clientId, properties, value, metadataRefreshInterval) {}
 
-  /** How long a topic created after a client started can stay unseen. */
+  /** How often the client refreshes what it knows of the cluster, which bounds how long a topic created after it started can stay unseen. */
   def withMetadataRefreshInterval(value: FiniteDuration): ValidatedNel[SettingsError, ClientSettings] =
     ClientSettings.from(bootstrapServers, clientId, properties, security, value)
 
@@ -188,41 +250,79 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
     properties: Map[String, String],
     acks: Acks,
     closeTimeout: FiniteDuration,
-    idempotence: Boolean
+    idempotence: Boolean,
+    compression: Compression,
+    linger: FiniteDuration,
+    batchSize: Option[Int]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ProducerSettings[G, K, V] =
-    new ProducerSettings(client, keySerializer.mapK(fk), valueSerializer.mapK(fk), properties, acks, closeTimeout, idempotence) {}
+    new ProducerSettings(
+      client,
+      keySerializer.mapK(fk),
+      valueSerializer.mapK(fk),
+      properties,
+      acks,
+      closeTimeout,
+      idempotence,
+      compression,
+      linger,
+      batchSize
+    ) {}
 
   def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
-    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence) {}
+    new ProducerSettings(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize) {}
 
   /** How many replicas must have a record before the broker answers for it. Anything short of `AllReplicas` needs idempotence turned off first. */
   def withAcks(value: Acks): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, value, closeTimeout, idempotence, compression, linger, batchSize)
 
   /** Turns on Kafka's idempotent producer, `enable.idempotence`, which is the default. It needs `acks` to be `AllReplicas`. */
   def withIdempotence: ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence = true)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, true, compression, linger, batchSize)
 
   /** Turns off Kafka's idempotent producer, `enable.idempotence`, which any `acks` short of `AllReplicas` needs. */
   def withoutIdempotence: ProducerSettings[F, K, V] =
-    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, false) {}
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, false, compression, linger, batchSize) {}
 
   /** How long releasing a producer waits to deliver the records it has already accepted, before dropping whatever is left. */
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value, idempotence)
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, value, idempotence, compression, linger, batchSize)
+
+  /** How record batches are compressed on their way to the broker. */
+  def withCompression(value: Compression): ProducerSettings[F, K, V] =
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, value, linger, batchSize) {}
+
+  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
+  def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value, batchSize)
+
+  /** The most bytes of records one batch holds before it is sent without waiting out the linger. */
+  def withBatchSize(value: Int): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings.from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, Some(value))
+
+  /** Leaves the batch size to the backend, which is the default. */
+  def withoutBatchSize: ProducerSettings[F, K, V] =
+    new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, None) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
-    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence)
+    ProducerSettings.from(client, keySerializer, valueSerializer, values, acks, closeTimeout, idempotence, compression, linger, batchSize)
 
   /** The Kafka properties these settings own, spelled the same for both clients. */
-  private[xkafka] def managedProperties: Map[String, String] = Map("acks" -> acks.property, "enable.idempotence" -> idempotence.toString)
+  private[xkafka] def managedProperties: Map[String, String] =
+    Map(
+      "acks"               -> acks.property,
+      "enable.idempotence" -> idempotence.toString,
+      "compression.type"   -> compression.property,
+      "linger.ms"          -> linger.toMillis.toString
+    ) ++ batchSize.map(size => "batch.size" -> size.toString)
 
   override def toString: String =
-    s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(properties)},$acks,$closeTimeout,$idempotence)"
+    s"ProducerSettings($client,$keySerializer,$valueSerializer,${redacted(
+        properties
+      )},$acks,$closeTimeout,$idempotence,$compression,$linger,$batchSize)"
 
 object ProducerSettings:
   /** What both backends already ask for, and the only setting that survives losing a leader. */
@@ -231,6 +331,12 @@ object ProducerSettings:
   /** Long enough that a producer with records still in flight delivers them rather than dropping them on the way out. */
   val DefaultCloseTimeout: FiniteDuration = 60.seconds
 
+  /** What both backends wait by default. */
+  val DefaultLinger: FiniteDuration = 5.millis
+
+  /** The longest linger the settings accept. */
+  val LingerLimit: FiniteDuration = 15.minutes
+
   def from[F[_], K, V](
       client: ClientSettings,
       keySerializer: Serializer[F, K],
@@ -238,12 +344,19 @@ object ProducerSettings:
       properties: Map[String, String] = Map.empty,
       acks: Acks = ProducerSettings.DefaultAcks,
       closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout,
-      idempotence: Boolean = true
+      idempotence: Boolean = true,
+      compression: Compression = Compression.Uncompressed,
+      linger: FiniteDuration = ProducerSettings.DefaultLinger,
+      batchSize: Option[Int] = None
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
-        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks))
-    validateSettings(errors).map(_ => new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence) {})
+        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++
+        boundedDurationErrors(SettingsError.DurationField.Linger, linger, LingerLimit) ++ batchSize.filter(_ <= 0)
+          .map(SettingsError.NonPositiveBatchSize(_))
+    validateSettings(errors).map(_ =>
+      new ProducerSettings(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize) {}
+    )
 
   given [K, V]: FunctorK[[F[_]] =>> ProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: ProducerSettings[F, K, V])(fk: FunctionK[F, G]): ProducerSettings[G, K, V] = settings.mapK(fk)
@@ -251,7 +364,7 @@ object ProducerSettings:
 /** Kafka requires idempotence of every transactional producer, so each backend asks for it outright. */
 private[xkafka] val TransactionalIdempotence: (String, String) = "enable.idempotence" -> "true"
 
-/** A producer that writes inside transactions, which is all it writes, so these settings build a producer of their own. */
+/** Settings for a producer that writes only inside transactions. It always waits for every in-sync replica and is always idempotent. */
 sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     producer: ProducerSettings[F, K, V],
     transactionalId: TransactionalId,
@@ -263,7 +376,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withClient(value: ClientSettings): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withClient(value), transactionalId, transactionTimeout) {}
 
-  /** Kafka's `transaction.timeout.ms`. */
+  /** How long the broker lets a transaction stay open before it aborts it, Kafka's `transaction.timeout.ms`. */
   def withTransactionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, value))
       .map(_ => new TransactionalProducerSettings(producer, transactionalId, value) {})
@@ -271,6 +384,22 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   /** How long releasing the producer waits for records it has not delivered yet. */
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     producer.withCloseTimeout(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
+  /** How record batches are compressed on their way to the broker. */
+  def withCompression(value: Compression): TransactionalProducerSettings[F, K, V] =
+    new TransactionalProducerSettings(producer.withCompression(value), transactionalId, transactionTimeout) {}
+
+  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
+  def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withLinger(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
+  /** The most bytes of records one batch holds before it is sent without waiting out the linger. */
+  def withBatchSize(value: Int): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withBatchSize(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+
+  /** Leaves the batch size to the backend, which is the default. */
+  def withoutBatchSize: TransactionalProducerSettings[F, K, V] =
+    new TransactionalProducerSettings(producer.withoutBatchSize, transactionalId, transactionTimeout) {}
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     withProperties(producer.properties.updated(name, value))
@@ -289,10 +418,22 @@ object TransactionalProducerSettings:
       valueSerializer: Serializer[F, V],
       transactionTimeout: FiniteDuration = TransactionalProducerSettings.DefaultTransactionTimeout,
       properties: Map[String, String] = Map.empty,
-      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout
+      closeTimeout: FiniteDuration = ProducerSettings.DefaultCloseTimeout,
+      compression: Compression = Compression.Uncompressed,
+      linger: FiniteDuration = ProducerSettings.DefaultLinger,
+      batchSize: Option[Int] = None
   ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     (
-      ProducerSettings.from(client, keySerializer, valueSerializer, properties, closeTimeout = closeTimeout),
+      ProducerSettings.from(
+        client,
+        keySerializer,
+        valueSerializer,
+        properties,
+        closeTimeout = closeTimeout,
+        compression = compression,
+        linger = linger,
+        batchSize = batchSize
+      ),
       validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, transactionTimeout))
     ).mapN((producer, _) => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})
 
@@ -318,6 +459,28 @@ enum Acks:
   /** Every in-sync replica, which is the only one of the three that survives losing the leader. */
   case AllReplicas
 
+/** How a producer compresses its record batches. */
+enum Compression:
+  /** What both backends read this as, which is the same string on each of them. */
+  private[xkafka] def property: String =
+    this match
+      case Compression.Uncompressed => "none"
+      case Compression.Gzip         => "gzip"
+      case Compression.Snappy       => "snappy"
+      case Compression.Lz4          => "lz4"
+      case Compression.Zstd         => "zstd"
+
+  /** Batches are sent as they are, which is the default. */
+  case Uncompressed
+
+  case Gzip
+
+  case Snappy
+
+  case Lz4
+
+  case Zstd
+
 /** Where a consumer starts in a partition where its group has no committed offset, or where that offset is no longer in the partition's log. */
 enum AutoOffsetReset:
   /** At the first record still in the partition. */
@@ -337,6 +500,30 @@ enum IsolationLevel:
   /** A record written by a transaction is delivered once that transaction commits, and never where it aborts. */
   case ReadCommitted
 
+/** How long a consumer holds back the revocation of a partition for the records it handed out from it to be committed, and what happens if they still
+  * are not.
+  */
+final case class RebalanceSafeCommits(limit: FiniteDuration, atLimit: RebalanceSafeCommits.AtLimit)
+
+object RebalanceSafeCommits:
+  /** What a revocation does once it has waited `limit` with records still uncommitted. */
+  enum AtLimit derives CanEqual:
+    /** The revocation goes ahead, and whoever the partition goes to reads those records again. */
+    case Proceed
+
+    /** The revocation goes ahead, and the consumer's record stream fails as `KafkaException.UncommittedRevocation`. */
+    case Fail
+
+/** Where an assigned partition starts reading, with the leader epoch of the record before it where the application kept one. */
+final case class StartingOffset(offset: Offset, leaderEpoch: Option[LeaderEpoch] = None)
+
+/** Offsets an application keeps itself, which each partition assigned to a consumer starts from.
+  *
+  * `offsets` gets the partitions just assigned and answers with where each starts. It must answer within `limit`.
+  */
+final case class StartingOffsets[F[_]](offsets: Set[TopicPartition] => F[Map[TopicPartition, StartingOffset]], limit: FiniteDuration):
+  def mapK[G[_]](fk: FunctionK[F, G]): StartingOffsets[G] = StartingOffsets(partitions => fk(offsets(partitions)), limit)
+
 sealed abstract case class ConsumerSettings[F[_], K, V] private (
     client: ClientSettings,
     groupId: ConsumerGroup,
@@ -349,7 +536,13 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     pollTimeout: FiniteDuration,
     requestTimeout: FiniteDuration,
     properties: Map[String, String],
-    assignmentFencing: Boolean
+    assignmentFencing: Boolean,
+    groupInstanceId: Option[String],
+    sessionTimeout: Option[FiniteDuration],
+    heartbeatInterval: Option[FiniteDuration],
+    maxPollInterval: FiniteDuration,
+    rebalanceSafeCommits: Option[RebalanceSafeCommits],
+    startingOffsets: Option[StartingOffsets[F]]
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -364,190 +557,172 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       pollTimeout,
       requestTimeout,
       properties,
-      assignmentFencing
+      assignmentFencing,
+      groupInstanceId,
+      sessionTimeout,
+      heartbeatInterval,
+      maxPollInterval,
+      rebalanceSafeCommits,
+      startingOffsets.map(_.mapK(fk))
     ) {}
 
-  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      value,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
 
-  def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      value,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] = copied(groupId = value)
 
-  def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      value,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withAutoOffsetReset(value: AutoOffsetReset): ConsumerSettings[F, K, V] = copied(autoOffsetReset = value)
 
   /** Whether records of a transaction that has not committed are delivered. */
-  def withIsolationLevel(value: IsolationLevel): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      value,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withIsolationLevel(value: IsolationLevel): ConsumerSettings[F, K, V] = copied(isolationLevel = value)
 
   /** How long a commit waits for the broker before it fails as `ErrorCode.RequestTimedOut`, which the recovery policy retries. */
-  def withCommitTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      value,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    )
+  def withCommitTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(commitTimeout = value)
 
   /** How a failed offset commit is retried. */
-  def withCommitRecovery(value: CommitRecovery): ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      value,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    ) {}
+  def withCommitRecovery(value: CommitRecovery): ConsumerSettings[F, K, V] = copied(commitRecovery = value)
 
   /** Refuses offsets from a partition this consumer no longer owns, which is the default.
     *
     * An offset read before its partition was revoked fails to commit with `ErrorCode.IllegalGeneration`, whether it is committed on its own, in a
     * batch, or in a transaction.
     */
-  def withAssignmentFencing: ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      true
-    ) {}
+  def withAssignmentFencing: ConsumerSettings[F, K, V] = copied(assignmentFencing = true)
 
   /** Commits offsets even after their partition has moved to another consumer, which can move that partition back to an earlier position. */
-  def withoutAssignmentFencing: ConsumerSettings[F, K, V] =
-    new ConsumerSettings(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      requestTimeout,
-      properties,
-      false
-    ) {}
+  def withoutAssignmentFencing: ConsumerSettings[F, K, V] = copied(assignmentFencing = false)
 
-  /** How long one poll waits for records before it returns empty.
-    *
-    * It also bounds how long another call on the same consumer can queue behind a poll already in flight.
-    */
-  def withPollTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      value,
-      requestTimeout,
-      properties,
-      assignmentFencing
-    )
+  /** How long one poll waits for records before it returns empty. */
+  def withPollTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(pollTimeout = value)
 
   /** How long a call that asks the broker something waits for its answer.
     *
-    * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, and `seek`.
+    * It bounds `committed`, `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, `seek`, `seekToBeginning`, and
+    * `seekToEnd`.
     */
-  def withRequestTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    ConsumerSettings.from(
-      client,
-      groupId,
-      keyDeserializer,
-      valueDeserializer,
-      autoOffsetReset,
-      isolationLevel,
-      commitRecovery,
-      commitTimeout,
-      pollTimeout,
-      value,
-      properties,
-      assignmentFencing
-    )
+  def withRequestTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(requestTimeout = value)
+
+  /** Makes the consumer a static member of its group under this identity, Kafka's `group.instance.id`.
+    *
+    * A static member that is released, or stops, keeps its partitions until its session times out, so one that comes back under the same identity
+    * within the session timeout gets them back without the rest of the group rebalancing.
+    */
+  def withGroupInstanceId(value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(groupInstanceId = Some(value))
+
+  /** Makes the consumer a dynamic member of its group, which is the default: it leaves the group when it is released. */
+  def withoutGroupInstanceId: ConsumerSettings[F, K, V] = copied(groupInstanceId = None)
+
+  /** How long the group waits to hear from the consumer before it hands the consumer's partitions to the rest, from more than the heartbeat interval
+    * up to `ConsumerSettings.SessionTimeoutLimit`. The broker also bounds it, through `group.min.session.timeout.ms` and
+    * `group.max.session.timeout.ms`. Leave it unset under `group.protocol=consumer`, where the broker decides it: a consumer with one set fails as
+    * `ErrorCode.InvalidConfiguration`.
+    */
+  def withSessionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = Some(value))
+
+  /** Leaves the session timeout unset, which is the default, and is `ConsumerSettings.DefaultSessionTimeout` on every platform. */
+  def withoutSessionTimeout: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = None)
+
+  /** How often the consumer tells the group it is alive, which must be less than the session timeout. Leave it unset under `group.protocol=consumer`,
+    * where the broker decides it: a consumer with one set fails as `ErrorCode.InvalidConfiguration`.
+    */
+  def withHeartbeatInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    revalidated(heartbeatInterval = Some(value))
+
+  /** Leaves the heartbeat interval unset, which is the default, and is `ConsumerSettings.DefaultHeartbeatInterval` on every platform. */
+  def withoutHeartbeatInterval: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(heartbeatInterval = None)
+
+  /** How long the consumer can go without fetching records before it leaves its group and its partitions go to the others. Fetching stops while too
+    * many fetched records wait unread, so records left unread for this long make the consumer leave. It must be at least the session timeout, and at
+    * most `ConsumerSettings.MaxPollIntervalLimit`.
+    */
+  def withMaxPollInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollInterval = value)
+
+  /** Holds back the revocation of a partition until every record `records` handed out from it is committed, for at most `limit`, which must be less
+    * than the maximum poll interval.
+    *
+    * While it waits, the partition still belongs to this consumer, so those commits succeed, and the records of the partition that have not been
+    * handed out yet are dropped. A partition the group has already given away is let go at once, since nothing can be committed for it.
+    */
+  def withRebalanceSafeCommits(
+      limit: FiniteDuration,
+      atLimit: RebalanceSafeCommits.AtLimit = RebalanceSafeCommits.AtLimit.Proceed
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(rebalanceSafeCommits = Some(RebalanceSafeCommits(limit, atLimit)))
+
+  /** Lets a revocation go ahead without waiting for the records handed out to be committed, which is the default. With assignment fencing on, it
+    * still waits for commits and transactions already under way for the partition.
+    */
+  def withoutRebalanceSafeCommits: ConsumerSettings[F, K, V] = copied(rebalanceSafeCommits = None)
+
+  /** Starts each assigned partition at the offset `offsets` answers for it, which must answer within `limit`, itself less than the maximum poll
+    * interval.
+    *
+    * It is called with the partitions each rebalance assigns, before any of their records are fetched, and, for `Selection.Partitions`, once when the
+    * consumer is created. A partition it answers nothing for starts where it would without it. If it fails, or passes its limit as
+    * `KafkaException.StartingOffsetsTimedOut`, the record stream fails, or for `Selection.Partitions`, creating the consumer fails.
+    */
+  def withStartingOffsets(limit: FiniteDuration)(
+      offsets: Set[TopicPartition] => F[Map[TopicPartition, StartingOffset]]
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(startingOffsets = Some(StartingOffsets(offsets, limit)))
+
+  /** Starts each assigned partition at its committed offset, or where `autoOffsetReset` says, which is the default. */
+  def withoutStartingOffsets: ConsumerSettings[F, K, V] = copied(startingOffsets = None)
 
   def withProperty(name: String, value: String): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     withProperties(properties.updated(name, value))
 
-  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+  def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(properties = values)
+
+  /** The Kafka properties of group membership these settings own, spelled the same for both clients. A timeout left to the backend is not set, since
+    * both clients refuse one under `group.protocol=consumer`, where the broker decides it.
+    */
+  private[xkafka] def managedProperties: Map[String, String] =
+    Map("max.poll.interval.ms" -> maxPollInterval.toMillis.toString) ++ groupInstanceId.map("group.instance.id" -> _) ++
+      sessionTimeout.map(value => "session.timeout.ms" -> value.toMillis.toString) ++
+      heartbeatInterval.map(value => "heartbeat.interval.ms" -> value.toMillis.toString)
+
+  private def copied(
+      client: ClientSettings = client,
+      groupId: ConsumerGroup = groupId,
+      autoOffsetReset: AutoOffsetReset = autoOffsetReset,
+      isolationLevel: IsolationLevel = isolationLevel,
+      commitRecovery: CommitRecovery = commitRecovery,
+      assignmentFencing: Boolean = assignmentFencing,
+      groupInstanceId: Option[String] = groupInstanceId,
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits,
+      startingOffsets: Option[StartingOffsets[F]] = startingOffsets
+  ): ConsumerSettings[F, K, V] =
+    new ConsumerSettings(
+      client,
+      groupId,
+      keyDeserializer,
+      valueDeserializer,
+      autoOffsetReset,
+      isolationLevel,
+      commitRecovery,
+      commitTimeout,
+      pollTimeout,
+      requestTimeout,
+      properties,
+      assignmentFencing,
+      groupInstanceId,
+      sessionTimeout,
+      heartbeatInterval,
+      maxPollInterval,
+      rebalanceSafeCommits,
+      startingOffsets
+    ) {}
+
+  private def revalidated(
+      commitTimeout: FiniteDuration = commitTimeout,
+      pollTimeout: FiniteDuration = pollTimeout,
+      requestTimeout: FiniteDuration = requestTimeout,
+      properties: Map[String, String] = properties,
+      groupInstanceId: Option[String] = groupInstanceId,
+      sessionTimeout: Option[FiniteDuration] = sessionTimeout,
+      heartbeatInterval: Option[FiniteDuration] = heartbeatInterval,
+      maxPollInterval: FiniteDuration = maxPollInterval,
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits,
+      startingOffsets: Option[StartingOffsets[F]] = startingOffsets
+  ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     ConsumerSettings.from(
       client,
       groupId,
@@ -559,14 +734,21 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       commitTimeout,
       pollTimeout,
       requestTimeout,
-      values,
-      assignmentFencing
+      properties,
+      assignmentFencing,
+      groupInstanceId,
+      sessionTimeout,
+      heartbeatInterval,
+      maxPollInterval,
+      rebalanceSafeCommits,
+      startingOffsets
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
-      )},$assignmentFencing)"
+      )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval,$rebalanceSafeCommits,${startingOffsets
+        .map(value => s"StartingOffsets(${value.limit})")})"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -577,6 +759,24 @@ object ConsumerSettings:
 
   /** What Kafka's own clients wait for the same answers, through `default.api.timeout.ms`. */
   val DefaultRequestTimeout: FiniteDuration = 60.seconds
+
+  /** The session timeout both backends use when it is left to them. */
+  val DefaultSessionTimeout: FiniteDuration = 45.seconds
+
+  /** The heartbeat interval both backends use when it is left to them. */
+  val DefaultHeartbeatInterval: FiniteDuration = 3.seconds
+
+  /** What both backends use. */
+  val DefaultMaxPollInterval: FiniteDuration = 5.minutes
+
+  /** The longest session timeout the settings accept. */
+  val SessionTimeoutLimit: FiniteDuration = 1.hour
+
+  /** The longest heartbeat interval the settings accept. */
+  val HeartbeatIntervalLimit: FiniteDuration = 1.hour
+
+  /** The longest maximum poll interval the settings accept. */
+  val MaxPollIntervalLimit: FiniteDuration = 24.hours
 
   def from[F[_], K, V](
       client: ClientSettings,
@@ -590,12 +790,40 @@ object ConsumerSettings:
       pollTimeout: FiniteDuration = ConsumerSettings.DefaultPollTimeout,
       requestTimeout: FiniteDuration = ConsumerSettings.DefaultRequestTimeout,
       properties: Map[String, String] = Map.empty,
-      assignmentFencing: Boolean = true
+      assignmentFencing: Boolean = true,
+      groupInstanceId: Option[String] = None,
+      sessionTimeout: Option[FiniteDuration] = None,
+      heartbeatInterval: Option[FiniteDuration] = None,
+      maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval,
+      rebalanceSafeCommits: Option[RebalanceSafeCommits] = None,
+      startingOffsets: Option[StartingOffsets[F]] = None
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
+    val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
+    val intervals =
+      sessionTimeout.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.SessionTimeout, _, SessionTimeoutLimit)) ++
+        heartbeatInterval.toList.flatMap(limitedDurationErrors(SettingsError.DurationField.HeartbeatInterval, _, HeartbeatIntervalLimit)) ++
+        limitedDurationErrors(SettingsError.DurationField.MaxPollInterval, maxPollInterval, MaxPollIntervalLimit) ++
+        rebalanceSafeCommits.toList.flatMap(safe => durationErrors(SettingsError.DurationField.RebalanceSafeCommitLimit, safe.limit)) ++
+        startingOffsets.toList.flatMap(starting => durationErrors(SettingsError.DurationField.StartingOffsetsLimit, starting.limit))
+    // The Java client refuses the first combination and librdkafka the second, so both are refused here for every backend. They are only
+    // compared once each is valid on its own.
+    val combinations =
+      if intervals.nonEmpty then Nil
+      else
+        Option.when(heartbeat >= session)(SettingsError.HeartbeatNotBelowSessionTimeout(heartbeat, session)).toList ++
+          Option.when(maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session)) ++
+          // A revocation held longer than this outlasts the group's patience, which removes the consumer from it.
+          rebalanceSafeCommits.filter(_.limit >= maxPollInterval)
+            .map(safe => SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(safe.limit, maxPollInterval)) ++
+          // The rest of the group waits while the offsets are fetched, so the same holds for them.
+          startingOffsets.filter(_.limit >= maxPollInterval)
+            .map(starting => SettingsError.StartingOffsetsLimitNotBelowMaxPollInterval(starting.limit, maxPollInterval))
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
-        durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout)
+        durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout) ++
+        Option.when(groupInstanceId.exists(_.trim.isEmpty))(SettingsError.BlankGroupInstanceId) ++ intervals ++ combinations
     validateSettings(errors).map(_ =>
       new ConsumerSettings(
         client,
@@ -609,7 +837,13 @@ object ConsumerSettings:
         pollTimeout,
         requestTimeout,
         properties,
-        assignmentFencing
+        assignmentFencing,
+        groupInstanceId,
+        sessionTimeout,
+        heartbeatInterval,
+        maxPollInterval,
+        rebalanceSafeCommits,
+        startingOffsets
       ) {}
     )
 
@@ -690,7 +924,7 @@ enum ConfigurationSource derives CanEqual:
   /** Kafka's default, set nowhere. */
   case Default
 
-  /** A source with no portable meaning. */
+  /** A source none of the other cases describe. */
   case Unknown
 
 object ConfigurationSource:
@@ -704,10 +938,103 @@ object ConfigurationSource:
       case 5 => Default               // DEFAULT_CONFIG
       case _ => Unknown
 
-/** Topic administration.
+/** A change to one property of a topic's configuration. */
+enum ConfigurationChange derives CanEqual:
+  /** Sets the topic's own value. */
+  case Set(value: String)
+
+  /** Drops the topic's own value, so the topic takes the value it would without one. */
+  case Unset
+
+  /** Adds a value to a property that holds a list, such as `cleanup.policy`. */
+  case Append(value: String)
+
+  /** Removes a value from a property that holds a list. */
+  case Subtract(value: String)
+
+/** A broker of the cluster, as it advertises itself to clients. */
+final case class Broker(id: BrokerId, host: String, port: Int, rack: Option[String])
+
+object Broker:
+  /** Brokers are ordered by id, and no two brokers in a cluster share one. */
+  given Order[Broker] = Order.by(_.id)
+
+/** The cluster's id, the brokers it reports, and the broker it reports as its controller, where it reports one. */
+final case class ClusterDescription(id: String, controller: Option[Broker], brokers: NonEmptySet[Broker])
+
+/** A topic's id, whether Kafka keeps it for itself, and where each of its partitions is.
   *
-  * Kafka reports an outcome for each topic, and the backends do not agree on whether that detail survives when creating, deleting, or growing topics,
-  * so those report the first failure and nothing more. Deleting records and describing topic configurations answer for each partition or topic.
+  * @param internal
+  *   whether Kafka keeps the topic for itself, such as `__consumer_offsets`
+  */
+final case class TopicDescription(id: TopicId, internal: Boolean, partitions: NonEmptyMap[Partition, PartitionDescription])
+
+/** Where a partition's replicas are.
+  *
+  * @param leader
+  *   the broker that serves the partition, where it has one
+  * @param replicas
+  *   the brokers that hold a replica
+  * @param inSyncReplicas
+  *   the replicas that have caught up with the leader
+  */
+final case class PartitionDescription(leader: Option[BrokerId], replicas: NonEmptyList[BrokerId], inSyncReplicas: List[BrokerId])
+
+/** Where a consumer group is in its life. */
+enum ConsumerGroupState derives CanEqual:
+  /** Its members hold their assignments. */
+  case Stable
+
+  /** Members are joining or leaving, so its partitions are about to be assigned again. */
+  case PreparingRebalance
+
+  /** Its members have joined and are waiting for their assignments. */
+  case CompletingRebalance
+
+  /** It has no members, though it may still hold committed offsets. */
+  case Empty
+
+  /** A state none of the other cases describe. */
+  case Unknown
+
+object ConsumerGroupState:
+  /** Classifies librdkafka's `rd_kafka_consumer_group_state_t`. */
+  private[xkafka] def fromLibrdkafka(value: Int): ConsumerGroupState =
+    value match
+      case 1 => PreparingRebalance  // PREPARING_REBALANCE
+      case 2 => CompletingRebalance // COMPLETING_REBALANCE
+      case 3 => Stable              // STABLE
+      case 5 => Empty               // EMPTY
+      case _ => Unknown
+
+/** A member of a consumer group and the partitions it is assigned.
+  *
+  * @param instanceId
+  *   the member's static group instance id, where it has one
+  */
+final case class GroupMember(memberId: String, instanceId: Option[String], clientId: String, host: String, assignment: Set[TopicPartition])
+
+/** What a consumer group is doing and who is in it.
+  *
+  * @param simple
+  *   whether the group holds committed offsets but no consumer has joined it, such as one created by `alterConsumerGroupOffsets`
+  * @param assignor
+  *   the name of the assignor that chose the members' assignments, where the group has one
+  * @param coordinator
+  *   the broker that coordinates the group, where it has one
+  */
+final case class ConsumerGroupDescription(
+    state: ConsumerGroupState,
+    simple: Boolean,
+    assignor: Option[String],
+    coordinator: Option[Broker],
+    members: List[GroupMember]
+)
+
+/** Topic and consumer group administration.
+  *
+  * Creating, deleting, and growing topics report only the first failure, even when several topics fail. Describing topics, deleting records,
+  * describing topic configurations, and the consumer group calls that name partitions or groups answer for each one.
   */
 trait KafkaAdminClient[F[_]]:
   self =>
@@ -718,27 +1045,103 @@ trait KafkaAdminClient[F[_]]:
   /** Deletes each topic, failing if any of them cannot be deleted, including where it does not exist. */
   def deleteTopics(topics: NonEmptySet[Topic]): F[Unit]
 
-  /** Adds partitions to a topic, which Kafka allows only as an increase. */
+  /** Grows the topic to `count` partitions in all, failing where it already has `count` or more. */
   def createPartitions(topic: Topic, count: Int): F[Unit]
 
-  /** Reports the partitions of each requested topic, failing where the cluster does not have one of them. */
-  def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]]
+  /** The cluster's id, its brokers, and its controller. */
+  def describeCluster: F[ClusterDescription]
+
+  /** Describes each topic, or answers why it could not be described.
+    *
+    * Each topic is answered on its own, and one the cluster does not have answers as `ErrorCode.UnknownTopicOrPartition`. The call fails as a whole
+    * only when the cluster answered for none of the topics, such as when it cannot be reached in time.
+    */
+  def describeTopics(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]]
 
   /** Deletes each partition's records below its offset, answering for each one its new low watermark or the reason the broker refused it.
     *
     * Every requested partition gets an answer, including a topic or partition the cluster does not have, which answers as
-    * `ErrorCode.UnknownTopicOrPartition`. The call fails only where nothing is known about any partition, such as when the cluster cannot be reached
-    * in time. A partition already beginning at or after its offset keeps its records and answers with its current low watermark. An offset past the
-    * end of the partition is refused as `ErrorCode.OffsetOutOfRange`. Deleting records moves no consumer group's offsets.
+    * `ErrorCode.UnknownTopicOrPartition`. The call fails as a whole only when the cluster answered for none of the partitions, such as when it cannot
+    * be reached in time. A partition already beginning at or after its offset keeps its records and answers with its current low watermark. An offset
+    * past the end of the partition is refused as `ErrorCode.OffsetOutOfRange`. Deleting records moves no consumer group's offsets.
     */
-  def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]]
+  def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]]
 
   /** Reports each topic's effective configuration, including the values it inherits, or the reason the broker would not describe it.
     *
     * Every requested topic gets an answer, including one the cluster does not have, which answers as `ErrorCode.UnknownTopicOrPartition`. The call
-    * fails only where nothing is known about any topic, such as when the cluster cannot be reached in time.
+    * fails as a whole only when the cluster answered for none of the topics, such as when it cannot be reached in time.
     */
-  def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]]
+  def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]]
+
+  /** Changes the named properties of each topic, leaving the properties it does not name as they are.
+    *
+    * Every topic gets an answer, and the call fails as a whole only when the cluster answered for none of the topics, such as when it cannot be
+    * reached in time.
+    */
+  def alterTopicConfigurations(
+      changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+  ): F[NonEmptyMap[Topic, Either[KafkaException, Unit]]]
+
+  /** Makes each partition's preferred replica, the first of its replicas, its leader.
+    *
+    * Every partition gets an answer, and one already led by its preferred replica answers `Right(())`. The call fails as a whole only when the
+    * cluster answered for none of the partitions, such as when it cannot be reached in time.
+    */
+  def electPreferredLeaders(partitions: NonEmptySet[TopicPartition]): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]
+
+  /** Every consumer group the cluster knows, with its state, including a group with no members that still holds committed offsets.
+    *
+    * Kafka keeps committed offsets under an empty group name and lists that group, but it is left out here, because `ConsumerGroup` does not accept
+    * an empty name.
+    */
+  def listConsumerGroups: F[Map[ConsumerGroup, ConsumerGroupState]]
+
+  /** Describes each group, or answers why it could not be described.
+    *
+    * Each group is answered on its own, and one the cluster does not have answers as `ErrorCode.GroupIdNotFound`. The call fails as a whole only when
+    * the cluster answered for none of the groups, such as when it cannot be reached in time.
+    */
+  def describeConsumerGroups(groups: NonEmptySet[ConsumerGroup]): F[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]]
+
+  /** Every offset the group has committed, which is empty where it has committed none or the cluster does not have the group. */
+  def listConsumerGroupOffsets(group: ConsumerGroup): F[Map[TopicPartition, OffsetAndMetadata]]
+
+  /** The offset the group has committed for each partition, or `None` where it has committed none. */
+  def listConsumerGroupOffsets(
+      group: ConsumerGroup,
+      partitions: NonEmptySet[TopicPartition]
+  ): F[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]]
+
+  /** Sets the group's committed offsets, answering for each partition whether it was set.
+    *
+    * Each partition is answered on its own, and a topic the cluster does not have answers as `ErrorCode.UnknownTopicOrPartition`. The call fails as a
+    * whole only when the cluster answered for none of the partitions, such as when it cannot be reached in time. A group the cluster does not have is
+    * created holding these offsets. A group with members refuses them as `ErrorCode.UnknownMemberId`, so stop its consumers first.
+    */
+  def alterConsumerGroupOffsets(
+      group: ConsumerGroup,
+      offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+  ): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]
+
+  /** Deletes the group's committed offsets for these partitions, answering for each partition whether they were deleted.
+    *
+    * Each partition is answered on its own. The call fails as a whole only when the cluster answered for none of the partitions, such as when it
+    * cannot be reached in time. A partition whose topic the group is subscribed to answers as `ErrorCode.GroupSubscribedToTopic`, and every partition
+    * of a group the cluster does not have as `ErrorCode.GroupIdNotFound`.
+    */
+  def deleteConsumerGroupOffsets(
+      group: ConsumerGroup,
+      partitions: NonEmptySet[TopicPartition]
+  ): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]
+
+  /** Deletes each group with its committed offsets, answering for each group whether it was deleted.
+    *
+    * Each group is answered on its own. The call fails as a whole only when the cluster answered for none of the groups, such as when it cannot be
+    * reached in time. A group with members answers as `ErrorCode.NonEmptyGroup`, so stop its consumers first, and one the cluster does not have as
+    * `ErrorCode.GroupIdNotFound`.
+    */
+  def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): F[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]]
 
   final def mapK[G[_]](fk: FunctionK[F, G]): KafkaAdminClient[G] =
     new KafkaAdminClient[G]:
@@ -748,13 +1151,50 @@ trait KafkaAdminClient[F[_]]:
 
       override def createPartitions(topic: Topic, count: Int): G[Unit] = fk(self.createPartitions(topic, count))
 
-      override def describeTopics(topics: NonEmptySet[Topic]): G[Map[Topic, Set[Partition]]] = fk(self.describeTopics(topics))
+      override def describeCluster: G[ClusterDescription] = fk(self.describeCluster)
 
-      override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): G[Map[TopicPartition, Either[KafkaException, Offset]]] =
+      override def describeTopics(topics: NonEmptySet[Topic]): G[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]] =
+        fk(self.describeTopics(topics))
+
+      override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): G[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]] =
         fk(self.deleteRecords(before))
 
-      override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+      override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
         fk(self.describeTopicConfigurations(topics))
+
+      override def alterTopicConfigurations(
+          changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+      ): G[NonEmptyMap[Topic, Either[KafkaException, Unit]]] = fk(self.alterTopicConfigurations(changes))
+
+      override def electPreferredLeaders(partitions: NonEmptySet[TopicPartition]): G[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] =
+        fk(self.electPreferredLeaders(partitions))
+
+      override def listConsumerGroups: G[Map[ConsumerGroup, ConsumerGroupState]] = fk(self.listConsumerGroups)
+
+      override def describeConsumerGroups(
+          groups: NonEmptySet[ConsumerGroup]
+      ): G[NonEmptyMap[ConsumerGroup, Either[KafkaException, ConsumerGroupDescription]]] = fk(self.describeConsumerGroups(groups))
+
+      override def listConsumerGroupOffsets(group: ConsumerGroup): G[Map[TopicPartition, OffsetAndMetadata]] =
+        fk(self.listConsumerGroupOffsets(group))
+
+      override def listConsumerGroupOffsets(
+          group: ConsumerGroup,
+          partitions: NonEmptySet[TopicPartition]
+      ): G[NonEmptyMap[TopicPartition, Option[OffsetAndMetadata]]] = fk(self.listConsumerGroupOffsets(group, partitions))
+
+      override def alterConsumerGroupOffsets(
+          group: ConsumerGroup,
+          offsets: NonEmptyMap[TopicPartition, OffsetAndMetadata]
+      ): G[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = fk(self.alterConsumerGroupOffsets(group, offsets))
+
+      override def deleteConsumerGroupOffsets(
+          group: ConsumerGroup,
+          partitions: NonEmptySet[TopicPartition]
+      ): G[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] = fk(self.deleteConsumerGroupOffsets(group, partitions))
+
+      override def deleteConsumerGroups(groups: NonEmptySet[ConsumerGroup]): G[NonEmptyMap[ConsumerGroup, Either[KafkaException, Unit]]] =
+        fk(self.deleteConsumerGroups(groups))
 
 object KafkaAdminClient:
   private[xkafka] def validatePartitionCount(value: Int): Either[KafkaException.InvalidValue, Int] =
@@ -763,17 +1203,32 @@ object KafkaAdminClient:
   given FunctorK[KafkaAdminClient] with
     override def mapK[F[_], G[_]](client: KafkaAdminClient[F])(fk: FunctionK[F, G]): KafkaAdminClient[G] = client.mapK(fk)
 
+/** An offset to commit, with what the broker stores beside it.
+  *
+  * @param leaderEpoch
+  *   the leader epoch of the record the offset follows
+  * @param metadata
+  *   text stored with the offset. The broker keeps no difference between empty text and none, so empty means none.
+  */
+final case class OffsetAndMetadata(offset: Offset, leaderEpoch: Option[LeaderEpoch] = None, metadata: String = "")
+
 trait OffsetCommitter[F[_]]:
   self =>
 
-  /** Commits these offsets. With assignment fencing on, it commits only for partitions the consumer owns when the commit runs. */
-  def commit(offsets: Map[TopicPartition, Offset]): F[Unit]
+  /** Commits these offsets, each with its leader epoch and metadata. With assignment fencing on, the commit fails as `ErrorCode.IllegalGeneration`,
+    * before it reaches the broker, where the consumer no longer owns one of the partitions.
+    */
+  def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit]
+
+  /** Commits these offsets alone, with no leader epoch and no metadata. */
+  final def commit(offsets: Map[TopicPartition, Offset]): F[Unit] = commitWithMetadata(offsets.view.mapValues(OffsetAndMetadata(_)).toMap)
 
   /** Commits offsets together with the lease each was read under, which a consumer that fences its assignment checks before committing.
     *
     * `CommittableOffset.commit` and `CommittableOffsetBatch.commit` come through here. A committer that does not fence commits the offsets alone.
     */
-  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): F[Unit] = commit(offsets.view.mapValues(_._1).toMap)
+  private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): F[Unit] =
+    commitWithMetadata(offsets.view.mapValues(_._1).toMap)
 
   /** How a transaction names the consumer group these offsets belong to.
     *
@@ -792,9 +1247,10 @@ object OffsetCommitter:
     TransformedOffsetCommitter(committer, fk)
 
   private final case class TransformedOffsetCommitter[F[_], G[_]](underlying: OffsetCommitter[F], fk: FunctionK[F, G]) extends OffsetCommitter[G]:
-    override def commit(offsets: Map[TopicPartition, Offset]): G[Unit] = fk(underlying.commit(offsets))
+    override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): G[Unit] = fk(underlying.commitWithMetadata(offsets))
 
-    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (Offset, Option[Lease])]): G[Unit] = fk(underlying.commitLeased(offsets))
+    override private[xkafka] def commitLeased(offsets: Map[TopicPartition, (OffsetAndMetadata, Option[Lease])]): G[Unit] =
+      fk(underlying.commitLeased(offsets))
 
     override private[xkafka] def membership: GroupMembership[G] = underlying.membership.mapK(fk)
 
@@ -806,7 +1262,33 @@ trait CommittableOffset[F[_]]:
   /** The next offset to consume after this commit succeeds. */
   def nextOffset: Offset
 
+  /** The leader epoch of the record this offset follows, where its backend reported one. */
+  def leaderEpoch: Option[LeaderEpoch] = None
+
+  /** The text committed with this offset, empty unless `withMetadata` set some. */
+  def metadata: String = ""
+
   def committer: OffsetCommitter[F]
+
+  /** What committing this offset sends: the next offset, the leader epoch and the metadata. */
+  final def offsetAndMetadata: OffsetAndMetadata = OffsetAndMetadata(nextOffset, leaderEpoch, metadata)
+
+  /** The same offset, committed with `value` as its metadata. */
+  final def withMetadata(value: String): CommittableOffset[F] =
+    new CommittableOffset[F]:
+      override def topicPartition: TopicPartition = self.topicPartition
+
+      override def nextOffset: Offset = self.nextOffset
+
+      override def leaderEpoch: Option[LeaderEpoch] = self.leaderEpoch
+
+      override def metadata: String = value
+
+      override def committer: OffsetCommitter[F] = self.committer
+
+      override private[xkafka] def membership: GroupMembership[F] = self.membership
+
+      override private[xkafka] def lease: Option[Lease] = self.lease
 
   /** The group membership this offset was read under, which is what a transaction records it against.
     *
@@ -817,13 +1299,17 @@ trait CommittableOffset[F[_]]:
   /** The lease this offset was read under, where its consumer fences its assignment and could name one. */
   private[xkafka] def lease: Option[Lease] = None
 
-  final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (nextOffset, lease)))
+  final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (offsetAndMetadata, lease)))
 
   final def mapK[G[_]](fk: FunctionK[F, G]): CommittableOffset[G] =
     new CommittableOffset[G]:
       override def topicPartition: TopicPartition = self.topicPartition
 
       override def nextOffset: Offset = self.nextOffset
+
+      override def leaderEpoch: Option[LeaderEpoch] = self.leaderEpoch
+
+      override def metadata: String = self.metadata
 
       override def committer: OffsetCommitter[G] = self.committer.mapK(fk)
 
@@ -839,7 +1325,7 @@ object CommittableOffset:
 opaque type CommittableOffsetBatch[F[_]] = Map[OffsetCommitter[F], Map[TopicPartition, CommittableOffsetBatch.Entry[F]]]
 
 object CommittableOffsetBatch:
-  private[xkafka] final case class Entry[F[_]](offset: Offset, membership: GroupMembership[F], lease: Option[Lease])
+  private[xkafka] final case class Entry[F[_]](offset: OffsetAndMetadata, membership: GroupMembership[F], lease: Option[Lease])
 
   def empty[F[_]]: CommittableOffsetBatch[F] = Map.empty
 
@@ -850,7 +1336,7 @@ object CommittableOffsetBatch:
     def updated(offset: CommittableOffset[F]): CommittableOffsetBatch[F] =
       batch.updated(
         offset.committer,
-        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.nextOffset, offset.membership, offset.lease))
+        include(batch.getOrElse(offset.committer, Map.empty), offset.topicPartition, Entry(offset.offsetAndMetadata, offset.membership, offset.lease))
       )
 
     def updated(other: CommittableOffsetBatch[F]): CommittableOffsetBatch[F] =
@@ -861,10 +1347,14 @@ object CommittableOffsetBatch:
               case (committerEntries, (topicPartition, entry)) => include(committerEntries, topicPartition, entry)
           )
 
-    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch.view.mapValues(_.view.mapValues(_.offset).toMap).toMap
+    def offsets: Map[OffsetCommitter[F], Map[TopicPartition, Offset]] = batch.view.mapValues(_.view.mapValues(_.offset.offset).toMap).toMap
+
+    /** The offsets with the leader epoch and metadata each is committed with. */
+    def offsetsAndMetadata: Map[OffsetCommitter[F], Map[TopicPartition, OffsetAndMetadata]] =
+      batch.view.mapValues(_.view.mapValues(_.offset).toMap).toMap
 
     /** The offsets grouped by the membership each was read under, which is how a transaction records them. */
-    private[xkafka] def memberships: Map[GroupMembership[F], Map[TopicPartition, Offset]] =
+    private[xkafka] def memberships: Map[GroupMembership[F], Map[TopicPartition, OffsetAndMetadata]] =
       batch.valuesIterator.flatten.toList.groupMap(_._2.membership)((topicPartition, entry) => topicPartition -> entry.offset).view.mapValues(_.toMap)
         .toMap
 
@@ -886,8 +1376,8 @@ object CommittableOffsetBatch:
   /** Keeps the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the earlier. */
   private def include[F[_]](entries: Map[TopicPartition, Entry[F]], topicPartition: TopicPartition, entry: Entry[F]): Map[TopicPartition, Entry[F]] =
     entries.updatedWith(topicPartition):
-      case current @ Some(existing) if existing.offset.value > entry.offset.value => current
-      case Some(_) | None                                                         => Some(entry)
+      case current @ Some(existing) if existing.offset.offset.value > entry.offset.offset.value => current
+      case Some(_) | None                                                                       => Some(entry)
 
 /** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
 def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =
@@ -904,18 +1394,42 @@ object CommittableConsumerRecord:
 trait KafkaProducer[F[_], K, V]:
   self =>
 
-  /** Enqueues `records` with the backend and returns the effect that completes once the broker has acknowledged them.
+  /** Enqueues `records` and returns the effect that completes once the broker has acknowledged them.
     *
-    * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once. Awaiting the inner
-    * effect immediately makes production fully synchronous.
+    * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once, and fails where the
+    * client refuses one of them as it is enqueued. Awaiting the inner effect immediately makes production fully synchronous. It fails where any
+    * record was not delivered, with the failure of the first such record.
     */
-  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[ProducerResult[K, V]]]
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Produced[K, V]]]]
 
   /** Enqueues `records` and waits for the broker to acknowledge them. */
-  final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[ProducerResult[K, V]] = F.flatten(produce(records))
+  final def produceAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[NonEmptyList[Produced[K, V]]] =
+    F.flatten(produce(records))
 
-  /** Returns the partitions currently known for `topic`, which is what choosing one to produce to needs. */
-  def partitionsFor(topic: Topic): F[Set[Partition]]
+  /** Enqueues `records` and returns the effect that completes once each of them has been delivered or has failed.
+    *
+    * Each record is answered on its own, in the order given, so the records that were delivered are known when some fail. A record the client refuses
+    * as it is enqueued fails with that refusal, as do the ones after it. A record that is not delivered fails neither effect. The outer effect still
+    * fails, with nothing enqueued, where a record cannot be serialized.
+    */
+  def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Attempted[K, V]]]]
+
+  /** Enqueues `records` and waits until each of them has been delivered or has failed. */
+  final def produceAttemptEachAndAwait(records: NonEmptyList[ProducerRecord[K, V]])(using F: FlatMap[F]): F[NonEmptyList[Attempted[K, V]]] =
+    F.flatten(produceAttemptEach(records))
+
+  /** Sends every record enqueued before it without waiting out `linger`, and completes once each of them has been delivered or has failed.
+    *
+    * A record that fails does not fail the flush: its own `produce` or `produceAttemptEach` result reports it. Records enqueued while it waits are
+    * not waited for. Cancelling it stops the wait, and the records stay enqueued.
+    */
+  def flush: F[Unit]
+
+  /** Returns the partitions `topic` has, for choosing one to produce to.
+    *
+    * Asking about a topic the cluster does not have creates it if the broker creates topics on request, which Kafka brokers do by default.
+    */
+  def partitionsFor(topic: Topic): F[NonEmptySet[Partition]]
 
   /** Produces each batch and reports its acknowledgement, in the order the batches arrived.
     *
@@ -925,16 +1439,37 @@ trait KafkaProducer[F[_], K, V]:
     * @param maxInFlight
     *   positive bound on the batches awaiting acknowledgement
     */
-  final def pipe(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], ProducerResult[K, V]] =
+  final def pipe(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], NonEmptyList[Produced[K, V]]] =
+    pipelined(maxInFlight)(produce)
+
+  /** Produces each batch with `produceAttemptEach` and reports how each of its records fared, in the order the batches arrived.
+    *
+    * It pipelines batches the way `pipe` does, and carries on past records that fail.
+    *
+    * @param maxInFlight
+    *   positive bound on the batches awaiting acknowledgement
+    */
+  final def pipeAttemptEach(maxInFlight: Int = 256)(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], NonEmptyList[Attempted[K, V]]] =
+    pipelined(maxInFlight)(produceAttemptEach)
+
+  private def pipelined[A](
+      maxInFlight: Int
+  )(enqueue: NonEmptyList[ProducerRecord[K, V]] => F[F[A]])(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], A] =
     if maxInFlight <= 0 then _ => Stream.raiseError(new IllegalArgumentException("maxInFlight must be positive"))
-    else _.evalMap(produce).parEvalMap(maxInFlight)(identity)
+    else _.evalMap(enqueue).parEvalMap(maxInFlight)(identity)
 
   /** Transforms the effect. Translating the acknowledgement nested inside the enqueue needs a `Functor[G]`, so this is not a lawful `FunctorK`. */
   final def mapK[G[_]](fk: FunctionK[F, G])(using G: Functor[G]): KafkaProducer[G, K, V] =
     new KafkaProducer[G, K, V]:
-      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[ProducerResult[K, V]]] = G.map(fk(self.produce(records)))(fk.apply)
+      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[G[NonEmptyList[Produced[K, V]]]] =
+        G.map(fk(self.produce(records)))(fk.apply)
 
-      override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
+      override def produceAttemptEach(records: NonEmptyList[ProducerRecord[K, V]]): G[G[NonEmptyList[Attempted[K, V]]]] =
+        G.map(fk(self.produceAttemptEach(records)))(fk.apply)
+
+      override def flush: G[Unit] = fk(self.flush)
+
+      override def partitionsFor(topic: Topic): G[NonEmptySet[Partition]] = fk(self.partitionsFor(topic))
 
 /** Produces records and records consumer offsets as one unit.
   *
@@ -945,18 +1480,15 @@ trait Transaction[F[_], K, V]:
   self =>
 
   /** Enqueues `records` and waits for the broker to acknowledge them, which a transaction must do before it can commit. */
-  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[ProducerResult[K, V]]
+  def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]]
 
-  /** Records `batch` against the group that read it, so those offsets land only where this transaction commits.
-    *
-    * The offsets carry the committer they came from, and that committer knows its consumer, so nothing here can name the wrong group.
-    */
+  /** Records `batch` against the consumer group each of its offsets was read by, so those offsets are committed only if this transaction commits. */
   def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit]
 
   /** Transforms the effect. Carrying a batch back to the underlying transaction needs the reverse direction, so this is not a lawful `FunctorK`. */
   final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Transaction[G, K, V] =
     new Transaction[G, K, V]:
-      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[ProducerResult[K, V]] = fk(self.produce(records))
+      override def produce(records: NonEmptyList[ProducerRecord[K, V]]): G[NonEmptyList[Produced[K, V]]] = fk(self.produce(records))
 
       override def commitOffsets(batch: CommittableOffsetBatch[G]): G[Unit] = fk(self.commitOffsets(batch.mapK(gk)))
 
@@ -976,7 +1508,7 @@ trait KafkaTransactionalProducer[F[_], K, V]:
       override def transactionally[A](use: Transaction[G, K, V] => G[A]): G[A] =
         fk(self.transactionally(transaction => gk(use(transaction.imapK(fk)(gk)))))
 
-/** Says a processed chunk can have its offsets committed, so the commit that follows is visible where the records are handled. */
+/** What a `consumeChunk` handler returns once it has processed its chunk, after which the chunk's offsets are committed. */
 case object CommitNow
 type CommitNow = CommitNow.type
 
@@ -1026,9 +1558,10 @@ trait KafkaConsumer[F[_], K, V]:
         F.productR(process(records))(offsets.commit)
     ).parJoinUnbounded.compile.drain
 
-  /** Splits `records` into bounded streams whose lifetimes follow the observed partition assignment.
+  /** One stream for each partition this consumer is assigned, ending once the partition is revoked.
     *
-    * Every emitted stream must be consumed concurrently; backpressure from one partition otherwise backpressures the shared record source.
+    * Read the streams concurrently, such as with `parJoinUnbounded`: a stream does not end while its partition is held, and a partition whose stream
+    * goes unread is paused once `maxQueuedRecords` of its records are waiting.
     *
     * @param maxQueuedRecords
     *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
@@ -1036,8 +1569,10 @@ trait KafkaConsumer[F[_], K, V]:
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
     PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords, pausing)
 
-  /** Returns the broker-stored next offset for each requested topic-partition, or `None` when no offset has been committed. */
-  def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[Offset]]]
+  /** Returns the broker-stored next offset for each requested topic-partition, with its leader epoch and metadata, or `None` when no offset has been
+    * committed.
+    */
+  def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]]
 
   /** Returns the earliest available offset for each requested topic-partition. */
   def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]]
@@ -1048,24 +1583,35 @@ trait KafkaConsumer[F[_], K, V]:
   /** Returns the earliest offset whose record timestamp is greater than or equal to each requested timestamp, or `None` when none exists. */
   def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]]
 
-  /** Returns the partitions currently known for `topic`. */
-  def partitionsFor(topic: Topic): F[Set[Partition]]
+  /** Returns the partitions `topic` has. For a topic the cluster does not have, it fails with `ErrorCode.UnknownTopicOrPartition` and creates
+    * nothing.
+    */
+  def partitionsFor(topic: Topic): F[NonEmptySet[Partition]]
 
-  /** Returns the topics and partitions visible to this consumer. */
-  def listTopics: F[Map[Topic, Set[Partition]]]
+  /** Returns the topics visible to this consumer, each with its partitions. */
+  def listTopics: F[Map[Topic, NonEmptySet[Partition]]]
 
+  /** Moves the next fetch of `topicPartition` to `offset`.
+    *
+    * The next record `records` hands out of the partition comes from `offset`, and none fetched before the seek is handed out. A partition the
+    * consumer has not been assigned fails with `ErrorCode.UnknownTopicOrPartition`.
+    */
   def seek(topicPartition: TopicPartition, offset: Offset): F[Unit]
 
-  /** Moves the next fetch for each requested topic-partition to the earliest record the broker still holds. */
+  /** Moves the next fetch for each requested topic-partition to the earliest record the broker still holds. As with `seek`, no record fetched before
+    * it is handed out.
+    */
   def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit]
 
-  /** Moves the next fetch for each requested topic-partition past the latest record the broker holds. */
+  /** Moves the next fetch for each requested topic-partition past the latest record the broker holds. As with `seek`, no record fetched before it is
+    * handed out.
+    */
   def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit]
 
-  /** Returns the offset this consumer reads next, or `None` where it has not consumed from the partition yet.
+  /** Returns where the client fetches the partition next.
     *
-    * A backend may settle on a position earlier than that, such as when a seek names an offset, so the value every backend agrees on is the one after
-    * records have been consumed.
+    * The client reads ahead of the records handed out, so after consuming it is at or past the offset after the last record consumed, by an amount
+    * that differs between platforms. Before the consumer has consumed from the partition, it can be `None`.
     */
   def position(topicPartition: TopicPartition): F[Option[Offset]]
 
@@ -1077,7 +1623,8 @@ trait KafkaConsumer[F[_], K, V]:
 
       override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
 
-      override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[Offset]]] = fk(self.committed(topicPartitions))
+      override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[OffsetAndMetadata]]] =
+        fk(self.committed(topicPartitions))
 
       override def beginningOffsets(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Offset]] = fk(self.beginningOffsets(topicPartitions))
 
@@ -1086,9 +1633,9 @@ trait KafkaConsumer[F[_], K, V]:
       override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): G[Map[TopicPartition, Option[Offset]]] =
         fk(self.offsetsForTimes(timestampsToSearch))
 
-      override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
+      override def partitionsFor(topic: Topic): G[NonEmptySet[Partition]] = fk(self.partitionsFor(topic))
 
-      override def listTopics: G[Map[Topic, Set[Partition]]] = fk(self.listTopics)
+      override def listTopics: G[Map[Topic, NonEmptySet[Partition]]] = fk(self.listTopics)
 
       override def seek(topicPartition: TopicPartition, offset: Offset): G[Unit] = fk(self.seek(topicPartition, offset))
 
