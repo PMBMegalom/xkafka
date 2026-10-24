@@ -756,8 +756,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
     def failure: KafkaException.BackendFailure = Failures.coded(text, codeValue)
 
-    def classifiedFailure: KafkaException.BackendFailure =
-      Failures.classified(text, codeValue, fatal.readInt32LE(0), retriable.readInt32LE(0), abort.readInt32LE(0))
+    def classifiedFailure: KafkaException.BackendFailure = Failures.classified(text, codeValue, fatal.readInt32LE(0), abort.readInt32LE(0))
 
     /** A handle, or the failure the call reported in place of one. */
     def orFail(handle: js.Any): js.Any = if handle == null then throw failure else handle

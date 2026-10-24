@@ -24,15 +24,13 @@ survives being lifted into an effect.
 
 `BackendFailure` keeps the original failure as its cause, where there is one,
 and carries an `ErrorCode` with three flags: `retriable`, `fatal`, and
-`transactionAbortRequired`. A flag is `None` where the platform's client does
-not report it, so which flags are present differs between platforms. `fatal` is
-always `true` for `ErrorCode.Fenced`.
-
-For a retry decision that is the same on every platform, ask the code, as
-commit recovery does:
+`transactionAbortRequired`. `retriable` is what the code's `retriable` says, so
+it is the same on every platform, and `None` only where there is no code.
+`fatal` and `transactionAbortRequired` are `None` where the platform's client
+does not report them. `fatal` is always `true` for `ErrorCode.Fenced`.
 
 ```scala
-if failure.code.exists(_.retriable) then retry else give up
+if failure.retriable.contains(true) then retry else give up
 ```
 
 `ErrorCode.retriable` is true for an unavailable or loading coordinator, a

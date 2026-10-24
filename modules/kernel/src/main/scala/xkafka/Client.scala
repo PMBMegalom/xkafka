@@ -613,14 +613,17 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
 
   /** How long the group waits to hear from the consumer before it hands the consumer's partitions to the rest, from more than the heartbeat interval
     * up to `ConsumerSettings.SessionTimeoutLimit`. The broker also bounds it, through `group.min.session.timeout.ms` and
-    * `group.max.session.timeout.ms`.
+    * `group.max.session.timeout.ms`. Leave it unset under `group.protocol=consumer`, where the broker decides it: a consumer with one set fails as
+    * `ErrorCode.InvalidConfiguration`.
     */
   def withSessionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = Some(value))
 
   /** Leaves the session timeout unset, which is the default, and is `ConsumerSettings.DefaultSessionTimeout` on every platform. */
   def withoutSessionTimeout: ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(sessionTimeout = None)
 
-  /** How often the consumer tells the group it is alive, which must be less than the session timeout. */
+  /** How often the consumer tells the group it is alive, which must be less than the session timeout. Leave it unset under `group.protocol=consumer`,
+    * where the broker decides it: a consumer with one set fails as `ErrorCode.InvalidConfiguration`.
+    */
   def withHeartbeatInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     revalidated(heartbeatInterval = Some(value))
 
@@ -1511,18 +1514,27 @@ trait KafkaConsumer[F[_], K, V]:
   /** Returns the topics and partitions visible to this consumer. */
   def listTopics: F[Map[Topic, Set[Partition]]]
 
+  /** Moves the next fetch of `topicPartition` to `offset`.
+    *
+    * The next record `records` hands out of the partition comes from `offset`, and none fetched before the seek is handed out. A partition the
+    * consumer has not been assigned fails with `ErrorCode.UnknownTopicOrPartition`.
+    */
   def seek(topicPartition: TopicPartition, offset: Offset): F[Unit]
 
-  /** Moves the next fetch for each requested topic-partition to the earliest record the broker still holds. */
+  /** Moves the next fetch for each requested topic-partition to the earliest record the broker still holds. As with `seek`, no record fetched before
+    * it is handed out.
+    */
   def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit]
 
-  /** Moves the next fetch for each requested topic-partition past the latest record the broker holds. */
+  /** Moves the next fetch for each requested topic-partition past the latest record the broker holds. As with `seek`, no record fetched before it is
+    * handed out.
+    */
   def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit]
 
-  /** Returns the offset this consumer reads next.
+  /** Returns where the client fetches the partition next.
     *
-    * It can be `None` until the consumer has consumed from the partition, and right after a seek the platforms can answer differently. Read it after
-    * consuming from the partition for the same answer everywhere.
+    * The client reads ahead of the records handed out, so after consuming it is at or past the offset after the last record consumed, by an amount
+    * that differs between platforms. Before the consumer has consumed from the partition, it can be `None`.
     */
   def position(topicPartition: TopicPartition): F[Option[Offset]]
 

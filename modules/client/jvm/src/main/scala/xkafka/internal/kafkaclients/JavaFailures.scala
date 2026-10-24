@@ -25,6 +25,7 @@ package kafkaclients
 
 import org.apache.kafka.clients.consumer.{CommitFailedException, InvalidOffsetException}
 import org.apache.kafka.common.KafkaException as JavaKafkaException
+import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.errors.{
   AuthenticationException, InvalidConfigurationException, InvalidPidMappingException, ProducerFencedException, SaslAuthenticationException,
   SslAuthenticationException, TransactionAbortedException
@@ -70,9 +71,10 @@ private[kafkaclients] object JavaFailures:
       case _: TransactionAbortedException => Some(ErrorCode.Purged)
       // The consumer raises these itself, for a partition its reset policy leaves without a position.
       case _: InvalidOffsetException => Some(ErrorCode.OffsetResetRequired)
-      // A client that cannot be built wraps the setting it could not use in failures of its own.
-      case _ if causes(error).exists(_.isInstanceOf[InvalidConfigurationException]) => Some(ErrorCode.InvalidConfiguration)
-      case _                                                                        => tabled(error)
+      // A client that cannot be built wraps the setting it could not use in failures of its own, or refuses a combination of settings outright.
+      case _ if causes(error).exists(cause => cause.isInstanceOf[InvalidConfigurationException] || cause.isInstanceOf[ConfigException]) =>
+        Some(ErrorCode.InvalidConfiguration)
+      case _ => tabled(error)
 
   private def causes(error: Throwable): Iterator[Throwable] = Iterator.iterate(error)(_.getCause).takeWhile(_ != null).take(16)
 

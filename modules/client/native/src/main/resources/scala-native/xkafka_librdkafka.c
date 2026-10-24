@@ -2139,15 +2139,15 @@ int xkafka_consumer_seek(rd_kafka_t *consumer,
             rd_kafka_seek_partitions(consumer, native_offsets, timeout_ms);
 
         if (result != NULL) {
-                xkafka_set_error(error, error_size, error_code,
-                                 rd_kafka_error_string(result));
+                xkafka_set_error_at(error, error_size, error_code,
+                                    rd_kafka_error_string(result), rd_kafka_error_code(result));
                 rd_kafka_error_destroy(result);
                 rd_kafka_topic_partition_list_destroy(native_offsets);
                 return -1;
         }
         if (native_offsets->elems[0].err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error(error, error_size, error_code,
-                                 rd_kafka_err2str(native_offsets->elems[0].err));
+                xkafka_set_error_at(error, error_size, error_code,
+                                    rd_kafka_err2str(native_offsets->elems[0].err), native_offsets->elems[0].err);
                 rd_kafka_topic_partition_list_destroy(native_offsets);
                 return -1;
         }

@@ -52,6 +52,7 @@ import org.apache.kafka.clients.producer.{
 }
 import org.apache.kafka.common.{GroupState, KafkaException as JavaKafkaException, KafkaFuture, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
+import org.apache.kafka.common.errors.UnknownTopicOrPartitionException
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.record.TimestampType
@@ -282,13 +283,19 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def positions(consumer: Client, partitions: Vector[TopicPartition]): F[Vector[Long]] =
     onConsumer(consumer)(value => partitions.map(partition => value.position(javaTopicPartition(partition))))
 
+  /** The Java consumer refuses a partition it is not fetching with an `IllegalStateException`, where librdkafka answers that the partition is
+    * unknown, so the same answer is given here.
+    */
   override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): F[Unit] =
-    onConsumer(consumer): value =>
-      val target = javaTopicPartition(partition)
-      offset match
-        case KafkaDriver.BeginningOffset => value.seekToBeginning(List(target).asJava)
-        case KafkaDriver.EndOffset       => value.seekToEnd(List(target).asJava)
-        case _                           => value.seek(target, offset)
+    val target = javaTopicPartition(partition)
+    onThread(consumer): thread =>
+      javaCall(F.async_[Unit](thread.seek(target)(value =>
+        if !value.assignment.contains(target) then throw new UnknownTopicOrPartitionException(s"No current assignment for partition $target")
+        offset match
+          case KafkaDriver.BeginningOffset => value.seekToBeginning(List(target).asJava)
+          case KafkaDriver.EndOffset       => value.seekToEnd(List(target).asJava)
+          case _                           => value.seek(target, offset)
+      )))
 
   override def metadata(client: Client, topic: Option[String], timeoutMillis: Int): F[Vector[(String, Vector[Int])]] =
     val timeout                                                                   = Duration.ofMillis(timeoutMillis.toLong)

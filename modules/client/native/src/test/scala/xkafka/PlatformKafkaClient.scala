@@ -24,7 +24,10 @@ package xkafka
 import cats.effect.IO
 
 private[xkafka] object PlatformKafkaClient:
-  val name: String                                = "native"
+  val name: String = "native"
+
+  /** The Java release the tests run on, on the JVM. */
+  val javaRelease: Option[Int]                    = None
   val integrationBootstrapServers: Option[String] = environment("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS")
 
   def environment(name: String): Option[String] = sys.env.get(name)

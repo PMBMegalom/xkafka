@@ -170,7 +170,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       failure <- Resource.eval(Deferred[F, Throwable])
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
-      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure)
+      seeks  <- Resource.eval((Mutex[F], Ref.of[F, Map[LeaseKey, Long]](Map.empty)).mapN(Seeks(_, _)))
+      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks)
       // Both are started after the client and cancelled before it, so neither is using the handle when it is destroyed.
       _ <- consumer.rebalancing.compile.drain.onError(failure.complete(_).void).background
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
@@ -497,7 +498,13 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         Option.when(delivery.timestamp >= 0L)(delivery.timestamp).map(Timestamp.fromEpochMillis)
       )
 
-  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long)
+  /** `sought` is how many seeks of the record's partition had been made when it was polled. */
+  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long, sought: Long)
+
+  /** How many seeks of each partition have been made. A poll and a seek each hold `exclusive`, so every record a poll returns was fetched after the
+    * seeks counted when it returns and before any made later.
+    */
+  private final case class Seeks(exclusive: Mutex[F], made: Ref[F, Map[LeaseKey, Long]])
 
   private final class DriverConsumer[K, V](
       client: NativeClient,
@@ -509,7 +516,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       assignments: SignallingRef[F, Set[TopicPartition]],
       stopping: Deferred[F, Unit],
       random: Random[F],
-      failure: Deferred[F, Throwable]
+      failure: Deferred[F, Throwable],
+      seeks: Seeks
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
@@ -556,19 +564,22 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     val pollLoop: Stream[F, Nothing] =
       // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
       PollQueue.feed(
-        Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty).evalMap(_ => leases.reading(pollOnce)(leaseKeyOf).product(hold.readUnder))
-          .flatMap((read, assignment) => Stream.emits(read.map((record, lease) => ReadRecord(record, lease, assignment(leaseKeyOf(record)))))),
+        Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
+          .evalMap(_ => leases.reading(pollOnce)((record, _) => leaseKeyOf(record)).product(hold.readUnder)).flatMap((read, assignment) =>
+            Stream.emits(read.map { case ((record, sought), lease) => ReadRecord(record, lease, assignment(leaseKeyOf(record)), sought) })
+          ),
         polled,
         failure
       )
 
     /** A rebalance taken from the driver has to be applied before the consumer can close, so taking one and queueing it for `rebalancing` is never
-      * cut apart by a cancellation, which costs a release at most one poll.
+      * cut apart by a cancellation, which costs a release at most one poll. Each record comes with how many seeks of its partition it follows.
       */
-    private def pollOnce: F[List[PolledRecord]] =
-      F.uncancelable(_ =>
-        client(poll.product(driver.takeRebalances(client.handle))).flatMap((records, taken) => taken.traverse_(rebalances.offer).as(records))
-      )
+    private def pollOnce: F[List[(PolledRecord, Long)]] =
+      seeks.exclusive.lock.surround:
+        F.uncancelable(_ =>
+          client(poll.product(driver.takeRebalances(client.handle))).flatMap((records, taken) => taken.traverse_(rebalances.offer).as(records))
+        ).product(seeks.made.get).map((records, made) => records.map(record => record -> made.getOrElse(leaseKeyOf(record), 0L)))
 
     /** Applies each rebalance in the order the poll raised it.
       *
@@ -623,11 +634,14 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
     /** A record of a partition being revoked, or read under an assignment the group has since replaced, is dropped and not handed out, where the
-      * revocation waits for what was handed out to be committed.
+      * revocation waits for what was handed out to be committed. So is a record fetched before a seek of its partition.
       */
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalFilter(read => hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L))
+      PollQueue.read(polled, failure)
+        .evalFilter(read => sinceLastSeek(read).ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false)))
         .evalMap(decode)
+
+    private def sinceLastSeek(read: ReadRecord): F[Boolean] = seeks.made.get.map(_.getOrElse(leaseKeyOf(read.record), 0L) == read.sought)
 
     override def assignment: F[Set[TopicPartition]] =
       client(driver.assignment(client.handle)).flatMap: entries =>
@@ -666,14 +680,22 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     override def listTopics: F[Map[Topic, Set[Partition]]] = client(readTopicMetadata(client.handle, requestTimeoutMillis, None))
 
-    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] =
-      client(driver.seek(client.handle, topicPartition, offset.value, requestTimeoutMillis))
+    override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = seekEach(List(topicPartition), offset.value)
 
-    override def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit] =
-      client(topicPartitions.toList.traverse_(driver.seek(client.handle, _, BeginningOffset, requestTimeoutMillis)))
+    override def seekToBeginning(topicPartitions: Set[TopicPartition]): F[Unit] = seekEach(topicPartitions.toList, BeginningOffset)
 
-    override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] =
-      client(topicPartitions.toList.traverse_(driver.seek(client.handle, _, EndOffset, requestTimeoutMillis)))
+    override def seekToEnd(topicPartitions: Set[TopicPartition]): F[Unit] = seekEach(topicPartitions.toList, EndOffset)
+
+    /** Each seek is counted once the driver has made it, and before any poll after it, so that the records fetched before it are dropped. Every
+      * driver drops what it has fetched itself, so only the records already polled are left to drop.
+      */
+    private def seekEach(topicPartitions: List[TopicPartition], offset: Long): F[Unit] =
+      seeks.exclusive.lock.surround:
+        F.uncancelable(_ =>
+          topicPartitions.traverse_ : topicPartition =>
+            client(driver.seek(client.handle, topicPartition, offset, requestTimeoutMillis)) *>
+              seeks.made.update(made => made.updated(leaseKey(topicPartition), made.getOrElse(leaseKey(topicPartition), 0L) + 1L))
+        )
 
     override def position(topicPartition: TopicPartition): F[Option[Offset]] =
       client(driver.positions(client.handle, Vector(topicPartition))).flatMap: values =>

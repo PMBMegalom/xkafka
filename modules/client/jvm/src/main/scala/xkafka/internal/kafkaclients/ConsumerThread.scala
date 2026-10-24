@@ -85,6 +85,13 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
   /** The records of one poll, or the records an earlier poll kept. */
   def poll(timeout: Duration)(reply: Either[Throwable, List[Record]] => Unit): Unit = send(Poll(timeout, reply), reply)
 
+  /** Makes a seek of `partition`, and drops the records kept for it, which were fetched before the seek. */
+  def seek(partition: JavaTopicPartition)(task: JavaConsumer[Array[Byte], Array[Byte]] => Unit)(reply: Either[Throwable, Unit] => Unit): Unit =
+    call(consumer =>
+      task(consumer)
+      buffered.filterInPlace(record => record.topic != partition.topic || record.partition != partition.partition): Unit
+    )(reply)
+
   /** Every rebalance the listener raised since the last take, oldest first. */
   def takeRebalances(reply: Either[Throwable, List[Rebalancing]] => Unit): Unit = call(_ => raised.removeAll().toList)(reply)
 
