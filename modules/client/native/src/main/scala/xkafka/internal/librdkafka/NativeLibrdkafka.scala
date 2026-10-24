@@ -621,6 +621,66 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             .configurations(topics, Vector.tabulate(Bindings.xkafka_configs_resource_count(configs).toInt)(index => resource(configs, index.toUSize)))
         finally Bindings.xkafka_configs_destroy(configs)
 
+  override def alterTopicConfigs(
+      admin: Client,
+      changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone     = zone
+        val entries    = LibrdkafkaAnswers.configurationChanges(changes)
+        val values     = alloc[CString](entries.size.max(1))
+        val operations = alloc[CInt](entries.size.max(1))
+        entries.iterator.zipWithIndex.foreach: (entry, index) =>
+          values(index) = entry._3.fold(null: CString)(toCString(_))
+          operations(index) = entry._4
+        val (error, errorCode) = errorSlots
+        val configs            =
+          Bindings.xkafka_admin_alter_topic_configs(
+            admin,
+            strings(entries.map(_._1)),
+            strings(entries.map(_._2)),
+            values,
+            operations,
+            entries.size.toUSize,
+            timeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if configs == null then throw nativeError(error, errorCode)
+
+        try LibrdkafkaAnswers.changed(
+            changes.map(_._1),
+            Vector.tabulate(Bindings.xkafka_configs_resource_count(configs).toInt)(index => resource(configs, index.toUSize))
+          )
+        finally Bindings.xkafka_configs_destroy(configs)
+
+  override def electPreferredLeaders(admin: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val codes              = alloc[CInt](partitions.size.max(1))
+        val (error, errorCode) = errorSlots
+        val (topics, values)   = partitionArrays(partitions)
+        val outcome            =
+          Bindings.xkafka_admin_elect_preferred_leaders(
+            admin,
+            topics,
+            values,
+            partitions.size.toUSize,
+            timeoutMillis,
+            codes,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        val answer =
+          if outcome != 0 then Coded.Refused(nativeError(error, errorCode))
+          else Coded.Answered(Vector.tabulate(partitions.size)(index => codes(index)))
+        LibrdkafkaAnswers.elected(partitions, answer, errorString)
+
   override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
     F.blocking:
       Zone.acquire: zone =>

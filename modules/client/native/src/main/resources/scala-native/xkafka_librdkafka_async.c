@@ -84,6 +84,11 @@ int xkafka_admin_delete_group_offsets(rd_kafka_t *client, const char *group, con
                                       size_t count, int timeout_ms, int32_t *codes, char *error, size_t error_size, int32_t *error_code);
 int xkafka_admin_delete_groups(rd_kafka_t *client, const char *const *groups, size_t count, int timeout_ms, int32_t *codes,
                                char *error, size_t error_size, int32_t *error_code);
+void *xkafka_admin_alter_topic_configs(rd_kafka_t *client, const char *const *topics, const char *const *names, const char *const *values,
+                                       const int32_t *operations, size_t count, int timeout_ms, char *error, size_t error_size,
+                                       int32_t *error_code);
+int xkafka_admin_elect_preferred_leaders(rd_kafka_t *client, const char *const *topics, const int32_t *partitions, size_t count,
+                                         int timeout_ms, int32_t *codes, char *error, size_t error_size, int32_t *error_code);
 
 /* What every job starts with. `run` makes the call and writes its result;
  * `release` frees the job's own copies. */
@@ -787,6 +792,10 @@ typedef struct {
         const int64_t *offset_values;
         const int32_t *leader_epochs;
         char **metadata_values;
+        /* The property names and values of a configuration change, one per entry, with its operations. */
+        char **config_names;
+        char **config_values;
+        const int32_t *operations;
         size_t count;
         int timeout_ms;
         int kind;
@@ -804,7 +813,9 @@ enum {
         XKAFKA_ALTER_GROUP_OFFSETS,
         XKAFKA_DELETE_GROUP_OFFSETS,
         XKAFKA_DESCRIBE_CLUSTER,
-        XKAFKA_DESCRIBE_TOPICS
+        XKAFKA_DESCRIBE_TOPICS,
+        XKAFKA_ALTER_TOPIC_CONFIGS,
+        XKAFKA_ELECT_PREFERRED_LEADERS
 };
 
 static void xkafka_groups_job_run(xkafka_job_t *job) {
@@ -826,6 +837,15 @@ static void xkafka_groups_job_run(xkafka_job_t *job) {
         case XKAFKA_DESCRIBE_TOPICS:
                 *call->pointer_result =
                     xkafka_admin_describe_topics(call->client, names, call->count, call->timeout_ms, s->error, s->error_size, s->error_code);
+                break;
+        case XKAFKA_ALTER_TOPIC_CONFIGS:
+                *call->pointer_result = xkafka_admin_alter_topic_configs(call->client, names, (const char *const *)call->config_names,
+                                                                         (const char *const *)call->config_values, call->operations,
+                                                                         call->count, call->timeout_ms, s->error, s->error_size, s->error_code);
+                break;
+        case XKAFKA_ELECT_PREFERRED_LEADERS:
+                *call->result = xkafka_admin_elect_preferred_leaders(call->client, names, call->partitions, call->count, call->timeout_ms,
+                                                                     call->codes, s->error, s->error_size, s->error_code);
                 break;
         case XKAFKA_DELETE_GROUPS:
                 *call->result = xkafka_admin_delete_groups(call->client, names, call->count, call->timeout_ms, call->codes, s->error,
@@ -854,6 +874,8 @@ static void xkafka_groups_job_release(xkafka_job_t *job) {
         free(call->group);
         xkafka_free_strings(call->names, call->count);
         xkafka_free_strings(call->metadata_values, call->count);
+        xkafka_free_strings(call->config_names, call->count);
+        xkafka_free_strings(call->config_values, call->count);
 }
 
 /* Copies the group, the names and the metadata, which the call reads after the starting call returns. */
@@ -976,6 +998,44 @@ int xkafka_async_admin_delete_group_offsets(rd_kafka_t *client, const char *grou
                                             size_t count, int timeout_ms, int32_t *codes, char *error, size_t error_size,
                                             int32_t *error_code, int32_t *result, xkafka_done_t done, int64_t token) {
         xkafka_groups_job_t *call = xkafka_groups_job(client, group, topics, NULL, count, timeout_ms, XKAFKA_DELETE_GROUP_OFFSETS, error,
+                                                      error_size, error_code);
+
+        if (call == NULL)
+                return -1;
+        call->partitions = partitions;
+        call->codes = codes;
+        call->result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+/* A configuration change names a topic for each entry, so it rides on the job too, with the entries' names and values copied
+ * alongside. */
+int xkafka_async_admin_alter_topic_configs(rd_kafka_t *client, const char *const *topics, const char *const *names,
+                                           const char *const *values, const int32_t *operations, size_t count, int timeout_ms,
+                                           char *error, size_t error_size, int32_t *error_code, void **result, xkafka_done_t done,
+                                           int64_t token) {
+        xkafka_groups_job_t *call =
+            xkafka_groups_job(client, NULL, topics, NULL, count, timeout_ms, XKAFKA_ALTER_TOPIC_CONFIGS, error, error_size, error_code);
+        int ok = 1;
+
+        if (call == NULL)
+                return -1;
+        call->config_names = xkafka_copy_strings(names, count, &ok);
+        call->config_values = xkafka_copy_strings(values, count, &ok);
+        if (!ok) {
+                xkafka_groups_job_release(&call->job);
+                free(call);
+                return -1;
+        }
+        call->operations = operations;
+        call->pointer_result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+int xkafka_async_admin_elect_preferred_leaders(rd_kafka_t *client, const char *const *topics, const int32_t *partitions, size_t count,
+                                               int timeout_ms, int32_t *codes, char *error, size_t error_size, int32_t *error_code,
+                                               int32_t *result, xkafka_done_t done, int64_t token) {
+        xkafka_groups_job_t *call = xkafka_groups_job(client, NULL, topics, NULL, count, timeout_ms, XKAFKA_ELECT_PREFERRED_LEADERS, error,
                                                       error_size, error_code);
 
         if (call == NULL)

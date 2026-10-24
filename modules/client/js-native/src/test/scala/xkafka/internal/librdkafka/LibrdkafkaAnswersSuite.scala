@@ -61,3 +61,24 @@ final class LibrdkafkaAnswersSuite extends munit.FunSuite:
       unknownTopic.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
       Some(ErrorCode.UnknownTopicOrPartition)
     )
+
+  test("changing configurations fails as a whole where every topic's answer says the cluster was not reached, and answers each topic otherwise"):
+    val topics                    = Vector(Topic.from("first").toOption.get, Topic.from("second").toOption.get)
+    def answered(codes: Int*)     = topics.zip(codes).map((topic, code) => ConfigResource(topic.value, code, s"code $code", Vector.empty))
+    val unreached                 = intercept[KafkaException.BackendFailure](LibrdkafkaAnswers.changed(topics, answered(-185, -185)))
+    val Vector(timedOut, changed) = LibrdkafkaAnswers.changed(topics, answered(-185, 0))
+    assertEquals(unreached.code, Some(ErrorCode.RequestTimedOut))
+    assertEquals(
+      timedOut.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
+      Some(ErrorCode.RequestTimedOut)
+    )
+    assertEquals(changed, Right(()))
+
+  test("a partition its preferred replica already leads answers as elected, beside one the cluster does not have"):
+    val partitions          = Vector(0, 1).map(index => TopicPartition(Topic.from("events").toOption.get, Partition.from(index).toOption.get))
+    val Vector(led, absent) = LibrdkafkaAnswers.elected(partitions, Coded.Answered(Vector(84, 3)), code => s"code $code")
+    assertEquals(led, Right(()))
+    assertEquals(
+      absent.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
+      Some(ErrorCode.UnknownTopicOrPartition)
+    )

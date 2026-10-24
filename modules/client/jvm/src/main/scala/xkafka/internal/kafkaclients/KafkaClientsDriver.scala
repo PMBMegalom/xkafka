@@ -38,11 +38,12 @@ import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.Chunk
 import org.apache.kafka.clients.admin.{
-  Admin, AlterConsumerGroupOffsetsOptions, ConfigEntry as JavaConfigEntry, ConsumerGroupDescription as JavaConsumerGroupDescription,
-  CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions,
-  DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
-  ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions,
-  NewTopic as JavaNewTopic, RecordsToDelete, TopicDescription as JavaTopicDescription
+  Admin, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, ConfigEntry as JavaConfigEntry,
+  ConsumerGroupDescription as JavaConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
+  DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions,
+  DescribeConsumerGroupsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+  ListGroupsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete,
+  TopicDescription as JavaTopicDescription
 }
 import org.apache.kafka.clients.consumer.{
   Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer,
@@ -51,9 +52,11 @@ import org.apache.kafka.clients.consumer.{
 import org.apache.kafka.clients.producer.{
   Callback, KafkaProducer as JavaKafkaProducer, Producer as JavaProducer, ProducerRecord as JavaProducerRecord, RecordMetadata as JavaRecordMetadata
 }
-import org.apache.kafka.common.{GroupState, KafkaException as JavaKafkaException, KafkaFuture, Node, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.{
+  ElectionType, GroupState, KafkaException as JavaKafkaException, KafkaFuture, Node, TopicPartition as JavaTopicPartition
+}
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
-import org.apache.kafka.common.errors.UnknownTopicOrPartitionException
+import org.apache.kafka.common.errors.{ElectionNotNeededException, UnknownTopicOrPartitionException}
 import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.record.TimestampType
@@ -426,6 +429,36 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
           eachAnswered(topics.map(topic => topic -> answers.get(resource(topic))), _.value)
             .map(_.map((_, answer) => answer.map(config => portableConfiguration(config.entries.asScala))))
 
+  override def alterTopicConfigs(
+      admin: Client,
+      changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]] =
+    def resource(topic: Topic)                               = new JavaConfigResource(JavaConfigResource.Type.TOPIC, topic.value)
+    def operation(name: String, change: ConfigurationChange) =
+      change match
+        case ConfigurationChange.Set(value)      => new AlterConfigOp(new JavaConfigEntry(name, value), AlterConfigOp.OpType.SET)
+        case ConfigurationChange.Unset           => new AlterConfigOp(new JavaConfigEntry(name, null), AlterConfigOp.OpType.DELETE)
+        case ConfigurationChange.Append(value)   => new AlterConfigOp(new JavaConfigEntry(name, value), AlterConfigOp.OpType.APPEND)
+        case ConfigurationChange.Subtract(value) => new AlterConfigOp(new JavaConfigEntry(name, value), AlterConfigOp.OpType.SUBTRACT)
+    val requested = changes.map((topic, properties) => resource(topic) -> properties.toList.map(operation).asJavaCollection).toMap.asJava
+    administering(admin): value =>
+      F.delay(value.incrementalAlterConfigs(requested, new AlterConfigsOptions().timeoutMs(timeoutMillis)).values.asScala.toMap).flatMap: answers =>
+        eachAnswered(changes.map((topic, _) => topic -> answers.get(resource(topic))), _.value).map(_.map((_, answer) => answer.void))
+
+  /** A partition already led by its preferred replica is answered with `ElectionNotNeededException`, which says what was asked for holds. */
+  override def electPreferredLeaders(admin: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]] =
+    administering(admin): value =>
+      val requested = partitions.map(javaTopicPartition)
+      answered(value.electLeaders(ElectionType.PREFERRED, requested.toSet.asJava, new ElectLeadersOptions().timeoutMs(timeoutMillis)).partitions)
+        .flatMap: results =>
+          partitions.zip(requested).traverse: (partition, java) =>
+            Option(results.get(java)).map(_.toScala) match
+              case None => F.raiseError(new KafkaException.InvalidBackendResponse(s"no answer for partition ${partition.show}"))
+              case Some(None | Some(_: ElectionNotNeededException)) => F.pure(Right(()))
+              case Some(Some(failure))                              => F.pure(Left(portableFailure(failure)))
+          .flatMap(wholeUnlessAllUnreached)
+
   /** Lists the groups of the two kinds a consumer joins, which is what librdkafka lists. */
   override def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]] =
     administering(admin): value =>
@@ -544,9 +577,17 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
           case Right(value)                  => F.pure(key -> Right(value))
           case Left(failure: KafkaException) => F.pure(key -> Left(failure))
           case Left(other)                   => F.raiseError(other)
-    .flatMap: answers =>
-      val failures = answers.collect { case (_, Left(failure)) => failure }
-      failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(F.pure(answers))(F.raiseError)
+    .flatMap(answers => wholeUnlessAllUnreached(answers.map(_._2)).as(answers))
+
+  /** The answers, unless every one says the request got none, which fails the call as a whole. */
+  private def wholeUnlessAllUnreached[A](answers: Vector[Either[KafkaException, A]]): F[Vector[Either[KafkaException, A]]] =
+    val failures = answers.collect { case Left(failure) => failure }
+    failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(F.pure(answers))(F.raiseError)
+
+  private def portableFailure(failure: Throwable): KafkaException =
+    JavaFailures.portable.applyOrElse(failure, other => new KafkaException.BackendFailure(other.toString, cause = other)) match
+      case portable: KafkaException => portable
+      case other                    => new KafkaException.BackendFailure(other.toString, cause = other)
 
   /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
   /** Listing groups wraps the reason it found no broker in a plain Java client exception, which classifies as nothing. */

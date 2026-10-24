@@ -27,7 +27,9 @@ val program =
 - `describeCluster` reports the cluster's id, its brokers, and its controller.
 - `describeTopics` reports each topic's id, its partitions, and where their replicas are. See [Cluster and topics](#cluster-and-topics).
 - `deleteRecords` deletes each partition's records below an offset. See [Deleting records](#deleting-records).
-- `describeTopicConfigurations` reports each topic's effective configuration. See [Topic configuration](#topic-configuration).
+- `describeTopicConfigurations` reports each topic's effective configuration, and
+  `alterTopicConfigurations` changes it. See [Topic configuration](#topic-configuration).
+- `electPreferredLeaders` makes each partition's preferred replica its leader. See [Leader election](#leader-election).
 - `listConsumerGroups`, `describeConsumerGroups`, `listConsumerGroupOffsets`,
   `alterConsumerGroupOffsets`, `deleteConsumerGroupOffsets`, and
   `deleteConsumerGroups` inspect and change consumer groups. See [Consumer groups](#consumer-groups).
@@ -171,6 +173,71 @@ Each `ConfigurationEntry` carries:
 - `readOnly`: whether the property can be changed.
 
 A property the broker did not report has no entry, so `get` answers `None`.
+
+### Changing it
+
+`alterTopicConfigurations` changes the properties it names on each topic and
+leaves every other property as it is. Each change is one of:
+
+- `ConfigurationChange.Set(value)` gives the topic its own value.
+- `ConfigurationChange.Unset` drops the topic's own value, so the topic takes
+  the value it would have without one, such as Kafka's default.
+- `ConfigurationChange.Append(value)` and `ConfigurationChange.Subtract(value)`
+  add a value to, or remove one from, a property that holds a list, such as
+  `cleanup.policy`.
+
+```scala mdoc:compile-only
+import cats.data.{NonEmptyList, NonEmptyMap}
+import cats.effect.IO
+
+import xkafka.*
+
+val program =
+  for
+    client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    topic   <- Topic.from("journal").liftTo[IO]
+    changes  = NonEmptyMap.of("retention.ms" -> ConfigurationChange.Set("604800000"), "cleanup.policy" -> ConfigurationChange.Append("compact"))
+    answers <- KafkaClient[IO].admin(client).use(_.alterTopicConfigurations(NonEmptyMap.one(topic, changes)))
+    _       <- IO.println(answers(topic).fold("no answer")(_.fold(failure => s"not changed: ${failure.getMessage}", _ => "changed")))
+  yield ()
+```
+
+Each topic answers on its own, and the call fails as a whole only when no topic
+got an answer, such as when the cluster cannot be reached in time. Where the
+broker refuses one topic's changes, the other topics are still changed:
+
+- A topic the cluster does not have answers with `ErrorCode.UnknownTopicOrPartition`.
+- A property Kafka does not have, and appending to or removing from a property
+  that holds no list, answer with `ErrorCode.InvalidConfiguration`.
+
+## Leader election
+
+Each partition has a preferred replica, the first of the replicas
+`describeTopics` lists for it. Another replica can lead the partition, and
+`electPreferredLeaders` makes the preferred one its leader again.
+
+```scala mdoc:compile-only
+import cats.data.{NonEmptyList, NonEmptySet}
+import cats.effect.IO
+
+import xkafka.*
+
+val program =
+  for
+    client    <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    topic     <- Topic.from("events").liftTo[IO]
+    partition <- Partition.from(0).liftTo[IO]
+    answers   <- KafkaClient[IO].admin(client).use(_.electPreferredLeaders(NonEmptySet.one(TopicPartition(topic, partition))))
+  yield answers
+```
+
+- A partition its preferred replica already leads answers `Right(())`, as one
+  the election moved does.
+- A partition the cluster does not have answers with
+  `ErrorCode.UnknownTopicOrPartition`, and the other partitions are still
+  answered.
+- The call fails as a whole only when no partition got an answer, such as when
+  the cluster cannot be reached in time.
 
 ## Consumer groups
 

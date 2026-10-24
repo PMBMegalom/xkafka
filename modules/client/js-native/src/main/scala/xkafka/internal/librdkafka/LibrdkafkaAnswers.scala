@@ -140,6 +140,44 @@ private[librdkafka] object LibrdkafkaAnswers:
         case None           => throw new KafkaException.InvalidBackendResponse(s"no answer for topic ${topic.value}")
         case Some(resource) => configuration(resource)
 
+  /** One entry for each property changed, in request order: its topic, its name, its value where it has one, and librdkafka's
+    * `rd_kafka_AlterConfigOpType_t` for the change.
+    */
+  def configurationChanges(changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])]): Vector[(String, String, Option[String], Int)] =
+    changes.flatMap: (topic, properties) =>
+      properties.toList.map: (name, change) =>
+        change match
+          case ConfigurationChange.Set(value)      => (topic.value, name, Some(value), 0) // SET
+          case ConfigurationChange.Unset           => (topic.value, name, None, 1)        // DELETE
+          case ConfigurationChange.Append(value)   => (topic.value, name, Some(value), 2) // APPEND
+          case ConfigurationChange.Subtract(value) => (topic.value, name, Some(value), 3) // SUBTRACT
+
+  /** Each requested topic's own answer, which librdkafka reports by name, and failures that say no topic got an answer fail the call. */
+  def changed(requested: Vector[Topic], resources: Vector[ConfigResource]): Vector[Either[KafkaException, Unit]] =
+    val answers = resources.map(resource => resource.name -> resource).toMap
+    val each    =
+      requested.map: topic =>
+        answers.get(topic.value) match
+          case None                                  => throw new KafkaException.InvalidBackendResponse(s"no answer for topic ${topic.value}")
+          case Some(resource) if resource.error == 0 => Right(())
+          case Some(resource)                        => Left(Failures.coded(resource.errorString, resource.error))
+    unlessAllUnreached(each)
+
+  /** Each partition's answer, where one already led by its preferred replica answers as elected, since what was asked for holds. */
+  def elected(requested: Vector[TopicPartition], answer: Coded, errorString: Int => String): Vector[Either[KafkaException, Unit]] =
+    val settled =
+      answer match
+        case Coded.Answered(codes) => Coded.Answered(codes.map(code => if code == ElectionNotNeeded then 0 else code))
+        case refused               => refused
+    eachCoded(requested, settled, _.show, errorString)
+
+  // ELECTION_NOT_NEEDED, which the broker answers for a partition its preferred replica already leads.
+  private val ElectionNotNeeded = 84
+
+  private def unlessAllUnreached[A](answers: Vector[Either[KafkaException, A]]): Vector[Either[KafkaException, A]] =
+    val failures = answers.collect { case Left(failure: KafkaException.BackendFailure) => failure }
+    failures.headOption.filter(_ => failures.size == answers.size && failures.forall(unreached)).fold(answers)(throw _)
+
   private def configuration(resource: ConfigResource): Either[KafkaException, TopicConfiguration] =
     resource.error match
       case 0 =>

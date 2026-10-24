@@ -1511,10 +1511,18 @@ void *xkafka_admin_describe_topic_configs(rd_kafka_t *client,
         return event;
 }
 
+/* The resources of a describing or a changing result, which the accessors below read alike. */
+static const rd_kafka_ConfigResource_t **xkafka_configs_resources(void *configs, size_t *count) {
+        rd_kafka_event_t *event = (rd_kafka_event_t *)configs;
+
+        if (rd_kafka_event_type(event) == RD_KAFKA_EVENT_INCREMENTALALTERCONFIGS_RESULT)
+                return rd_kafka_IncrementalAlterConfigs_result_resources(rd_kafka_event_IncrementalAlterConfigs_result(event), count);
+        return rd_kafka_DescribeConfigs_result_resources(rd_kafka_event_DescribeConfigs_result(event), count);
+}
+
 static const rd_kafka_ConfigResource_t *xkafka_configs_resource(void *configs, size_t resource_index) {
         size_t count = 0;
-        const rd_kafka_ConfigResource_t **resources =
-            rd_kafka_DescribeConfigs_result_resources(rd_kafka_event_DescribeConfigs_result((rd_kafka_event_t *)configs), &count);
+        const rd_kafka_ConfigResource_t **resources = xkafka_configs_resources(configs, &count);
         return resource_index < count ? resources[resource_index] : NULL;
 }
 
@@ -1526,7 +1534,7 @@ static const rd_kafka_ConfigEntry_t *xkafka_configs_entry(void *configs, size_t 
 
 size_t xkafka_configs_resource_count(void *configs) {
         size_t count = 0;
-        rd_kafka_DescribeConfigs_result_resources(rd_kafka_event_DescribeConfigs_result((rd_kafka_event_t *)configs), &count);
+        xkafka_configs_resources(configs, &count);
         return count;
 }
 
@@ -1640,6 +1648,113 @@ static void xkafka_partition_codes(const rd_kafka_topic_partition_list_t *answer
                     answers == NULL ? NULL : rd_kafka_topic_partition_list_find(answers, topics[index], partitions[index]);
                 codes[index] = answer == NULL ? XKAFKA_NO_ANSWER : answer->err;
         }
+}
+
+/* ---- Configuration changes and elections ---- */
+
+/* Changes the topics' properties, entry by entry, where the entries of one topic come together. Each entry's operation is
+ * an rd_kafka_AlterConfigOpType_t, and an unset entry has a NULL value. The result event is returned for the xkafka_configs_*
+ * accessors to read and xkafka_configs_destroy to release; NULL where the request as a whole failed, with error populated. */
+void *xkafka_admin_alter_topic_configs(rd_kafka_t *client,
+                                       const char *const *topics,
+                                       const char *const *names,
+                                       const char *const *values,
+                                       const int32_t *operations,
+                                       size_t count,
+                                       int timeout_ms,
+                                       char *error,
+                                       size_t error_size,
+                                       int32_t *error_code) {
+        rd_kafka_ConfigResource_t **resources = (rd_kafka_ConfigResource_t **)calloc(count, sizeof(rd_kafka_ConfigResource_t *));
+        rd_kafka_AdminOptions_t *options;
+        rd_kafka_queue_t *queue;
+        rd_kafka_event_t *event = NULL;
+        size_t resource_count = 0;
+        size_t index;
+
+        if (resources == NULL) {
+                xkafka_set_error(error, error_size, error_code, "could not allocate the topics to change");
+                return NULL;
+        }
+        for (index = 0; index < count; index++) {
+                rd_kafka_error_t *refused;
+
+                if (resource_count == 0 || strcmp(topics[index], rd_kafka_ConfigResource_name(resources[resource_count - 1])) != 0)
+                        resources[resource_count++] = rd_kafka_ConfigResource_new(RD_KAFKA_RESOURCE_TOPIC, topics[index]);
+                refused = rd_kafka_ConfigResource_add_incremental_config(resources[resource_count - 1], names[index],
+                                                                         (rd_kafka_AlterConfigOpType_t)operations[index], values[index]);
+                if (refused != NULL) {
+                        xkafka_set_error_at(error, error_size, error_code, rd_kafka_error_string(refused), rd_kafka_error_code(refused));
+                        rd_kafka_error_destroy(refused);
+                        rd_kafka_ConfigResource_destroy_array(resources, resource_count);
+                        free(resources);
+                        return NULL;
+                }
+        }
+
+        options = xkafka_admin_options(client, RD_KAFKA_ADMIN_OP_INCREMENTALALTERCONFIGS, timeout_ms, error, error_size, error_code);
+        if (options != NULL) {
+                queue = rd_kafka_queue_new(client);
+                rd_kafka_IncrementalAlterConfigs(client, resources, resource_count, options, queue);
+                event = xkafka_admin_result(queue, timeout_ms, error, error_size, error_code);
+                rd_kafka_AdminOptions_destroy(options);
+                rd_kafka_queue_destroy(queue);
+        }
+        rd_kafka_ConfigResource_destroy_array(resources, resource_count);
+        free(resources);
+        return event;
+}
+
+/* Elects each partition's preferred replica as its leader, writing each partition's code, or XKAFKA_NO_ANSWER where the result
+ * leaves it out; -1 where the request as a whole failed, with error populated. */
+int xkafka_admin_elect_preferred_leaders(rd_kafka_t *client,
+                                         const char *const *topics,
+                                         const int32_t *partitions,
+                                         size_t count,
+                                         int timeout_ms,
+                                         int32_t *codes,
+                                         char *error,
+                                         size_t error_size,
+                                         int32_t *error_code) {
+        rd_kafka_AdminOptions_t *options =
+            xkafka_admin_options(client, RD_KAFKA_ADMIN_OP_ELECTLEADERS, timeout_ms, error, error_size, error_code);
+        rd_kafka_topic_partition_list_t *requested;
+        rd_kafka_ElectLeaders_t *request;
+        rd_kafka_queue_t *queue;
+        rd_kafka_event_t *event;
+        const rd_kafka_topic_partition_result_t **results;
+        size_t result_count = 0;
+        size_t index;
+        size_t result;
+        int outcome = -1;
+
+        for (index = 0; index < count; index++)
+                codes[index] = XKAFKA_NO_ANSWER;
+        if (options == NULL)
+                return -1;
+        requested = xkafka_topic_partition_list(topics, partitions, NULL, count);
+        request = rd_kafka_ElectLeaders_new(RD_KAFKA_ELECTION_TYPE_PREFERRED, requested);
+        rd_kafka_topic_partition_list_destroy(requested);
+        queue = rd_kafka_queue_new(client);
+        rd_kafka_ElectLeaders(client, request, options, queue);
+        event = xkafka_admin_result(queue, timeout_ms, error, error_size, error_code);
+        if (event != NULL) {
+                results = rd_kafka_ElectLeaders_result_partitions(rd_kafka_event_ElectLeaders_result(event), &result_count);
+                for (result = 0; result < result_count; result++) {
+                        const rd_kafka_topic_partition_t *answered = rd_kafka_topic_partition_result_partition(results[result]);
+                        const rd_kafka_error_t *failure = rd_kafka_topic_partition_result_error(results[result]);
+
+                        for (index = 0; index < count; index++)
+                                if (partitions[index] == answered->partition && strcmp(topics[index], answered->topic) == 0)
+                                        codes[index] = failure == NULL ? RD_KAFKA_RESP_ERR_NO_ERROR : rd_kafka_error_code(failure);
+                }
+                rd_kafka_event_destroy(event);
+                outcome = 0;
+        }
+        rd_kafka_ElectLeaders_destroy(request);
+        rd_kafka_AdminOptions_destroy(options);
+        rd_kafka_queue_destroy(queue);
+        return outcome;
 }
 
 /* ---- Cluster and topics ---- */

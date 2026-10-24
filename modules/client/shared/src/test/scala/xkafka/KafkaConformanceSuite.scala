@@ -2133,6 +2133,102 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
       PlatformKafkaClient().admin(client).use(_.describeTopicConfigurations(topics)).attempt.timeout(150.seconds).map(unreachable)
 
+  test(conformance("changing a topic's configuration sets, appends to, removes from, and unsets the named properties, and leaves the others")):
+    withBroker: server =>
+      val topic                                                                          = uniqueTopic("configuration-change")
+      def changing(admin: KafkaAdminClient[IO], changes: (String, ConfigurationChange)*) =
+        admin.alterTopicConfigurations(NonEmptyMap.one(topic, NonEmptyMap.of(changes.head, changes.tail*)))
+      def entries(admin: KafkaAdminClient[IO]) =
+        admin.describeTopicConfigurations(NonEmptySet.one(topic))
+          .flatMap(answers => IO.fromEither(answers(topic).toRight(new AssertionError("no answer")).flatten)).map(configuration =>
+            List("retention.ms", "cleanup.policy", "segment.ms")
+              .map(name => name -> configuration.get(name).map(entry => (entry.value, entry.source))).toMap
+          )
+
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+        observed <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            for
+              _      <- admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 1)
+              before <- entries(admin)
+              first  <-
+                changing(admin, "retention.ms" -> ConfigurationChange.Set("123456789"), "cleanup.policy" -> ConfigurationChange.Append("compact"))
+              changed  <- entries(admin)
+              second   <- changing(admin, "retention.ms" -> ConfigurationChange.Unset, "cleanup.policy" -> ConfigurationChange.Subtract("delete"))
+              restored <- entries(admin)
+            yield (before, first, changed, second, restored)
+          .timeout(90.seconds)
+      yield
+        val (before, first, changed, second, restored) = observed
+        assertEquals(first.map(_.leftMap(_.getMessage)), NonEmptyMap.one(topic, Right(())))
+        assertEquals(second.map(_.leftMap(_.getMessage)), NonEmptyMap.one(topic, Right(())))
+        assertEquals(changed("retention.ms"), Some((ConfigurationValue.Present("123456789"), ConfigurationSource.TopicOverride)))
+        assertEquals(changed("cleanup.policy"), Some((ConfigurationValue.Present("delete,compact"), ConfigurationSource.TopicOverride)))
+        assertEquals(changed("segment.ms"), before("segment.ms"))
+        assertEquals(restored("retention.ms"), before("retention.ms"))
+        assertEquals(restored("retention.ms").map(_._2), Some(ConfigurationSource.Default))
+        assertEquals(restored("cleanup.policy"), Some((ConfigurationValue.Present("compact"), ConfigurationSource.TopicOverride)))
+        assertEquals(restored("segment.ms"), before("segment.ms"))
+
+  test(conformance("a configuration change the broker refuses answers for its own topic, and the other topics are still changed")):
+    withBroker: server =>
+      val changed  = uniqueTopic("configuration-changed")
+      val listless = uniqueTopic("configuration-listless")
+      val unknown  = uniqueTopic("configuration-unknown-property")
+      val missing  = uniqueTopic("configuration-change-missing")
+      for
+        client    <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        newTopics <- List(changed, listless, unknown).traverse(NewTopic.from(_, partitions = 1, replicationFactor = 1).liftTo[IO])
+        answers   <-
+          PlatformKafkaClient().admin(client).use: admin =>
+            admin.createTopics(NonEmptySet.of(newTopics.head, newTopics.tail*)) *> List(changed, listless, unknown)
+              .traverse_(described(admin, _, 1)) *> admin.alterTopicConfigurations(NonEmptyMap.of(
+              changed  -> NonEmptyMap.one("retention.ms", ConfigurationChange.Set("123456789")),
+              listless -> NonEmptyMap.one("retention.ms", ConfigurationChange.Append("123456789")),
+              unknown  -> NonEmptyMap.one("no.such.property", ConfigurationChange.Set("1")),
+              missing  -> NonEmptyMap.one("retention.ms", ConfigurationChange.Set("123456789"))
+            ))
+          .timeout(90.seconds)
+      yield
+        assertEquals(answers(changed).map(_.leftMap(_.getMessage)), Some(Right(())))
+        refusedWith(answers(listless), ErrorCode.InvalidConfiguration, "appending to a property that holds no list")
+        refusedWith(answers(unknown), ErrorCode.InvalidConfiguration, "a property Kafka does not have")
+        refusedWith(answers(missing), ErrorCode.UnknownTopicOrPartition, "a topic the cluster does not have")
+
+  test(conformance("changing topic configurations against a cluster that cannot be reached fails as a timed out request")):
+    val changes =
+      NonEmptyMap.of(
+        uniqueTopic("configuration-change-unreachable") -> NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1")),
+        uniqueTopic("configuration-change-unreachable") -> NonEmptyMap.one("retention.ms", ConfigurationChange.Set("1"))
+      )
+    ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
+      PlatformKafkaClient().admin(client).use(_.alterTopicConfigurations(changes)).attempt.timeout(150.seconds).map(unreachable)
+
+  test(
+    conformance("electing the preferred leader of a partition it already leads answers as done, and a partition the cluster does not have as unknown")
+  ):
+    withBroker: server =>
+      val led     = TopicPartition(uniqueTopic("election-led"), validPartition(0))
+      val missing = TopicPartition(uniqueTopic("election-missing"), validPartition(0))
+      for
+        _       <- produceValues(server, led, 1)
+        client  <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        answers <- PlatformKafkaClient().admin(client).use(_.electPreferredLeaders(NonEmptySet.of(led, missing))).timeout(90.seconds)
+      yield
+        assertEquals(answers(led).map(_.leftMap(_.getMessage)), Some(Right(())))
+        refusedWith(answers(missing), ErrorCode.UnknownTopicOrPartition, "a partition the cluster does not have")
+
+  test(conformance("electing preferred leaders against a cluster that cannot be reached fails as a timed out request")):
+    val partitions =
+      NonEmptySet.of(
+        TopicPartition(uniqueTopic("election-unreachable"), validPartition(0)),
+        TopicPartition(uniqueTopic("election-unreachable"), validPartition(1))
+      )
+    ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).liftTo[IO].flatMap: client =>
+      PlatformKafkaClient().admin(client).use(_.electPreferredLeaders(partitions)).attempt.timeout(150.seconds).map(unreachable)
+
   test(conformance("describing the cluster reports its id, and its broker as clients reach it, which is also its controller")):
     withBroker: server =>
       val (host, port) = server.splitAt(server.lastIndexOf(':'))

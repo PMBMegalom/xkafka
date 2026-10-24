@@ -174,6 +174,16 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Each topic's configuration, or why it was not described, in request order. */
   def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]]
 
+  /** Whether each topic's changes were made, in request order. */
+  def alterTopicConfigs(
+      admin: Client,
+      changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+      timeoutMillis: Int
+  ): F[Vector[Either[KafkaException, Unit]]]
+
+  /** Whether each partition's preferred replica leads it now, in request order, with one that already led it answering `Right(())`. */
+  def electPreferredLeaders(admin: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]]
+
   /** Every consumer group the cluster knows, with its state. */
   def listGroups(admin: Client, timeoutMillis: Int): F[Vector[(ConsumerGroup, ConsumerGroupState)]]
 

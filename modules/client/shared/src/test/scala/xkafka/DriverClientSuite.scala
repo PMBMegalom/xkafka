@@ -692,6 +692,18 @@ final class DriverClientSuite extends CatsEffectSuite:
         timeoutMillis: Int
     ): IO[Vector[Either[KafkaException, TopicConfiguration]]] = unused("describeTopicConfigs")
 
+    override def alterTopicConfigs(
+        admin: Client,
+        changes: Vector[(Topic, NonEmptyList[(String, ConfigurationChange)])],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = unused("alterTopicConfigs")
+
+    override def electPreferredLeaders(
+        admin: Client,
+        partitions: Vector[TopicPartition],
+        timeoutMillis: Int
+    ): IO[Vector[Either[KafkaException, Unit]]] = unused("electPreferredLeaders")
+
     override def listGroups(admin: Client, timeoutMillis: Int): IO[Vector[(ConsumerGroup, ConsumerGroupState)]] = unused("listGroups")
 
     override def describeGroups(

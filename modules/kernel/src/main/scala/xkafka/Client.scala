@@ -938,6 +938,20 @@ object ConfigurationSource:
       case 5 => Default               // DEFAULT_CONFIG
       case _ => Unknown
 
+/** A change to one property of a topic's configuration. */
+enum ConfigurationChange derives CanEqual:
+  /** Sets the topic's own value. */
+  case Set(value: String)
+
+  /** Drops the topic's own value, so the topic takes the value it would without one. */
+  case Unset
+
+  /** Adds a value to a property that holds a list, such as `cleanup.policy`. */
+  case Append(value: String)
+
+  /** Removes a value from a property that holds a list. */
+  case Subtract(value: String)
+
 /** A broker of the cluster, as it advertises itself to clients. */
 final case class Broker(id: BrokerId, host: String, port: Int, rack: Option[String])
 
@@ -1060,6 +1074,22 @@ trait KafkaAdminClient[F[_]]:
     */
   def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]]
 
+  /** Changes the named properties of each topic, leaving the properties it does not name as they are.
+    *
+    * Every topic gets an answer, and the call fails as a whole only when the cluster answered for none of the topics, such as when it cannot be
+    * reached in time.
+    */
+  def alterTopicConfigurations(
+      changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+  ): F[NonEmptyMap[Topic, Either[KafkaException, Unit]]]
+
+  /** Makes each partition's preferred replica, the first of its replicas, its leader.
+    *
+    * Every partition gets an answer, and one already led by its preferred replica answers `Right(())`. The call fails as a whole only when the
+    * cluster answered for none of the partitions, such as when it cannot be reached in time.
+    */
+  def electPreferredLeaders(partitions: NonEmptySet[TopicPartition]): F[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]]
+
   /** Every consumer group the cluster knows, with its state, including a group with no members that still holds committed offsets.
     *
     * Kafka keeps committed offsets under an empty group name and lists that group, but it is left out here, because `ConsumerGroup` does not accept
@@ -1131,6 +1161,13 @@ trait KafkaAdminClient[F[_]]:
 
       override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
         fk(self.describeTopicConfigurations(topics))
+
+      override def alterTopicConfigurations(
+          changes: NonEmptyMap[Topic, NonEmptyMap[String, ConfigurationChange]]
+      ): G[NonEmptyMap[Topic, Either[KafkaException, Unit]]] = fk(self.alterTopicConfigurations(changes))
+
+      override def electPreferredLeaders(partitions: NonEmptySet[TopicPartition]): G[NonEmptyMap[TopicPartition, Either[KafkaException, Unit]]] =
+        fk(self.electPreferredLeaders(partitions))
 
       override def listConsumerGroups: G[Map[ConsumerGroup, ConsumerGroupState]] = fk(self.listConsumerGroups)
 
