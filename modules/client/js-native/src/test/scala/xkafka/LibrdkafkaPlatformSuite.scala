@@ -21,6 +21,8 @@
 
 package xkafka
 
+import java.util.concurrent.TimeoutException
+
 import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
@@ -104,7 +106,7 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
     KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.one(record)).void).timeout(5.seconds)
 
-  test("a partially enqueued batch fails promptly and remains owned through release"):
+  test("a partially enqueued batch waiting for room can be cancelled, and remains owned through release"):
     val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
     val client     = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
     val settings   =
@@ -116,8 +118,8 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
       ).toOption.get.withCloseTimeout(100.millis).toOption.get
     val record = ProducerRecord(Topic.from("events").toOption.get, "key", "value")
 
-    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).attempt).timeout(5.seconds).map: outcome =>
-      assert(outcome.isLeft, s"the second record should exceed the one-message local queue, got $outcome")
+    KafkaClient[IO].producer(settings).use(_.produce(NonEmptyList.of(record, record)).timeout(1.second).attempt).timeout(5.seconds).map: outcome =>
+      assert(outcome.left.exists(_.isInstanceOf[TimeoutException]), s"the second record should wait for room in the one-message queue, got $outcome")
 
   /** librdkafka names idempotence as the reason it refuses too many requests in flight. */
   private def refusedForIdempotence(outcome: Either[Throwable, Unit]): Boolean =

@@ -25,6 +25,7 @@ import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
+import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.Chunk
 import internal.driver.*
@@ -46,8 +47,9 @@ final class DriverClientSuite extends CatsEffectSuite:
   private val producerSettings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get
 
   // The fake refuses to enqueue a record whose value is "refused", and fails to deliver one whose value is "lost". One whose value is "slow" is
-  // delivered once flushed, and one whose value is "stuck" never is.
-  private val refused = new KafkaException.BackendFailure("queue full", Some(ErrorCode.Other(-184)))
+  // delivered once flushed, and one whose value is "stuck" never is. It has room for one whose value is "crowded" once its deliveries have been
+  // served twice, for one whose value is "room at N" once N seconds have passed, and never for one whose value is "never".
+  private val refused = new KafkaException.BackendFailure("refused")
   private val lost    = new KafkaException.BackendFailure("too large", Some(ErrorCode.MessageTooLarge))
 
   test("attempting each record answers every record on its own, and producing fails with the first record that was not delivered"):
@@ -73,6 +75,38 @@ final class DriverClientSuite extends CatsEffectSuite:
         List("a" -> Right(Some(0L)), "refused" -> Left(refused), "b" -> Left(refused))
       )
       assertEquals(enqueued.void.leftMap(identity[Throwable]), Left(refused))
+
+  test("a producer with no room for a record has its deliveries served until there is, then enqueues it and the records after it"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).use(_.produceAndAwait(values("a", "crowded", "b"))).timeout(10.seconds)
+    .map(produced => assertEquals(produced.toList.map(_.metadata.offset.map(_.value)), List(Some(0L), Some(1L), Some(2L))))
+
+  test("a record waits up to a minute for room, counted again from each record that finds it, then it and the ones after it time out"):
+    // Each serving takes a second, so the minute passes in few of them.
+    val waited =
+      FakeDriver(servingTakes = 1.second).flatMap: fake =>
+        new DriverClient[IO](fake).producer(producerSettings).use: producer =>
+          for
+            roomy   <- producer.produceAndAwait(values("room at 50", "room at 100", "b"))
+            started <- IO.monotonic
+            crowded <- producer.produceAttemptEachAndAwait(values("a", "room at 500", "b"))
+            ended   <- IO.monotonic
+          yield (roomy.size, crowded.toList.map(each => each.record.value -> each.outcome.leftMap(timedOut).map(_ => ())), ended - started)
+    TestControl.executeEmbed(waited.timeout(10.minutes)).map: (delivered, attempted, took) =>
+      assertEquals(delivered, 3)
+      assertEquals(attempted, List("a" -> Right(()), "room at 500" -> Left(true), "b" -> Left(true)))
+      assert(took >= 1.minute && took < 61.seconds, s"gave up after $took")
+
+  test("a wait for room that is cancelled leaves the records before it to be delivered, so a flush still returns"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings)
+        .use(producer => producer.produce(values("a", "never")).timeout(500.millis).attempt <* producer.flush).timeout(10.seconds)
+    .map(outcome => assert(outcome.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"the wait should be cancelled, got $outcome"))
+
+  private def timedOut(failure: KafkaException): Boolean =
+    failure match
+      case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.RequestTimedOut) && failure.retriable.contains(true)
+      case _                                      => false
 
   test("attempting each record still fails as a whole where a record cannot be serialized"):
     val failing =
@@ -493,6 +527,8 @@ final class DriverClientSuite extends CatsEffectSuite:
       inPoll: Ref[IO, Option[IO[Unit]]],
       holds: Ref[IO, List[Deferred[IO, Unit]]],
       pauseTake: Ref[IO, Option[Deferred[IO, Unit]]],
+      servings: Ref[IO, Int],
+      servingTakes: FiniteDuration,
       holdCommits: Boolean,
       holdOffsets: Boolean
   ) extends KafkaDriver[IO]:
@@ -568,11 +604,23 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def freeBatch(batch: Batch): IO[Unit] = IO.unit
 
-    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Unit] =
-      records.traverse_ : record =>
-        if valueOf(record) == "refused" then IO.raiseError(refused) else batches.update(held => held.updated(batch, held(batch) :+ record))
+    override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): IO[Int] =
+      def from(rest: List[EncodedRecord], taken: Int): IO[Int] =
+        rest match
+          case Nil                                         => IO.pure(taken)
+          case record :: _ if valueOf(record) == "refused" => IO.raiseError(refused)
+          case record :: next                              => hasRoom(record)
+              .ifM(batches.update(held => held.updated(batch, held(batch) :+ record)) *> from(next, taken + 1), IO.pure(taken))
+      from(records.toList, 0)
 
-    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = IO.sleep(5.millis)
+    private def hasRoom(record: EncodedRecord): IO[Boolean] =
+      valueOf(record) match
+        case "crowded"           => servings.get.map(_ >= 2)
+        case "never"             => IO.pure(false)
+        case s"room at $seconds" => IO.monotonic.map(_ >= seconds.toInt.seconds)
+        case _                   => IO.pure(true)
+
+    override def serveDeliveries(producer: Client, timeoutMillis: Int): IO[Unit] = servings.update(_ + 1) *> IO.sleep(servingTakes)
 
     /** Takes a moment, then sends every batch enqueued so far. */
     override def flush(producer: Client, timeoutMillis: Int): IO[Unit] =
@@ -740,7 +788,7 @@ final class DriverClientSuite extends CatsEffectSuite:
       unused("deleteGroups")
 
   private object FakeDriver:
-    def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false): IO[FakeDriver] =
+    def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false, servingTakes: FiniteDuration = 5.millis): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
         Ref.of[IO, Set[Int]](Set.empty),
@@ -749,7 +797,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         Ref.of[IO, List[Rebalance[Int]]](Nil),
         Ref.of[IO, Option[IO[Unit]]](None),
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
-        Ref.of[IO, Option[Deferred[IO, Unit]]](None)
-      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake) =>
-        new FakeDriver(batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, holdCommits, holdOffsets)
+        Ref.of[IO, Option[Deferred[IO, Unit]]](None),
+        Ref.of[IO, Int](0)
+      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings) =>
+        new FakeDriver(batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, servingTakes, holdCommits, holdOffsets)
       )

@@ -117,10 +117,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def freeBatch(batch: Batch): F[Unit] = direct(_.batchFree(batch)).void
 
-  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit] =
+  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int] =
     direct: shim =>
-      val error = ErrorSlot()
-      records.toList.foreach: record =>
+      val error                                 = ErrorSlot()
+      def taken(record: EncodedRecord): Boolean =
         val (key, keySize)     = bytes(record.key)
         val (value, valueSize) = bytes(record.value)
         val headers            = nativeHeaders(shim, record.headers, error)
@@ -140,7 +140,11 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
             ErrorBufferSize,
             error.code
           )
-        if result.asInstanceOf[Int] != 0 then throw error.failure
+        result.asInstanceOf[Int] match
+          case 0 => true
+          case 1 => false
+          case _ => throw error.failure
+      records.iterator.takeWhile(taken).size
 
   private def nativeHeaders(shim: Shim, headers: Headers, error: ErrorSlot): js.Any =
     val native = shim.headersNew(headers.values.size)

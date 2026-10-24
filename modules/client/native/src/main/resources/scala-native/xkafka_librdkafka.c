@@ -330,8 +330,10 @@ xkafka_batch_t *xkafka_batch_new(size_t capacity) {
         return batch;
 }
 
-/* Enqueues one message. The message owns a copy of its payload, so the caller's
- * buffers may be released as soon as this returns. */
+/* Enqueues one message, returning 0 where the batch took it, 1 where the
+ * producer has no room for it yet, and -1 where it was refused. The message
+ * owns a copy of its payload, so the caller's buffers may be released as soon
+ * as this returns. */
 int xkafka_batch_add(rd_kafka_t *producer,
                      xkafka_batch_t *batch,
                      const char *topic,
@@ -389,6 +391,20 @@ int xkafka_batch_add(rd_kafka_t *producer,
                 if (headers != NULL)
                         rd_kafka_headers_destroy(headers);
                 __atomic_sub_fetch(&batch->pending, 1, __ATOMIC_RELAXED);
+        }
+
+        switch (result) {
+        case RD_KAFKA_RESP_ERR_NO_ERROR:
+                break;
+        case RD_KAFKA_RESP_ERR__QUEUE_FULL:
+                return 1;
+        /* A record too large for the producer is answered as its delivery, as
+         * the Java client answers it. */
+        case RD_KAFKA_RESP_ERR_MSG_SIZE_TOO_LARGE:
+                slot->error = result;
+                slot->complete = 1;
+                break;
+        default:
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }

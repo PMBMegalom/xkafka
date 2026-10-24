@@ -133,12 +133,12 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override def freeBatch(batch: Batch): F[Unit] = F.blocking(Bindings.xkafka_batch_free(batch))
 
-  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit] =
+  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone             = zone
-        val (error, errorCode) = errorSlots
-        records.toList.foreach: record =>
+        given Zone                                = zone
+        val (error, errorCode)                    = errorSlots
+        def taken(record: EncodedRecord): Boolean =
           val (keyPointer, keySize)     = cBytes(record.key)
           val (valuePointer, valueSize) = cBytes(record.value)
           val headers                   = nativeHeaders(record.headers, error, errorCode)
@@ -158,7 +158,11 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
               ErrorBufferSize.toUSize,
               errorCode
             )
-          if result != 0 then throw nativeError(error, errorCode)
+          result match
+            case 0 => true
+            case 1 => false
+            case _ => throw nativeError(error, errorCode)
+        records.iterator.takeWhile(taken).size
 
   private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
     val native = Bindings.xkafka_headers_new(headers.values.size.toUSize)

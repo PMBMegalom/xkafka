@@ -249,6 +249,58 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         )
         assertEquals(produced.leftMap(code), Left(Some(ErrorCode.MessageTooLarge)))
 
+  test(conformance("a record larger than the client takes is answered on its own, as one the broker rejects is")):
+    withBroker: server =>
+      val topic = uniqueTopic("too-large-locally")
+      // Two megabytes is over the request limit of each platform's client, so the client refuses the record without sending it.
+      val small   = record(topic, Some("k"), Some("small"), validPartition(0))
+      val large   = record(topic, Some("k"), Some("x" * 2000000), validPartition(0))
+      val records = NonEmptyList.of(small, large, small)
+
+      for
+        _        <- createPartitioned(server, topic, 1)
+        settings <- producerSettings(server)
+        outcomes <-
+          PlatformKafkaClient().producer(settings)
+            .use(producer => (producer.produceAttemptEachAndAwait(records), producer.produce(records).flatMap(_.attempt)).tupled).timeout(60.seconds)
+      yield
+        val (attempted, produced) = outcomes
+        assertEquals(
+          attempted.toList.map(_.outcome.leftMap(codeOf).map(_.offset.map(_.value))),
+          List(Right(Some(0L)), Left(Some(ErrorCode.MessageTooLarge)), Right(Some(1L)))
+        )
+        assertEquals(produced.leftMap(codeOf), Left(Some(ErrorCode.MessageTooLarge)))
+
+  test(conformance("a producer whose buffer is full waits for room, then takes the rest of the records")):
+    withBroker: server =>
+      val topic = uniqueTopic("buffer-full")
+      // Each platform's client has room for far fewer records than are produced at once.
+      val room    = if backend == "jvm" then Map("buffer.memory" -> "32768") else Map("queue.buffering.max.messages" -> "10")
+      val records =
+        NonEmptyList.fromListUnsafe(List.tabulate(200)(index => record(topic, Some("k"), Some(s"$index:${"x" * 1000}"), validPartition(0))))
+
+      for
+        _        <- createPartitioned(server, topic, 1)
+        settings <- producerSettings(server).flatMap(_.withProperties(room).liftTo[IO])
+        produced <- PlatformKafkaClient().producer(settings).use(_.produceAndAwait(records)).timeout(60.seconds)
+      yield assertEquals(produced.toList.map(_.metadata.offset.map(_.value)), List.tabulate(200)(index => Some(index.toLong)))
+
+  test(conformance("a record for a partition the topic does not have is answered on its own, also once the client knows the topic")):
+    withBroker: server =>
+      val topic = uniqueTopic("unknown-partition")
+      // The Java client waits up to its max.block.ms for the partition to appear, then answers that it timed out.
+      val waiting = if backend == "jvm" then Map("max.block.ms" -> "2000") else Map.empty
+      val records = NonEmptyList.of(record(topic, Some("k"), Some("a"), validPartition(0)), record(topic, Some("k"), Some("b"), validPartition(3)))
+
+      for
+        _        <- createPartitioned(server, topic, 1)
+        settings <- producerSettings(server).flatMap(_.withProperties(waiting).liftTo[IO])
+        rounds   <- PlatformKafkaClient().producer(settings).use(_.produceAttemptEachAndAwait(records).replicateA(2)).timeout(60.seconds)
+      yield
+        val missing = if backend == "jvm" then ErrorCode.RequestTimedOut else ErrorCode.UnknownTopicOrPartition
+        rounds.zipWithIndex.foreach: (attempted, round) =>
+          assertEquals(attempted.toList.map(_.outcome.leftMap(codeOf).void), List(Right(()), Left(Some(missing))), s"round $round")
+
   test(conformance("flushing sends records without waiting out the linger and returns once they are delivered")):
     withBroker: server =>
       val topic   = uniqueTopic("flush")
@@ -2331,6 +2383,11 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), failure.getMessage)
         assertEquals(failure.retriable, Some(true), failure.getMessage)
       case other => fail(s"a cluster that cannot be reached should fail the call, got $other")
+
+  private def codeOf(failure: Throwable): Option[ErrorCode] =
+    failure match
+      case failure: KafkaException.BackendFailure => failure.code
+      case _                                      => None
 
   private def refusedWith(answer: Option[Either[Throwable, ?]], code: ErrorCode, clue: String): Unit =
     answer match

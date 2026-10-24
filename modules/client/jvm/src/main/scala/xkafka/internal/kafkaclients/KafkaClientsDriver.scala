@@ -154,7 +154,8 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def freeBatch(batch: Batch): F[Unit] = F.unit
 
-  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Unit] =
+  /** The Java client waits for room itself, so this takes every record. */
+  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int] =
     producing(producer): value =>
       F.blocking:
         try records.toList.foreach: record =>
@@ -168,6 +169,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
                 throw error
             batch.enqueued.incrementAndGet()
         finally batch.seal()
+        records.size
 
   /** The Java client reports each record on its own thread, so there is no queue to serve. */
   override def serveDeliveries(producer: Client, timeoutMillis: Int): F[Unit] = F.unit

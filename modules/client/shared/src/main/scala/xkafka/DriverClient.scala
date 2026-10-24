@@ -50,6 +50,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     def unapply(handle: GroupHandle): Option[driver.GroupMetadata] = driver.asGroupMetadata(handle)
   // How long one wait for delivery reports lasts before whoever is waiting checks again whether to go on.
   private val DeliveryPollTimeoutMillis = 100
+  // How long a record waits for room in the producer: the Java client's default `max.block.ms`.
+  private val RoomTimeout = 1.minute
   // Admin calls are metadata round trips against the controller, so they are bounded on their own.
   private val AdminTimeoutMillis = 30000
 
@@ -472,19 +474,51 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     /** Enqueues the whole batch in one pass and serves its delivery reports once, so a batch of any size costs a single round trip.
       *
-      * It answers why the backend refused a record, where it did, and the effect that reports the records it accepted before that one.
+      * It answers why the backend refused a record, where it did, and the effect that reports the records it accepted before that one. The records it
+      * found no room for are reported as timed out.
       */
     private def send(records: NonEmptyList[ProducerRecord[K, V]]): F[(Option[Throwable], F[Vector[Either[KafkaException, RecordMetadata]]])] =
       records.traverse(encodeRecord).flatMap: encoded =>
-        F.uncancelable: _ =>
+        F.uncancelable: poll =>
           for
-            batch    <- client(driver.batch(encoded.size))
-            _        <- owned.update(_ + batch)
-            ticket   <- outstanding.modify(current => (current.copy(next = current.next + 1, open = current.open + current.next), current.next))
-            enqueued <- client(driver.enqueue(client.handle, batch, encoded)).attempt
+            batch  <- client(driver.batch(encoded.size))
+            _      <- owned.update(_ + batch)
+            ticket <- outstanding.modify(current => (current.copy(next = current.next + 1, open = current.open + current.next), current.next))
             done = outstanding.update(current => current.copy(open = current.open - ticket))
-            reported <- superviseBatch(batch, awaitDelivery(batch).guarantee(done) *> client(outcomes(batch, records))).onError(_ => done)
+            // A wait for room that is cancelled leaves the records already enqueued to be delivered and the batch to be released.
+            enqueued <- enqueueWaitingForRoom(batch, encoded, poll).attempt.onCancel(superviseBatch(batch, awaitDelivery(batch).guarantee(done)).void)
+            unplaced  = enqueued.getOrElse(0)
+            delivered = awaitDelivery(batch).guarantee(done) *> client(outcomes(batch, records))
+            reported <- superviseBatch(batch, delivered.map(_ ++ Vector.fill(unplaced)(Left(noRoom)))).onError(_ => done)
           yield (enqueued.left.toOption, reported)
+
+    /** Enqueues the records, waiting while the producer has no room for the next one, and answers how many it gave up on.
+      *
+      * Room opens as the records ahead are delivered, so where deliveries share a queue the wait has it served. The Java client waits up to its
+      * `max.block.ms`, a minute unless set, for each record, and this waits as long for each one. The wait can be cancelled.
+      */
+    private def enqueueWaitingForRoom(batch: driver.Batch, records: NonEmptyList[EncodedRecord], poll: Poll[F]): F[Int] =
+      def from(rest: NonEmptyList[EncodedRecord], waitingSince: FiniteDuration): F[Int] =
+        client(driver.enqueue(client.handle, batch, rest)).flatMap: taken =>
+          NonEmptyList.fromList(rest.toList.drop(taken)).fold(F.pure(0)): left =>
+            F.monotonic.flatMap: now =>
+              val since = if taken > 0 then now else waitingSince
+              if now - since >= RoomTimeout then F.pure(left.size) else poll(awaitRoom) *> from(left, since)
+      F.monotonic.flatMap(from(records, _))
+
+    private def awaitRoom: F[Unit] =
+      if driver.deliveriesShareQueue then
+        val servedAgain = deliveries.served.get.flatMap(count => deliveries.served.waitUntil(_ > count))
+        val failed      = deliveries.failure.get.flatMap(F.raiseError[Unit])
+        F.bracket(deliveries.waiting.update(_ + 1))(_ => F.race(servedAgain, failed).void)(_ => deliveries.waiting.update(_ - 1))
+      else F.sleep(DeliveryPollTimeoutMillis.millis)
+
+    private def noRoom: KafkaException =
+      new KafkaException.BackendFailure(
+        s"the producer had no room for the record for ${RoomTimeout.toSeconds} seconds",
+        code = Some(ErrorCode.RequestTimedOut),
+        retriable = Some(ErrorCode.RequestTimedOut.retriable)
+      )
 
     private def superviseBatch[A](batch: driver.Batch, result: F[A]): F[F[A]] =
       supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch))).map(_.joinWithNever)

@@ -1397,8 +1397,8 @@ trait KafkaProducer[F[_], K, V]:
   /** Enqueues `records` and returns the effect that completes once the broker has acknowledged them.
     *
     * The outer effect completes as soon as the records are accepted for delivery, so several batches can be in flight at once, and fails where the
-    * client refuses one of them as it is enqueued. Awaiting the inner effect immediately makes production fully synchronous. It fails where any
-    * record was not delivered, with the failure of the first such record.
+    * client refuses one of them as it is enqueued. While the client's buffer is full, it waits for room. Awaiting the inner effect immediately makes
+    * production fully synchronous. It fails where any record was not delivered, with the failure of the first such record.
     */
   def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[F[NonEmptyList[Produced[K, V]]]]
 
