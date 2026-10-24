@@ -21,6 +21,8 @@
 
 package xkafka
 
+import scala.concurrent.duration.*
+
 import cats.Order
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Poll, Ref, Resource}
@@ -415,10 +417,23 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   private final class DriverProducer[K, V](handle: NativeProducerHandle, settings: ProducerSettings[F, K, V]) extends KafkaProducer[F, K, V]:
     import handle.*
 
+    private val TopicCreationPoll = 100.millis
+
     /** A metadata lookup is a round trip against the cluster, so it is bounded the way the administration calls are. */
     private val metadataTimeoutMillis = settings.client.metadataRefreshInterval.toMillis.toInt.min(AdminTimeoutMillis)
 
-    override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] = client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic))
+    /** Asking about a topic makes the broker create it, which the Java client waits for and librdkafka does not, answering that the topic is unknown
+      * while it is being made. So the lookup is made again until the topic is there or its time is up.
+      */
+    override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] =
+      F.monotonic.flatMap: started =>
+        def lookUp: F[NonEmptySet[Partition]] =
+          client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic)).recoverWith:
+            case failure: KafkaException.BackendFailure
+                if failure.code.exists(code => code == ErrorCode.UnknownTopicOrPartition || code == ErrorCode.LeaderNotAvailable) =>
+              F.monotonic.flatMap: now =>
+                if now - started < metadataTimeoutMillis.millis then F.sleep(TopicCreationPoll) *> lookUp else F.raiseError(failure)
+        lookUp
 
     /** Waits for the batches numbered before the call, flushing the backend in short rounds meanwhile, so it can be cancelled between rounds.
       *
