@@ -83,6 +83,7 @@ final class EffectLazinessSuite extends CatsEffectSuite:
           admin.createTopics(NonEmptySet.one(NewTopic.from(topic, partitions = 1, replicationFactor = 1).toOption.get)),
           admin.deleteTopics(NonEmptySet.one(topic)),
           admin.createPartitions(topic, 2),
+          admin.describeCluster,
           admin.describeTopics(NonEmptySet.one(topic)),
           admin.deleteRecords(NonEmptyMap.one(partition, offset)),
           admin.describeTopicConfigurations(NonEmptySet.one(topic)),
@@ -193,7 +194,12 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         admin: Client,
         cuts: Vector[(TopicPartition, Offset)],
         timeoutMillis: Int
-    ): IO[Vector[Either[KafkaException, Offset]]] = waiting("deleteRecords")
+    ): IO[Vector[Either[KafkaException, Offset]]]                                           = waiting("deleteRecords")
+    override def describeCluster(admin: Client, timeoutMillis: Int): IO[ClusterDescription] = waiting("describeCluster")
+
+    override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): IO[Vector[Either[KafkaException, TopicDescription]]] =
+      waiting("describeTopics")
+
     override def describeTopicConfigs(
         admin: Client,
         topics: Vector[Topic],

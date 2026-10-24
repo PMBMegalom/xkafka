@@ -192,7 +192,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       settings.client.clientId,
       settings.groupId.value,
       ClientProperties.autoOffsetReset(settings.autoOffsetReset),
-      settings.client.properties ++ settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel)) ++
+      // The Java consumer asks the broker to create a topic it looks up, which librdkafka does not, so neither does. A property given still wins.
+      Map("allow.auto.create.topics" -> "false") ++ settings.client.properties ++
+        settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel)) ++
         ClientProperties.security(settings.client.security) ++ ClientProperties(settings.client) ++ ClientProperties.consumer(settings) ++
         settings.managedProperties
     )
@@ -266,20 +268,19 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       F.fromEither(KafkaAdminClient.validatePartitionCount(count))
         .flatMap(valid => client(driver.createPartitions(client.handle, topic, valid, requestTimeoutMillis)))
 
-    /** Topic metadata already reports what the cluster holds, so this asks for that rather than a second admin call. */
-    override def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]] =
-      client(readTopicMetadata(client.handle, requestTimeoutMillis, None)).map(_.view.filterKeys(topics.contains).toMap).flatMap: described =>
-        topics.find(topic => !described.contains(topic)) match
-          case Some(missing) => F.raiseError(unknownTopic(missing))
-          case None          => F.pure(described)
+    override def describeCluster: F[ClusterDescription] = client(driver.describeCluster(client.handle, requestTimeoutMillis))
 
-    override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]] =
-      val cuts = before.toSortedMap.toVector
-      client(driver.deleteRecords(client.handle, cuts, requestTimeoutMillis)).map(answers => cuts.map(_._1).zip(answers).toMap)
+    override def describeTopics(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]] =
+      val requested = topics.toNonEmptyList
+      client(driver.describeTopics(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
 
-    override def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
-      val requested = topics.toSortedSet.toVector
-      client(driver.describeTopicConfigs(client.handle, requested, requestTimeoutMillis)).map(answers => requested.zip(answers).toMap)
+    override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]] =
+      val cuts = before.toNel
+      client(driver.deleteRecords(client.handle, cuts.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(cuts.map(_._1), _))
+
+    override def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
+      val requested = topics.toNonEmptyList
+      client(driver.describeTopicConfigs(client.handle, requested.toList.toVector, requestTimeoutMillis)).flatMap(answeredEach(requested, _))
 
     override def listConsumerGroups: F[Map[ConsumerGroup, ConsumerGroupState]] =
       client(driver.listGroups(client.handle, requestTimeoutMillis)).map(_.toMap)
@@ -328,13 +329,6 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       if answers.size == requested.size then F.pure(requested.zipWith(NonEmptyList.fromListUnsafe(answers.toList))(_ -> _).toNem)
       else F.raiseError(new KafkaException.InvalidBackendResponse(s"expected ${requested.size} answers, got ${answers.size}"))
 
-    private def unknownTopic(topic: Topic): KafkaException.BackendFailure =
-      new KafkaException.BackendFailure(
-        s"the cluster has no topic '${topic.value}'",
-        Some(ErrorCode.UnknownTopicOrPartition),
-        retriable = Some(false)
-      )
-
     private val requestTimeoutMillis = AdminTimeoutMillis
 
   private def select(consumer: driver.Client, selection: Selection, starts: Vector[StartAt]): F[Unit] =
@@ -368,9 +362,27 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
           topic -> partitions.toSet
         .toMap
 
-  private def readPartitionsFor(handle: driver.Client, requestTimeoutMillis: Int, topic: Topic): F[Set[Partition]] =
+  /** Every topic has a partition, so the Java client's answer of none for a topic it does not know is the same answer as librdkafka's. */
+  private def readPartitionsFor(handle: driver.Client, requestTimeoutMillis: Int, topic: Topic): F[NonEmptySet[Partition]] =
     readTopicMetadata(handle, requestTimeoutMillis, Some(topic)).flatMap: topics =>
-      F.fromOption(topics.get(topic), new KafkaException.InvalidBackendResponse(s"missing metadata for topic '${topic.value}'"))
+      F.fromOption(topics.get(topic).flatMap(partitions => NonEmptyList.fromList(partitions.toList)).map(_.toNes), unknownTopic(topic))
+
+  /** Kafka makes no topic without a partition, so a listing that has one is not an answer to trust. */
+  private def readTopics(handle: driver.Client, requestTimeoutMillis: Int): F[Map[Topic, NonEmptySet[Partition]]] =
+    readTopicMetadata(handle, requestTimeoutMillis, None).flatMap: topics =>
+      topics.toList.traverse: (topic, partitions) =>
+        F.fromOption(
+          NonEmptyList.fromList(partitions.toList).map(listed => topic -> listed.toNes),
+          new KafkaException.InvalidBackendResponse(s"topic '${topic.value}' was listed without partitions")
+        )
+      .map(_.toMap)
+
+  private def unknownTopic(topic: Topic): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(
+      s"the cluster has no topic '${topic.value}'",
+      Some(ErrorCode.UnknownTopicOrPartition),
+      retriable = Some(ErrorCode.UnknownTopicOrPartition.retriable)
+    )
 
   private def invalidBackendValue(field: String, value: Any, error: ValidationError): KafkaException.InvalidBackendResponse =
     new KafkaException.InvalidBackendResponse(s"$field '$value': $error")
@@ -406,7 +418,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     /** A metadata lookup is a round trip against the cluster, so it is bounded the way the administration calls are. */
     private val metadataTimeoutMillis = settings.client.metadataRefreshInterval.toMillis.toInt.min(AdminTimeoutMillis)
 
-    override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic))
+    override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] = client(readPartitionsFor(client.handle, metadataTimeoutMillis, topic))
 
     /** Waits for the batches numbered before the call, flushing the backend in short rounds meanwhile, so it can be cancelled between rounds.
       *
@@ -676,9 +688,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis)).flatMap: values =>
           F.delay(entries.zip(values).map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
 
-    override def partitionsFor(topic: Topic): F[Set[Partition]] = client(readPartitionsFor(client.handle, requestTimeoutMillis, topic))
+    override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] = client(readPartitionsFor(client.handle, requestTimeoutMillis, topic))
 
-    override def listTopics: F[Map[Topic, Set[Partition]]] = client(readTopicMetadata(client.handle, requestTimeoutMillis, None))
+    override def listTopics: F[Map[Topic, NonEmptySet[Partition]]] = client(readTopics(client.handle, requestTimeoutMillis))
 
     override def seek(topicPartition: TopicPartition, offset: Offset): F[Unit] = seekEach(List(topicPartition), offset.value)
 

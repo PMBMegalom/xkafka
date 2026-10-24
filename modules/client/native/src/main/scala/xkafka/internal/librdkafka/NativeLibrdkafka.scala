@@ -635,6 +635,77 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
           )
         finally Bindings.xkafka_groups_destroy(groups)
 
+  override def describeCluster(admin: Client, timeoutMillis: Int): F[ClusterDescription] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val cluster            = Bindings.xkafka_admin_describe_cluster(admin, timeoutMillis, error, ErrorBufferSize.toUSize, errorCode)
+        if cluster == null then throw nativeError(error, errorCode)
+
+        try
+          val controller = Bindings.xkafka_cluster_controller(cluster)
+          LibrdkafkaAnswers.cluster(DescribedCluster(
+            optionalString(Bindings.xkafka_cluster_id(cluster)),
+            Option.when(controller != null)(node(controller)),
+            Vector
+              .tabulate(Bindings.xkafka_cluster_broker_count(cluster).toInt)(index => node(Bindings.xkafka_cluster_broker_at(cluster, index.toUSize)))
+          ))
+        finally Bindings.xkafka_cluster_destroy(cluster)
+
+  private def node(node: CVoidPtr): Node =
+    Node(
+      Bindings.xkafka_node_id(node),
+      fromCString(Bindings.xkafka_node_host(node)),
+      Bindings.xkafka_node_port(node),
+      optionalString(Bindings.xkafka_node_rack(node))
+    )
+
+  override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicDescription]]] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val described          =
+          Bindings.xkafka_admin_describe_topics(
+            admin,
+            strings(topics.map(_.value)),
+            topics.size.toUSize,
+            timeoutMillis,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
+        if described == null then throw nativeError(error, errorCode)
+
+        try LibrdkafkaAnswers.topics(topics, Vector.tabulate(Bindings.xkafka_topics_count(described).toInt)(describedTopic(described, _)))
+        finally Bindings.xkafka_topics_destroy(described)
+
+  private def describedTopic(topics: CVoidPtr, index: Int): DescribedTopic =
+    val topic = index.toUSize
+    val error = Bindings.xkafka_topic_error(topics, topic)
+    DescribedTopic(
+      fromCString(Bindings.xkafka_topic_name(topics, topic)),
+      error,
+      fromCString(Bindings.xkafka_topic_error_string(topics, topic)),
+      (Bindings.xkafka_topic_id_most(topics, topic), Bindings.xkafka_topic_id_least(topics, topic)),
+      Bindings.xkafka_topic_internal(topics, topic) != 0,
+      if error != 0 then Vector.empty
+      else
+        Vector.tabulate(Bindings.xkafka_topic_partition_count(topics, topic).toInt): partitionIndex =>
+          val partition = partitionIndex.toUSize
+          DescribedPartition(
+            Bindings.xkafka_topic_partition_at(topics, topic, partition),
+            Bindings.xkafka_topic_partition_leader(topics, topic, partition),
+            Vector.tabulate(Bindings.xkafka_topic_replica_count(topics, topic, partition).toInt)(replica =>
+              Bindings.xkafka_topic_replica_at(topics, topic, partition, replica.toUSize)
+            ),
+            Vector.tabulate(Bindings.xkafka_topic_in_sync_count(topics, topic, partition).toInt)(replica =>
+              Bindings.xkafka_topic_in_sync_at(topics, topic, partition, replica.toUSize)
+            )
+          )
+    )
+
   override def describeGroups(
       admin: Client,
       groups: Vector[ConsumerGroup],
@@ -671,7 +742,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       Bindings.xkafka_description_state(descriptions, group),
       optionalString(Bindings.xkafka_description_assignor(descriptions, group)),
       Option.when(error == 0 && Bindings.xkafka_description_coordinator_id(descriptions, group) >= 0):
-        Broker(
+        Node(
           Bindings.xkafka_description_coordinator_id(descriptions, group),
           fromCString(Bindings.xkafka_description_coordinator_host(descriptions, group)),
           Bindings.xkafka_description_coordinator_port(descriptions, group),

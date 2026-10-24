@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
@@ -58,7 +58,7 @@ final class ProducerPipeSuite extends CatsEffectSuite:
 
           override def flush: IO[Unit] = IO.unit
 
-          override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
+          override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
       running <- Stream.emits(values.map(batch)).through(producer.pipe()).compile.toList.start
       // Nothing has been acknowledged yet, because that waits on a signal this test has not given, so reaching
       // here is what shows the enqueueing did not wait for it.
@@ -90,7 +90,7 @@ final class ProducerPipeSuite extends CatsEffectSuite:
 
           override def flush: IO[Unit] = IO.unit
 
-          override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
+          override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
       running <- Stream.emits(values.map(batch)).through(producer.pipe(maxInFlight = 2)).compile.toList.start
       // Two are held by the bound, so the count cannot climb past it however many batches are offered.
       _        <- waiting.get.iterateUntil(_ == 2).timeout(10.seconds)
@@ -112,7 +112,7 @@ final class ProducerPipeSuite extends CatsEffectSuite:
 
         override def flush: IO[Unit] = IO.unit
 
-        override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set(partition))
+        override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
 
     Stream.emits(List(batch("a"))).through(producer.pipe(0)).compile.drain.attempt.map:
       case Left(error: IllegalArgumentException) => assertEquals(error.getMessage, "maxInFlight must be positive")

@@ -100,7 +100,8 @@ codecs, represents a Kafka null. Tombstones are produced this way.
 ## Partitions
 
 `partitionsFor` returns the partitions a topic currently has. Use it to pick a
-partition to produce to:
+partition to produce to. Asking about a topic the cluster does not have creates
+it if the broker creates topics on request, which Kafka brokers do by default.
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList

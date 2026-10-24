@@ -939,7 +939,32 @@ object ConfigurationSource:
       case _ => Unknown
 
 /** A broker of the cluster, as it advertises itself to clients. */
-final case class Broker(id: Int, host: String, port: Int, rack: Option[String])
+final case class Broker(id: BrokerId, host: String, port: Int, rack: Option[String])
+
+object Broker:
+  /** Brokers are ordered by id, and no two brokers in a cluster share one. */
+  given Order[Broker] = Order.by(_.id)
+
+/** The cluster's id, the brokers it reports, and the broker it reports as its controller, where it reports one. */
+final case class ClusterDescription(id: String, controller: Option[Broker], brokers: NonEmptySet[Broker])
+
+/** A topic's id, whether Kafka keeps it for itself, and where each of its partitions is.
+  *
+  * @param internal
+  *   whether Kafka keeps the topic for itself, such as `__consumer_offsets`
+  */
+final case class TopicDescription(id: TopicId, internal: Boolean, partitions: NonEmptyMap[Partition, PartitionDescription])
+
+/** Where a partition's replicas are.
+  *
+  * @param leader
+  *   the broker that serves the partition, where it has one
+  * @param replicas
+  *   the brokers that hold a replica
+  * @param inSyncReplicas
+  *   the replicas that have caught up with the leader
+  */
+final case class PartitionDescription(leader: Option[BrokerId], replicas: NonEmptyList[BrokerId], inSyncReplicas: List[BrokerId])
 
 /** Where a consumer group is in its life. */
 enum ConsumerGroupState derives CanEqual:
@@ -994,8 +1019,8 @@ final case class ConsumerGroupDescription(
 
 /** Topic and consumer group administration.
   *
-  * Creating, deleting, and growing topics report only the first failure, even when several topics fail. Deleting records, describing topic
-  * configurations, and the consumer group calls that name partitions or groups answer for each one.
+  * Creating, deleting, and growing topics report only the first failure, even when several topics fail. Describing topics, deleting records,
+  * describing topic configurations, and the consumer group calls that name partitions or groups answer for each one.
   */
 trait KafkaAdminClient[F[_]]:
   self =>
@@ -1009,8 +1034,15 @@ trait KafkaAdminClient[F[_]]:
   /** Grows the topic to `count` partitions in all, failing where it already has `count` or more. */
   def createPartitions(topic: Topic, count: Int): F[Unit]
 
-  /** Reports the partitions of each requested topic, failing where the cluster does not have one of them. */
-  def describeTopics(topics: NonEmptySet[Topic]): F[Map[Topic, Set[Partition]]]
+  /** The cluster's id, its brokers, and its controller. */
+  def describeCluster: F[ClusterDescription]
+
+  /** Describes each topic, or answers why it could not be described.
+    *
+    * Each topic is answered on its own, and one the cluster does not have answers as `ErrorCode.UnknownTopicOrPartition`. The call fails as a whole
+    * only when the cluster answered for none of the topics, such as when it cannot be reached in time.
+    */
+  def describeTopics(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]]
 
   /** Deletes each partition's records below its offset, answering for each one its new low watermark or the reason the broker refused it.
     *
@@ -1019,14 +1051,14 @@ trait KafkaAdminClient[F[_]]:
     * be reached in time. A partition already beginning at or after its offset keeps its records and answers with its current low watermark. An offset
     * past the end of the partition is refused as `ErrorCode.OffsetOutOfRange`. Deleting records moves no consumer group's offsets.
     */
-  def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[Map[TopicPartition, Either[KafkaException, Offset]]]
+  def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): F[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]]
 
   /** Reports each topic's effective configuration, including the values it inherits, or the reason the broker would not describe it.
     *
     * Every requested topic gets an answer, including one the cluster does not have, which answers as `ErrorCode.UnknownTopicOrPartition`. The call
     * fails as a whole only when the cluster answered for none of the topics, such as when it cannot be reached in time.
     */
-  def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[Map[Topic, Either[KafkaException, TopicConfiguration]]]
+  def describeTopicConfigurations(topics: NonEmptySet[Topic]): F[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]]
 
   /** Every consumer group the cluster knows, with its state, including a group with no members that still holds committed offsets.
     *
@@ -1089,12 +1121,15 @@ trait KafkaAdminClient[F[_]]:
 
       override def createPartitions(topic: Topic, count: Int): G[Unit] = fk(self.createPartitions(topic, count))
 
-      override def describeTopics(topics: NonEmptySet[Topic]): G[Map[Topic, Set[Partition]]] = fk(self.describeTopics(topics))
+      override def describeCluster: G[ClusterDescription] = fk(self.describeCluster)
 
-      override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): G[Map[TopicPartition, Either[KafkaException, Offset]]] =
+      override def describeTopics(topics: NonEmptySet[Topic]): G[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]] =
+        fk(self.describeTopics(topics))
+
+      override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): G[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]] =
         fk(self.deleteRecords(before))
 
-      override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
+      override def describeTopicConfigurations(topics: NonEmptySet[Topic]): G[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
         fk(self.describeTopicConfigurations(topics))
 
       override def listConsumerGroups: G[Map[ConsumerGroup, ConsumerGroupState]] = fk(self.listConsumerGroups)
@@ -1353,8 +1388,11 @@ trait KafkaProducer[F[_], K, V]:
     */
   def flush: F[Unit]
 
-  /** Returns the partitions currently known for `topic`, which is what choosing one to produce to needs. */
-  def partitionsFor(topic: Topic): F[Set[Partition]]
+  /** Returns the partitions `topic` has, for choosing one to produce to.
+    *
+    * Asking about a topic the cluster does not have creates it if the broker creates topics on request, which Kafka brokers do by default.
+    */
+  def partitionsFor(topic: Topic): F[NonEmptySet[Partition]]
 
   /** Produces each batch and reports its acknowledgement, in the order the batches arrived.
     *
@@ -1394,7 +1432,7 @@ trait KafkaProducer[F[_], K, V]:
 
       override def flush: G[Unit] = fk(self.flush)
 
-      override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
+      override def partitionsFor(topic: Topic): G[NonEmptySet[Partition]] = fk(self.partitionsFor(topic))
 
 /** Produces records and records consumer offsets as one unit.
   *
@@ -1508,11 +1546,13 @@ trait KafkaConsumer[F[_], K, V]:
   /** Returns the earliest offset whose record timestamp is greater than or equal to each requested timestamp, or `None` when none exists. */
   def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): F[Map[TopicPartition, Option[Offset]]]
 
-  /** Returns the partitions currently known for `topic`. */
-  def partitionsFor(topic: Topic): F[Set[Partition]]
+  /** Returns the partitions `topic` has. For a topic the cluster does not have, it fails with `ErrorCode.UnknownTopicOrPartition` and creates
+    * nothing.
+    */
+  def partitionsFor(topic: Topic): F[NonEmptySet[Partition]]
 
-  /** Returns the topics and partitions visible to this consumer. */
-  def listTopics: F[Map[Topic, Set[Partition]]]
+  /** Returns the topics visible to this consumer, each with its partitions. */
+  def listTopics: F[Map[Topic, NonEmptySet[Partition]]]
 
   /** Moves the next fetch of `topicPartition` to `offset`.
     *
@@ -1556,9 +1596,9 @@ trait KafkaConsumer[F[_], K, V]:
       override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): G[Map[TopicPartition, Option[Offset]]] =
         fk(self.offsetsForTimes(timestampsToSearch))
 
-      override def partitionsFor(topic: Topic): G[Set[Partition]] = fk(self.partitionsFor(topic))
+      override def partitionsFor(topic: Topic): G[NonEmptySet[Partition]] = fk(self.partitionsFor(topic))
 
-      override def listTopics: G[Map[Topic, Set[Partition]]] = fk(self.listTopics)
+      override def listTopics: G[Map[Topic, NonEmptySet[Partition]]] = fk(self.listTopics)
 
       override def seek(topicPartition: TopicPartition, offset: Offset): G[Unit] = fk(self.seek(topicPartition, offset))
 

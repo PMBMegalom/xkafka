@@ -207,7 +207,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(beginning, Map(consumed.record.topicPartition -> consumed.record.offset))
         assertEquals(end, Map(consumed.record.topicPartition -> consumed.offset.nextOffset))
         assertEquals(timed, Map(consumed.record.topicPartition -> Some(consumed.record.offset)))
-        assertEquals(partitions, Set(consumed.record.topicPartition.partition))
+        assertEquals(partitions, NonEmptySet.one(consumed.record.topicPartition.partition))
         assertEquals(topics.get(topic), Some(partitions))
         assertEquals(position, 0L)
         // The consumer polls in slices within the poll timeout.
@@ -456,6 +456,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
             client.createTopics(NonEmptySet.one(newTopic)),
             client.deleteTopics(NonEmptySet.one(topic)),
             client.createPartitions(topic, 2),
+            client.describeCluster,
             client.describeTopics(NonEmptySet.one(topic)),
             client.deleteRecords(cut),
             client.describeTopicConfigurations(NonEmptySet.one(topic)),
@@ -474,12 +475,13 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         assertEquals(before, Nil, "building the effects should not call the Java client")
         assertEquals(
           calls.asScala.toList,
-          // Describing topics lists them first, and deleting records stops at looking up its topic, which the proxy refuses.
+          // Deleting records stops at looking up its topic, which the proxy refuses.
           List.fill(2)(List(
             "createTopics",
             "deleteTopics",
             "createPartitions",
-            "listTopics",
+            "describeCluster",
+            "describeTopics",
             "describeTopics",
             "describeConfigs",
             "listGroups",

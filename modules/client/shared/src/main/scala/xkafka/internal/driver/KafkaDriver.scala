@@ -165,6 +165,12 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Each partition's new low watermark, or why it was not cut, in request order. */
   def deleteRecords(admin: Client, cuts: Vector[(TopicPartition, Offset)], timeoutMillis: Int): F[Vector[Either[KafkaException, Offset]]]
 
+  /** The cluster's id, its brokers, and its controller. */
+  def describeCluster(admin: Client, timeoutMillis: Int): F[ClusterDescription]
+
+  /** Each topic's description, or why it was not described, in request order. */
+  def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicDescription]]]
+
   /** Each topic's configuration, or why it was not described, in request order. */
   def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]]
 

@@ -41,3 +41,23 @@ final class LibrdkafkaAnswersSuite extends munit.FunSuite:
       (fenced.code, fenced.retriable, fenced.fatal, fenced.transactionAbortRequired),
       (Some(ErrorCode.Fenced), Some(false), Some(true), None)
     )
+
+  test("a topic id reads as Kafka prints it, in URL-safe base64 without padding, where librdkafka prints + and /"):
+    assertEquals(LibrdkafkaAnswers.topicId((0x0123456789abcdefL, 0xfedcba9876543210L)).value, "ASNFZ4mrze_-3LqYdlQyEA")
+    assertEquals(LibrdkafkaAnswers.topicId((0xfbffbffbffbffbffL, 0xfeffeffeffeffeffL)).value, "-_-_-_-_-__-_-_-_-_-_w")
+
+  test("describing topics fails as a whole where every topic's answer says the cluster was not reached, and answers each topic otherwise"):
+    val topics                = Vector(Topic.from("first").toOption.get, Topic.from("second").toOption.get)
+    def answered(codes: Int*) =
+      topics.zip(codes).map((topic, code) => DescribedTopic(topic.value, code, s"code $code", (0L, 0L), false, Vector.empty))
+    val unreached                      = intercept[KafkaException.BackendFailure](LibrdkafkaAnswers.topics(topics, answered(-185, -185)))
+    val Vector(timedOut, unknownTopic) = LibrdkafkaAnswers.topics(topics, answered(-185, 3))
+    assertEquals(unreached.code, Some(ErrorCode.RequestTimedOut))
+    assertEquals(
+      timedOut.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
+      Some(ErrorCode.RequestTimedOut)
+    )
+    assertEquals(
+      unknownTopic.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
+      Some(ErrorCode.UnknownTopicOrPartition)
+    )

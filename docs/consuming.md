@@ -156,7 +156,10 @@ Within the consumer resource:
   committed offset.
 - `beginningOffsets` and `endOffsets` query the available offset range.
 - `offsetsForTimes` finds the earliest available offsets at or after timestamps.
-- `partitionsFor` and `listTopics` expose visible topic metadata.
+- `partitionsFor` returns a topic's partitions. For a topic the cluster does
+  not have, it fails with `ErrorCode.UnknownTopicOrPartition` and creates
+  nothing.
+- `listTopics` returns every topic the consumer can see, with its partitions.
 - `seek` changes the next offset fetched for an assigned topic-partition.
 - `seekToBeginning` and `seekToEnd` move to either end of an assigned topic-partition.
 - `position` reports the offset a topic-partition reads next.

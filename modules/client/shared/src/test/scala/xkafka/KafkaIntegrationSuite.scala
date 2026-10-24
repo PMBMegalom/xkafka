@@ -168,7 +168,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       assertEquals(end, Map(topicPartition -> first._1.offset.nextOffset))
       assertEquals(timed, Map(topicPartition -> Some(first._1.record.offset)))
       assertEquals(missing, Map(topicPartition -> None))
-      assertEquals(partitions, Set(partition))
+      assertEquals(partitions, NonEmptySet.one(partition))
       assertEquals(topics.get(topic), Some(partitions))
       assertEquals(replayed._1.record.offset, first._1.record.offset)
       assertEquals(replayed._1.record.value, "control-value")

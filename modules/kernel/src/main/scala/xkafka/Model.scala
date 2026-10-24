@@ -45,6 +45,7 @@ enum ValidationError derives CanEqual:
   case JitterOutOfRange(value: Double)
   case NonPositivePartitionCount(value: Int)
   case NonPositiveReplicationFactor(value: Short)
+  case NegativeBrokerId(value: Int)
 
   def message: String =
     this match
@@ -66,6 +67,7 @@ enum ValidationError derives CanEqual:
       case JitterOutOfRange(value)               => s"jitter must be between 0 and 1, was $value"
       case NonPositivePartitionCount(value)      => s"partition count must be positive, was $value"
       case NonPositiveReplicationFactor(value)   => s"replication factor must be positive, was $value"
+      case NegativeBrokerId(value)               => s"broker id must not be negative, was $value"
 
 object ValidationError:
   given Show[ValidationError] = Show.show(_.message)
@@ -123,6 +125,30 @@ object Partition:
 
   given Order[Partition] = Order.from((x, y) => Integer.compare(x.value, y.value))
   given Show[Partition]  = Show.show(_.value.toString)
+
+/** A broker's id within its cluster. */
+opaque type BrokerId = Int
+
+object BrokerId:
+  def from(value: Int): Either[ValidationError, BrokerId] = Either.cond(value >= 0, value, ValidationError.NegativeBrokerId(value))
+
+  extension (id: BrokerId) def value: Int = id
+
+  given Order[BrokerId] = Order.from((x, y) => Integer.compare(x.value, y.value))
+  given Show[BrokerId]  = Show.show(_.value.toString)
+
+/** The id the cluster gives a topic when it creates it, in the base64 form Kafka prints it in. A topic deleted and created again under the same name
+  * gets a new one.
+  */
+opaque type TopicId = String
+
+object TopicId:
+  private[xkafka] def apply(value: String): TopicId = value
+
+  extension (id: TopicId) def value: String = id
+
+  given Order[TopicId] = Order.from((x, y) => x.value.compareTo(y.value))
+  given Show[TopicId]  = Show.show(_.value)
 
 opaque type Offset = Long
 

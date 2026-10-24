@@ -1,7 +1,7 @@
 # Administration
 
-`KafkaClient[F].admin` is a `Resource` over the topic operations, record
-deletion, topic configuration, and consumer groups. It neither produces nor
+`KafkaClient[F].admin` is a `Resource` over the cluster and topic operations,
+record deletion, topic configuration, and consumer groups. It neither produces nor
 consumes.
 
 ```scala mdoc:compile-only
@@ -24,7 +24,8 @@ val program =
 - `createTopics` creates each topic with the partitions, replication factor, and configuration given.
 - `deleteTopics` deletes each topic.
 - `createPartitions` requests the topic's new total partition count, which Kafka allows only as an increase.
-- `describeTopics` reports the partitions of each requested topic.
+- `describeCluster` reports the cluster's id, its brokers, and its controller.
+- `describeTopics` reports each topic's id, its partitions, and where their replicas are. See [Cluster and topics](#cluster-and-topics).
 - `deleteRecords` deletes each partition's records below an offset. See [Deleting records](#deleting-records).
 - `describeTopicConfigurations` reports each topic's effective configuration. See [Topic configuration](#topic-configuration).
 - `listConsumerGroups`, `describeConsumerGroups`, `listConsumerGroupOffsets`,
@@ -44,11 +45,49 @@ changed the cluster for the others.
 @:@
 
 @:callout(info)
-`describeTopics` fails if the cluster does not have one of the requested topics.
 Creating, growing, and deleting topics all propagate through the cluster in their
 own time, so a description taken immediately afterwards may not yet reflect the
 request before it.
 @:@
+
+## Cluster and topics
+
+`describeCluster` answers the cluster's id, each of its brokers with the host
+and port clients connect to, and which broker is its controller.
+
+`describeTopics` answers each requested topic on its own with a
+`TopicDescription`: the topic's id, whether it is `internal`, and each
+partition's leader, replicas, and in-sync replicas, by `BrokerId`. Look a broker
+id up in `describeCluster`'s brokers for its host and port.
+
+```scala mdoc:compile-only
+import cats.data.{NonEmptyList, NonEmptySet}
+import cats.effect.IO
+
+import xkafka.*
+
+val program =
+  for
+    client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    topic   <- Topic.from("events").liftTo[IO]
+    answers <- KafkaClient[IO].admin(client).use(_.describeTopics(NonEmptySet.one(topic)))
+    _       <- answers(topic) match
+                 case Some(Right(description)) =>
+                   IO.println(s"${description.partitions.length} partitions, id ${description.id.value}")
+                 case Some(Left(failure)) => IO.println(s"not described: ${failure.getMessage}")
+                 case None                => IO.unit
+  yield ()
+```
+
+- A topic the cluster does not have answers with
+  `ErrorCode.UnknownTopicOrPartition`, and the other topics are still answered.
+- `internal` is true for the topics Kafka keeps for itself, such as
+  `__consumer_offsets`. The cluster creates that one for the first committed
+  offset, so a cluster where nothing has committed yet does not have it.
+- A topic keeps its id. A topic deleted and created again under the same name
+  gets a new one. The id reads the same on every platform.
+- Either call fails as a whole when the cluster cannot be reached in time. That
+  failure is retriable.
 
 ## Deleting records
 
@@ -71,7 +110,7 @@ val program =
     partition <- Partition.from(0).liftTo[IO]
     cut       <- Offset.from(1000L).liftTo[IO]
     answers   <- KafkaClient[IO].admin(client).use(_.deleteRecords(NonEmptyMap.one(TopicPartition(topic, partition), cut)))
-    _         <- answers.toList.traverse_ :
+    _         <- answers.toSortedMap.toList.traverse_ :
                    case (topicPartition, Right(lowWatermark)) => IO.println(s"${topicPartition.show} begins at ${lowWatermark.show}")
                    case (topicPartition, Left(failure))       => IO.println(s"${topicPartition.show} was refused: ${failure.getMessage}")
   yield ()
@@ -117,7 +156,7 @@ val program =
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic   <- Topic.from("journal").liftTo[IO]
     answers <- KafkaClient[IO].admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(topic)))
-    policy   = answers.get(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy"))
+    policy   = answers(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy"))
     _       <- IO.println(policy.fold("no cleanup.policy reported")(entry => s"${entry.value} from ${entry.source}"))
   yield ()
 ```

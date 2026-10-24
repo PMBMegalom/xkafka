@@ -76,11 +76,11 @@ object DownstreamSmoke extends IOApp.Simple:
       // The record was read, so the whole partition can go.
       cut = NonEmptyMap.one(consumed.offset.topicPartition, consumed.offset.nextOffset)
       deleted <- KafkaClient[IO].admin(client).use(_.deleteRecords(cut)).timeout(60.seconds)
-      _ <- IO.raiseUnless(deleted == cut.toSortedMap.view.mapValues(Right(_)).toMap)(new AssertionError(s"unexpected deletion: $deleted"))
+      _ <- IO.raiseUnless(deleted.toSortedMap == cut.map(Right(_)).toSortedMap)(new AssertionError(s"unexpected deletion: $deleted"))
       // The JavaScript backend cannot describe configuration, and says so.
       described <- KafkaClient[IO].admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).attempt.timeout(60.seconds)
       _ <- described match
-        case Right(answers) if answers.get(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy")).isDefined => IO.unit
+        case Right(answers) if answers(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy")).isDefined => IO.unit
         case Left(_: KafkaException.Unsupported)                                                                 => IO.unit
         case other => IO.raiseError(new AssertionError(s"unexpected configuration: $other"))
       _ <- IO.println("xkafka downstream smoke test passed")

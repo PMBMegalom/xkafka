@@ -56,6 +56,20 @@ size_t xkafka_metadata_partition_count_at(const void *metadata, size_t index);
 void xkafka_metadata_destroy(void *metadata);
 size_t xkafka_configs_entry_count(void *configs, size_t index);
 void xkafka_configs_destroy(void *configs);
+const char *xkafka_cluster_id(void *cluster);
+const void *xkafka_cluster_controller(void *cluster);
+size_t xkafka_cluster_broker_count(void *cluster);
+const void *xkafka_cluster_broker_at(void *cluster, size_t index);
+void xkafka_cluster_destroy(void *cluster);
+const char *xkafka_node_host(const void *node);
+size_t xkafka_topics_count(void *topics);
+int32_t xkafka_topic_error(void *topics, size_t topic);
+int64_t xkafka_topic_id_most(void *topics, size_t topic);
+int64_t xkafka_topic_id_least(void *topics, size_t topic);
+size_t xkafka_topic_partition_count(void *topics, size_t topic);
+size_t xkafka_topic_replica_count(void *topics, size_t topic, size_t partition);
+size_t xkafka_topic_in_sync_count(void *topics, size_t topic, size_t partition);
+void xkafka_topics_destroy(void *topics);
 size_t xkafka_groups_count(void *groups);
 const char *xkafka_groups_id_at(void *groups, size_t index);
 void xkafka_groups_destroy(void *groups);
@@ -111,6 +125,9 @@ int xkafka_async_admin_delete_records(rd_kafka_t *client, const char *const *top
                                       int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_admin_describe_topic_configs(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms,
                                               ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_describe_cluster(rd_kafka_t *client, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_admin_describe_topics(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms, ERROR_ARGUMENTS,
+                                       void **result, DONE_ARGUMENTS);
 int xkafka_async_admin_list_groups(rd_kafka_t *client, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
 int xkafka_async_admin_describe_groups(rd_kafka_t *client, const char *const *groups, size_t count, int timeout_ms, ERROR_ARGUMENTS,
                                        void **result, DONE_ARGUMENTS);
@@ -321,6 +338,27 @@ int main(int argc, char **argv) {
         if (configs == NULL || xkafka_configs_entry_count(configs, 0) == 0)
                 fail("xkafka_async_admin_describe_topic_configs");
         xkafka_configs_destroy(configs);
+        {
+                void *cluster = NULL, *described = NULL;
+                size_t partition;
+
+                await_answer("xkafka_async_admin_describe_cluster",
+                             xkafka_async_admin_describe_cluster(admin, TIMEOUT_MS, ERRORS, &cluster, done, next_token()));
+                if (cluster == NULL || xkafka_cluster_id(cluster) == NULL || xkafka_cluster_controller(cluster) == NULL ||
+                    xkafka_cluster_broker_count(cluster) != 1 || xkafka_node_host(xkafka_cluster_broker_at(cluster, 0)) == NULL)
+                        fail("xkafka_async_admin_describe_cluster");
+                xkafka_cluster_destroy(cluster);
+                await_answer("xkafka_async_admin_describe_topics",
+                             xkafka_async_admin_describe_topics(admin, topics, 1, TIMEOUT_MS, ERRORS, &described, done, next_token()));
+                if (described == NULL || xkafka_topics_count(described) != 1 || xkafka_topic_error(described, 0) != 0 ||
+                    (xkafka_topic_id_most(described, 0) == 0 && xkafka_topic_id_least(described, 0) == 0) ||
+                    xkafka_topic_partition_count(described, 0) != 2)
+                        fail("xkafka_async_admin_describe_topics");
+                for (partition = 0; partition < 2; partition++)
+                        if (xkafka_topic_replica_count(described, 0, partition) != 1 || xkafka_topic_in_sync_count(described, 0, partition) != 1)
+                                fail("xkafka_async_admin_describe_topics");
+                xkafka_topics_destroy(described);
+        }
 
         {
                 const char *names[] = {"transactional.id"}, *values[] = {transactional_id};
