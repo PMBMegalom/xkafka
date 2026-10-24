@@ -23,6 +23,7 @@ package xkafka
 package internal
 package librdkafka
 
+import cats.data.NonEmptyList
 import cats.syntax.all.*
 
 /** What deleting records answered. */
@@ -54,9 +55,28 @@ private[xkafka] final case class DescribedGroup(
     simple: Boolean,
     state: Int,
     assignor: Option[String],
-    coordinator: Option[Broker],
+    coordinator: Option[Node],
     members: List[DescribedMember]
 )
+
+/** A broker as librdkafka reports it. */
+private[xkafka] final case class Node(id: Int, host: String, port: Int, rack: Option[String])
+
+/** What describing the cluster answered, each part `None` where librdkafka reported none. */
+private[xkafka] final case class DescribedCluster(id: Option[String], controller: Option[Node], brokers: Vector[Node])
+
+/** One described topic: its error code and text, and what it holds when the code is 0. `id` is the topic id's most and least significant halves. */
+private[xkafka] final case class DescribedTopic(
+    name: String,
+    error: Int,
+    errorString: String,
+    id: (Long, Long),
+    internal: Boolean,
+    partitions: Vector[DescribedPartition]
+)
+
+/** A partition's replicas by broker id; a negative `leader` is none. */
+private[xkafka] final case class DescribedPartition(partition: Int, leader: Int, replicas: Vector[Int], inSync: Vector[Int])
 
 private[xkafka] final case class DescribedMember(
     memberId: String,
@@ -154,10 +174,52 @@ private[librdkafka] object LibrdkafkaAnswers:
             ConsumerGroupState.fromLibrdkafka(answer.state),
             answer.simple,
             answer.assignor.filter(_.nonEmpty),
-            answer.coordinator,
+            answer.coordinator.map(broker),
             answer.members.map: member =>
               GroupMember(member.memberId, member.instanceId, member.clientId, member.host, member.assignment.map(topicPartition).toSet)
           ))
+
+  def cluster(described: DescribedCluster): ClusterDescription =
+    ClusterDescription(
+      described.id.getOrElse(throw new KafkaException.InvalidBackendResponse("the cluster reported no id")),
+      described.controller.map(broker),
+      NonEmptyList.fromList(described.brokers.toList.map(broker)).map(_.toNes)
+        .getOrElse(throw new KafkaException.InvalidBackendResponse("the cluster reported no brokers"))
+    )
+
+  /** Each requested topic's own answer, which librdkafka reports by name, and failures that say no topic got an answer fail the call. */
+  def topics(requested: Vector[Topic], described: Vector[DescribedTopic]): Vector[Either[KafkaException, TopicDescription]] =
+    val answers  = described.map(topic => topic.name -> topic).toMap
+    val failures = described.map(topic => Failures.coded(topic.errorString, topic.error))
+    if failures.nonEmpty && failures.forall(unreached) then throw failures.head
+    requested.map: topic =>
+      answers.get(topic.value) match
+        case None                              => throw new KafkaException.InvalidBackendResponse(s"no answer for topic ${topic.value}")
+        case Some(answer) if answer.error != 0 => Left(Failures.coded(answer.errorString, answer.error))
+        case Some(answer)                      => Right(description(answer))
+
+  private def description(topic: DescribedTopic): TopicDescription =
+    def partition(described: DescribedPartition): (Partition, PartitionDescription) =
+      val replicas =
+        NonEmptyList.fromList(described.replicas.toList.map(brokerId))
+          .getOrElse(throw new KafkaException.InvalidBackendResponse(s"partition ${described.partition} of ${topic.name} has no replicas"))
+      Partition.from(described.partition).fold(error => throw invalid("partition", described.partition, error), identity) ->
+        PartitionDescription(Option.when(described.leader >= 0)(brokerId(described.leader)), replicas, described.inSync.toList.map(brokerId))
+    TopicDescription(
+      topicId(topic.id),
+      topic.internal,
+      NonEmptyList.fromList(topic.partitions.toList.map(partition)).map(_.toNem)
+        .getOrElse(throw new KafkaException.InvalidBackendResponse(s"topic ${topic.name} has no partitions"))
+    )
+
+  /** Encodes the id as Kafka's `Uuid.toString` does: its bytes from the most significant, in URL-safe base64 without padding. */
+  def topicId(halves: (Long, Long)): TopicId =
+    val bytes = java.nio.ByteBuffer.allocate(16).putLong(halves._1).putLong(halves._2).array
+    TopicId(java.util.Base64.getUrlEncoder.withoutPadding.encodeToString(bytes))
+
+  private def broker(node: Node): Broker = Broker(brokerId(node.id), node.host, node.port, node.rack)
+
+  private def brokerId(value: Int): BrokerId = BrokerId.from(value).fold(error => throw invalid("broker id", value, error), identity)
 
   /** The offsets a group committed, as librdkafka lists them by topic and partition. */
   def committed(entries: Vector[(String, Int, driver.StoredOffset)]): Vector[(TopicPartition, driver.StoredOffset)] =

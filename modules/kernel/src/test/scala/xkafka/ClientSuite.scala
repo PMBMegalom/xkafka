@@ -25,7 +25,7 @@ import scala.compiletime.testing.typeCheckErrors
 import scala.concurrent.duration.*
 
 import cats.arrow.FunctionK
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{IO, SyncIO}
 import cats.syntax.all.*
 import cats.tagless.FunctorK
@@ -443,7 +443,7 @@ final class ClientSuite extends FunSuite:
 
         override def flush: Option[Unit] = Some(())
 
-        override def partitionsFor(value: Topic): Option[Set[Partition]] = Some(Set(partition))
+        override def partitionsFor(value: Topic): Option[NonEmptySet[Partition]] = Some(NonEmptySet.one(partition))
     val mapped = source.mapK(optionToErrorOr)
 
     assertEquals(mapped.produce(NonEmptyList.one(producerRecord)), Right(Right(result)))
@@ -451,7 +451,7 @@ final class ClientSuite extends FunSuite:
     assertEquals(mapped.produceAttemptEach(NonEmptyList.one(producerRecord)), Right(Right(attempted)))
     assertEquals(mapped.produceAttemptEachAndAwait(NonEmptyList.one(producerRecord)), Right(attempted))
     assertEquals(mapped.flush, Right(()))
-    assertEquals(mapped.partitionsFor(topic), Right(Set(partition)))
+    assertEquals(mapped.partitionsFor(topic), Right(NonEmptySet.one(partition)))
 
   test("a produced or attempted record gives back what it holds, by name and by pattern"):
     val metadata = RecordMetadata(TopicPartition(topic, partition), None, None)
@@ -482,8 +482,8 @@ final class ClientSuite extends FunSuite:
           Some(topicPartitions.map(_ -> nextOffset).toMap)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(timestampsToSearch.keys.map(_ -> Some(offset)).toMap)
-        override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
-        override def listTopics: Option[Map[Topic, Set[Partition]]]                      = Some(Map(topic -> Set(partition)))
+        override def partitionsFor(topic: Topic): Option[NonEmptySet[Partition]]         = Some(NonEmptySet.one(partition))
+        override def listTopics: Option[Map[Topic, NonEmptySet[Partition]]]              = Some(Map(topic -> NonEmptySet.one(partition)))
         override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit]  = Some(())
         override def seekToBeginning(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
         override def seekToEnd(topicPartitions: Set[TopicPartition]): Option[Unit]       = Some(())
@@ -514,8 +514,8 @@ final class ClientSuite extends FunSuite:
         Map(consumerRecord.topicPartition -> Some(offset))
       )
     )
-    assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), Set(partition))
-    assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> Set(partition)))
+    assertEquals(mapped.partitionsFor(topic).unsafeRunSync(), NonEmptySet.one(partition))
+    assertEquals(mapped.listTopics.unsafeRunSync(), Map(topic -> NonEmptySet.one(partition)))
     assertEquals(mapped.position(consumerRecord.topicPartition).unsafeRunSync(), Some(nextOffset))
     assertEquals(mapped.seekToBeginning(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
     assertEquals(mapped.seekToEnd(Set(consumerRecord.topicPartition)).unsafeRunSync(), ())
@@ -534,8 +534,8 @@ final class ClientSuite extends FunSuite:
         override def endOffsets(topicPartitions: Set[TopicPartition]): Option[Map[TopicPartition, Offset]]                   = Some(Map.empty)
         override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): Option[Map[TopicPartition, Option[Offset]]] =
           Some(Map.empty)
-        override def partitionsFor(topic: Topic): Option[Set[Partition]]                 = Some(Set(partition))
-        override def listTopics: Option[Map[Topic, Set[Partition]]]                      = Some(Map.empty)
+        override def partitionsFor(topic: Topic): Option[NonEmptySet[Partition]]         = Some(NonEmptySet.one(partition))
+        override def listTopics: Option[Map[Topic, NonEmptySet[Partition]]]              = Some(Map.empty)
         override def seek(topicPartition: TopicPartition, offset: Offset): Option[Unit]  = Some(())
         override def seekToBeginning(topicPartitions: Set[TopicPartition]): Option[Unit] = Some(())
         override def seekToEnd(topicPartitions: Set[TopicPartition]): Option[Unit]       = Some(())

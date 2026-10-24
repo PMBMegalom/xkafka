@@ -65,6 +65,17 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       assertEquals(result, Right(()))
       assertEquals(recorded, List(TestGroupHandle("workers")))
 
+  private val broker = Broker(BrokerId.from(1).toOption.get, "localhost", 9092, None)
+
+  private val cluster = ClusterDescription("cluster", Some(broker), NonEmptySet.one(broker))
+
+  private val topicDescription =
+    TopicDescription(
+      TopicId("AAAAAAAAAAAAAAAAAAAAAQ"),
+      internal = false,
+      NonEmptyMap.one(Partition.from(0).toOption.get, PartitionDescription(Some(broker.id), NonEmptyList.one(broker.id), List(broker.id)))
+    )
+
   /** Stands in for a backend's own handle, which only that backend can name. */
   private final case class TestGroupHandle(group: String) extends GroupHandle
 
@@ -91,6 +102,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     for
       produced  <- client.producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record))).value
       consumed  <- client.consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.compile.drain).value
+      described <- client.admin(clientSettings).use(admin => admin.describeCluster.product(admin.describeTopics(NonEmptySet.one(topic)))).value
       deleted   <- client.admin(clientSettings).use(_.deleteRecords(cut)).value
       inspected <- client.admin(clientSettings).use(_.describeTopicConfigurations(NonEmptySet.one(topic))).value
       groups    <-
@@ -108,8 +120,9 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     yield
       assertEquals(produced, Right(NonEmptyList.one(Produced(record, metadataOf(record)))))
       assertEquals(consumed, Right(()))
-      assertEquals(deleted, Right(cut.toSortedMap.view.mapValues(Right(_)).toMap))
-      assertEquals(inspected, Right(Map(topic -> Right(TopicConfiguration(Map.empty)))))
+      assertEquals(described, Right((cluster, NonEmptyMap.one(topic, Right(topicDescription)))))
+      assertEquals(deleted, Right(cut.map(Right(_))))
+      assertEquals(inspected, Right(NonEmptyMap.one(topic, Right(TopicConfiguration(Map.empty)))))
       assertEquals(
         groups,
         Right((
@@ -161,19 +174,21 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
             override def flush: IO[Unit] = IO.unit
 
-            override def partitionsFor(value: Topic): IO[Set[Partition]] = IO.pure(Set.empty)
+            override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(Partition.from(0).toOption.get))
 
       override def admin(settings: ClientSettings): Resource[IO, KafkaAdminClient[IO]] =
         Resource.pure:
           new KafkaAdminClient[IO]:
-            override def createTopics(topics: NonEmptySet[NewTopic]): IO[Unit]                      = IO.unit
-            override def deleteTopics(topics: NonEmptySet[Topic]): IO[Unit]                         = IO.unit
-            override def createPartitions(topic: Topic, count: Int): IO[Unit]                       = IO.unit
-            override def describeTopics(topics: NonEmptySet[Topic]): IO[Map[Topic, Set[Partition]]] = IO.pure(Map.empty)
-            override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): IO[Map[TopicPartition, Either[KafkaException, Offset]]] =
-              IO.pure(before.toSortedMap.view.mapValues(Right(_)).toMap)
-            override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[Map[Topic, Either[KafkaException, TopicConfiguration]]] =
-              IO.pure(topics.toSortedSet.toList.map(_ -> Right(TopicConfiguration(Map.empty))).toMap)
+            override def createTopics(topics: NonEmptySet[NewTopic]): IO[Unit] = IO.unit
+            override def deleteTopics(topics: NonEmptySet[Topic]): IO[Unit]    = IO.unit
+            override def createPartitions(topic: Topic, count: Int): IO[Unit]  = IO.unit
+            override def describeCluster: IO[ClusterDescription]               = IO.pure(cluster)
+            override def describeTopics(topics: NonEmptySet[Topic]): IO[NonEmptyMap[Topic, Either[KafkaException, TopicDescription]]] =
+              IO.pure(topics.toNonEmptyList.map(_ -> Right(topicDescription)).toNem)
+            override def deleteRecords(before: NonEmptyMap[TopicPartition, Offset]): IO[NonEmptyMap[TopicPartition, Either[KafkaException, Offset]]] =
+              IO.pure(before.map(Right(_)))
+            override def describeTopicConfigurations(topics: NonEmptySet[Topic]): IO[NonEmptyMap[Topic, Either[KafkaException, TopicConfiguration]]] =
+              IO.pure(topics.toNonEmptyList.map(_ -> Right(TopicConfiguration(Map.empty))).toNem)
             override def listConsumerGroups: IO[Map[ConsumerGroup, ConsumerGroupState]] =
               IO.pure(Map(ConsumerGroup.from("workers").toOption.get -> ConsumerGroupState.Stable))
             override def describeConsumerGroups(
@@ -212,8 +227,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def endOffsets(topicPartitions: Set[TopicPartition]): IO[Map[TopicPartition, Offset]]       = IO.pure(Map.empty)
             override def offsetsForTimes(timestampsToSearch: Map[TopicPartition, Timestamp]): IO[Map[TopicPartition, Option[Offset]]] =
               IO.pure(Map.empty)
-            override def partitionsFor(topic: Topic): IO[Set[Partition]]                 = IO.pure(Set.empty)
-            override def listTopics: IO[Map[Topic, Set[Partition]]]                      = IO.pure(Map.empty)
+            override def partitionsFor(topic: Topic): IO[NonEmptySet[Partition]]         = IO.pure(NonEmptySet.one(Partition.from(0).toOption.get))
+            override def listTopics: IO[Map[Topic, NonEmptySet[Partition]]]              = IO.pure(Map.empty)
             override def seek(topicPartition: TopicPartition, offset: Offset): IO[Unit]  = IO.unit
             override def seekToBeginning(topicPartitions: Set[TopicPartition]): IO[Unit] = IO.unit
             override def seekToEnd(topicPartitions: Set[TopicPartition]): IO[Unit]       = IO.unit

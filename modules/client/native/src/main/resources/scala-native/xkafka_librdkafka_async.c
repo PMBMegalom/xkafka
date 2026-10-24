@@ -69,6 +69,9 @@ int xkafka_admin_delete_records(rd_kafka_t *client, const char *const *topics, c
                                 size_t error_size, int32_t *error_code);
 void *xkafka_admin_describe_topic_configs(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms, char *error,
                                           size_t error_size, int32_t *error_code);
+void *xkafka_admin_describe_cluster(rd_kafka_t *client, int timeout_ms, char *error, size_t error_size, int32_t *error_code);
+void *xkafka_admin_describe_topics(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms, char *error,
+                                   size_t error_size, int32_t *error_code);
 void *xkafka_admin_list_groups(rd_kafka_t *client, int timeout_ms, char *error, size_t error_size, int32_t *error_code);
 void *xkafka_admin_describe_groups(rd_kafka_t *client, const char *const *groups, size_t count, int timeout_ms, char *error,
                                    size_t error_size, int32_t *error_code);
@@ -799,7 +802,9 @@ enum {
         XKAFKA_DELETE_GROUPS,
         XKAFKA_LIST_GROUP_OFFSETS,
         XKAFKA_ALTER_GROUP_OFFSETS,
-        XKAFKA_DELETE_GROUP_OFFSETS
+        XKAFKA_DELETE_GROUP_OFFSETS,
+        XKAFKA_DESCRIBE_CLUSTER,
+        XKAFKA_DESCRIBE_TOPICS
 };
 
 static void xkafka_groups_job_run(xkafka_job_t *job) {
@@ -814,6 +819,13 @@ static void xkafka_groups_job_run(xkafka_job_t *job) {
         case XKAFKA_DESCRIBE_GROUPS:
                 *call->pointer_result =
                     xkafka_admin_describe_groups(call->client, names, call->count, call->timeout_ms, s->error, s->error_size, s->error_code);
+                break;
+        case XKAFKA_DESCRIBE_CLUSTER:
+                *call->pointer_result = xkafka_admin_describe_cluster(call->client, call->timeout_ms, s->error, s->error_size, s->error_code);
+                break;
+        case XKAFKA_DESCRIBE_TOPICS:
+                *call->pointer_result =
+                    xkafka_admin_describe_topics(call->client, names, call->count, call->timeout_ms, s->error, s->error_size, s->error_code);
                 break;
         case XKAFKA_DELETE_GROUPS:
                 *call->result = xkafka_admin_delete_groups(call->client, names, call->count, call->timeout_ms, call->codes, s->error,
@@ -886,6 +898,30 @@ int xkafka_async_admin_describe_groups(rd_kafka_t *client, const char *const *gr
                                        size_t error_size, int32_t *error_code, void **result, xkafka_done_t done, int64_t token) {
         xkafka_groups_job_t *call =
             xkafka_groups_job(client, NULL, groups, NULL, count, timeout_ms, XKAFKA_DESCRIBE_GROUPS, error, error_size, error_code);
+
+        if (call == NULL)
+                return -1;
+        call->pointer_result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+/* The cluster and topic descriptions are admin calls that name nothing or name strings and answer one result pointer, as the
+ * group calls do, so they ride on the same job. */
+int xkafka_async_admin_describe_cluster(rd_kafka_t *client, int timeout_ms, char *error, size_t error_size, int32_t *error_code,
+                                        void **result, xkafka_done_t done, int64_t token) {
+        xkafka_groups_job_t *call =
+            xkafka_groups_job(client, NULL, NULL, NULL, 0, timeout_ms, XKAFKA_DESCRIBE_CLUSTER, error, error_size, error_code);
+
+        if (call == NULL)
+                return -1;
+        call->pointer_result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+int xkafka_async_admin_describe_topics(rd_kafka_t *client, const char *const *names, size_t count, int timeout_ms, char *error,
+                                       size_t error_size, int32_t *error_code, void **result, xkafka_done_t done, int64_t token) {
+        xkafka_groups_job_t *call =
+            xkafka_groups_job(client, NULL, names, NULL, count, timeout_ms, XKAFKA_DESCRIBE_TOPICS, error, error_size, error_code);
 
         if (call == NULL)
                 return -1;

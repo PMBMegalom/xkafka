@@ -40,8 +40,9 @@ import fs2.Chunk
 import org.apache.kafka.clients.admin.{
   Admin, AlterConsumerGroupOffsetsOptions, ConfigEntry as JavaConfigEntry, ConsumerGroupDescription as JavaConsumerGroupDescription,
   CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions,
-  DeleteTopicsOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions, ListConsumerGroupOffsetsOptions,
-  ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions, NewTopic as JavaNewTopic, RecordsToDelete
+  DeleteTopicsOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeTopicsOptions,
+  ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListTopicsOptions, NewPartitions as JavaNewPartitions,
+  NewTopic as JavaNewTopic, RecordsToDelete, TopicDescription as JavaTopicDescription
 }
 import org.apache.kafka.clients.consumer.{
   Consumer as JavaConsumer, ConsumerGroupMetadata as JavaConsumerGroupMetadata, KafkaConsumer as JavaKafkaConsumer,
@@ -50,7 +51,7 @@ import org.apache.kafka.clients.consumer.{
 import org.apache.kafka.clients.producer.{
   Callback, KafkaProducer as JavaKafkaProducer, Producer as JavaProducer, ProducerRecord as JavaProducerRecord, RecordMetadata as JavaRecordMetadata
 }
-import org.apache.kafka.common.{GroupState, KafkaException as JavaKafkaException, KafkaFuture, TopicPartition as JavaTopicPartition}
+import org.apache.kafka.common.{GroupState, KafkaException as JavaKafkaException, KafkaFuture, Node, TopicPartition as JavaTopicPartition}
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException
 import org.apache.kafka.common.header.Header as JavaHeader
@@ -380,6 +381,43 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       retriable = Some(ErrorCode.UnknownTopicOrPartition.retriable)
     )
 
+  override def describeCluster(admin: Client, timeoutMillis: Int): F[ClusterDescription] =
+    administering(admin): value =>
+      F.delay(value.describeCluster(new DescribeClusterOptions().timeoutMs(timeoutMillis))).flatMap: result =>
+        (answered(result.clusterId), answered(result.controller), answered(result.nodes)).tupled.flatMap: (id, controller, nodes) =>
+          F.delay:
+            ClusterDescription(
+              Option(id).getOrElse(throw new KafkaException.InvalidBackendResponse("the cluster reported no id")),
+              Option(controller).filterNot(_.isEmpty).map(portableBroker),
+              NonEmptyList.fromList(nodes.asScala.toList.map(portableBroker)).map(_.toNes)
+                .getOrElse(throw new KafkaException.InvalidBackendResponse("the cluster reported no brokers"))
+            )
+
+  override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicDescription]]] =
+    administering(admin): value =>
+      F.delay(value.describeTopics(topics.map(_.value).asJava, new DescribeTopicsOptions().timeoutMs(timeoutMillis)).topicNameValues.asScala.toMap)
+        .flatMap(answers => eachAnswered(topics.map(topic => topic -> answers.get(topic.value)), _.value))
+        .flatMap(_.traverse((_, answer) => answer.traverse(description => F.delay(portableTopic(description)))))
+
+  private def portableTopic(description: JavaTopicDescription): TopicDescription =
+    val partitions =
+      description.partitions.asScala.toList.map: info =>
+        val partition = Partition.from(info.partition).fold(error => throw invalidBackendValue("partition", error), identity)
+        val replicas  =
+          NonEmptyList.fromList(info.replicas.asScala.toList.map(brokerId))
+            .getOrElse(throw new KafkaException.InvalidBackendResponse(s"partition ${info.partition} of ${description.name} has no replicas"))
+        partition -> PartitionDescription(Option(info.leader).filterNot(_.isEmpty).map(brokerId), replicas, info.isr.asScala.toList.map(brokerId))
+    TopicDescription(
+      TopicId(description.topicId.toString),
+      description.isInternal,
+      NonEmptyList.fromList(partitions).map(_.toNem)
+        .getOrElse(throw new KafkaException.InvalidBackendResponse(s"topic ${description.name} has no partitions"))
+    )
+
+  private def brokerId(node: Node): BrokerId = BrokerId.from(node.id).fold(error => throw invalidBackendValue("broker id", error), identity)
+
+  private def portableBroker(node: Node): Broker = Broker(brokerId(node), node.host, node.port, Option.when(node.hasRack)(node.rack))
+
   override def describeTopicConfigs(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicConfiguration]]] =
     def resource(topic: Topic) = new JavaConfigResource(JavaConfigResource.Type.TOPIC, topic.value)
     administering(admin): value =>
@@ -476,7 +514,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       Option(description.groupState).fold(ConsumerGroupState.Unknown)(portableState),
       description.isSimpleConsumerGroup,
       Option(description.partitionAssignor).filter(_.nonEmpty),
-      Option(description.coordinator).filterNot(_.isEmpty).map(node => Broker(node.id, node.host, node.port, Option.when(node.hasRack)(node.rack))),
+      Option(description.coordinator).filterNot(_.isEmpty).map(portableBroker),
       description.members.asScala.toList.map: member =>
         GroupMember(
           member.consumerId,

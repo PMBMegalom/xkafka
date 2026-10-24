@@ -540,6 +540,66 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
               )
             finally shim.groupsDestroy(groups): Unit
 
+  override def describeCluster(admin: Client, timeoutMillis: Int): F[ClusterDescription] =
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.describeCluster)(admin, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+        val cluster = result.pointer
+        if cluster == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers.cluster(DescribedCluster(
+                optionalString(shim.clusterId(cluster)),
+                Option(shim.clusterController(cluster)).map(node(shim, _)),
+                Vector.tabulate(int(shim.clusterBrokerCount(cluster)))(index => node(shim, shim.clusterBrokerAt(cluster, index)))
+              ))
+            finally shim.clusterDestroy(cluster): Unit
+
+  private def node(shim: Shim, node: js.Any): Node =
+    Node(int(shim.nodeId(node)), shim.nodeHost(node).asInstanceOf[String], int(shim.nodePort(node)), optionalString(shim.nodeRack(node)))
+
+  override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): F[Vector[Either[KafkaException, TopicDescription]]] =
+    F.defer:
+      val error  = ErrorSlot()
+      val result = Result()
+      background(_.describeTopics)(
+        admin,
+        strings(topics.map(_.value)),
+        topics.size,
+        timeoutMillis,
+        error.message,
+        ErrorBufferSize,
+        error.code,
+        result.value
+      ) *> F.defer:
+        val described = result.pointer
+        if described == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try LibrdkafkaAnswers.topics(topics, Vector.tabulate(int(shim.topicsCount(described)))(describedTopic(shim, described, _)))
+            finally shim.topicsDestroy(described): Unit
+
+  private def describedTopic(shim: Shim, topics: js.Any, topic: Int): DescribedTopic =
+    val error = int(shim.topicError(topics, topic))
+    DescribedTopic(
+      shim.topicName(topics, topic).asInstanceOf[String],
+      error,
+      shim.topicErrorString(topics, topic).asInstanceOf[String],
+      (long(shim.topicIdMost(topics, topic)), long(shim.topicIdLeast(topics, topic))),
+      int(shim.topicInternal(topics, topic)) != 0,
+      if error != 0 then Vector.empty
+      else
+        Vector.tabulate(int(shim.topicPartitionCount(topics, topic))): partition =>
+          DescribedPartition(
+            int(shim.topicPartitionAt(topics, topic, partition)),
+            int(shim.topicPartitionLeader(topics, topic, partition)),
+            Vector
+              .tabulate(int(shim.topicReplicaCount(topics, topic, partition)))(index => int(shim.topicReplicaAt(topics, topic, partition, index))),
+            Vector.tabulate(int(shim.topicInSyncCount(topics, topic, partition)))(index => int(shim.topicInSyncAt(topics, topic, partition, index)))
+          )
+    )
+
   override def describeGroups(
       admin: Client,
       groups: Vector[ConsumerGroup],
@@ -575,7 +635,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       int(shim.descriptionState(descriptions, group)),
       optionalString(shim.descriptionAssignor(descriptions, group)),
       Option.when(error == 0 && int(shim.descriptionCoordinatorId(descriptions, group)) >= 0):
-        Broker(
+        Node(
           int(shim.descriptionCoordinatorId(descriptions, group)),
           shim.descriptionCoordinatorHost(descriptions, group).asInstanceOf[String],
           int(shim.descriptionCoordinatorPort(descriptions, group)),

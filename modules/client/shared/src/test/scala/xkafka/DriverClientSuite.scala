@@ -415,6 +415,24 @@ final class DriverClientSuite extends CatsEffectSuite:
       assertEquals(one, NonEmptyMap.one(eventsAt(0), Right(())))
       assert(two.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]), s"a short answer should be refused, got $two")
 
+  test("a topic's partitions are never empty: one the backend knows none for is unknown, and a listing with such a topic is an invalid response"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake): consumer =>
+        (consumer.partitionsFor(events), consumer.partitionsFor(Topic.from("missing").toOption.get).attempt, consumer.listTopics.attempt).tupled
+    .map: (known, missing, listed) =>
+      assertEquals(known, NonEmptySet.one(Partition.from(0).toOption.get))
+      assert(
+        missing.left.exists:
+          case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.UnknownTopicOrPartition)
+          case _                                      => false
+        ,
+        s"a topic without partitions should be unknown, got $missing"
+      )
+      assert(
+        listed.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]),
+        s"a listed topic without partitions should be refused, got $listed"
+      )
+
   private val group = ConsumerGroup.from("fake").toOption.get
 
   private val eventsZero = TopicPartition(events, Partition.from(0).toOption.get)
@@ -635,7 +653,12 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): IO[Unit] = unused("seek")
 
-    override def metadata(client: Client, topic: Option[String], timeoutMillis: Int): IO[Vector[(String, Vector[Int])]] = unused("metadata")
+    /** Knows `events` with one partition, and lists `bare` without any, which no Kafka cluster answers. */
+    override def metadata(client: Client, topic: Option[String], timeoutMillis: Int): IO[Vector[(String, Vector[Int])]] =
+      IO.pure(
+        topic
+          .fold(Vector("events" -> Vector(0), "bare" -> Vector.empty))(name => Vector(name -> (if name == "events" then Vector(0) else Vector.empty)))
+      )
 
     override def createTopics(admin: Client, topics: Vector[NewTopic], timeoutMillis: Int): IO[Unit] = unused("createTopics")
 
@@ -648,6 +671,11 @@ final class DriverClientSuite extends CatsEffectSuite:
         cuts: Vector[(TopicPartition, Offset)],
         timeoutMillis: Int
     ): IO[Vector[Either[KafkaException, Offset]]] = unused("deleteRecords")
+
+    override def describeCluster(admin: Client, timeoutMillis: Int): IO[ClusterDescription] = unused("describeCluster")
+
+    override def describeTopics(admin: Client, topics: Vector[Topic], timeoutMillis: Int): IO[Vector[Either[KafkaException, TopicDescription]]] =
+      unused("describeTopics")
 
     override def describeTopicConfigs(
         admin: Client,

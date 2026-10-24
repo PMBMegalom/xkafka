@@ -346,6 +346,66 @@ private[xkafka] object Bindings:
 
   def xkafka_configs_destroy(configs: CVoidPtr): Unit = extern
 
+  def xkafka_admin_describe_cluster(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
+
+  def xkafka_cluster_id(cluster: CVoidPtr): CString = extern
+
+  def xkafka_cluster_controller(cluster: CVoidPtr): CVoidPtr = extern
+
+  def xkafka_cluster_broker_count(cluster: CVoidPtr): CSize = extern
+
+  def xkafka_cluster_broker_at(cluster: CVoidPtr, index: CSize): CVoidPtr = extern
+
+  def xkafka_cluster_destroy(cluster: CVoidPtr): Unit = extern
+
+  def xkafka_node_id(node: CVoidPtr): CInt = extern
+
+  def xkafka_node_host(node: CVoidPtr): CString = extern
+
+  def xkafka_node_port(node: CVoidPtr): CInt = extern
+
+  def xkafka_node_rack(node: CVoidPtr): CString = extern
+
+  def xkafka_admin_describe_topics(
+      client: CVoidPtr,
+      names: Ptr[CString],
+      count: CSize,
+      timeoutMs: CInt,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CVoidPtr = extern
+
+  def xkafka_topics_count(topics: CVoidPtr): CSize = extern
+
+  def xkafka_topic_name(topics: CVoidPtr, topic: CSize): CString = extern
+
+  def xkafka_topic_error(topics: CVoidPtr, topic: CSize): CInt = extern
+
+  def xkafka_topic_error_string(topics: CVoidPtr, topic: CSize): CString = extern
+
+  def xkafka_topic_id_most(topics: CVoidPtr, topic: CSize): CLongLong = extern
+
+  def xkafka_topic_id_least(topics: CVoidPtr, topic: CSize): CLongLong = extern
+
+  def xkafka_topic_internal(topics: CVoidPtr, topic: CSize): CInt = extern
+
+  def xkafka_topic_partition_count(topics: CVoidPtr, topic: CSize): CSize = extern
+
+  def xkafka_topic_partition_at(topics: CVoidPtr, topic: CSize, partition: CSize): CInt = extern
+
+  def xkafka_topic_partition_leader(topics: CVoidPtr, topic: CSize, partition: CSize): CInt = extern
+
+  def xkafka_topic_replica_count(topics: CVoidPtr, topic: CSize, partition: CSize): CSize = extern
+
+  def xkafka_topic_replica_at(topics: CVoidPtr, topic: CSize, partition: CSize, replica: CSize): CInt = extern
+
+  def xkafka_topic_in_sync_count(topics: CVoidPtr, topic: CSize, partition: CSize): CSize = extern
+
+  def xkafka_topic_in_sync_at(topics: CVoidPtr, topic: CSize, partition: CSize, replica: CSize): CInt = extern
+
+  def xkafka_topics_destroy(topics: CVoidPtr): Unit = extern
+
   def xkafka_admin_list_groups(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
 
   def xkafka_groups_count(groups: CVoidPtr): CSize = extern
