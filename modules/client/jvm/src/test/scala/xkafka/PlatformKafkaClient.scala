@@ -36,5 +36,4 @@ private[xkafka] object PlatformKafkaClient:
 
   // A producer that can never reach the broker should report the failure itself, so the negative cases do
   // not depend on cancelling a call that is already in flight.
-  val impatientProducerProperties: Map[String, String] =
-    Map("max.block.ms" -> "10000", "request.timeout.ms" -> "5000", "delivery.timeout.ms" -> "15000")
+  val impatientProducerProperties: Map[String, String] = Map("request.timeout.ms" -> "5000", "delivery.timeout.ms" -> "15000")

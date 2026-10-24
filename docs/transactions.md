@@ -98,11 +98,12 @@ properties, along with these values:
 | setting | default | meaning |
 | --- | --- | --- |
 | `transactionalId` | required | Kafka's `transactional.id` |
-| `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms` |
+| `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms`, and how long creating the producer waits to start transactions |
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
 | `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
 | `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
+| `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 
 A transactional producer always uses `Acks.AllReplicas` and idempotence, because
 Kafka requires both for transactions, so neither can be changed.

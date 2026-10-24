@@ -50,8 +50,6 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     def unapply(handle: GroupHandle): Option[driver.GroupMetadata] = driver.asGroupMetadata(handle)
   // How long one wait for delivery reports lasts before whoever is waiting checks again whether to go on.
   private val DeliveryPollTimeoutMillis = 100
-  // How long a record waits for room in the producer: the Java client's default `max.block.ms`.
-  private val RoomTimeout = 1.minute
   // Admin calls are metadata round trips against the controller, so they are bounded on their own.
   private val AdminTimeoutMillis = 30000
 
@@ -147,7 +145,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   override def producer[K, V](settings: ProducerSettings[F, K, V]): Resource[F, KafkaProducer[F, K, V]] =
     producerHandle(
-      createProducer(settings.client, settings.properties ++ settings.managedProperties),
+      createProducer(settings.client, settings.properties ++ settings.managedProperties, settings.enqueueTimeout),
       handle => driver.destroyProducer(handle, settings.closeTimeout.toMillis.toInt)
     ).map(handle => new DriverProducer(handle, settings))
 
@@ -183,11 +181,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   private def bootstrap(client: ClientSettings): String = client.bootstrapServers.toList.mkString(",")
 
-  private def createProducer(client: ClientSettings, properties: Map[String, String]): F[driver.Client] =
+  private def createProducer(client: ClientSettings, properties: Map[String, String], enqueueTimeout: FiniteDuration): F[driver.Client] =
     driver.producer(
       bootstrap(client),
       client.clientId,
-      client.properties ++ properties ++ ClientProperties.security(client.security) ++ ClientProperties(client)
+      client.properties ++ properties ++ ClientProperties.security(client.security) ++ ClientProperties(client),
+      enqueueTimeout.toMillis.toInt
     )
 
   private def createConsumer[K, V](settings: ConsumerSettings[F, K, V]): F[driver.Client] =
@@ -211,7 +210,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
           createProducer(
             settings.producer.client,
             settings.producer.properties ++ settings.producer.managedProperties + TransactionalIdempotence ++
-              Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString)
+              Map("transactional.id" -> settings.transactionalId.value, "transaction.timeout.ms" -> timeoutMillis.toString),
+            settings.producer.enqueueTimeout
           ),
           handle => driver.destroyProducer(handle, settings.producer.closeTimeout.toMillis.toInt)
         )
@@ -494,16 +494,16 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     /** Enqueues the records, waiting while the producer has no room for the next one, and answers how many it gave up on.
       *
-      * Room opens as the records ahead are delivered, so where deliveries share a queue the wait has it served. The Java client waits up to its
-      * `max.block.ms`, a minute unless set, for each record, and this waits as long for each one. The wait can be cancelled.
+      * Room opens as the records ahead are delivered, so where deliveries share a queue the wait has it served. Each record waits up to the enqueue
+      * timeout, which the Java client waits itself; where it gives up on a record, the ones after it are given up on too. The wait can be cancelled.
       */
     private def enqueueWaitingForRoom(batch: driver.Batch, records: NonEmptyList[EncodedRecord], poll: Poll[F]): F[Int] =
       def from(rest: NonEmptyList[EncodedRecord], waitingSince: FiniteDuration): F[Int] =
-        client(driver.enqueue(client.handle, batch, rest)).flatMap: taken =>
-          NonEmptyList.fromList(rest.toList.drop(taken)).fold(F.pure(0)): left =>
+        poll(client(driver.enqueue(client.handle, batch, rest))).flatMap: enqueued =>
+          NonEmptyList.fromList(rest.toList.drop(enqueued.taken)).fold(F.pure(0)): left =>
             F.monotonic.flatMap: now =>
-              val since = if taken > 0 then now else waitingSince
-              if now - since >= RoomTimeout then F.pure(left.size) else poll(awaitRoom) *> from(left, since)
+              val since = if enqueued.taken > 0 then now else waitingSince
+              if enqueued.gaveUp || now - since >= settings.enqueueTimeout then F.pure(left.size) else poll(awaitRoom) *> from(left, since)
       F.monotonic.flatMap(from(records, _))
 
     private def awaitRoom: F[Unit] =
@@ -515,7 +515,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     private def noRoom: KafkaException =
       new KafkaException.BackendFailure(
-        s"the producer had no room for the record for ${RoomTimeout.toSeconds} seconds",
+        s"the producer had no room for the record within the enqueue timeout of ${settings.enqueueTimeout}",
         code = Some(ErrorCode.RequestTimedOut),
         retriable = Some(ErrorCode.RequestTimedOut.retriable)
       )

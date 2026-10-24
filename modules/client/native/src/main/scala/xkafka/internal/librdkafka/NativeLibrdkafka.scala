@@ -33,7 +33,7 @@ import cats.data.NonEmptyList
 import cats.effect.Sync
 import cats.syntax.show.*
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class NativeGroupMetadata(pointer: CVoidPtr) extends GroupHandle
@@ -52,7 +52,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override val deliveriesShareQueue: Boolean = true
 
-  override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
+  override def producer(bootstrapServers: String, clientId: Option[String], properties: Map[String, String], enqueueTimeoutMillis: Int): F[Client] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone                        = zone
@@ -133,7 +133,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override def freeBatch(batch: Batch): F[Unit] = F.blocking(Bindings.xkafka_batch_free(batch))
 
-  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Int] =
+  override def enqueue(producer: Client, batch: Batch, records: NonEmptyList[EncodedRecord]): F[Enqueued] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone                                = zone
@@ -162,7 +162,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             case 0 => true
             case 1 => false
             case _ => throw nativeError(error, errorCode)
-        records.iterator.takeWhile(taken).size
+        Enqueued(records.iterator.takeWhile(taken).size, gaveUp = false)
 
   private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
     val native = Bindings.xkafka_headers_new(headers.values.size.toUSize)
