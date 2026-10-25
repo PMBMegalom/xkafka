@@ -100,8 +100,8 @@ ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
 )
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
-// The matrix is small, so a failure on one entry should not hide the state of the others.
-ThisBuild / githubWorkflowBuildMatrixFailFast := Some(false)
+// A failure anywhere fails the whole run at once, so nothing waits on a run that has already failed.
+ThisBuild / githubWorkflowBuildMatrixFailFast := Some(true)
 
 // Only the Native build is worth running twice: it is the one whose result depends on the host toolchain.
 ThisBuild / githubWorkflowBuildMatrixExclusions ++= Seq(
@@ -201,15 +201,18 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
     installNativeDependencies,
-    cacheLibrdkafkaLibrary.value,
+    cacheLibrdkafkaLibrary.value.withCond(Some("matrix.platform == 'js'")),
     WorkflowStep.Run(
-      List("scripts/integration-test.sh"),
-      name = Some("Test all three backends against Kafka, including TLS and SASL")
+      List("scripts/integration-test.sh ${{ matrix.platform }}"),
+      name = Some("Test the backend against Kafka, including TLS and SASL")
     )
   ),
   oses = List("ubuntu-24.04"),
   scalas = Nil,
   javas = List(JavaSpec.temurin("17")),
+  // Each backend runs on a runner of its own, with its own brokers, so the three run side by side.
+  matrixAdds = Map("platform" -> List("jvm", "js", "native")),
+  matrixFailFast = Some(true),
   timeoutMinutes = Some(45)
 )
 
@@ -279,11 +282,23 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 
 // sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
+//
+// GitHub only cancels the other entries of a failing job's own matrix, so every job ends by cancelling the whole run when it has failed.
+val cancelRunOnFailure = WorkflowStep.Run(
+  List("gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}"),
+  name = Some("Cancel the rest of the run"),
+  cond = Some("failure()"),
+  env = Map("GH_TOKEN" -> "${{ github.token }}"),
+  continueOnError = true
+)
+
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
-    else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
-    else job
+    val placed =
+      if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
+      else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
+      else job
+    placed.withSteps(placed.steps :+ cancelRunOnFailure)
   }
 }
 
