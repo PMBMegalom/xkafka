@@ -18,7 +18,12 @@ scripts/integration-test.sh
 
 The script starts one pinned Kafka broker with plaintext, TLS, and SASL_SSL
 listeners, runs the same suites against all three backends, then removes the
-broker and its volume.
+broker and its volume. Name a backend, `jvm`, `js` or `native`, to run only that
+one, as CI does with each on a runner of its own:
+
+```sh
+scripts/integration-test.sh native
+```
 
 Three suites need it:
 
