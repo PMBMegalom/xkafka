@@ -282,6 +282,14 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override def groupMetadata(consumer: Client): F[GroupMetadata] = F.blocking(NativeGroupMetadata(Bindings.xkafka_consumer_group_metadata(consumer)))
 
+  override def groupMetadataFor(group: ConsumerGroup, generation: Int, memberId: String): F[GroupMetadata] =
+    F.delay:
+      Zone.acquire: zone =>
+        given Zone   = zone
+        val metadata = Bindings.xkafka_group_metadata_new(toCString(group.value), generation, toCString(memberId))
+        if metadata == null then throw Failures.plain("could not allocate a group identity")
+        NativeGroupMetadata(metadata)
+
   override def destroyGroupMetadata(metadata: GroupMetadata): F[Unit] = F.blocking(Bindings.xkafka_consumer_group_metadata_destroy(metadata.pointer))
 
   override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =

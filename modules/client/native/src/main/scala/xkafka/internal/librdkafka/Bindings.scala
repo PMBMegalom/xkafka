@@ -649,6 +649,8 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_group_metadata(consumer: CVoidPtr): CVoidPtr = extern
 
+  def xkafka_group_metadata_new(groupId: CString, generationId: CInt, memberId: CString): CVoidPtr = extern
+
   def xkafka_consumer_group_metadata_destroy(metadata: CVoidPtr): Unit = extern
 
   def xkafka_producer_send_offsets(

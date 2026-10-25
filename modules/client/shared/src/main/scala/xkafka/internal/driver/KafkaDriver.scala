@@ -112,6 +112,9 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def groupMetadata(consumer: Client): F[GroupMetadata]
 
+  /** A group identity from its parts, for a member whose membership no consumer of the driver holds. Destroyed like a consumer's. */
+  def groupMetadataFor(group: ConsumerGroup, generation: Int, memberId: String): F[GroupMetadata]
+
   def destroyGroupMetadata(metadata: GroupMetadata): F[Unit]
 
   /** The handle as group metadata of this platform, if it is one. Handles from every client on the platform qualify. */

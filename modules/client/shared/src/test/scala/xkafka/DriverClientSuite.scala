@@ -690,6 +690,8 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def groupMetadata(consumer: Client): IO[GroupMetadata] = IO.pure(FakeGroupMetadata(consumer))
 
+    override def groupMetadataFor(group: ConsumerGroup, generation: Int, memberId: String): IO[GroupMetadata] = IO.pure(FakeGroupMetadata(memberId))
+
     override def destroyGroupMetadata(metadata: GroupMetadata): IO[Unit] = IO.unit
 
     override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =

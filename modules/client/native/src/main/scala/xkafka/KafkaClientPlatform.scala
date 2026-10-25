@@ -23,10 +23,13 @@ package xkafka
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
+import internal.driver.KafkaDriver
 import internal.librdkafka.{MockCluster, NativeLibrdkafka}
 
 private[xkafka] object KafkaClientPlatform:
-  def apply[F[_]: Async]: KafkaClient[F] = new DriverClient[F](new NativeLibrdkafka[F])
+  def apply[F[_]: Async]: KafkaClient[F] = new DriverClient[F](driver[F])
+
+  def driver[F[_]: Async]: KafkaDriver[F] = new NativeLibrdkafka[F]
 
 private[xkafka] object LibrdkafkaPlatform:
   def version: String = new NativeLibrdkafka[cats.effect.SyncIO].version

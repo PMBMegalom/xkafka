@@ -23,6 +23,7 @@ package xkafka
 
 import cats.effect.Async
 import org.apache.kafka.clients.admin.ConfigEntry as JavaConfigEntry
+import internal.driver.KafkaDriver
 import internal.kafkaclients.{JavaClients, KafkaClientsDriver}
 
 private[xkafka] object KafkaClientPlatform:
@@ -30,6 +31,8 @@ private[xkafka] object KafkaClientPlatform:
 
   /** The client over Java clients made some other way, such as the Java client's mocks. */
   private[xkafka] def fromJava[F[_]: Async](clients: JavaClients): KafkaClient[F] = new DriverClient[F](new KafkaClientsDriver[F](clients))
+
+  def driver[F[_]: Async]: KafkaDriver[F] = new KafkaClientsDriver[F](JavaClients.default)
 
 /** Reads the Java client's configuration entries into the portable ones. */
 private[xkafka] object JavaConfiguration:

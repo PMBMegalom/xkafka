@@ -2609,6 +2609,15 @@ void *xkafka_consumer_group_metadata(rd_kafka_t *consumer) {
         return rd_kafka_consumer_group_metadata(consumer);
 }
 
+/* A group identity from its parts, for a member whose group membership no
+ * consumer of this client holds. */
+void *xkafka_group_metadata_new(const char *group_id,
+                                int32_t generation_id,
+                                const char *member_id) {
+        return rd_kafka_consumer_group_metadata_new_with_genid(
+            group_id, generation_id, member_id, NULL);
+}
+
 void xkafka_consumer_group_metadata_destroy(void *metadata) {
         if (metadata == NULL)
                 return;
