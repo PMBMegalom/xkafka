@@ -18,6 +18,7 @@ username="xkafka"
 password="xkafka-secret"
 key_password="xkafka-key-secret"
 secrets_dir="$project_dir/target/kafka-secrets-$$"
+logs_dir="$project_dir/target/broker-logs"
 working_directory="$project_dir"
 
 if [[ "${1:-}" == "--directory" ]]; then
@@ -32,12 +33,16 @@ fi
 
 cleanup() {
   status=$?
+  # A failure keeps each broker's whole log in target/broker-logs, for a test that failed long before the tails printed here.
   if [[ "$status" -ne 0 ]]; then
+    mkdir -p "$logs_dir"
+    docker logs "$container_name" >"$logs_dir/broker.log" 2>&1 || true
     docker logs --tail 200 "$container_name" || true
   fi
   docker rm --force --volumes "$container_name" >/dev/null 2>&1 || true
   for node in 1 2 3; do
     if [[ "$status" -ne 0 ]]; then
+      docker logs "$cluster_name-$node" >"$logs_dir/cluster-$node.log" 2>&1 || true
       docker logs --tail 50 "$cluster_name-$node" || true
     fi
     docker rm --force --volumes "$cluster_name-$node" >/dev/null 2>&1 || true

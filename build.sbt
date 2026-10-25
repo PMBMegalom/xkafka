@@ -205,6 +205,12 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     WorkflowStep.Run(
       List("scripts/integration-test.sh ${{ matrix.platform }}"),
       name = Some("Test the backend against Kafka, including TLS and SASL")
+    ),
+    WorkflowStep.Use(
+      UseRef.Public("actions", "upload-artifact", "v7"),
+      name = Some("Keep the broker logs"),
+      cond = Some("failure()"),
+      params = Map("name" -> "broker-logs-${{ matrix.platform }}", "path" -> "target/broker-logs")
     )
   ),
   oses = List("ubuntu-24.04"),
