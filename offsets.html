@@ -91,8 +91,11 @@
   <p class="header"><a href="#">Offsets</a></p>
 
   <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#leader-epoch-and-metadata">Leader epoch and metadata</a></li>
     <li class="level1 nav-leaf"><a href="#batches">Batches</a></li>
     <li class="level1 nav-leaf"><a href="#offsets-and-rebalances">Offsets and rebalances</a></li>
+    <li class="level1 nav-leaf"><a href="#committing-before-a-partition-moves">Committing before a partition moves</a></li>
+    <li class="level1 nav-leaf"><a href="#starting-from-offsets-you-keep">Starting from offsets you keep</a></li>
     <li class="level1 nav-leaf"><a href="#committing-on-a-schedule">Committing on a schedule</a></li>
     <li class="level1 nav-leaf"><a href="#retrying-a-failed-commit">Retrying a failed commit</a></li>
     <li class="level1 nav-leaf"><a href="#how-long-a-commit-waits">How long a commit waits</a></li>
@@ -112,12 +115,24 @@
         <p>A successful <code>record.offset.commit</code> stores <code>record.offset.nextOffset</code>, the
         offset after the one just handled.</p>
         
+        <h2 id="leader-epoch-and-metadata" class="section"><a class="anchor-link left" href="#leader-epoch-and-metadata"><i class="icofont-laika link">&#xef71;</i></a>Leader epoch and metadata</h2>
+        <p>An offset commits with the leader epoch of the record it was read with. It can
+        also carry text of your own, which the broker stores beside it and <code>committed</code>
+        returns:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">withMetadata</span><span>(</span><span class="string-literal">&quot;processed by worker 3&quot;</span><span>).</span><span class="identifier">commit</span></code></pre>
+        <p>The broker keeps no difference between empty metadata and none, so empty means
+        none. It refuses metadata longer than its <code>offset.metadata.max.bytes</code>, 4096
+        bytes by default, and the commit fails with <code>ErrorCode.OffsetMetadataTooLarge</code>.
+        A batch keeps the metadata of the offset it keeps, and a
+        <a href="transactions.html">transaction</a> stores both the epoch and the metadata of the
+        offsets it records.</p>
+        
         <h2 id="batches" class="section"><a class="anchor-link left" href="#batches"><i class="icofont-laika link">&#xef71;</i></a>Batches</h2>
         <p>Offsets can be accumulated and committed together while the consumer resource
         is active:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">offsets</span><span>).</span><span class="identifier">commit</span></code></pre>
-        <p>A batch keeps only the greatest next offset for each topic-partition, and makes
-        one backend commit per originating consumer.</p>
+        <p>A batch keeps only the greatest next offset for each topic-partition, and
+        commits once for each consumer its offsets came from.</p>
         
         <h2 id="offsets-and-rebalances" class="section"><a class="anchor-link left" href="#offsets-and-rebalances"><i class="icofont-laika link">&#xef71;</i></a>Offsets and rebalances</h2>
         <p>By default, an offset can only be committed while the consumer that read it still
@@ -136,15 +151,74 @@
           them again, so offsets read before any rebalance are refused, even for the
           partitions the consumer keeps.</li>
           <li>With a cooperative strategy, only the partitions that move are revoked, so
-          offsets for the partitions a consumer keeps can still be committed.</li>
+          offsets for the partitions a consumer keeps can still be committed. Choose
+          one through the <code>partition.assignment.strategy</code> property:
+          <code>org.apache.kafka.clients.consumer.CooperativeStickyAssignor</code> on the JVM, and
+          <code>cooperative-sticky</code> on Scala.js and Native.</li>
         </ul>
         <p><code>committer.commit(offsets)</code> takes offsets that did not come from a record, so it
-        can only check that the consumer owns each partition at the time of the commit.</p>
+        can only check that the consumer owns each partition at the time of the commit.
+        It commits them with no leader epoch and no metadata;
+        <code>committer.commitWithMetadata</code> takes an <code>OffsetAndMetadata</code> for each partition.</p>
         <p>To turn fencing off:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withoutAssignmentFencing</span></code></pre>
         <p>Without fencing, an offset read before a rebalance can still be committed after its
         partition has moved to another consumer, which moves that partition back to an
         earlier position.</p>
+        
+        <h2 id="committing-before-a-partition-moves" class="section"><a class="anchor-link left" href="#committing-before-a-partition-moves"><i class="icofont-laika link">&#xef71;</i></a>Committing before a partition moves</h2>
+        <p>When a partition moves, the records your consumer is still handling from it can
+        no longer be committed, so the consumer that gets the partition reads them
+        again. Rebalance-safe commits give those records time to be committed first:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withRebalanceSafeCommits</span><span>(</span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>)</span></code></pre>
+        <p>Before the consumer gives up a partition, it waits until every record it has
+        handed out from that partition is committed, for at most the limit. While it
+        waits:</p>
+        <ul>
+          <li>committing those records succeeds, one at a time, in a batch, or in a
+          <a href="transactions.html">transaction</a> once the transaction commits;</li>
+          <li>the consumer hands out no further records of that partition, and the consumer
+          that gets the partition reads them instead;</li>
+          <li>the rest of the group waits for the rebalance to finish.</li>
+        </ul>
+        <p>Keep the limit short for that last reason. It must be less than
+        <code>maxPollInterval</code>.</p>
+        <p>If the limit passes with records still uncommitted, the consumer gives up the
+        partition anyway, and those records are read again. To stop consuming instead:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withRebalanceSafeCommits</span><span>(</span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>, </span><span class="type-name">RebalanceSafeCommits</span><span>.</span><span class="type-name">AtLimit</span><span>.</span><span class="type-name">Fail</span><span>)</span></code></pre>
+        <p>The record stream then fails with <code>KafkaException.UncommittedRevocation</code>, whose
+        <code>topicPartitions</code> names the partitions that still had records uncommitted.</p>
+        <p>A consumer that has already been removed from its group, for instance because
+        it went longer than <code>maxPollInterval</code> without fetching, gives up its partitions
+        without waiting. Committing a record it read before it was removed fails with
+        <code>ErrorCode.UnknownMemberId</code>. If it was the group&#39;s only member, the broker may
+        already have removed the empty group, and the commit fails with
+        <code>ErrorCode.GroupIdNotFound</code> instead.</p>
+        
+        <h2 id="starting-from-offsets-you-keep" class="section"><a class="anchor-link left" href="#starting-from-offsets-you-keep"><i class="icofont-laika link">&#xef71;</i></a>Starting from offsets you keep</h2>
+        <p>An application that stores how far it has got itself, for example in the same
+        database transaction as its results, can tell the consumer where each partition
+        starts:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withStartingOffsets</span><span>(</span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>): </span><span class="identifier">partitions</span><span> =&gt;
+  </span><span class="identifier">loadPositions</span><span>(</span><span class="identifier">partitions</span><span>) </span><span class="comment">// F[Map[TopicPartition, StartingOffset]]</span></code></pre>
+        <p>The consumer calls the function with the partitions each rebalance assigns,
+        before it reads any of their records, and once at the start with partitions
+        named directly. Each partition it answers for starts at the offset given, and
+        no earlier record of it is handed out. A <code>StartingOffset</code> can also carry the
+        leader epoch of the last record you handled, <code>record.offset.leaderEpoch</code>, if
+        you stored it.</p>
+        <ul>
+          <li>A partition the function answers nothing for starts as it would without the
+          function: at its committed offset, or where <code>autoOffsetReset</code> says if it has
+          none.</li>
+          <li>An offset past the end of the partition also starts where <code>autoOffsetReset</code>
+          says.</li>
+          <li>The function must answer within its limit, which must be less than
+          <code>maxPollInterval</code>. If it fails or passes the limit, the record stream fails,
+          with the function&#39;s own failure or with
+          <code>KafkaException.StartingOffsetsTimedOut</code>. For partitions named directly,
+          creating the consumer fails instead.</li>
+        </ul>
         
         <h2 id="committing-on-a-schedule" class="section"><a class="anchor-link left" href="#committing-on-a-schedule"><i class="icofont-laika link">&#xef71;</i></a>Committing on a schedule</h2>
         <p><code>commitBatchWithin</code> is an FS2 pipe which commits whenever it collects <code>n</code>
@@ -188,7 +262,7 @@
         attempt.</p>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p>Recovery wraps the committer, so it applies wherever a commit happens: a single
+          <p>The recovery policy applies wherever a commit happens: a single
           <code>CommittableOffset.commit</code>, a batch, <code>commitBatchWithin</code>, and <code>consumeChunk</code>.</p>
         </div>
         

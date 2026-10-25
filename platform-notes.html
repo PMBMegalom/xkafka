@@ -108,21 +108,18 @@
         <p>The API is the same everywhere. These are the places the runtimes differ.</p>
         
         <h2 id="record-delivery" class="section"><a class="anchor-link left" href="#record-delivery"><i class="icofont-laika link">&#xef71;</i></a>Record delivery</h2>
-        <p>Every backend has one record source for each consumer: a single poll owned by
-        the consumer, feeding both the record stream and the assignment. The poll starts
-        when the consumer is made, so a consumer joins its group and takes its share of
-        the partitions even before anything reads its records. A partition whose buffer
-        fills is paused at the broker until its reader catches up, so a slow partition
-        does not hold up the others.</p>
-        <p>A consumer which stops reading records for long enough stops seeing rebalances
-        too, because both come from that one poll.</p>
-        <p>On the JVM each consumer has a thread of its own, which makes every call to the
-        Java client.</p>
+        <p>On every platform a consumer joins its group and takes its share of the
+        partitions as soon as it is acquired, even before anything reads its records. A
+        partition whose buffer fills is paused until its reader catches up, so a slow
+        partition does not hold up the others.</p>
+        <p>A consumer whose records go unread for longer than its <code>maxPollInterval</code> leaves
+        its group. See <a href="consuming.html#group-membership">Group membership</a>.</p>
+        <p>On the JVM each consumer uses one thread of its own.</p>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
         <p>The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
-        OAUTHBEARER, and gzip and zstd compression enabled, so it can reach
-        authenticated brokers and read compressed topics.</p>
+        OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
+        and read and write records in any compression.</p>
         <p>librdkafka links these against system libraries, so any application linking the
         Native backend needs OpenSSL, zlib, and zstd available:
         <code>libssl-dev</code>, <code>zlib1g-dev</code>, and <code>libzstd-dev</code> on Debian and Ubuntu, or
@@ -146,9 +143,8 @@
         <p>On macOS add a <code>-L</code> for the OpenSSL installation as well.</p>
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>The backend is librdkafka, the same release and the same C shim Scala Native
-        uses, called from Node.js through koffi. It targets Node.js rather than
-        browsers.</p>
+        <p>The backend is librdkafka, the same release Scala Native uses. It runs on
+        Node.js, not in browsers.</p>
         <p>The library comes from npm as <code>@xkafka/librdkafka</code>, which sbt-scalajs-bundler
         installs. npm adds the prebuilt library for the platform it runs on:</p>
         <table>
@@ -186,15 +182,16 @@
           </tbody>
         </table>
         <p>Nothing else needs installing: each library carries its own OpenSSL, zlib and
-        zstd. Each xkafka release depends on the library built from its own shim, and
-        refuses to start with any other.</p>
+        zstd. Each xkafka release needs the exact <code>@xkafka/librdkafka</code> version it was
+        published with, so do not pin or override that package. With any other version,
+        acquiring a client fails with a <code>BackendFailure</code> naming both versions.</p>
         
         <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
-        <p>Serializers, deserializers, producer and consumer settings, committable offsets
-        and records, partition record streams, and consumers have cats-tagless
-        <code>FunctorK</code> instances. <code>KafkaProducer</code> has <code>mapK</code> but no <code>FunctorK</code> instance,
-        because translating the acknowledgement nested inside the enqueue needs a
-        <code>Functor</code> for the target effect. <code>KafkaClient.imapK</code> transforms a complete
+        <p>Serializers, deserializers, producer, transactional producer, and consumer
+        settings, offset committers, committable offsets, batches, and records,
+        partition record streams, consumers, and administration clients have
+        cats-tagless <code>FunctorK</code> instances. <code>KafkaProducer</code> has <code>mapK</code>, which needs a
+        <code>Functor</code> for the target effect, and so no <code>FunctorK</code> instance. <code>KafkaClient.imapK</code> transforms a complete
         client between effects in both directions while preserving <code>Resource</code>
         cancellation semantics.</p>
 

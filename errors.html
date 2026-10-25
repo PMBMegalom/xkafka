@@ -102,7 +102,7 @@
       <main class="content">
 
         <h1 id="errors" class="title">Errors</h1>
-        <p>Failures xkafka classifies from Kafka or its portable data model are
+        <p>Failures Kafka reports, and values or settings xkafka rejects, are
         <code>KafkaException</code> values. User-supplied effects keep their own failures, and
         ordinary method precondition failures such as a non-positive partition-stream
         queue threshold use their usual exception type.</p>
@@ -120,7 +120,7 @@
             </tr>
             <tr>
               <td><code>InvalidBackendResponse</code></td>
-              <td>a backend returned data the portable API cannot represent</td>
+              <td>the client returned data xkafka cannot represent, which is a bug in xkafka worth reporting</td>
             </tr>
             <tr>
               <td><code>InvalidValue</code></td>
@@ -130,6 +130,22 @@
               <td><code>InvalidSettings</code></td>
               <td>settings could not be constructed</td>
             </tr>
+            <tr>
+              <td><code>StartingOffsetsTimedOut</code></td>
+              <td>a consumer&#39;s <a href="offsets.html#starting-from-offsets-you-keep">starting offsets</a> were not supplied within their limit</td>
+            </tr>
+            <tr>
+              <td><code>CommitFailed</code></td>
+              <td>a commit kept failing as retriable after every retry its <a href="offsets.html#retrying-a-failed-commit">recovery policy</a> allowed</td>
+            </tr>
+            <tr>
+              <td><code>Unsupported</code></td>
+              <td>a transaction was asked to record offsets that came from a consumer of another client</td>
+            </tr>
+            <tr>
+              <td><code>UncommittedRevocation</code></td>
+              <td>a consumer whose <a href="offsets.html#committing-before-a-partition-moves">rebalance-safe commits</a> fail at their limit gave up partitions with records still uncommitted</td>
+            </tr>
           </tbody>
         </table>
         <p><code>InvalidValue</code> carries the <code>ValidationError</code> that rejected the value, and
@@ -137,24 +153,23 @@
         survives being lifted into an effect.</p>
         
         <h2 id="backend-failures" class="section"><a class="anchor-link left" href="#backend-failures"><i class="icofont-laika link">&#xef71;</i></a>Backend failures</h2>
-        <p><code>BackendFailure</code> preserves an original cause when one is available and carries a portable
-        <code>ErrorCode</code> along with retriable, fatal, and transaction-abort-required
-        classifications. A <code>None</code> for any of those means the backend did not make that
-        classification available.</p>
-        <p>The classifications preserve what a backend reports. When a backend supplies
-        only a code, <code>retriable</code> falls back to the portable <code>ErrorCode.retriable</code> answer.
-        <code>fatal</code> is always <code>true</code> for <code>ErrorCode.Fenced</code>; otherwise it, like
-        <code>transactionAbortRequired</code>, remains <code>None</code> when unavailable. Code that
-        needs one portable retry decision should use <code>ErrorCode.retriable</code>; commit
-        recovery does so as well:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span>.</span><span class="identifier">exists</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">retriable</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
-        <p>It is true for an unavailable or loading coordinator, a leader that has moved, a
-        rebalance in progress, a network failure, and a timed out request.</p>
+        <p><code>BackendFailure</code> keeps the original failure as its cause, where there is one,
+        and carries an <code>ErrorCode</code> with three flags: <code>retriable</code>, <code>fatal</code>, and
+        <code>transactionAbortRequired</code>. <code>retriable</code> is what the code&#39;s <code>retriable</code> says, so
+        it is the same on every platform, and <code>None</code> only where there is no code.
+        <code>fatal</code> and <code>transactionAbortRequired</code> are <code>None</code> where the platform&#39;s client
+        does not report them. <code>fatal</code> is always <code>true</code> for <code>ErrorCode.Fenced</code>.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
+        <p><code>ErrorCode.retriable</code> is true for an unavailable or loading coordinator, a
+        leader that has moved, a rebalance in progress, a network failure, and a timed
+        out request.</p>
         
         <h2 id="portable-codes" class="section"><a class="anchor-link left" href="#portable-codes"><i class="icofont-laika link">&#xef71;</i></a>Portable codes</h2>
         <p>The named <code>ErrorCode</code> cases are Kafka protocol errors, which every broker
-        reports under the same code, plus the client-side conditions each backend raises
-        on its own. <code>ErrorCode.Other</code> carries a code with no portable meaning.</p>
+        reports under the same code, plus client-side conditions such as a timed out
+        request. <code>ErrorCode.Other(value)</code> carries a code xkafka does not name. Its value
+        comes from the platform&#39;s client and can differ between the JVM and Scala.js or
+        Native, so code meant for every platform should not match on it.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span> </span><span class="keyword">match</span><span>
   </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">ErrorCode</span><span>.</span><span class="type-name">OffsetOutOfRange</span><span>)        =&gt; </span><span class="identifier">resetPosition</span><span>
   </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">ErrorCode</span><span>.</span><span class="type-name">SaslAuthenticationFailed</span><span>) =&gt; </span><span class="identifier">refreshCredentials</span><span>

@@ -93,6 +93,7 @@
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#protocols">Protocols</a></li>
     <li class="level1 nav-leaf"><a href="#certificate-authorities">Certificate authorities</a></li>
+    <li class="level1 nav-leaf"><a href="#client-certificates">Client certificates</a></li>
     <li class="level1 nav-leaf"><a href="#credentials">Credentials</a></li>
     <li class="level1 nav-leaf"><a href="#failures">Failures</a></li>
   </ul>
@@ -149,19 +150,86 @@
           </tbody>
         </table>
         <p>Scala.js and Scala Native also accept a directory of certificates as a
-        <code>PemFile</code>.</p>
+        <code>PemFile</code>. Each certificate must be named by its subject hash, as
+        <code>openssl rehash</code> names it; under any other name it is not found, and the broker
+        is refused as <code>ErrorCode.SslAuthenticationFailed</code>. On the JVM a directory fails
+        as <code>ErrorCode.InvalidConfiguration</code>.</p>
         <p><code>TlsSettings</code> verifies the broker hostname by default. Call
         <code>withoutHostnameVerification</code> to turn that off.</p>
+        
+        <h2 id="client-certificates" class="section"><a class="anchor-link left" href="#client-certificates"><i class="icofont-laika link">&#xef71;</i></a>Client certificates</h2>
+        <p>A broker can require each client to present a certificate of its own. Give
+        <code>TlsSettings</code> a <code>ClientCertificate</code>, which is one of:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>case</th>
+              <th>meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>PemFile</code></td>
+              <td>a path to one PEM file holding the private key and the certificate chain</td>
+            </tr>
+            <tr>
+              <td><code>Pem</code></td>
+              <td>the certificate chain and the private key, as PEM text held in memory</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">tls</span><span> =
+  </span><span class="type-name">TlsSettings</span><span>.</span><span class="identifier">from</span><span>(
+    </span><span class="type-name">CertificateAuthority</span><span>.</span><span class="type-name">PemFile</span><span>(</span><span class="string-literal">&quot;/etc/kafka/ca.pem&quot;</span><span>),
+    </span><span class="identifier">clientCertificate</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="type-name">ClientCertificate</span><span>.</span><span class="type-name">PemFile</span><span>(</span><span class="string-literal">&quot;/etc/kafka/client.pem&quot;</span><span>, </span><span class="identifier">keyPassword</span><span> = </span><span class="type-name">None</span><span>))
+  )</span></code></pre>
+        <p>The private key must be PKCS#8, which PEM marks as <code>PRIVATE KEY</code>, or as
+        <code>ENCRYPTED PRIVATE KEY</code> when it needs <code>keyPassword</code>. Other forms are not
+        supported, and an inline key in another form, such as <code>RSA PRIVATE KEY</code>, is a
+        <code>SettingsError</code>. <code>openssl pkcs8 -topk8</code> converts one. The certificate&#39;s key and
+        password are kept out of <code>toString</code>.</p>
+        <p>Java 17 can&#39;t read a key encrypted with PBES2, the scheme <code>openssl pkcs8</code>
+        uses by default, so on the JVM with Java 17 acquiring the client fails with a
+        <code>BackendFailure</code> whose code is <code>ErrorCode.InvalidConfiguration</code>. Encrypt the key with <code>openssl pkcs8 -topk8 -v1
+PBE-SHA1-3DES</code> instead, which every backend reads. Java 21 reads both.</p>
         
         <h2 id="credentials" class="section"><a class="anchor-link left" href="#credentials"><i class="icofont-laika link">&#xef71;</i></a>Credentials</h2>
         <p><code>SaslSettings</code> accepts <code>SaslMechanism.Plain</code>, <code>ScramSha256</code>, and <code>ScramSha512</code>,
         and keeps its password out of <code>toString</code>.</p>
         
         <h2 id="failures" class="section"><a class="anchor-link left" href="#failures"><i class="icofont-laika link">&#xef71;</i></a>Failures</h2>
-        <p>A rejected broker certificate or an incorrect password fails the call as
-        <code>KafkaException.BackendFailure</code>.</p>
-        <p><code>BackendFailure.code</code> distinguishes these as <code>SslAuthenticationFailed</code> and
-        <code>SaslAuthenticationFailed</code>.</p>
+        <p>Each of these fails as <code>KafkaException.BackendFailure</code>, and its <code>code</code> says
+        which:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>failure</th>
+              <th><code>code</code></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>the broker&#39;s certificate is not trusted</td>
+              <td><code>SslAuthenticationFailed</code></td>
+            </tr>
+            <tr>
+              <td>the broker refuses the client&#39;s certificate, or wants one and gets none</td>
+              <td><code>SslAuthenticationFailed</code></td>
+            </tr>
+            <tr>
+              <td>the SASL credentials are incorrect</td>
+              <td><code>SaslAuthenticationFailed</code></td>
+            </tr>
+            <tr>
+              <td><code>keyPassword</code> does not decrypt the client&#39;s key</td>
+              <td><code>InvalidConfiguration</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>The last one fails when the producer, consumer or admin client is acquired,
+        before any connection is made.</p>
 
         
 <hr class="footer-rule"/>

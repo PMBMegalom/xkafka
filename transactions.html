@@ -124,9 +124,8 @@
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         <p><code>transactionally</code> commits the transaction if its body succeeds, and aborts it if
         the body fails or is cancelled.</p>
-        <p>A transactional producer only writes inside transactions, which is why
-        <code>transactionalProducer</code> is a separate constructor rather than an option on
-        <code>producer</code>.</p>
+        <p>A transactional producer only writes inside transactions. Create one with
+        <code>transactionalProducer</code>, from <code>TransactionalProducerSettings</code>.</p>
         <p>Kafka allows one transaction at a time per transactional id, so concurrent calls
         to <code>transactionally</code> on one producer run one after another.</p>
         <div class="callout warning">
@@ -173,9 +172,9 @@
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p><code>produce</code> inside a transaction returns <code>F[ProducerResult]</code> rather than the two
-          stages a plain producer offers. A transaction cannot commit records the broker
-          has not acknowledged, so the call waits for them.</p>
+          <p><code>produce</code> inside a transaction returns <code>F[NonEmptyList[Produced]]</code> rather than
+          the two stages a plain producer offers. A transaction cannot commit records the
+          broker has not acknowledged, so the call waits for them.</p>
         </div>
         
         <h2 id="settings" class="section"><a class="anchor-link left" href="#settings"><i class="icofont-laika link">&#xef71;</i></a>Settings</h2>
@@ -198,12 +197,32 @@
             <tr>
               <td><code>transactionTimeout</code></td>
               <td>60s</td>
-              <td>Kafka&#39;s <code>transaction.timeout.ms</code></td>
+              <td>Kafka&#39;s <code>transaction.timeout.ms</code>, and how long creating the producer waits to start transactions</td>
             </tr>
             <tr>
               <td><code>closeTimeout</code></td>
               <td>60s</td>
               <td>how long releasing the producer waits for records it has not delivered</td>
+            </tr>
+            <tr>
+              <td><code>compression</code></td>
+              <td><code>Compression.Uncompressed</code></td>
+              <td>how record batches are compressed</td>
+            </tr>
+            <tr>
+              <td><code>linger</code></td>
+              <td>5ms</td>
+              <td>how long a record waits for others to join its batch, from zero to 15 minutes</td>
+            </tr>
+            <tr>
+              <td><code>batchSize</code></td>
+              <td>unset, which leaves it to the platform&#39;s client</td>
+              <td>the most bytes one batch holds before it is sent</td>
+            </tr>
+            <tr>
+              <td><code>enqueueTimeout</code></td>
+              <td>60s</td>
+              <td>how long <code>produce</code> waits for room for a record while the client&#39;s buffer is full</td>
             </tr>
           </tbody>
         </table>

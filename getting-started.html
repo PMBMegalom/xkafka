@@ -107,14 +107,14 @@
         <h1 id="getting-started" class="title">Getting started</h1>
         
         <h2 id="dependency" class="section"><a class="anchor-link left" href="#dependency"><i class="icofont-laika link">&#xef71;</i></a>Dependency</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.4.0&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.4.1&quot;</span></code></pre>
         <p>The <code>%%%</code> operator selects the artifact for the platform being built. The same
         code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
-        each selects its platform adapter.</p>
+        each one runs on its platform&#39;s Kafka client.</p>
         <p>Two modules are published:</p>
         <ul>
-          <li><code>xkafka-kernel</code> holds the portable data model and the producer and consumer
-          algebras.</li>
+          <li><code>xkafka-kernel</code> holds the data types and the producer, consumer, and
+          administration interfaces, with no backend.</li>
           <li><code>xkafka-client</code> holds <code>KafkaClient</code> and the three backends, and depends on the
           kernel.</li>
         </ul>
@@ -138,20 +138,22 @@
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">client</span><span> = </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
-        <p>The selected artifact supplies the adapter, so this line is the same on every
-        platform. The platform&#39;s runtime dependencies are described below.</p>
+        <p>This line is the same on every platform. What each platform needs at runtime is
+        described below.</p>
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>The backend is librdkafka, the same release Scala Native uses, called through
-        koffi. sbt-scalajs-bundler installs it from npm as <code>@xkafka/librdkafka</code>, which
-        brings a prebuilt library for the platform it runs on. Use the Node version
-        recorded in <code>.nvmrc</code>:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span>nvm use</span></code></pre>
+        <p>The backend is librdkafka, the same release Scala Native uses, and it runs on
+        Node.js 24. It comes from npm as <code>@xkafka/librdkafka</code>, which brings a prebuilt
+        library for the platform it runs on. sbt-scalajs-bundler installs it, so enable
+        that plugin in the Scala.js project:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// project/plugins.sbt
+</span><span class="identifier">addSbtPlugin</span><span>(</span><span class="string-literal">&quot;ch.epfl.scala&quot;</span><span> % </span><span class="string-literal">&quot;sbt-scalajs-bundler&quot;</span><span> % </span><span class="string-literal">&quot;0.21.1&quot;</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// build.sbt
+</span><span>.</span><span class="identifier">jsConfigure</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">enablePlugins</span><span>(</span><span class="type-name">ScalaJSBundlerPlugin</span><span>))</span></code></pre>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
-        <p>The backend is librdkafka, reached through a small C shim that ships inside the
-        published artifact. An application needs librdkafka available to its compiler
-        and linker. See <a href="platform-notes.html">Platform notes</a> for the linking recipes,
+        <p>The backend is librdkafka, which must be installed where the application&#39;s
+        compiler and linker can find it. See <a href="platform-notes.html">Platform notes</a> for the linking recipes,
         including the flags a static link requires.</p>
 
         

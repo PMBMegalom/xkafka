@@ -110,13 +110,16 @@
         <h2 id="running-the-tests" class="section"><a class="anchor-link left" href="#running-the-tests"><i class="icofont-laika link">&#xef71;</i></a>Running the tests</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt test</span></code></pre>
         <p>That runs the ordinary JVM, Scala.js, and Scala Native suites. Tests which need
-        a broker are skipped unless one is configured.</p>
+        a broker are skipped unless <code>XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS</code> names one,
+        which the script below sets.</p>
         
         <h2 id="broker-backed-tests" class="section"><a class="anchor-link left" href="#broker-backed-tests"><i class="icofont-laika link">&#xef71;</i></a>Broker-backed tests</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh</span></code></pre>
         <p>The script starts one pinned Kafka broker with plaintext, TLS, and SASL_SSL
         listeners, runs the same suites against all three backends, then removes the
-        broker and its volume.</p>
+        broker and its volume. Name a backend, <code>jvm</code>, <code>js</code> or <code>native</code>, to run only that
+        one, as CI does with each on a runner of its own:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh native</span></code></pre>
         <p>Three suites need it:</p>
         <ul>
           <li><code>KafkaIntegrationSuite</code> covers produce, consume, and commit round trips.</li>

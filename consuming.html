@@ -91,7 +91,10 @@
   <p class="header"><a href="#">Consuming</a></p>
 
   <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#what-a-record-carries">What a record carries</a></li>
     <li class="level1 nav-leaf"><a href="#what-a-consumer-reads">What a consumer reads</a></li>
+    <li class="level1 nav-node"><a href="#group-membership">Group membership</a></li>
+    <li class="level2 nav-leaf"><a href="#static-members">Static members</a></li>
     <li class="level1 nav-leaf"><a href="#where-a-consumer-starts">Where a consumer starts</a></li>
     <li class="level1 nav-leaf"><a href="#inspecting-the-consumer">Inspecting the consumer</a></li>
     <li class="level1 nav-leaf"><a href="#processing-every-record">Processing every record</a></li>
@@ -126,12 +129,42 @@
         .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">take</span><span>(</span><span class="number-literal">10</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>)
   </span><span class="keyword">yield</span><span> </span><span class="identifier">records</span></code></pre>
         
+        <h2 id="what-a-record-carries" class="section"><a class="anchor-link left" href="#what-a-record-carries"><i class="icofont-laika link">&#xef71;</i></a>What a record carries</h2>
+        <p>Besides its topic-partition, offset, key, value and headers, a <code>ConsumerRecord</code>
+        has:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>field</th>
+              <th>meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>timestamp</code></td>
+              <td><code>RecordTimestamp.CreateTime</code> where the producer set the time, or <code>LogAppendTime</code> where the topic&#39;s <code>message.timestamp.type</code> is <code>LogAppendTime</code> and the broker set it</td>
+            </tr>
+            <tr>
+              <td><code>leaderEpoch</code></td>
+              <td>the leader epoch of the partition when the record was written</td>
+            </tr>
+            <tr>
+              <td><code>serializedKeySize</code></td>
+              <td>the key&#39;s size in bytes as it was read, or <code>None</code> for a record without a key</td>
+            </tr>
+            <tr>
+              <td><code>serializedValueSize</code></td>
+              <td>the value&#39;s size in bytes as it was read, or <code>None</code> for a record without a value</td>
+            </tr>
+          </tbody>
+        </table>
+        
         <h2 id="what-a-consumer-reads" class="section"><a class="anchor-link left" href="#what-a-consumer-reads"><i class="icofont-laika link">&#xef71;</i></a>What a consumer reads</h2>
         <p><code>Selection</code> says where a consumer&#39;s records come from.</p>
         <p><code>Selection.Topics</code> takes a non-empty set of topics. <code>Selection.Pattern</code> takes a
-        <code>TopicPattern</code>, which matches complete topic names. Portable patterns should use
-        regular-expression syntax shared by Java, ECMAScript, and POSIX extended regular
-        expressions. Both join a consumer group, so the partitions a consumer holds
+        <code>TopicPattern</code>, which matches complete topic names. The JVM matches it as a Java
+        regular expression, and Scala.js and Native through librdkafka, so a pattern
+        meant for every platform should keep to simple syntax, such as <code>events-.*</code>. Both join a consumer group, so the partitions a consumer holds
         follow the group&#39;s rebalances.</p>
         <p><code>Selection.Partitions</code> takes a non-empty set of topic-partitions and reads
         exactly those. It joins no group, so the assignment never changes. Two consumers
@@ -151,13 +184,60 @@
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p>A seek is refused until the partition it names is being fetched, which happens
-          after the assignment arrives. Retry briefly if you seek immediately after
-          starting a consumer.</p>
+          <p>After a seek, the next record the stream hands out of that partition comes from
+          the offset sought, and no record fetched before the seek is handed out. A seek
+          of a partition the consumer has not been assigned fails with
+          <code>ErrorCode.UnknownTopicOrPartition</code>. A seek is also refused until the partition
+          it names is being fetched, which happens after the assignment arrives. Retry
+          briefly if you seek immediately after starting a consumer.</p>
         </div>
         <p>By default a consumer delivers records from transactions that have not
         committed. Set <code>isolationLevel</code> to change that. See
         <a href="transactions.html">Transactions</a>.</p>
+        
+        <h2 id="group-membership" class="section"><a class="anchor-link left" href="#group-membership"><i class="icofont-laika link">&#xef71;</i></a>Group membership</h2>
+        <p>A consumer that joins a group stays in it while it keeps in touch with the
+        group. Four settings govern that, and each is checked when the settings are
+        built, so a combination either backend would refuse is a <code>SettingsError</code>:</p>
+        <ul>
+          <li><code>sessionTimeout</code> is how long the group waits to hear from the consumer before
+          handing its partitions to the others. The broker also bounds it, through its
+          <code>group.min.session.timeout.ms</code> and <code>group.max.session.timeout.ms</code>, which
+          default to six seconds and thirty minutes.</li>
+          <li><code>heartbeatInterval</code> is how often the consumer tells the group it is alive. It
+          must be less than the session timeout.</li>
+          <li><code>maxPollInterval</code> is how long the consumer can go without fetching records.
+          Fetching stops while too many records wait unread, so a consumer whose records
+          go unread for longer than this leaves its group. It must be at least the
+          session timeout.</li>
+          <li><code>groupInstanceId</code> makes the consumer a static member of its group.</li>
+        </ul>
+        <p>Unless they are set, the session timeout and heartbeat interval are 45 seconds
+        and 3 seconds on every platform. Under the consumer group protocol, which the
+        <code>group.protocol</code> property set to <code>consumer</code> selects, the broker decides both, so
+        leave them unset: a consumer with either one set fails as
+        <code>ErrorCode.InvalidConfiguration</code>.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">staticMember</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
+  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withGroupInstanceId</span><span>(</span><span class="string-literal">&quot;orders-1&quot;</span><span>).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withSessionTimeout</span><span>(</span><span class="number-literal">2</span><span>.</span><span class="identifier">minutes</span><span>)).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withMaxPollInterval</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
+        <p>Each wither revalidates the settings as a whole, so raising the session timeout
+        above the maximum poll interval fails unless the poll interval is raised first.</p>
+        
+        <h3 id="static-members" class="section"><a class="anchor-link left" href="#static-members"><i class="icofont-laika link">&#xef71;</i></a>Static members</h3>
+        <p>A dynamic member leaves its group when it is released, and the others take its
+        partitions at once. A static member does not: the group keeps its partitions
+        for it until its session times out. One that comes back under the same
+        <code>groupInstanceId</code> within the session timeout gets the same partitions back, and
+        the rest of the group carries on with theirs. One that stays away loses its
+        partitions once its session times out.</p>
+        <p>Give each static member an identity of its own. A longer session timeout gives a
+        restarting member more time to come back, at the cost of leaving its partitions
+        unread for that long if it does not.</p>
         
         <h2 id="where-a-consumer-starts" class="section"><a class="anchor-link left" href="#where-a-consumer-starts"><i class="icofont-laika link">&#xef71;</i></a>Where a consumer starts</h2>
         <p>A consumer resumes each partition from its group&#39;s committed offset. Where the
@@ -195,10 +275,15 @@
         <ul>
           <li><code>assignment</code> reports the currently assigned topic-partitions.</li>
           <li><code>assignmentChanges</code> emits the current assignment and then each distinct one.</li>
-          <li><code>committed</code> returns broker-stored next offsets, without sentinel values.</li>
+          <li><code>committed</code> returns broker-stored next offsets, with the leader epoch and
+          metadata each was committed with, and <code>None</code> for a partition with no
+          committed offset.</li>
           <li><code>beginningOffsets</code> and <code>endOffsets</code> query the available offset range.</li>
           <li><code>offsetsForTimes</code> finds the earliest available offsets at or after timestamps.</li>
-          <li><code>partitionsFor</code> and <code>listTopics</code> expose visible topic metadata.</li>
+          <li><code>partitionsFor</code> returns a topic&#39;s partitions. For a topic the cluster does
+          not have, it fails with <code>ErrorCode.UnknownTopicOrPartition</code> and creates
+          nothing.</li>
+          <li><code>listTopics</code> returns every topic the consumer can see, with its partitions.</li>
           <li><code>seek</code> changes the next offset fetched for an assigned topic-partition.</li>
           <li><code>seekToBeginning</code> and <code>seekToEnd</code> move to either end of an assigned topic-partition.</li>
           <li><code>position</code> reports the offset a topic-partition reads next.</li>
@@ -206,10 +291,11 @@
         </ul>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p><code>position</code> returns <code>None</code> until this consumer has consumed from the partition.
-          Some backends settle on a position sooner, for instance when a seek names an
-          offset, so the value every backend agrees on is the one after records have been
-          consumed.</p>
+          <p><code>position</code> is where the client fetches the partition next. The client reads
+          ahead of the records the stream has handed out, so after consuming, <code>position</code>
+          is at or past the offset after the last record consumed, by an amount that
+          differs between platforms. Before the consumer has consumed from the partition,
+          it can be <code>None</code>.</p>
         </div>
         
         <h2 id="processing-every-record" class="section"><a class="anchor-link left" href="#processing-every-record"><i class="icofont-laika link">&#xef71;</i></a>Processing every record</h2>

@@ -143,8 +143,12 @@
         accumulation survives the lift.</p>
         <p>Bootstrap servers must be <code>host:port</code>, including bracketed IPv6 literals.
         Property names must not be blank. Every duration must be positive and at most
-        <code>Int.MaxValue</code> milliseconds (about 24.9 days), which is the largest timeout the
-        JavaScript and Native backend calls can represent without overflow.</p>
+        <code>Int.MaxValue</code> milliseconds (about 24.9 days). Some have a lower limit:
+        <code>linger</code> may be zero and at most <code>ProducerSettings.LingerLimit</code> (15 minutes),
+        and the group membership intervals are limited by
+        <code>ConsumerSettings.SessionTimeoutLimit</code> (1 hour),
+        <code>ConsumerSettings.HeartbeatIntervalLimit</code> (1 hour), and
+        <code>ConsumerSettings.MaxPollIntervalLimit</code> (24 hours).</p>
         
         <h2 id="properties" class="section"><a class="anchor-link left" href="#properties"><i class="icofont-laika link">&#xef71;</i></a>Properties</h2>
         <p>Each settings type accepts an immutable <code>properties</code> map for backend
@@ -161,26 +165,26 @@
     </span><span class="identifier">bootstrapServers</span><span> = </span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>),
     </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;client.rack&quot;</span><span> -&gt; </span><span class="string-literal">&quot;eu-west-1a&quot;</span><span>)
   ).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
-    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;linger.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;5&quot;</span><span>))</span></code></pre>
+    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;retry.backoff.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;200&quot;</span><span>))</span></code></pre>
         <p>Producer or consumer properties override client properties. Names and values are
         interpreted by the selected backend, so portable applications should use only
         properties supported with the same meaning by each one.</p>
         
         <h2 id="managed-properties" class="section"><a class="anchor-link left" href="#managed-properties"><i class="icofont-laika link">&#xef71;</i></a>Managed properties</h2>
-        <p><code>ManagedProperties</code> lists the names xkafka derives from the typed settings:
-        bootstrap servers, client and group IDs, offset reset, automatic commits, the
-        default API timeout, the metadata refresh names, the isolation level, the
-        acknowledgement and transaction names, and the TLS and SASL names.
-        Supplying one through the map is a <code>SettingsError</code>, so the typed settings and the
-        map cannot disagree.</p>
+        <p><code>ManagedProperties</code> is the set of property names xkafka sets from the typed
+        settings, such as <code>bootstrap.servers</code>, <code>group.id</code>, <code>acks</code>, <code>linger.ms</code>, and the
+        TLS and SASL names. Supplying one of them through the map is a <code>SettingsError</code>;
+        use the typed setting instead.</p>
         
         <h2 id="withers" class="section"><a class="anchor-link left" href="#withers"><i class="icofont-laika link">&#xef71;</i></a>Withers</h2>
         <p>Each type has <code>with*</code> methods for deriving one value from another. Those that
         can invalidate the result, such as <code>withProperty</code>, return
         <code>ValidatedNel[SettingsError, *]</code> and revalidate in full. This includes every
         duration wither: <code>withMetadataRefreshInterval</code>, <code>withCloseTimeout</code>,
-        <code>withTransactionTimeout</code>, <code>withCommitTimeout</code>, <code>withPollTimeout</code>, and
-        <code>withRequestTimeout</code>.</p>
+        <code>withTransactionTimeout</code>, <code>withCommitTimeout</code>, <code>withPollTimeout</code>,
+        <code>withRequestTimeout</code>, <code>withLinger</code>, <code>withEnqueueTimeout</code>, <code>withSessionTimeout</code>,
+        <code>withHeartbeatInterval</code>, <code>withMaxPollInterval</code>, <code>withRebalanceSafeCommits</code>, and
+        <code>withStartingOffsets</code>.</p>
         
         <h2 id="consumer-settings" class="section"><a class="anchor-link left" href="#consumer-settings"><i class="icofont-laika link">&#xef71;</i></a>Consumer settings</h2>
         <p>Beyond the group and the deserializers, <code>ConsumerSettings</code> carries:</p>
@@ -228,13 +232,46 @@
               <td><code>true</code></td>
               <td>whether offsets from a partition this consumer no longer owns are refused</td>
             </tr>
+            <tr>
+              <td><code>groupInstanceId</code></td>
+              <td>none</td>
+              <td>an identity that makes the consumer a static member of its group</td>
+            </tr>
+            <tr>
+              <td><code>sessionTimeout</code></td>
+              <td>unset, which is 45s on every platform</td>
+              <td>how long the group waits to hear from the consumer before handing its partitions on</td>
+            </tr>
+            <tr>
+              <td><code>heartbeatInterval</code></td>
+              <td>unset, which is 3s on every platform</td>
+              <td>how often the consumer tells the group it is alive</td>
+            </tr>
+            <tr>
+              <td><code>maxPollInterval</code></td>
+              <td>5m</td>
+              <td>how long the consumer can go without fetching before it leaves its group</td>
+            </tr>
+            <tr>
+              <td><code>rebalanceSafeCommits</code></td>
+              <td>none</td>
+              <td>how long a partition being taken away waits for the records handed out from it to be committed</td>
+            </tr>
+            <tr>
+              <td><code>startingOffsets</code></td>
+              <td>none</td>
+              <td>where each assigned partition starts, from offsets the application keeps</td>
+            </tr>
           </tbody>
         </table>
         <p><code>requestTimeout</code> bounds <code>committed</code>, <code>beginningOffsets</code>, <code>endOffsets</code>,
-        <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, and <code>seek</code>. Its default matches
+        <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, <code>seek</code>, <code>seekToBeginning</code>, and
+        <code>seekToEnd</code>. Its default matches
         what Kafka&#39;s own clients use.</p>
-        <p>See <a href="offsets.html">Offsets</a> for commit recovery, the commit timeout, and assignment
-        fencing, and <a href="transactions.html">Transactions</a> for the isolation level.</p>
+        <p>See <a href="offsets.html">Offsets</a> for commit recovery, the commit timeout, assignment
+        fencing, rebalance-safe commits, and starting offsets, <a href="transactions.html">Transactions</a> for the isolation level, and
+        <a href="consuming.html#group-membership">Group membership</a> for <code>groupInstanceId</code> and the
+        three intervals.</p>
         
         <h2 id="producer-settings" class="section"><a class="anchor-link left" href="#producer-settings"><i class="icofont-laika link">&#xef71;</i></a>Producer settings</h2>
         <p>Beyond the serializers, <code>ProducerSettings</code> carries:</p>
@@ -262,9 +299,29 @@
               <td><code>true</code></td>
               <td>whether Kafka&#39;s <code>enable.idempotence</code> is on, which requires <code>Acks.AllReplicas</code></td>
             </tr>
+            <tr>
+              <td><code>compression</code></td>
+              <td><code>Compression.Uncompressed</code></td>
+              <td>how record batches are compressed</td>
+            </tr>
+            <tr>
+              <td><code>linger</code></td>
+              <td>5ms</td>
+              <td>how long a record waits for others to join its batch, from zero to 15 minutes</td>
+            </tr>
+            <tr>
+              <td><code>batchSize</code></td>
+              <td>unset, which leaves it to the platform&#39;s client</td>
+              <td>the most bytes one batch holds before it is sent</td>
+            </tr>
+            <tr>
+              <td><code>enqueueTimeout</code></td>
+              <td>60s</td>
+              <td>how long <code>produce</code> waits for room for a record while the client&#39;s buffer is full</td>
+            </tr>
           </tbody>
         </table>
-        <p>See <a href="producing.html">Producing</a> for all three.</p>
+        <p>See <a href="producing.html">Producing</a> for each of them.</p>
         
         <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
         <p><code>ClientSettings</code> applies to producers and consumers alike:</p>
