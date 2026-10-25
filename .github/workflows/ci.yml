@@ -436,6 +436,13 @@ jobs:
       - name: Test the backend against Kafka, including TLS and SASL
         run: scripts/integration-test.sh ${{ matrix.platform }}
 
+      - name: Keep the broker logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: broker-logs-${{ matrix.platform }}
+          path: target/broker-logs
+
   native-leaks:
     name: Native leak check
     strategy:
