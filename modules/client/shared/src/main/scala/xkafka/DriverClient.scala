@@ -190,7 +190,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     driver.producer(
       bootstrap(client),
       client.clientId,
-      client.properties ++ properties ++ ClientProperties.security(client.security) ++ ClientProperties(client),
+      ClientProperties.producer ++ client.properties ++ properties ++ ClientProperties.security(client.security) ++ ClientProperties(client),
       enqueueTimeout.toMillis.toInt
     )
 

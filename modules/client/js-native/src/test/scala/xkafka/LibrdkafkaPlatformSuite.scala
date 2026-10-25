@@ -68,6 +68,13 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
 
     interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))
 
+  test("a partitioner passed as a property replaces the one that follows Java's"):
+    val serializer = Serializer.const[IO, String](None)
+    val client     = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get
+    val settings   = ProducerSettings.from(client, serializer, serializer, Map("partitioner" -> "not-a-partitioner")).toOption.get
+
+    interceptIO[KafkaException.BackendFailure](KafkaClient[IO].producer(settings).use(_ => IO.unit))
+
   test("idempotence reaches librdkafka, which refuses more than five requests in flight with it on"):
     val serializer = Serializer.const[IO, String](None)
     val client     = ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get

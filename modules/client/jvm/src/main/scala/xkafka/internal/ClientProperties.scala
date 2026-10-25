@@ -27,6 +27,9 @@ private[xkafka] object ClientProperties:
   /** The Java client refreshes when its metadata cache reaches this age, so the age is also the refresh period. */
   def apply(settings: ClientSettings): Map[String, String] = Map("metadata.max.age.ms" -> settings.metadataRefreshInterval.toMillis.toString)
 
+  /** The Java producer's own partitioner is the one every backend follows. */
+  val producer: Map[String, String] = Map.empty
+
   /** The Java consumer bounds the calls given no timeout of their own, such as reading a position, by its default API timeout. */
   def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] =
     Map("default.api.timeout.ms" -> settings.requestTimeout.toMillis.toString)

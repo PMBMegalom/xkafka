@@ -28,6 +28,9 @@ private[xkafka] object ClientProperties:
   def apply(settings: ClientSettings): Map[String, String] =
     Map("topic.metadata.refresh.interval.ms" -> settings.metadataRefreshInterval.toMillis.toString)
 
+  /** librdkafka hashes keys with CRC32 by default; Java's murmur2 sends each key to the partition a Java producer would. */
+  val producer: Map[String, String] = Map("partitioner" -> "murmur2_random")
+
   /** librdkafka bounds each call by the timeout it is given, so a consumer needs nothing more. */
   def consumer[F[_], K, V](@scala.annotation.unused settings: ConsumerSettings[F, K, V]): Map[String, String] = Map.empty
 

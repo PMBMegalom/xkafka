@@ -113,6 +113,11 @@ codecs, represents a Kafka null. Tombstones are produced this way.
 
 ## Partitions
 
+A record with a key and no partition goes to the partition given by the murmur2
+hash of its serialized key, modulo the topic's partition count. Every backend
+uses this hash, the same one the Java producer uses, so a key always lands on
+the same partition whichever backend produced it.
+
 `partitionsFor` returns the partitions a topic currently has. Use it to pick a
 partition to produce to. Asking about a topic the cluster does not have creates
 it if the broker creates topics on request, which Kafka brokers do by default.
