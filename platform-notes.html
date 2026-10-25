@@ -117,6 +117,15 @@
         <p>On the JVM each consumer uses one thread of its own.</p>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
+        <p>The Native backend needs librdkafka 2.16.0, the release xkafka is built and
+        tested with. Older releases lack calls xkafka makes, so an application linked
+        against one, such as Ubuntu 24.04&#39;s own librdkafka 2.3.0, does not compile.
+        Confluent publishes each release for Debian and Ubuntu. On Ubuntu 24.04:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sudo mkdir -p /etc/apt/keyrings
+curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-clients.gpg
+</span><span class="identifier">echo</span><span> </span><span class="string-literal">&quot;deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb </span><span class="substitution">$(lsb_release -cs)</span><span class="string-literal"> main&quot;</span><span> | sudo tee /etc/apt/sources.list.d/confluent-clients.list
+sudo apt-get update
+sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span> librdkafka</span><span class="number-literal">1</span><span>=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span></code></pre>
         <p>The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
         OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
         and read and write records in any compression.</p>
