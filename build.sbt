@@ -100,7 +100,7 @@ ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
 )
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
-// A failure anywhere fails the whole run at once, so nothing waits on a run that has already failed.
+// A failure on one entry cancels the others, so nothing waits on a matrix that has already failed.
 ThisBuild / githubWorkflowBuildMatrixFailFast := Some(true)
 
 // Only the Native build is worth running twice: it is the one whose result depends on the host toolchain.
@@ -251,9 +251,16 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     setupNode,
     installNativeDependencies,
     // One of the downstream Native builds links against an installed librdkafka, which is the arrangement the
-    // README promises needs no xkafka settings of its own.
+    // README promises needs no xkafka settings of its own. Ubuntu's own package is older than the release xkafka
+    // needs, so it comes from Confluent's repository, as a user's would, at the release xkafka is built with.
     WorkflowStep.Run(
-      List("sudo apt-get update", "sudo apt-get install --yes librdkafka-dev"),
+      List(
+        "sudo mkdir -p /etc/apt/keyrings",
+        "curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-clients.gpg",
+        "echo \"deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb $(lsb_release -cs) main\" | sudo tee /etc/apt/sources.list.d/confluent-clients.list",
+        "sudo apt-get update",
+        s"sudo apt-get install --yes librdkafka-dev=$librdkafkaVersion-1.cflt~ubu24 librdkafka1=$librdkafkaVersion-1.cflt~ubu24"
+      ),
       name = Some("Install librdkafka"),
       cond = Some("startsWith(matrix.os, 'ubuntu')")
     ),
@@ -282,23 +289,11 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 
 // sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
-//
-// GitHub only cancels the other entries of a failing job's own matrix, so every job ends by cancelling the whole run when it has failed.
-val cancelRunOnFailure = WorkflowStep.Run(
-  List("gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}"),
-  name = Some("Cancel the rest of the run"),
-  cond = Some("failure()"),
-  env = Map("GH_TOKEN" -> "${{ github.token }}"),
-  continueOnError = true
-)
-
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    val placed =
-      if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
-      else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
-      else job
-    placed.withSteps(placed.steps :+ cancelRunOnFailure)
+    if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
+    else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
+    else job
   }
 }
 

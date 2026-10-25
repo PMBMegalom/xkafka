@@ -129,13 +129,6 @@ jobs:
           name: target-${{ matrix.os }}-${{ matrix.java }}-${{ matrix.scala }}-${{ matrix.project }}
           path: targets.tar
 
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-
   publish:
     name: Publish Artifacts
     needs: [build, integration, native-leaks, js-leaks, npm-publish]
@@ -221,13 +214,6 @@ jobs:
           SONATYPE_CREDENTIAL_HOST: ${{ secrets.SONATYPE_CREDENTIAL_HOST }}
         run: sbt tlCiRelease
 
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-
   dependency-submission:
     name: Submit Dependencies
     if: github.event.repository.fork == false && github.event_name != 'pull_request'
@@ -264,13 +250,6 @@ jobs:
           modules-ignore: xkafka_3 docs_3 xkafka_3 xkafka_3
           configs-ignore: test scala-tool scala-doc-tool test-internal
 
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-
   validate-steward:
     name: Validate Steward Config
     strategy:
@@ -295,13 +274,6 @@ jobs:
           apps: scala-steward
 
       - run: scala-steward validate-repo-config .scala-steward.conf
-
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
 
   npm-librdkafka:
     name: Prebuilt librdkafka libraries
@@ -365,13 +337,6 @@ jobs:
           name: npm-librdkafka-${{ matrix.os }}
           path: modules/client/js/target/npm/librdkafka*
 
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-
   npm-publish:
     name: Publish the prebuilt librdkafka libraries
     needs: [npm-librdkafka]
@@ -413,13 +378,6 @@ jobs:
 
       - name: Publish the versions npm does not have yet
         run: scripts/publish-npm-librdkafka.sh npm-packages
-
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
 
   integration:
     name: Broker-backed integration tests
@@ -478,13 +436,6 @@ jobs:
       - name: Test the backend against Kafka, including TLS and SASL
         run: scripts/integration-test.sh ${{ matrix.platform }}
 
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-
   native-leaks:
     name: Native leak check
     strategy:
@@ -534,13 +485,6 @@ jobs:
       - name: Check the Native downstream application for leaks
         run: scripts/native-leak-check.sh
 
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
-
   js-leaks:
     name: Scala.js leak check
     strategy:
@@ -581,13 +525,6 @@ jobs:
 
       - name: Check the Scala.js library's asynchronous calls for leaks
         run: scripts/js-leak-check.sh
-
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
 
   downstream:
     name: Published artifact smoke tests
@@ -637,8 +574,11 @@ jobs:
       - name: Install librdkafka
         if: startsWith(matrix.os, 'ubuntu')
         run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-clients.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/confluent-clients.list
           sudo apt-get update
-          sudo apt-get install --yes librdkafka-dev
+          sudo apt-get install --yes librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cflt~ubu24
 
       - name: Select published version
         run: |
@@ -647,13 +587,6 @@ jobs:
 
       - name: Test published JVM, JavaScript, and Native artifacts
         run: scripts/downstream-test.sh
-
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
 
   site:
     name: Generate Site
@@ -694,10 +627,3 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: site/target/docs/site
           keep_files: true
-
-      - name: Cancel the rest of the run
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        continue-on-error: true
-        run: gh run cancel ${{ github.run_id }} --repo ${{ github.repository }}
