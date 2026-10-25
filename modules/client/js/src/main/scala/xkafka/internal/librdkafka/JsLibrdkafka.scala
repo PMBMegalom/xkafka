@@ -238,6 +238,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def groupMetadata(consumer: Client): F[GroupMetadata] = direct(_.groupMetadata(consumer)).map(JsGroupMetadata(_))
 
+  override def groupMetadataFor(group: ConsumerGroup, generation: Int, memberId: String): F[GroupMetadata] =
+    direct: shim =>
+      val metadata: js.Any = shim.groupMetadataNew(group.value, generation, memberId)
+      if metadata == null then throw Failures.plain("could not allocate a group identity")
+      JsGroupMetadata(metadata)
+
   override def destroyGroupMetadata(metadata: GroupMetadata): F[Unit] = direct(_.groupMetadataDestroy(metadata.pointer)).void
 
   override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =

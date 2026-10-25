@@ -51,6 +51,7 @@ int64_t xkafka_message_offset(const void *message);
 int32_t xkafka_message_partition(const void *message);
 void xkafka_message_destroy(void *message);
 void *xkafka_consumer_group_metadata(rd_kafka_t *consumer);
+void *xkafka_group_metadata_new(const char *group_id, int32_t generation_id, const char *member_id);
 void xkafka_consumer_group_metadata_destroy(void *metadata);
 size_t xkafka_metadata_partition_count_at(const void *metadata, size_t index);
 void xkafka_metadata_destroy(void *metadata);
@@ -467,7 +468,20 @@ int main(int argc, char **argv) {
              ERRORS, FLAGS, &result);
         CALL(xkafka_async_producer_abort_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
         xkafka_consumer_group_metadata_destroy(group_metadata);
+
         await_answer("xkafka_async_consumer_destroy", xkafka_async_consumer_destroy(consumer, done, next_token()));
+
+        /* The same, now that the group has no members, under a group identity built from its parts. */
+        group_metadata = xkafka_group_metadata_new(group, -1, "");
+        if (group_metadata == NULL)
+                fail("xkafka_group_metadata_new");
+        if (xkafka_producer_begin_transaction(producer, ERRORS, FLAGS) != 0)
+                fail("xkafka_producer_begin_transaction");
+        produce(producer, topic, 1);
+        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS,
+             ERRORS, FLAGS, &result);
+        CALL(xkafka_async_producer_abort_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
+        xkafka_consumer_group_metadata_destroy(group_metadata);
 
         /* The group, now without members. */
         {

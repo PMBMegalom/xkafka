@@ -169,8 +169,10 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         metadata: GroupMetadata,
         offsets: Vector[(TopicPartition, OffsetAndMetadata)],
         timeoutMillis: Int
-    ): IO[Unit]                                                              = called("sendOffsets")(IO.unit)
-    override def groupMetadata(consumer: Client): IO[GroupMetadata]          = called("groupMetadata")(IO.pure(RecordedGroup(consumer)))
+    ): IO[Unit]                                                     = called("sendOffsets")(IO.unit)
+    override def groupMetadata(consumer: Client): IO[GroupMetadata] = called("groupMetadata")(IO.pure(RecordedGroup(consumer)))
+    override def groupMetadataFor(group: ConsumerGroup, generation: Int, memberId: String): IO[GroupMetadata] =
+      called("groupMetadataFor")(IO.pure(RecordedGroup(memberId)))
     override def destroyGroupMetadata(metadata: GroupMetadata): IO[Unit]     = called("destroyGroupMetadata")(IO.unit)
     override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =
       handle match

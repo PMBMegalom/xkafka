@@ -258,6 +258,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def groupMetadata(consumer: Client): F[GroupMetadata] = onConsumer(consumer)(value => JavaGroupMetadata(value.groupMetadata()))
 
+  /** The constructor is deprecated for removal in Kafka 5.0, which makes the class an interface (KIP-1136); the streams engine then implements it. */
+  @annotation.nowarn("cat=deprecation")
+  override def groupMetadataFor(group: ConsumerGroup, generation: Int, memberId: String): F[GroupMetadata] =
+    F.delay(JavaGroupMetadata(new JavaConsumerGroupMetadata(group.value, generation, memberId, Optional.empty)))
+
   override def destroyGroupMetadata(metadata: GroupMetadata): F[Unit] = F.unit
 
   override def asGroupMetadata(handle: GroupHandle): Option[GroupMetadata] =

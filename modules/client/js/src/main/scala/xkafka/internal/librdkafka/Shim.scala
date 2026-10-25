@@ -92,6 +92,7 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
         s"const int32_t *leader_epochs, const char **offset_metadata, size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
     )
   val groupMetadata        = f("void *xkafka_consumer_group_metadata(void *consumer)")
+  val groupMetadataNew     = f("void *xkafka_group_metadata_new(const char *group_id, int32_t generation_id, const char *member_id)")
   val groupMetadataDestroy = f("void xkafka_consumer_group_metadata_destroy(void *metadata)")
 
   val takeRebalance       = f("void *xkafka_consumer_take_rebalance(void *consumer)")
