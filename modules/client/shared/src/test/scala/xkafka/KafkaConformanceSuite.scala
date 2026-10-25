@@ -222,6 +222,20 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         assertEquals(result.map(_.record), records)
         assertEquals(result.toList.flatMap(_.metadata.offset.map(_.value)), List(0L, 1L, 2L))
 
+  test(conformance("a keyed record goes to the partition the Java producer picks for its key")):
+    withBroker: server =>
+      val topic      = uniqueTopic("key-partition")
+      val partitions = 6
+      val keys       = NonEmptyList.fromListUnsafe(List.tabulate(60)(index => s"key-$index"))
+
+      for
+        _        <- createPartitioned(server, topic, partitions)
+        produced <- produce(server, keys.map(key => ProducerRecord(topic, Some(key), Some("v"))))
+      yield assertEquals(
+        produced.toList.map(result => result.record.key -> result.metadata.topicPartition.partition.value),
+        keys.toList.map(key => Some(key) -> javaPartition(key.getBytes(java.nio.charset.StandardCharsets.UTF_8), partitions))
+      )
+
   test(conformance("attempting each record answers every record on its own, so one the broker rejects leaves the others delivered")):
     withBroker: server =>
       val topic = uniqueTopic("attempt-each")
@@ -2489,6 +2503,18 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def firstOffsets(settings: ConsumerSettings[IO, Option[String], Option[String]], selection: Selection, count: Int): IO[List[Long]] =
     PlatformKafkaClient().consumer(settings, selection).use(_.records.take(count.toLong).map(_.record.offset.value).compile.toList)
       .timeout(60.seconds)
+
+  /** The partition the Java producer's default partitioner picks for a key: its murmur2 hash, made positive, modulo the partition count. */
+  private def javaPartition(key: Array[Byte], partitions: Int): Int =
+    val m      = 0x5bd1e995
+    val blocks = key.length / 4
+    val mixed  = (0 until blocks).foldLeft(0x9747b28c ^ key.length): (h, block) =>
+      val word = (0 until 4).foldLeft(0)((k, byte) => k | ((key(block * 4 + byte) & 0xff) << (8 * byte))) * m
+      (h * m) ^ ((word ^ (word >>> 24)) * m)
+    val tail     = key.length % 4
+    val withTail = if tail == 0 then mixed else (0 until tail).foldLeft(mixed)((h, byte) => h ^ ((key(blocks * 4 + byte) & 0xff) << (8 * byte))) * m
+    val shifted  = (withTail ^ (withTail >>> 13)) * m
+    ((shifted ^ (shifted >>> 15)) & 0x7fffffff) % partitions
 
   /** Topics created on demand get one partition, so a test that needs more makes its own. */
   private def createPartitioned(server: String, topic: Topic, partitions: Int, configuration: Map[String, String] = Map.empty): IO[Unit] =
