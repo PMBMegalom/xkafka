@@ -132,8 +132,10 @@ docker run --detach --rm \
   --env KAFKA_LISTENER_NAME_MTLS_SSL_CLIENT_AUTH=required \
   --env KAFKA_LISTENER_NAME_WRONGNAME_SSL_KEYSTORE_TYPE=PEM \
   --env KAFKA_LISTENER_NAME_WRONGNAME_SSL_KEYSTORE_LOCATION=/etc/kafka/secrets/wrong-name.pem \
-  --env KAFKA_SASL_ENABLED_MECHANISMS=SCRAM-SHA-256 \
+  --env KAFKA_SASL_ENABLED_MECHANISMS=SCRAM-SHA-256,SCRAM-SHA-512,PLAIN \
   --env KAFKA_LISTENER_NAME_SASLTLS_SCRAM___SHA___256_SASL_JAAS_CONFIG='org.apache.kafka.common.security.scram.ScramLoginModule required;' \
+  --env KAFKA_LISTENER_NAME_SASLTLS_SCRAM___SHA___512_SASL_JAAS_CONFIG='org.apache.kafka.common.security.scram.ScramLoginModule required;' \
+  --env KAFKA_LISTENER_NAME_SASLTLS_PLAIN_SASL_JAAS_CONFIG="org.apache.kafka.common.security.plain.PlainLoginModule required user_$username=\"$password\";" \
   --env KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
   --env KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
   --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
@@ -194,11 +196,14 @@ for node in 1 2 3; do
   await_healthy "$cluster_name-$node"
 done
 
-# SCRAM credentials live in the metadata log, so the user is created once the broker is serving.
-docker exec "$container_name" /opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server localhost:19092 \
-  --alter --add-config "SCRAM-SHA-256=[password=$password]" \
-  --entity-type users --entity-name "$username" >/dev/null
+# SCRAM credentials live in the metadata log, so the user is created once the broker is serving, one
+# mechanism per call since the broker refuses two changes to a user's credentials in one request.
+for mechanism in SCRAM-SHA-256 SCRAM-SHA-512; do
+  docker exec "$container_name" /opt/kafka/bin/kafka-configs.sh \
+    --bootstrap-server localhost:19092 \
+    --alter --add-config "$mechanism=[password=$password]" \
+    --entity-type users --entity-name "$username" >/dev/null
+done
 
 # Topics are created on demand with one partition each, so a rebalance between two consumers needs
 # one that was made with more.
