@@ -14,6 +14,11 @@
  * RD_KAFKA_RESP_ERR__SSL, a lost connection as RD_KAFKA_RESP_ERR__TRANSPORT
  * and a timeout as RD_KAFKA_RESP_ERR__TIMED_OUT. */
 
+/* Scala Native compiles C as strict C11, which leaves out the POSIX
+ * declarations (getaddrinfo, strerror) this file needs; glibc and musl give
+ * them back for this, and macOS shows them anyway. */
+#define _DEFAULT_SOURCE
+
 #include <librdkafka/rdkafka.h>
 
 #include <openssl/err.h>
