@@ -44,6 +44,14 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   private val Starts         =
     "const char **start_topics, const int32_t *start_partitions, const int64_t *start_offsets, const int32_t *start_leader_epochs, size_t start_count"
 
+  val hash   = f("int xkafka_hash(int bits, const void *data, int data_size, void *out)")
+  val hmac   = f("int xkafka_hmac(int bits, const void *key, int key_size, const void *data, int data_size, void *out)")
+  val pbkdf2 =
+    f(
+      "int xkafka_pbkdf2(int bits, const void *password, int password_size, const void *salt, int salt_size, int iterations, void *out, int out_size)"
+    )
+  val randomBytes = f("int xkafka_random_bytes(void *out, int size)")
+
   val versionStr  = f("const char *xkafka_version_str(void)")
   val shimId      = f("const char *xkafka_shim_id(void)")
   val errorString = f("const char *xkafka_error_string(int32_t code)")

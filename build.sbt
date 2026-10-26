@@ -341,7 +341,8 @@ def fetchLibrdkafka(log: Logger, buildRoot: File): File = {
 
 // The C shim both librdkafka backends call. Scala Native compiles it from its resources; the JavaScript backend links it into a shared library.
 val librdkafkaShim =
-  Seq("xkafka_librdkafka.c", "xkafka_librdkafka_async.c").map(repositoryRoot / "modules" / "client" / "native" / "src" / "main" / "resources" /
+  Seq("xkafka_librdkafka.c", "xkafka_librdkafka_async.c", "xkafka_crypto.c").map(repositoryRoot / "modules" / "client" / "native" / "src" / "main" /
+    "resources" /
     "scala-native" / _)
 
 // The library's identity: the librdkafka release and everything the npm packages are made from, the shim sources, the script that builds them into
@@ -673,10 +674,14 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
         case Some(prefix) => Seq("libssl", "libcrypto").map(name => s"${prefix.getAbsolutePath}/lib/$name.dylib")
         case None         => Seq("-lssl", "-lcrypto")
       }
-      val systemLinkFlags = prefixes.map(prefix => s"-L${prefix.getAbsolutePath}/lib") ++ ("-lrdkafka" +: openSsl) ++ Seq("-lz", "-lzstd")
+      //
+      // Scala Native's own search paths include Homebrew's shared directories, where OpenSSL 4 is, so these prefixes come first: the shim then
+      // compiles against OpenSSL 3's headers and its own `-lcrypto` finds OpenSSL 3, the release librdkafka was built against.
+      val searchPaths = s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}" +:
+        prefixes.map(prefix => s"-L${prefix.getAbsolutePath}/lib")
       config
-        .withCompileOptions(_ :+ s"-I${prefix.getAbsolutePath}/include")
-        .withLinkingOptions(_ ++ (s"-L${(target.value / "librdkafka-static-link").getAbsolutePath}" +: systemLinkFlags))
+        .withCompileOptions((prefix +: prefixes).map(directory => s"-I${directory.getAbsolutePath}/include") ++ _)
+        .withLinkingOptions(options => searchPaths ++ options ++ ("-lrdkafka" +: openSsl) ++ Seq("-lz", "-lzstd"))
     }
   )
   .jvmSettings(

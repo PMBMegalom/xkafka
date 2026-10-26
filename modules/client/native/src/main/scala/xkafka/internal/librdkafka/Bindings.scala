@@ -23,7 +23,8 @@ package xkafka.internal.librdkafka
 
 import scala.scalanative.unsafe.*
 
-@link("rdkafka") @extern
+// The glue code holds the shim's cryptography too, which calls OpenSSL directly, so every program that links the glue code links libcrypto.
+@link("rdkafka") @link("crypto") @extern
 private[xkafka] object Bindings:
   def xkafka_version_str(): CString = extern
 

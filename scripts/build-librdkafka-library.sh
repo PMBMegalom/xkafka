@@ -53,7 +53,9 @@ cp "$source/src/rdkafka_mock.h" "$build/include/librdkafka/rdkafka_mock.h"
 objects=""
 for shim in "$@"; do
   object="$build/$(basename "$shim" .c).o"
-  cc -O2 -fPIC -DSCALANATIVE_LINK_RDKAFKA -DXKAFKA_SHIM_ID="\"$shim_id\"" -I"$build/include" -c "$shim" -o "$object"
+  # The OpenSSL headers are those of the OpenSSL librdkafka's build compiled, which the library links.
+  cc -O2 -fPIC -DSCALANATIVE_LINK_RDKAFKA -DXKAFKA_SHIM_ID="\"$shim_id\"" -I"$build/include" -I"$source/mklove/deps/dest/usr/include" \
+    -c "$shim" -o "$object"
   objects="$objects $object"
 done
 
