@@ -215,18 +215,19 @@ static void apply_rebalances(rd_kafka_t *consumer) {
                 xkafka_consumer_apply_rebalance(consumer, event, NULL, NULL, NULL, NULL, 0);
 }
 
-/* Polls until `wanted` records have arrived, and reports the next offset of the last one. */
+/* Polls until `wanted` records and then the end of their partition have arrived, and reports the next offset of the last record. */
 static int64_t consume(rd_kafka_t *consumer, int wanted) {
         int received = 0;
         int polls = 0;
+        int ended = 0;
         int64_t next = -1;
 
-        while (received < wanted) {
+        while (received < wanted || !ended) {
                 void *message = NULL;
                 int status = 0;
 
                 if (++polls > 600) {
-                        fprintf(stderr, "only %d of %d records arrived\n", received, wanted);
+                        fprintf(stderr, "only %d of %d records arrived, ended: %d\n", received, wanted, ended);
                         exit(1);
                 }
                 await_answer("xkafka_async_consumer_poll", xkafka_async_consumer_poll(consumer, 100, &status, ERRORS, &message, done,
@@ -234,7 +235,10 @@ static int64_t consume(rd_kafka_t *consumer, int wanted) {
                 apply_rebalances(consumer);
                 if (status < 0)
                         fail("xkafka_async_consumer_poll");
-                if (status > 0) {
+                if (status == 2) {
+                        ended = received == wanted;
+                        xkafka_message_destroy(message);
+                } else if (status > 0) {
                         if (xkafka_message_partition(message) != 0) {
                                 fprintf(stderr, "a record arrived from partition %d\n", xkafka_message_partition(message));
                                 exit(1);
@@ -333,6 +337,8 @@ int main(int argc, char **argv) {
         int64_t next, committed, low, high, found, low_watermark;
         const int32_t no_epoch[1] = {-1};
         const char *const notes[1] = {"leak check"};
+        const char *const eof_names[1] = {"enable.partition.eof"};
+        const char *const eof_values[1] = {"true"};
         void *stored;
         const char *note;
         size_t note_size;
@@ -422,7 +428,7 @@ int main(int argc, char **argv) {
         produce_too_large(producer, topic);
         CALL(xkafka_async_producer_commit_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
 
-        consumer = xkafka_consumer_new(brokers, "xkafka-js-leaks", group, "earliest", NULL, NULL, 0, ERRORS);
+        consumer = xkafka_consumer_new(brokers, "xkafka-js-leaks", group, "earliest", eof_names, eof_values, 1, ERRORS);
         if (consumer == NULL)
                 fail("xkafka_consumer_new");
         subscription = xkafka_subscription_new(1);

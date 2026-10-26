@@ -773,10 +773,14 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                 *status = 0;
                 return NULL;
         }
+        /* The end of a partition, which only a consumer with enable.partition.eof reports: its offset is the end reached. */
+        if (message->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) {
+                *status = 2;
+                return message;
+        }
         /* librdkafka leaves the group when the poll interval is exceeded and rejoins on a later poll, after handing over the lost partitions,
          * so the notice it queues first is not a failure of the consumer. */
-        if (message->err == RD_KAFKA_RESP_ERR__PARTITION_EOF ||
-            message->err == RD_KAFKA_RESP_ERR__MAX_POLL_EXCEEDED) {
+        if (message->err == RD_KAFKA_RESP_ERR__MAX_POLL_EXCEEDED) {
                 rd_kafka_message_destroy(message);
                 *status = 0;
                 return NULL;

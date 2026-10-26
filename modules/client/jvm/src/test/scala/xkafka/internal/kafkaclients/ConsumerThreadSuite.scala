@@ -53,20 +53,20 @@ final class ConsumerThreadSuite extends FunSuite:
       consumer.addRecord(new JavaConsumerRecord(topic, 0, 0L, bytes("key"), bytes("value")))
     )
     // The poll that raises the rebalance answers with nothing, so the rebalance can be taken while the listener still holds the poll.
-    assertEquals(answer(thread.poll(Duration.ofSeconds(5))), Nil)
+    assertEquals(answer(thread.poll(Duration.ofSeconds(5))), ConsumerThread.Polled.empty)
     val taken = answer(thread.takeRebalances)
     assertEquals(taken.map(rebalance => rebalance.kind -> rebalance.partitions), List(ConsumerThread.Assigned -> List(LeaseKey(topic, 0))))
     assertEquals(answer(thread.call(_.assignment.asScala.toSet)), Set(partition))
     answer(thread.apply(taken.head, _ => ()))
     // The records the poll went on to return once the listener was done reach the next poll.
-    assertEquals(answer(thread.poll(Duration.ofSeconds(5))).map(_.offset), List(0L))
+    assertEquals(answer(thread.poll(Duration.ofSeconds(5))).records.map(_.offset), List(0L))
     answer(thread.close)
 
   bounded("a consumer closed while the group waits on a rebalance closes, and refuses calls afterwards"):
     val consumer = subscribable()
     val thread   = subscribed(consumer)
     consumer.schedulePollTask(() => consumer.rebalance(JavaList.of(partition)))
-    assertEquals(answer(thread.poll(Duration.ofSeconds(5))), Nil)
+    assertEquals(answer(thread.poll(Duration.ofSeconds(5))), ConsumerThread.Polled.empty)
     assertEquals(answer(thread.takeRebalances).size, 1)
     // Nothing applies the rebalance, so only the close lets the listener return.
     answer(thread.close)
@@ -85,10 +85,10 @@ final class ConsumerThreadSuite extends FunSuite:
           records
     consumer.updatePartitions(topic, JavaList.of(new PartitionInfo(topic, 0, null, Array.empty, Array.empty)))
     val thread  = subscribed(consumer)
-    val polling = new CompletableFuture[Either[Throwable, List[ConsumerThread.Record]]]
+    val polling = new CompletableFuture[Either[Throwable, ConsumerThread.Polled]]
     thread.poll(Duration.ofMillis(300))(outcome => polling.complete(outcome): Unit)
     answer(thread.call(_ => events.add("call"): Unit))
-    assertEquals(polling.get(5, TimeUnit.SECONDS).map(_.size), Right(0))
+    assertEquals(polling.get(5, TimeUnit.SECONDS).map(_.records.size), Right(0))
     assertEquals(events.asScala.toList, List("poll returned", "call"))
     answer(thread.close)
 
@@ -100,7 +100,7 @@ final class ConsumerThreadSuite extends FunSuite:
     consumer
 
   private def subscribed(consumer: MockConsumer[Array[Byte], Array[Byte]]): ConsumerThread =
-    val thread = new ConsumerThread(consumer, "xkafka-consumer-test")
+    val thread = new ConsumerThread(consumer, "xkafka-consumer-test", reportEnds = false)
     thread.start()
     answer(thread.call(_.subscribe(JavaList.of(topic), thread.listener)))
     thread

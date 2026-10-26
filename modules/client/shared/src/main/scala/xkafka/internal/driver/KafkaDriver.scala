@@ -56,12 +56,14 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Delivers what the producer already accepted for up to the timeout, then destroys it. */
   def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit]
 
+  /** With `reportEnds`, each poll also reports the partitions whose end it reached (see [[Polled]]). */
   def consumer(
       bootstrapServers: String,
       clientId: Option[String],
       groupId: String,
       autoOffsetReset: String,
-      properties: Map[String, String]
+      properties: Map[String, String],
+      reportEnds: Boolean
   ): F[Client]
 
   def destroyConsumer(consumer: Client): F[Unit]
@@ -126,8 +128,8 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Subscribes to topic names, or to one pattern, which starts with `^` as no topic name can. */
   def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit]
 
-  /** The records one poll returned, none when the timeout passed first or the poll only reached the end of a partition. */
-  def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]]
+  /** The records one poll returned, none when the timeout passed first, and the ends it reached for a consumer that reports them. */
+  def poll(consumer: Client, timeoutMillis: Int): F[Polled]
 
   /** Every rebalance the consumer received since the last call, oldest first. */
   def takeRebalances(consumer: Client): F[List[Rebalance[Event]]]
@@ -270,6 +272,19 @@ private[xkafka] final case class PolledRecord(
     value: Option[Chunk[Byte]],
     headers: Headers
 )
+
+/** What one poll returned. Each end names a partition the consumer has read to the end of, and the offset after the last record it can read there,
+  * which under read_committed is the last stable offset. A partition's end is reported once each time the consumer reaches it, after the records
+  * before it.
+  */
+private[xkafka] final case class Polled(records: List[PolledRecord], ends: List[PartitionEnd])
+
+private[xkafka] object Polled:
+  val empty: Polled = Polled(Nil, Nil)
+
+  def records(records: List[PolledRecord]): Polled = Polled(records, Nil)
+
+private[xkafka] final case class PartitionEnd(topic: String, partition: Int, offset: Long)
 
 /** Where an assigned partition starts. `leaderEpoch` is negative where none is known. */
 private[xkafka] final case class StartAt(partition: TopicPartition, offset: Long, leaderEpoch: Int)
