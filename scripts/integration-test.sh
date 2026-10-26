@@ -4,7 +4,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-suites='xkafka.KafkaIntegrationSuite xkafka.KafkaConformanceSuite xkafka.KafkaSecuritySuite xkafka.PartitionPausingSuite xkafka.KafkaClusterSuite xkafka.StreamsDriverSuite xkafka.internal.group.GroupSocketSuite'
+suites='xkafka.KafkaIntegrationSuite xkafka.KafkaConformanceSuite xkafka.KafkaSecuritySuite xkafka.PartitionPausingSuite xkafka.KafkaClusterSuite xkafka.StreamsDriverSuite xkafka.internal.group.GroupSocketSuite xkafka.internal.group.GroupConnectionSuite'
 
 # With a backend named (jvm, js or native), only that one runs; with none, all three run one after the other.
 case "${1:-all}" in
