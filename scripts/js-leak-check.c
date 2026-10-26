@@ -151,6 +151,13 @@ int xkafka_async_admin_delete_group_offsets(rd_kafka_t *client, const char *grou
                                             size_t count, int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result,
                                             DONE_ARGUMENTS);
 
+int xkafka_async_socket_open(const char *host, int port, int timeout_ms, int tls, const char *ca_location, const char *ca_pem,
+                             const char *certificate_location, const char *key_location, const char *certificate_pem, const char *key_pem,
+                             const char *key_password, int verify_hostname, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
+int xkafka_async_socket_write(void *socket, const void *data, size_t size, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+int xkafka_async_socket_read(void *socket, void *out, size_t size, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+void xkafka_socket_close(void *socket);
+
 enum { TIMEOUT_MS = 30000, RECORDS = 20 };
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -325,6 +332,58 @@ static void group_offsets(rd_kafka_t *admin, const char *group, const char *cons
         if (offsets == NULL || xkafka_assignment_count(offsets) != expected)
                 fail("xkafka_async_admin_list_group_offsets");
         xkafka_committed_destroy(offsets);
+}
+
+static const char *required(const char *name) {
+        const char *value = getenv(name);
+
+        if (value == NULL) {
+                fprintf(stderr, "%s is not set\n", name);
+                exit(1);
+        }
+        return value;
+}
+
+/* Opens a TLS connection to `server`, given as host:port, presenting `certificate` when there is one. */
+static void *open_socket(const char *server, const char *authority, const char *certificate, const char *password) {
+        char host[256];
+        const char *separator = strrchr(server, ':');
+        void *socket = NULL;
+
+        snprintf(host, sizeof host, "%.*s", (int)(separator - server), server);
+        await_answer("xkafka_async_socket_open", xkafka_async_socket_open(host, atoi(separator + 1), TIMEOUT_MS, 1, authority, NULL, certificate,
+                                                                          certificate, NULL, NULL, password, 1, ERRORS, &socket, done,
+                                                                          next_token()));
+        return socket;
+}
+
+/* A TLS connection that asks the broker which versions it reads, then one
+ * refused for its authority and one refused for its key's password, each
+ * leaving nothing behind. */
+static void sockets(void) {
+        const char *authority = required("XKAFKA_SECURITY_CERTIFICATE_AUTHORITY");
+        /* ApiVersions version 0 with no client id, after its size. */
+        const unsigned char request[] = {0, 0, 0, 10, 0, 18, 0, 0, 0, 0, 0, 1, 0xff, 0xff};
+        unsigned char size[4], answer[4096];
+        size_t length;
+        void *socket = open_socket(required("XKAFKA_SECURITY_TLS_BOOTSTRAP_SERVERS"), authority, NULL, NULL);
+
+        if (socket == NULL)
+                fail("xkafka_async_socket_open");
+        CALL(xkafka_async_socket_write, socket, request, sizeof request, ERRORS, &result);
+        CALL(xkafka_async_socket_read, socket, size, sizeof size, ERRORS, &result);
+        length = ((size_t)size[0] << 24) | ((size_t)size[1] << 16) | ((size_t)size[2] << 8) | size[3];
+        if (length > sizeof answer)
+                fail("the ApiVersions answer's size");
+        CALL(xkafka_async_socket_read, socket, answer, length, ERRORS, &result);
+        xkafka_socket_close(socket);
+
+        if (open_socket(required("XKAFKA_SECURITY_TLS_BOOTSTRAP_SERVERS"), NULL, NULL, NULL) != NULL || error_code != -181)
+                fail("an untrusted broker's refusal");
+        if (open_socket(required("XKAFKA_SECURITY_MTLS_BOOTSTRAP_SERVERS"), authority, required("XKAFKA_SECURITY_CLIENT_ENCRYPTED_PEM"),
+                        "wrong") != NULL ||
+            error_code != 40)
+                fail("a wrongly unlocked key's refusal");
 }
 
 int main(int argc, char **argv) {
@@ -532,6 +591,8 @@ int main(int argc, char **argv) {
                 return 1;
         }
         CALL(xkafka_async_admin_delete_topics, admin, topics, 1, TIMEOUT_MS, ERRORS, &result);
+
+        sockets();
 
         await_answer("xkafka_async_producer_destroy", xkafka_async_producer_destroy(producer, TIMEOUT_MS, done, next_token()));
         await_answer("xkafka_async_admin_destroy", xkafka_async_admin_destroy(admin, done, next_token()));

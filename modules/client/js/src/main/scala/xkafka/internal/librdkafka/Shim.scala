@@ -52,6 +52,16 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
     )
   val randomBytes = f("int xkafka_random_bytes(void *out, int size)")
 
+  val socketOpen =
+    f(
+      "int xkafka_async_socket_open(const char *host, int port, int timeout_ms, int tls, const char *ca_location, const char *ca_pem, " +
+        "const char *certificate_location, const char *key_location, const char *certificate_pem, const char *key_pem, const char *key_password, " +
+        s"int verify_hostname, char *error, size_t error_size, int32_t *error_code, void **result, $Done)"
+    )
+  val socketWrite = f(s"int xkafka_async_socket_write(void *socket, const void *data, size_t size, $Error, int32_t *result, $Done)")
+  val socketRead  = f(s"int xkafka_async_socket_read(void *socket, void *out, size_t size, $Error, int32_t *result, $Done)")
+  val socketClose = f("void xkafka_socket_close(void *socket)")
+
   val versionStr  = f("const char *xkafka_version_str(void)")
   val shimId      = f("const char *xkafka_shim_id(void)")
   val errorString = f("const char *xkafka_error_string(int32_t code)")
