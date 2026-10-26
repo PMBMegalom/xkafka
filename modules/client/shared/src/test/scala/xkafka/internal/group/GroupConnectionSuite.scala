@@ -26,8 +26,9 @@ import scala.concurrent.duration.*
 
 import cats.data.NonEmptyList
 import cats.effect.IO
+import cats.syntax.all.*
 import munit.CatsEffectSuite
-import internal.protocol.FindCoordinatorRequest
+import internal.protocol.*
 
 /** The group connection reaching a group's coordinator through each of the broker's listeners, and refused where the data-plane clients are. */
 final class GroupConnectionSuite extends CatsEffectSuite:
@@ -54,6 +55,14 @@ final class GroupConnectionSuite extends CatsEffectSuite:
       case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, Some(code), error.getMessage)
       case other                                      => fail(s"expected a backend failure with $code, got $other")
 
+  /** Sends the request in the given version straight over the socket and reads the answer. */
+  private def exchange[R](socket: Socket[IO], request: Request[R], version: Short): IO[R] =
+    for
+      _      <- socket.write(Frame.request(request, version, version.toInt, "xkafka-group-connection"))
+      size   <- socket.read(4).map(_.toInt())
+      answer <- socket.read(size).flatMap(bytes => IO.fromEither(Frame.response(request, version.toInt)(bytes).leftMap(new RuntimeException(_))))
+    yield answer
+
   private def tls(authority: String, certificate: Option[ClientCertificate] = None): TlsSettings =
     TlsSettings.from(CertificateAuthority.PemFile(authority), clientCertificate = certificate)
       .fold(errors => fail(s"invalid test TLS settings: $errors"), identity)
@@ -67,7 +76,34 @@ final class GroupConnectionSuite extends CatsEffectSuite:
         reachesCoordinator(NonEmptyList.one(plaintext), SecuritySettings.Plaintext, plaintext)
       test("the coordinator is reached through a bootstrap server listed after one that cannot be reached"):
         reachesCoordinator(NonEmptyList.of("127.0.0.1:1", plaintext), SecuritySettings.Plaintext, plaintext)
+      test("the broker reads every version of every request the codec writes, and answers each version of ApiVersions and FindCoordinator"):
+        val group           = s"xkafka-group-connection-versions-${PlatformKafkaClient.name}-${System.nanoTime()}"
+        val (host, port)    = Connections.address(plaintext)
+        def every(api: Api) = (api.lowest.toInt to api.highest.toInt).map(_.toShort).toList
+        for
+          _       <- connections(NonEmptyList.one(plaintext), SecuritySettings.Plaintext).coordinator(group).use_
+          answers <-
+            PlatformSockets[IO].connect(host, port, None, 30.seconds).use: socket =>
+              for
+                listed <- every(Api.ApiVersions).traverse(version => exchange(socket, ApiVersionsRequest("xkafka", "0.6.0"), version))
+                found  <-
+                  every(Api.FindCoordinator)
+                    .traverse(version => exchange(socket, FindCoordinatorRequest(FindCoordinatorRequest.GroupKey, List(group)), version))
+              yield (listed, found)
+        yield
+          val (listed, found) = answers
+          assertEquals(listed.map(_.errorCode), every(Api.ApiVersions).as(0: Short))
+          Api.values.foreach: api =>
+            val offered = listed.head.apis.find(_.key == api.key)
+            assert(offered.exists(range => range.min <= api.lowest && range.max >= api.highest), s"$api: the broker reads $offered")
+          assertEquals(
+            found.map(_.map(c => (c.key, c.errorCode, s"${c.host}:${c.port}"))),
+            every(Api.FindCoordinator).as(List((group, 0: Short, plaintext)))
+          )
     case None =>
+      test("the broker reads every version of every request the codec writes, and answers each version of ApiVersions and FindCoordinator".ignore)(
+        IO.unit
+      )
       test("the coordinator is reached over plaintext".ignore)(IO.unit)
       test("the coordinator is reached through a bootstrap server listed after one that cannot be reached".ignore)(IO.unit)
 

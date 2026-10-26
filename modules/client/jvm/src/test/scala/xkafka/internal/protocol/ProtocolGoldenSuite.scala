@@ -152,3 +152,113 @@ final class ProtocolGoldenSuite extends FunSuite:
         Frame.response(request, CorrelationId)(javaResponse(ApiKeys.SASL_AUTHENTICATE, version, body)),
         Right(SaslAuthenticateResponse(58, Some("wrong"), ByteVector(9, 8), 1234L))
       )
+
+  private val keys: List[(Api, ApiKeys)] =
+    List(
+      Api.ApiVersions      -> ApiKeys.API_VERSIONS,
+      Api.FindCoordinator  -> ApiKeys.FIND_COORDINATOR,
+      Api.SaslHandshake    -> ApiKeys.SASL_HANDSHAKE,
+      Api.SaslAuthenticate -> ApiKeys.SASL_AUTHENTICATE
+    )
+
+  /** How each version this codec does not write compares with the versions it does: whether its request, and then its answer, has the same bytes. */
+  private val outside: Map[(Api, Int), (Boolean, Boolean)] =
+    Map(
+      // Versions 0 to 2 have no body and answer without tagged fields.
+      (Api.ApiVersions, 0) -> (false, false),
+      (Api.ApiVersions, 1) -> (false, false),
+      (Api.ApiVersions, 2) -> (false, false),
+      // Version 5 asks the broker to check the cluster and node it is (KIP-1242); its answer is laid out as version 4's.
+      (Api.ApiVersions, 5) -> (false, true),
+      // Versions 0 to 3 find one coordinator at a time.
+      (Api.FindCoordinator, 0) -> (false, false),
+      (Api.FindCoordinator, 1) -> (false, false),
+      (Api.FindCoordinator, 2) -> (false, false),
+      (Api.FindCoordinator, 3) -> (false, false),
+      // Version 0 has version 1's bytes, but after it the client sends bare SASL tokens instead of SaslAuthenticate requests.
+      (Api.SaslHandshake, 0) -> (true, true),
+      // Versions 0 and 1 are not flexible, and version 0 answers without the session lifetime.
+      (Api.SaslAuthenticate, 0) -> (false, false),
+      (Api.SaslAuthenticate, 1) -> (false, false)
+    )
+
+  private def every(key: ApiKeys): List[Short] = (key.oldestVersion.toInt to key.latestVersion(true).toInt).map(_.toShort).toList
+
+  test("every version the Java client defines is one this codec writes or one whose difference is recorded here"):
+    keys.foreach: (api, key) =>
+      every(key).foreach: version =>
+        val written = version >= api.lowest && version <= api.highest
+        assert(written != outside.contains((api, version.toInt)), s"$api $version: written by the codec, or its difference recorded, but not both")
+    outside.keys.foreach: (api, version) =>
+      assert(
+        keys.toMap.get(api).exists(key => every(key).contains(version.toShort)),
+        s"$api $version is recorded but the Java client does not define it"
+      )
+
+  /** One request and answer, as this codec writes and reads them and as the Java client does in a given version. */
+  private final case class Sample(request: Request[?], javaRequest: Message, javaAnswer: Message, read: Any)
+
+  private def sample(api: Api, version: Short): Sample =
+    api match
+      case Api.ApiVersions =>
+        val listed = new ApiVersionsResponseData.ApiVersionCollection()
+        listed.add(new ApiVersionsResponseData.ApiVersion().setApiKey(18).setMinVersion(0).setMaxVersion(4))
+        Sample(
+          ApiVersionsRequest("xkafka", "0.6.0"),
+          if version < 3 then new ApiVersionsRequestData()
+          else new ApiVersionsRequestData().setClientSoftwareName("xkafka").setClientSoftwareVersion("0.6.0"),
+          new ApiVersionsResponseData().setErrorCode(0).setApiKeys(listed),
+          ApiVersionsResponse(0, List(ApiVersion(18, 0, 4)))
+        )
+      case Api.FindCoordinator => Sample(
+          FindCoordinatorRequest(FindCoordinatorRequest.GroupKey, List("app")),
+          if version < 4 then new FindCoordinatorRequestData().setKey("app")
+          else new FindCoordinatorRequestData().setCoordinatorKeys(List("app").asJava),
+          if version < 4 then new FindCoordinatorResponseData().setErrorCode(0).setErrorMessage(null).setNodeId(1).setHost("broker").setPort(9092)
+          else
+            new FindCoordinatorResponseData().setCoordinators(
+              List(new FindCoordinatorResponseData.Coordinator().setKey("app").setNodeId(1).setHost("broker").setPort(9092).setErrorMessage(null))
+                .asJava
+            )
+          ,
+          List(Coordinator("app", 1, "broker", 9092, 0, None))
+        )
+      case Api.SaslHandshake => Sample(
+          SaslHandshakeRequest("PLAIN"),
+          new SaslHandshakeRequestData().setMechanism("PLAIN"),
+          new SaslHandshakeResponseData().setErrorCode(0).setMechanisms(List("PLAIN").asJava),
+          SaslHandshakeResponse(0, List("PLAIN"))
+        )
+      case Api.SaslAuthenticate =>
+        val token = ByteVector("n,,n=user,r=nonce".getBytes("UTF-8"))
+        Sample(
+          SaslAuthenticateRequest(token),
+          new SaslAuthenticateRequestData().setAuthBytes(token.toArray),
+          new SaslAuthenticateResponseData().setErrorCode(0).setErrorMessage(null).setAuthBytes(Array[Byte](9, 8)),
+          SaslAuthenticateResponse(0, None, ByteVector(9, 8), 0L)
+        )
+
+  test("each version this codec does not write differs from the ones it writes as recorded"):
+    keys.foreach: (api, key) =>
+      every(key).filterNot(version => version >= api.lowest && version <= api.highest).foreach: version =>
+        val example                   = sample(api, version)
+        val (sameRequest, sameAnswer) = outside((api, version.toInt))
+        val written                   = Frame.request(example.request, version, CorrelationId, ClientId)
+        assertEquals(written == javaRequest(key, version, example.javaRequest), sameRequest, s"$api $version request")
+        val read = Frame.response(example.request, CorrelationId)(javaResponse(key, version, example.javaAnswer))
+        assertEquals(read == Right(example.read), sameAnswer, s"$api $version answer: $read")
+
+  test("the samples above are read and written as the Java client does in every version this codec writes"):
+    keys.foreach: (api, key) =>
+      versions(api).foreach: version =>
+        val example = sample(api, version)
+        assertEquals(
+          Frame.request(example.request, version, CorrelationId, ClientId),
+          javaRequest(key, version, example.javaRequest),
+          s"$api $version"
+        )
+        assertEquals[Either[String, Any], Either[String, Any]](
+          Frame.response(example.request, CorrelationId)(javaResponse(key, version, example.javaAnswer)),
+          Right(example.read),
+          s"$api $version"
+        )
