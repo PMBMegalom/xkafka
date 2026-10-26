@@ -60,7 +60,8 @@ final class GroupConnectionSuite extends CatsEffectSuite:
     for
       _      <- socket.write(Frame.request(request, version, version.toInt, "xkafka-group-connection"))
       size   <- socket.read(4).map(_.toInt())
-      answer <- socket.read(size).flatMap(bytes => IO.fromEither(Frame.response(request, version.toInt)(bytes).leftMap(new RuntimeException(_))))
+      answer <-
+        socket.read(size).flatMap(bytes => IO.fromEither(Frame.response(request, version, version.toInt)(bytes).leftMap(new RuntimeException(_))))
     yield answer
 
   private def tls(authority: String, certificate: Option[ClientCertificate] = None): TlsSettings =
@@ -76,7 +77,7 @@ final class GroupConnectionSuite extends CatsEffectSuite:
         reachesCoordinator(NonEmptyList.one(plaintext), SecuritySettings.Plaintext, plaintext)
       test("the coordinator is reached through a bootstrap server listed after one that cannot be reached"):
         reachesCoordinator(NonEmptyList.of("127.0.0.1:1", plaintext), SecuritySettings.Plaintext, plaintext)
-      test("the broker reads every version of every request the codec writes, and answers each version of ApiVersions and FindCoordinator"):
+      test("the broker reads every version of the requests the connection makes, and answers each version of ApiVersions and FindCoordinator"):
         val group           = s"xkafka-group-connection-versions-${PlatformKafkaClient.name}-${System.nanoTime()}"
         val (host, port)    = Connections.address(plaintext)
         def every(api: Api) = (api.lowest.toInt to api.highest.toInt).map(_.toShort).toList
@@ -93,7 +94,8 @@ final class GroupConnectionSuite extends CatsEffectSuite:
         yield
           val (listed, found) = answers
           assertEquals(listed.map(_.errorCode), every(Api.ApiVersions).as(0: Short))
-          Api.values.foreach: api =>
+          // Which heartbeat versions a broker reads depends on its release, which the group member's tests check.
+          Api.values.filterNot(_ == Api.StreamsGroupHeartbeat).foreach: api =>
             val offered = listed.head.apis.find(_.key == api.key)
             assert(offered.exists(range => range.min <= api.lowest && range.max >= api.highest), s"$api: the broker reads $offered")
           assertEquals(
@@ -101,7 +103,7 @@ final class GroupConnectionSuite extends CatsEffectSuite:
             every(Api.FindCoordinator).as(List((group, 0: Short, plaintext)))
           )
     case None =>
-      test("the broker reads every version of every request the codec writes, and answers each version of ApiVersions and FindCoordinator".ignore)(
+      test("the broker reads every version of the requests the connection makes, and answers each version of ApiVersions and FindCoordinator".ignore)(
         IO.unit
       )
       test("the coordinator is reached over plaintext".ignore)(IO.unit)

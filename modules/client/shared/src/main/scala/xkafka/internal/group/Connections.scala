@@ -34,7 +34,9 @@ import internal.protocol.*
   * it, has logged the client in.
   */
 private[xkafka] trait Connection[F[_]]:
-  /** Sends the request in the highest version both sides read and reads the broker's answer. Requests go one at a time. */
+  /** Sends the request in the highest version both sides read and reads the broker's answer. Requests go one at a time, and a request the broker
+    * reads in no version this codec writes fails as an unsupported version.
+    */
   def send[R](request: Request[R]): F[R]
 
 /** Connections to the brokers of one cluster, made as `settings` ask, each waiting at most `timeout` for any one read or write. */
@@ -52,7 +54,7 @@ private[xkafka] final class Connections[F[_]](sockets: Sockets[F], crypto: Crypt
       versions <- Resource.eval(negotiate(exchange))
       connection =
         new Connection[F]:
-          def send[R](request: Request[R]): F[R] = exchange(request, versions(request.api))
+          def send[R](request: Request[R]): F[R] = version(versions, request.api).flatMap(exchange(request, _))
       _ <- Resource.eval(settings.security.saslSettings.traverse_(login(connection, _)))
     yield connection
 
@@ -87,15 +89,16 @@ private[xkafka] final class Connections[F[_]](sockets: Sockets[F], crypto: Crypt
     val request = ApiVersionsRequest(SoftwareName, SoftwareVersion)
     exchange(request, Api.ApiVersions.highest).flatMap: answer =>
       // A broker that does not read the version asked for lists the versions it reads, so the request goes again in one of them.
-      if answer.errorCode == UnsupportedVersion then supported(answer).flatMap(chosen => exchange(request, chosen(Api.ApiVersions))).flatMap(accepted)
+      if answer.errorCode == UnsupportedVersion then
+        version(Api.negotiate(answer.apis), Api.ApiVersions).flatMap(exchange(request, _)).flatMap(accepted)
       else accepted(answer)
 
   private def accepted(answer: ApiVersionsResponse): F[Map[Api, Short]] =
-    if answer.errorCode == 0 then supported(answer)
+    if answer.errorCode == 0 then F.pure(Api.negotiate(answer.apis))
     else F.raiseError(failure(ErrorCode.fromProtocol(answer.errorCode), "the broker did not say which versions it reads"))
 
-  private def supported(answer: ApiVersionsResponse): F[Map[Api, Short]] =
-    F.fromEither(Api.negotiate(answer.apis).leftMap(failure(ErrorCode.UnsupportedVersion, _)))
+  private def version(versions: Map[Api, Short], api: Api): F[Short] =
+    versions.get(api).liftTo[F](failure(ErrorCode.UnsupportedVersion, s"the broker reads no version of $api from ${api.lowest} to ${api.highest}"))
 
   private def login(connection: Connection[F], sasl: SaslSettings): F[Unit] =
     val mechanism = sasl.mechanism.name
@@ -145,7 +148,7 @@ private final class Exchange[F[_]](socket: Socket[F], clientId: String, lock: Mu
         case None     => F.raiseError(failure(ErrorCode.NetworkException, "an earlier request on this connection failed"))
         case Some(id) =>
           val answered = socket.write(Frame.request(request, version, id, clientId)) *> answer
-          F.guaranteeCase(answered.flatMap(bytes => F.fromEither(Frame.response(request, id)(bytes).leftMap(invalid)))):
+          F.guaranteeCase(answered.flatMap(bytes => F.fromEither(Frame.response(request, version, id)(bytes).leftMap(invalid)))):
             case Outcome.Succeeded(_) => next.set(Some(id + 1))
             case _                    => next.set(None)
 
