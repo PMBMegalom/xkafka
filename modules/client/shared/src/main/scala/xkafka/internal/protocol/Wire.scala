@@ -41,6 +41,8 @@ private[xkafka] object Wire:
   def int32(value: Int): ByteVector  = ByteVector.fromInt(value)
   def int64(value: Long): ByteVector = ByteVector.fromLong(value)
 
+  def boolean(value: Boolean): ByteVector = int8(if value then 1 else 0)
+
   /** Seven bits to a byte, lowest first, with the high bit set on every byte but the last. */
   def unsignedVarint(value: Int): ByteVector =
     if (value & ~0x7f) == 0 then int8(value) else int8((value & 0x7f) | 0x80) ++ unsignedVarint(value >>> 7)
@@ -52,6 +54,11 @@ private[xkafka] object Wire:
   def compactBytes(value: ByteVector): ByteVector                        = compact(value)
   def array[A](items: List[A])(item: A => ByteVector): ByteVector        = int32(items.size) ++ ByteVector.concat(items.map(item))
   def compactArray[A](items: List[A])(item: A => ByteVector): ByteVector = unsignedVarint(items.size + 1) ++ ByteVector.concat(items.map(item))
+
+  def compactNullableArray[A](items: Option[List[A]])(item: A => ByteVector): ByteVector = items.fold(unsignedVarint(0))(compactArray(_)(item))
+
+  /** A structure that may be missing, marked by a byte before it: -1 when it is, 1 when it follows. */
+  def nullableStruct[A](value: Option[A])(struct: A => ByteVector): ByteVector = value.fold(int8(-1))(int8(1) ++ struct(_))
 
   /** The tagged fields of a flexible structure, of which this codec writes none. */
   val noTags: ByteVector = unsignedVarint(0)
@@ -72,6 +79,9 @@ private[xkafka] object Wire:
   val readInt16: Read[Short] = take(2, "an int16").map(_.toShort())
   val readInt32: Read[Int]   = take(4, "an int32").map(_.toInt())
   val readInt64: Read[Long]  = take(8, "an int64").map(_.toLong())
+
+  val readBoolean: Read[Boolean] = readInt8.map(_ != 0)
+  val readUint16: Read[Int]      = readInt16.map(_ & 0xffff)
 
   /** At most five bytes, as an int holds 32 bits. */
   val readUnsignedVarint: Read[Int] =
@@ -104,6 +114,10 @@ private[xkafka] object Wire:
     readInt32.flatMap(count => if count < 0 then fail("an array is null") else repeated(count.toLong, "array items", item))
 
   def readCompactArray[A](item: Read[A]): Read[List[A]] = compactLength("an array").flatMap(repeated(_, "array items", item))
+
+  def readCompactNullableArray[A](item: Read[A]): Read[Option[List[A]]] =
+    readUnsignedVarint.flatMap: length =>
+      if length == 0 then none[List[A]].pure[Read] else repeated(Integer.toUnsignedLong(length) - 1, "array items", item).map(_.some)
 
   /** Tagged fields this codec does not read, each skipped by its size. */
   val skipTags: Read[Unit] =

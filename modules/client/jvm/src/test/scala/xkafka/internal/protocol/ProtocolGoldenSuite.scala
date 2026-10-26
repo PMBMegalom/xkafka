@@ -59,12 +59,8 @@ final class ProtocolGoldenSuite extends FunSuite:
   private def versions(api: Api): List[Short] = (api.lowest.toInt to api.highest.toInt).map(_.toShort).toList
 
   test("every version this codec writes is one the Java client writes, under the same key"):
-    List(
-      Api.FindCoordinator  -> ApiKeys.FIND_COORDINATOR,
-      Api.SaslHandshake    -> ApiKeys.SASL_HANDSHAKE,
-      Api.ApiVersions      -> ApiKeys.API_VERSIONS,
-      Api.SaslAuthenticate -> ApiKeys.SASL_AUTHENTICATE
-    ).foreach: (api, key) =>
+    assertEquals(keys.map(_._1).toSet, Api.values.toSet)
+    keys.foreach: (api, key) =>
       assertEquals(api.key, key.id)
       versions(api).foreach: version =>
         assert(key.isVersionSupported(version), s"$api $version")
@@ -89,7 +85,7 @@ final class ProtocolGoldenSuite extends FunSuite:
             .setFinalizedFeaturesEpoch(3)
         )
       assertEquals(
-        Frame.response(request, CorrelationId)(javaResponse(ApiKeys.API_VERSIONS, version, body)),
+        Frame.response(request, version, CorrelationId)(javaResponse(ApiKeys.API_VERSIONS, version, body)),
         Right(ApiVersionsResponse(0, List(ApiVersion(10, 0, 6), ApiVersion(18, 0, 5))))
       )
 
@@ -98,7 +94,7 @@ final class ProtocolGoldenSuite extends FunSuite:
     keys.add(new ApiVersionsResponseData.ApiVersion().setApiKey(18).setMinVersion(0).setMaxVersion(2))
     val body = new ApiVersionsResponseData().setErrorCode(35).setApiKeys(keys)
     assertEquals(
-      Frame.response(ApiVersionsRequest("xkafka", "0.6.0"), CorrelationId)(javaResponse(ApiKeys.API_VERSIONS, 0, body)),
+      Frame.response(ApiVersionsRequest("xkafka", "0.6.0"), 3, CorrelationId)(javaResponse(ApiKeys.API_VERSIONS, 0, body)),
       Right(ApiVersionsResponse(35, List(ApiVersion(18, 0, 2))))
     )
 
@@ -119,7 +115,7 @@ final class ProtocolGoldenSuite extends FunSuite:
           .setErrorMessage("not available")
       val body = tagged(new FindCoordinatorResponseData().setThrottleTimeMs(0).setCoordinators(List(found, missing).asJava))
       assertEquals(
-        Frame.response(request, CorrelationId)(javaResponse(ApiKeys.FIND_COORDINATOR, version, body)),
+        Frame.response(request, version, CorrelationId)(javaResponse(ApiKeys.FIND_COORDINATOR, version, body)),
         Right(List(Coordinator("app", 1, "broker", 9092, 0, None), Coordinator("other", -1, "", -1, 15, Some("not available"))))
       )
 
@@ -132,7 +128,7 @@ final class ProtocolGoldenSuite extends FunSuite:
       )
       val body = new SaslHandshakeResponseData().setErrorCode(33).setMechanisms(List("PLAIN", "SCRAM-SHA-256").asJava)
       assertEquals(
-        Frame.response(request, CorrelationId)(javaResponse(ApiKeys.SASL_HANDSHAKE, version, body)),
+        Frame.response(request, version, CorrelationId)(javaResponse(ApiKeys.SASL_HANDSHAKE, version, body)),
         Right(SaslHandshakeResponse(33, List("PLAIN", "SCRAM-SHA-256")))
       )
 
@@ -149,16 +145,158 @@ final class ProtocolGoldenSuite extends FunSuite:
           new SaslAuthenticateResponseData().setErrorCode(58).setErrorMessage("wrong").setAuthBytes(Array[Byte](9, 8)).setSessionLifetimeMs(1234L)
         )
       assertEquals(
-        Frame.response(request, CorrelationId)(javaResponse(ApiKeys.SASL_AUTHENTICATE, version, body)),
+        Frame.response(request, version, CorrelationId)(javaResponse(ApiKeys.SASL_AUTHENTICATE, version, body)),
         Right(SaslAuthenticateResponse(58, Some("wrong"), ByteVector(9, 8), 1234L))
+      )
+
+  private def heartbeatRequest: StreamsGroupHeartbeatRequest =
+    import StreamsGroup.*
+    StreamsGroupHeartbeatRequest(
+      groupId = "app",
+      memberId = "member",
+      memberEpoch = 3,
+      endpointInformationEpoch = 2,
+      instanceId = Some("instance"),
+      rackId = Some("rack"),
+      rebalanceTimeoutMs = 300000,
+      topology =
+        Some(Topology(
+          1,
+          List(Subtopology(
+            "0",
+            List("input"),
+            List("in-.*"),
+            List(TopicInfo("app-counts-changelog", 0, 1, List("cleanup.policy" -> "compact"))),
+            List("app-by-key-repartition"),
+            List(TopicInfo("app-other-repartition", 4, 3, Nil)),
+            List(CopartitionGroup(List(0), List(0), List(0)))
+          ))
+        )),
+      activeTasks = Some(List(Tasks("0", List(0, 2)))),
+      standbyTasks = Some(List(Tasks("1", List(1)))),
+      warmupTasks = Some(Nil),
+      processId = Some("process"),
+      userEndpoint = Some(Endpoint("host", 65000)),
+      clientTags = Some(List("zone" -> "a")),
+      taskOffsets = Some(List(TaskOffset("0", 0, 5L))),
+      taskEndOffsets = Some(List(TaskOffset("0", 0, 6000000000L))),
+      shutdownApplication = true
+    )
+
+  private def javaHeartbeatRequest: StreamsGroupHeartbeatRequestData =
+    import StreamsGroupHeartbeatRequestData as J
+    val subtopology =
+      new J.Subtopology().setSubtopologyId("0").setSourceTopics(List("input").asJava).setSourceTopicRegex(List("in-.*").asJava)
+        .setStateChangelogTopics(
+          List(
+            new J.TopicInfo().setName("app-counts-changelog").setPartitions(0).setReplicationFactor(1)
+              .setTopicConfigs(List(new J.KeyValue().setKey("cleanup.policy").setValue("compact")).asJava)
+          ).asJava
+        ).setRepartitionSinkTopics(List("app-by-key-repartition").asJava)
+        .setRepartitionSourceTopics(List(new J.TopicInfo().setName("app-other-repartition").setPartitions(4).setReplicationFactor(3)).asJava)
+        .setCopartitionGroups(
+          List(
+            new J.CopartitionGroup().setSourceTopics(List[java.lang.Short](0.toShort).asJava)
+              .setSourceTopicRegex(List[java.lang.Short](0.toShort).asJava).setRepartitionSourceTopics(List[java.lang.Short](0.toShort).asJava)
+          ).asJava
+        )
+    new J().setGroupId("app").setMemberId("member").setMemberEpoch(3).setEndpointInformationEpoch(2).setInstanceId("instance").setRackId("rack")
+      .setRebalanceTimeoutMs(300000).setTopology(new J.Topology().setEpoch(1).setSubtopologies(List(subtopology).asJava))
+      .setActiveTasks(List(new J.TaskIds().setSubtopologyId("0").setPartitions(List[Integer](0, 2).asJava)).asJava)
+      .setStandbyTasks(List(new J.TaskIds().setSubtopologyId("1").setPartitions(List[Integer](1).asJava)).asJava)
+      .setWarmupTasks(List.empty[J.TaskIds].asJava).setProcessId("process").setUserEndpoint(new J.Endpoint().setHost("host").setPort(65000))
+      .setClientTags(List(new J.KeyValue().setKey("zone").setValue("a")).asJava)
+      .setTaskOffsets(List(new J.TaskOffset().setSubtopologyId("0").setPartition(0).setOffset(5L)).asJava)
+      .setTaskEndOffsets(List(new J.TaskOffset().setSubtopologyId("0").setPartition(0).setOffset(6000000000L)).asJava).setShutdownApplication(true)
+
+  /** A heartbeat that changes nothing since the last one, every field that may be left out left out. */
+  private val quietHeartbeat =
+    StreamsGroupHeartbeatRequest("app", "member", 3, 2, None, None, -1, None, None, None, None, None, None, None, None, None, false)
+
+  private def javaQuietHeartbeat: StreamsGroupHeartbeatRequestData =
+    new StreamsGroupHeartbeatRequestData().setGroupId("app").setMemberId("member").setMemberEpoch(3).setEndpointInformationEpoch(2)
+
+  /** The answers differ between versions only in the recovery lag, 32 bits in version 0 and 64 after, and in the request to describe the topology. */
+  private def javaHeartbeatAnswer(version: Short): StreamsGroupHeartbeatResponseData =
+    import StreamsGroupHeartbeatResponseData as J
+    val endpoint =
+      tagged(
+        new J.EndpointToPartitions().setUserEndpoint(tagged(new J.Endpoint().setHost("host").setPort(65000)))
+          .setActivePartitions(List(tagged(new J.TopicPartition().setTopic("input").setPartitions(List[Integer](0, 2).asJava))).asJava)
+          .setStandbyPartitions(List.empty[J.TopicPartition].asJava)
+      )
+    val answer =
+      new J().setThrottleTimeMs(1).setErrorCode(0).setErrorMessage(null).setMemberId("member").setMemberEpoch(4).setHeartbeatIntervalMs(5000)
+        .setTaskOffsetIntervalMs(60000).setStatus(List(tagged(new J.Status().setStatusCode(3).setStatusDetail("missing"))).asJava)
+        .setActiveTasks(List(tagged(new J.TaskIds().setSubtopologyId("0").setPartitions(List[Integer](0, 2).asJava))).asJava)
+        .setStandbyTasks(List(new J.TaskIds().setSubtopologyId("1").setPartitions(List[Integer](1).asJava)).asJava)
+        .setWarmupTasks(List.empty[J.TaskIds].asJava).setEndpointInformationEpoch(6).setPartitionsByUserEndpoint(List(endpoint).asJava)
+    tagged(
+      if version == 0 then answer.setAcceptableRecoveryLagLegacy(7)
+      else answer.setAcceptableRecoveryLag(7000000000L).setTopologyDescriptionRequired(true)
+    )
+
+  private def heartbeatAnswer(version: Short): StreamsGroupHeartbeatResponse =
+    import StreamsGroup.*
+    StreamsGroupHeartbeatResponse(
+      throttleTimeMs = 1,
+      errorCode = 0,
+      errorMessage = None,
+      memberId = "member",
+      memberEpoch = 4,
+      heartbeatIntervalMs = 5000,
+      acceptableRecoveryLag = if version == 0 then 7L else 7000000000L,
+      taskOffsetIntervalMs = 60000,
+      statuses = Some(List(Status(3, "missing"))),
+      activeTasks = Some(List(Tasks("0", List(0, 2)))),
+      standbyTasks = Some(List(Tasks("1", List(1)))),
+      warmupTasks = Some(Nil),
+      topologyDescriptionRequired = version > 0,
+      endpointInformationEpoch = 6,
+      partitionsByUserEndpoint = Some(List(EndpointPartitions(Endpoint("host", 65000), List(TopicPartitions("input", List(0, 2))), Nil)))
+    )
+
+  test("StreamsGroupHeartbeat"):
+    versions(Api.StreamsGroupHeartbeat).foreach: version =>
+      val key = ApiKeys.STREAMS_GROUP_HEARTBEAT
+      assertEquals(Frame.request(heartbeatRequest, version, CorrelationId, ClientId), javaRequest(key, version, javaHeartbeatRequest), s"$version")
+      assertEquals(Frame.request(quietHeartbeat, version, CorrelationId, ClientId), javaRequest(key, version, javaQuietHeartbeat), s"$version")
+      assertEquals(
+        Frame.response(heartbeatRequest, version, CorrelationId)(javaResponse(key, version, javaHeartbeatAnswer(version))),
+        Right(heartbeatAnswer(version)),
+        s"$version"
+      )
+      val unchanged =
+        new StreamsGroupHeartbeatResponseData().setErrorCode(22).setErrorMessage("fenced").setMemberId("member").setMemberEpoch(4).setStatus(null)
+      assertEquals(
+        Frame.response(heartbeatRequest, version, CorrelationId)(javaResponse(key, version, unchanged)),
+        Right(StreamsGroupHeartbeatResponse(
+          0,
+          22,
+          Some("fenced"),
+          "member",
+          4,
+          0,
+          if version == 0 then 0L else -1L,
+          0,
+          None,
+          None,
+          None,
+          None,
+          false,
+          0,
+          None
+        )),
+        s"$version"
       )
 
   private val keys: List[(Api, ApiKeys)] =
     List(
-      Api.ApiVersions      -> ApiKeys.API_VERSIONS,
-      Api.FindCoordinator  -> ApiKeys.FIND_COORDINATOR,
-      Api.SaslHandshake    -> ApiKeys.SASL_HANDSHAKE,
-      Api.SaslAuthenticate -> ApiKeys.SASL_AUTHENTICATE
+      Api.ApiVersions           -> ApiKeys.API_VERSIONS,
+      Api.FindCoordinator       -> ApiKeys.FIND_COORDINATOR,
+      Api.SaslHandshake         -> ApiKeys.SASL_HANDSHAKE,
+      Api.SaslAuthenticate      -> ApiKeys.SASL_AUTHENTICATE,
+      Api.StreamsGroupHeartbeat -> ApiKeys.STREAMS_GROUP_HEARTBEAT
     )
 
   /** How each version this codec does not write compares with the versions it does: whether its request, and then its answer, has the same bytes. */
@@ -229,7 +367,8 @@ final class ProtocolGoldenSuite extends FunSuite:
           new SaslHandshakeResponseData().setErrorCode(0).setMechanisms(List("PLAIN").asJava),
           SaslHandshakeResponse(0, List("PLAIN"))
         )
-      case Api.SaslAuthenticate =>
+      case Api.StreamsGroupHeartbeat => Sample(heartbeatRequest, javaHeartbeatRequest, javaHeartbeatAnswer(version), heartbeatAnswer(version))
+      case Api.SaslAuthenticate      =>
         val token = ByteVector("n,,n=user,r=nonce".getBytes("UTF-8"))
         Sample(
           SaslAuthenticateRequest(token),
@@ -245,7 +384,7 @@ final class ProtocolGoldenSuite extends FunSuite:
         val (sameRequest, sameAnswer) = outside((api, version.toInt))
         val written                   = Frame.request(example.request, version, CorrelationId, ClientId)
         assertEquals(written == javaRequest(key, version, example.javaRequest), sameRequest, s"$api $version request")
-        val read = Frame.response(example.request, CorrelationId)(javaResponse(key, version, example.javaAnswer))
+        val read = Frame.response(example.request, version, CorrelationId)(javaResponse(key, version, example.javaAnswer))
         assertEquals(read == Right(example.read), sameAnswer, s"$api $version answer: $read")
 
   test("the samples above are read and written as the Java client does in every version this codec writes"):
@@ -258,7 +397,7 @@ final class ProtocolGoldenSuite extends FunSuite:
           s"$api $version"
         )
         assertEquals[Either[String, Any], Either[String, Any]](
-          Frame.response(example.request, CorrelationId)(javaResponse(key, version, example.javaAnswer)),
+          Frame.response(example.request, version, CorrelationId)(javaResponse(key, version, example.javaAnswer)),
           Right(example.read),
           s"$api $version"
         )

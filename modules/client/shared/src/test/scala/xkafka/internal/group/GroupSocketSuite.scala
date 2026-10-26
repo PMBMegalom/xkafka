@@ -53,7 +53,7 @@ final class GroupSocketSuite extends CatsEffectSuite:
     for
       _      <- socket.write(Frame.request(request, 3, 1, "xkafka-group-socket"))
       size   <- socket.read(4).flatMap(bytes => IO.fromEither(Wire.readAll(Wire.readInt32)(bytes).leftMap(new RuntimeException(_))))
-      answer <- socket.read(size).flatMap(bytes => IO.fromEither(Frame.response(request, 1)(bytes).leftMap(new RuntimeException(_))))
+      answer <- socket.read(size).flatMap(bytes => IO.fromEither(Frame.response(request, 3, 1)(bytes).leftMap(new RuntimeException(_))))
     yield answer
 
   private def answers(server: (String, Int), security: Option[TlsSettings]): IO[Unit] =

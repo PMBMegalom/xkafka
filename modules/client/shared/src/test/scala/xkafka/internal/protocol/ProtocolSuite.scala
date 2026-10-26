@@ -29,21 +29,25 @@ import Wire.*
 
 /** How the group connection's codec chooses versions and refuses answers it cannot read, on every platform. */
 final class ProtocolSuite extends ScalaCheckSuite:
-  private val everything = List(ApiVersion(10, 0, 6), ApiVersion(17, 0, 1), ApiVersion(18, 0, 4), ApiVersion(36, 0, 2))
+  private val everything = List(ApiVersion(10, 0, 6), ApiVersion(17, 0, 1), ApiVersion(18, 0, 4), ApiVersion(36, 0, 2), ApiVersion(88, 0, 1))
+
+  private val highest: Map[Api, Short] =
+    Map(Api.FindCoordinator -> 6, Api.SaslHandshake -> 1, Api.ApiVersions -> 4, Api.SaslAuthenticate -> 2, Api.StreamsGroupHeartbeat -> 1)
 
   private def offering(versions: ApiVersion*): List[ApiVersion] =
     versions.foldLeft(everything)((offered, version) => offered.filterNot(_.key == version.key) :+ version)
 
   test("each request is sent in the highest version both sides read"):
     assertEquals(
-      Api.negotiate(offering(ApiVersion(10, 0, 5), ApiVersion(18, 0, 9))),
-      Right(Map(Api.FindCoordinator -> 5.toShort, Api.SaslHandshake -> 1.toShort, Api.ApiVersions -> 4.toShort, Api.SaslAuthenticate -> 2.toShort))
+      Api.negotiate(offering(ApiVersion(10, 0, 5), ApiVersion(18, 0, 9), ApiVersion(88, 0, 0))),
+      highest ++ Map(Api.FindCoordinator -> 5.toShort, Api.StreamsGroupHeartbeat -> 0.toShort)
     )
 
-  test("a broker that reads no version this codec writes is refused"):
-    assert(Api.negotiate(everything.filterNot(_.key == 36)).isLeft, "SaslAuthenticate missing")
-    assert(Api.negotiate(offering(ApiVersion(10, 0, 3))).isLeft, "FindCoordinator only below 4")
-    assert(Api.negotiate(offering(ApiVersion(17, 2, 3))).isLeft, "SaslHandshake only above 1")
+  test("a request the broker reads in no version this codec writes is left out, and the others kept"):
+    assertEquals(Api.negotiate(everything.filterNot(_.key == 88)), highest - Api.StreamsGroupHeartbeat)
+    assertEquals(Api.negotiate(offering(ApiVersion(10, 0, 3))), highest - Api.FindCoordinator)
+    assertEquals(Api.negotiate(offering(ApiVersion(17, 2, 3))), highest - Api.SaslHandshake)
+    assertEquals(Api.negotiate(offering(ApiVersion(88, 2, 2))), highest - Api.StreamsGroupHeartbeat)
 
   property("an unsigned varint reads back as written"):
     forAll((value: Int) => readAll(readUnsignedVarint)(unsignedVarint(value)) == Right(value))
@@ -87,5 +91,8 @@ final class ProtocolSuite extends ScalaCheckSuite:
 
   test("an answer to another request is refused"):
     val request = SaslHandshakeRequest("PLAIN")
-    assertEquals(Frame.response(request, 3)(int32(4) ++ int16(0) ++ array(List("PLAIN"))(string)), Left("an answer to request 4 came for request 3"))
-    assertEquals(Frame.response(request, 3)(int32(3) ++ int16(0) ++ array(List("PLAIN"))(string)), Right(SaslHandshakeResponse(0, List("PLAIN"))))
+    assertEquals(
+      Frame.response(request, 1, 3)(int32(4) ++ int16(0) ++ array(List("PLAIN"))(string)),
+      Left("an answer to request 4 came for request 3")
+    )
+    assertEquals(Frame.response(request, 1, 3)(int32(3) ++ int16(0) ++ array(List("PLAIN"))(string)), Right(SaslHandshakeResponse(0, List("PLAIN"))))

@@ -61,9 +61,14 @@ final class ConnectionsSuite extends CatsEffectSuite:
     FakeBroker(scripted(versions()) { case r if r.api == Api.ApiVersions => IO.pure(Reply.Body(apiVersions(Nil, error = 42))) }).flatMap: broker =>
       refusedWith(connections(broker).to("broker", 9092).use_, ErrorCode.Other(42))
 
-  test("a broker that reads no version of a request the connection makes is refused as not supporting the version"):
-    FakeBroker(standard(versions(findCoordinator = 3))).flatMap: broker =>
-      refusedWith(connections(broker).to("broker", 9092).use_, ErrorCode.UnsupportedVersion)
+  test("a request the broker reads in no version the codec writes is refused as not supporting the version, without being sent"):
+    for
+      broker   <- FakeBroker(standard(versions(findCoordinator = 3)))
+      outcome  <- connections(broker).to("broker", 9092).use(_.send(group).attempt)
+      received <- broker.received
+    yield
+      assertEquals(code(outcome), Some(ErrorCode.UnsupportedVersion))
+      assertEquals(received.map(_.api), Vector(Api.ApiVersions))
 
   test("an answer to another request fails as an invalid answer, and the connection then takes no more requests"):
     for
@@ -284,13 +289,14 @@ object ConnectionsSuite:
       script.applyOrElse(
         request,
         request =>
-          IO.pure:
+          IO:
             Reply.Body(
               request.api match
-                case Api.ApiVersions      => apiVersions(listed)
-                case Api.FindCoordinator  => findCoordinator("group", "broker", 9092)
-                case Api.SaslHandshake    => saslHandshake(0, List("PLAIN"))
-                case Api.SaslAuthenticate => saslAuthenticate(0, None)
+                case Api.ApiVersions           => apiVersions(listed)
+                case Api.FindCoordinator       => findCoordinator("group", "broker", 9092)
+                case Api.SaslHandshake         => saslHandshake(0, List("PLAIN"))
+                case Api.SaslAuthenticate      => saslAuthenticate(0, None)
+                case Api.StreamsGroupHeartbeat => throw new IllegalStateException("a test that sends heartbeats scripts their answers")
             )
       )
 
