@@ -33,7 +33,7 @@ import cats.data.NonEmptyList
 import cats.effect.Sync
 import cats.syntax.show.*
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PartitionEnd, Polled, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class NativeGroupMetadata(pointer: CVoidPtr) extends GroupHandle
@@ -106,13 +106,14 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       clientId: Option[String],
       groupId: String,
       autoOffsetReset: String,
-      properties: Map[String, String]
+      properties: Map[String, String],
+      reportEnds: Boolean
   ): F[Client] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone                        = zone
         val (error, errorCode)            = errorSlots
-        val (names, values, propertySize) = nativeProperties(properties)
+        val (names, values, propertySize) = nativeProperties(properties.updated("enable.partition.eof", reportEnds.toString))
         val consumer                      =
           Bindings.xkafka_consumer_new(
             toCString(bootstrapServers),
@@ -335,7 +336,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
           if result != 0 then throw nativeError(error, errorCode)
         finally Bindings.xkafka_subscription_destroy(nativeSubscription)
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]] =
+  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone             = zone
@@ -344,10 +345,17 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         val message            = Bindings.xkafka_consumer_poll(consumer, timeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
 
         if !status < 0 then throw nativeError(error, errorCode)
-        else if !status == 0 then Nil
+        else if !status == 0 then Polled.empty
         else
-          try List(copyMessage(message))
+          try if !status == 2 then Polled(Nil, List(copyEnd(message))) else Polled.records(List(copyMessage(message)))
           finally Bindings.xkafka_message_destroy(message)
+
+  private def copyEnd(message: CVoidPtr): PartitionEnd =
+    PartitionEnd(
+      fromCString(Bindings.xkafka_message_topic(message)),
+      Bindings.xkafka_message_partition(message),
+      Bindings.xkafka_message_offset(message)
+    )
 
   private def copyMessage(message: CVoidPtr): PolledRecord =
     val keyPointer   = Bindings.xkafka_message_key(message)

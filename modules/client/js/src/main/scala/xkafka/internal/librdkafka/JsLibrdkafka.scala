@@ -32,7 +32,7 @@ import cats.data.NonEmptyList
 import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Chunk
-import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PartitionEnd, Polled, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** librdkafka's group metadata, which outlives the consumer it came from. */
 private[xkafka] final case class JsGroupMetadata(pointer: js.Any) extends GroupHandle
@@ -98,11 +98,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       clientId: Option[String],
       groupId: String,
       autoOffsetReset: String,
-      properties: Map[String, String]
+      properties: Map[String, String],
+      reportEnds: Boolean
   ): F[Client] =
     F.defer:
       val error                  = ErrorSlot()
-      val (names, values, count) = nativeProperties(properties)
+      val (names, values, count) = nativeProperties(properties.updated("enable.partition.eof", reportEnds.toString))
       direct(_.consumerNew(
         bootstrapServers,
         optional(clientId),
@@ -269,7 +270,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         if shim.subscribe(consumer, subscription, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then throw error.failure
       finally shim.subscriptionDestroy(subscription): Unit
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]] =
+  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
     F.defer:
       val error  = ErrorSlot()
       val status = Buffers.alloc(4)
@@ -277,11 +278,14 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       background(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
         status.readInt32LE(0) match
           case negative if negative < 0 => F.raiseError(error.failure)
-          case 0                        => F.pure(Nil)
-          case _                        => direct: shim =>
+          case 0                        => F.pure(Polled.empty)
+          case kind                     => direct: shim =>
               val message = result.pointer
-              try List(copyMessage(shim, message))
+              try if kind == 2 then Polled(Nil, List(copyEnd(shim, message))) else Polled.records(List(copyMessage(shim, message)))
               finally shim.messageDestroy(message): Unit
+
+  private def copyEnd(shim: Shim, message: js.Any): PartitionEnd =
+    PartitionEnd(shim.messageTopic(message).asInstanceOf[String], shim.messagePartition(message).asInstanceOf[Int], long(shim.messageOffset(message)))
 
   private def copyMessage(shim: Shim, message: js.Any): PolledRecord =
     val timestamp = long(shim.messageTimestamp(message))

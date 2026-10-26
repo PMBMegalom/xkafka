@@ -62,7 +62,7 @@ import org.apache.kafka.common.header.Header as JavaHeader
 import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
-import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PartitionEnd, Polled, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
 private[xkafka] final case class JavaClients(
@@ -134,14 +134,15 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       clientId: Option[String],
       groupId: String,
       autoOffsetReset: String,
-      properties: Map[String, String]
+      properties: Map[String, String],
+      reportEnds: Boolean
   ): F[Client] =
     val configured =
       connection(bootstrapServers, clientId, properties) ++
         Map("group.id" -> groupId, "auto.offset.reset" -> autoOffsetReset, "enable.auto.commit" -> "false")
     javaCall(
       F.blocking:
-        val thread = new ConsumerThread(clients.consumer(configured), s"xkafka-consumer-${clientId.getOrElse(groupId)}")
+        val thread = new ConsumerThread(clients.consumer(configured), s"xkafka-consumer-${clientId.getOrElse(groupId)}", reportEnds)
         thread.start()
         JavaClient.Consumer(thread)
     )
@@ -271,9 +272,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       case _                           => None
 
   override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): F[Unit] =
-    onConsumer(consumer): value =>
-      value.assign(partitions.map(javaTopicPartition).asJava)
-      startAt(value, starts)
+    onThread(consumer): thread =>
+      javaCall(F.async_[Unit](thread.assign(value =>
+        value.assign(partitions.map(javaTopicPartition).asJava)
+        startAt(value, starts)
+      )))
 
   /** A subscription the shared client spells as a pattern starts with `^`, which no topic name can. */
   override def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit] =
@@ -282,9 +285,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
         if topics.tail.isEmpty && topics.head.startsWith("^") then value.subscribe(Pattern.compile(topics.head), thread.listener)
         else value.subscribe(topics.toList.asJava, thread.listener)
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[List[PolledRecord]] =
+  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
     onThread(consumer)(thread =>
-      javaCall(F.async_[List[ConsumerThread.Record]](thread.poll(Duration.ofMillis(timeoutMillis.toLong)))).map(_.map(polled))
+      javaCall(F.async_[ConsumerThread.Polled](thread.poll(Duration.ofMillis(timeoutMillis.toLong)))).map(polled =>
+        Polled(polled.records.map(polledRecord), polled.ends.map(end => PartitionEnd(end.partition.topic, end.partition.partition, end.offset)))
+      )
     )
 
   override def takeRebalances(consumer: Client): F[List[Rebalance[Event]]] =
@@ -711,7 +716,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       headers
     )
 
-  private def polled(record: ConsumerThread.Record): PolledRecord =
+  private def polledRecord(record: ConsumerThread.Record): PolledRecord =
     PolledRecord(
       topic = record.topic,
       partition = record.partition,

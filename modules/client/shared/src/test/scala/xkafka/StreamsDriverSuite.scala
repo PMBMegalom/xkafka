@@ -24,8 +24,9 @@ package xkafka
 import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
+import internal.driver.{PartitionEnd, Polled, StartAt}
 import munit.{CatsEffectSuite, TestOptions}
 
 /** What the streams engine needs from each platform's driver beyond what the clients use, asserted identically on each one against the broker. */
@@ -84,6 +85,111 @@ final class StreamsDriverSuite extends CatsEffectSuite:
       yield
         assertEquals(codeOf(refused), Some(ErrorCode.IllegalGeneration))
         assertEquals(stored, Map.empty)
+
+  test(broker("a read reaches the end of a partition at its last stable offset, past a commit marker and short of an open transaction")):
+    withBroker: server =>
+      val topic = uniqueTopic("stable-end")
+
+      for
+        _       <- createTopic(server, topic)
+        _       <- transactionally(server)(_.produce(records(topic, 3)))
+        reached <- transactionally(server)(_.produce(records(topic, 2)) *> reading(server, topic, reportEnds = true).use(toEnd))
+      yield
+        // The committed transaction's records take offsets 0 to 2 and its commit marker 3. The open transaction's records, at 4 and 5, are not read.
+        assertEquals(reached, (List(0L, 1L, 2L), PartitionEnd(topic.value, 0, 4L)))
+
+  test(broker("an empty partition's end is its first offset")):
+    withBroker: server =>
+      val topic = uniqueTopic("empty-end")
+
+      for
+        _       <- createTopic(server, topic)
+        reached <- reading(server, topic, reportEnds = true).use(toEnd)
+      yield assertEquals(reached, (Nil, PartitionEnd(topic.value, 0, 0L)))
+
+  test(broker("a partition's end is reported once each time the consumer reaches it: after more records, a seek back, or a new assignment")):
+    withBroker: server =>
+      val topic = uniqueTopic("ends-again")
+
+      for
+        _        <- createTopic(server, topic)
+        _        <- produce(server, records(topic, 2))
+        observed <-
+          reading(server, topic, reportEnds = true).use: consumer =>
+            for
+              first      <- toEnd(consumer)
+              quiet      <- pollFor(consumer, 3.seconds)
+              _          <- produce(server, records(topic, 2))
+              second     <- toEnd(consumer)
+              _          <- driver.seek(consumer, partitionOf(topic), 1L, 10000)
+              afterSeek  <- toEnd(consumer)
+              _          <- driver.assign(consumer, Vector(partitionOf(topic)), Vector(StartAt(partitionOf(topic), 0L, -1)))
+              reassigned <- toEnd(consumer)
+            yield (first, quiet, second, afterSeek, reassigned)
+      yield
+        val (first, quiet, second, afterSeek, reassigned) = observed
+        assertEquals(first, (List(0L, 1L), PartitionEnd(topic.value, 0, 2L)))
+        assertEquals(quiet, Polled.empty)
+        assertEquals(second, (List(2L, 3L), PartitionEnd(topic.value, 0, 4L)))
+        assertEquals(afterSeek, (List(1L, 2L, 3L), PartitionEnd(topic.value, 0, 4L)))
+        assertEquals(reassigned, (List(0L, 1L, 2L, 3L), PartitionEnd(topic.value, 0, 4L)))
+
+  test(broker("a consumer that does not report ends reaches none")):
+    withBroker: server =>
+      val topic = uniqueTopic("no-ends")
+
+      for
+        _      <- createTopic(server, topic)
+        _      <- produce(server, records(topic, 1))
+        polled <- reading(server, topic, reportEnds = false).use(pollFor(_, 5.seconds))
+      yield assertEquals(polled.records.map(_.offset) -> polled.ends, List(0L) -> Nil)
+
+  /** A consumer of the topic's only partition from its start, under read_committed, as a restore reads a changelog. */
+  private def reading(server: String, topic: Topic, reportEnds: Boolean): Resource[IO, driver.Client] =
+    Resource.make(
+      driver.consumer(server, None, uniqueGroup("restore").value, "earliest", Map("isolation.level" -> "read_committed"), reportEnds)
+    )(driver.destroyConsumer).evalTap(consumer => driver.assign(consumer, Vector(partitionOf(topic)), Vector.empty))
+
+  /** The offsets read up to the first end the consumer reports, and that end. */
+  private def toEnd(consumer: driver.Client): IO[(List[Long], PartitionEnd)] =
+    def loop(read: List[Long]): IO[(List[Long], PartitionEnd)] =
+      driver.poll(consumer, 500).flatMap: polled =>
+        val offsets = read ++ polled.records.map(_.offset)
+        polled.ends.headOption.fold(loop(offsets))(end => IO.pure(offsets -> end))
+    loop(Nil).timeout(60.seconds)
+
+  /** Everything the consumer's polls return over `period`. */
+  private def pollFor(consumer: driver.Client, period: FiniteDuration): IO[Polled] =
+    IO.monotonic.flatMap: start =>
+      def loop(seen: Polled): IO[Polled] =
+        IO.monotonic.flatMap: now =>
+          if now - start >= period then IO.pure(seen)
+          else driver.poll(consumer, 500).flatMap(polled => loop(Polled(seen.records ++ polled.records, seen.ends ++ polled.ends)))
+      loop(Polled.empty)
+
+  private def records(topic: Topic, count: Int): NonEmptyList[ProducerRecord[String, String]] =
+    NonEmptyList.fromListUnsafe(List.tabulate(count)(index => ProducerRecord(topic, s"key-$index", s"value-$index")))
+
+  private def createTopic(server: String, topic: Topic): IO[Unit] =
+    for
+      client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+      newTopic <- NewTopic.from(topic, partitions = 1, replicationFactor = 1).liftTo[IO]
+      _        <- PlatformKafkaClient().admin(client).use(_.createTopics(NonEmptySet.one(newTopic)))
+    yield ()
+
+  private def produce(server: String, batch: NonEmptyList[ProducerRecord[String, String]]): IO[Unit] =
+    for
+      client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+      settings <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+      _        <- PlatformKafkaClient().producer(settings).use(_.produceAndAwait(batch))
+    yield ()
+
+  private def transactionally[A](server: String)(use: Transaction[IO, String, String] => IO[A]): IO[A] =
+    for
+      client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+      settings <- TransactionalProducerSettings.from(client, uniqueTransactionalId(), Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+      result   <- PlatformKafkaClient().transactionalProducer(settings).use(_.transactionally(use))
+    yield result
 
   private def codeOf(outcome: Either[Throwable, Unit]): Option[ErrorCode] =
     outcome.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten

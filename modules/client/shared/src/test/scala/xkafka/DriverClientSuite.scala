@@ -619,7 +619,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         clientId: Option[String],
         groupId: String,
         autoOffsetReset: String,
-        properties: Map[String, String]
+        properties: Map[String, String],
+        reportEnds: Boolean
     ) = IO.pure("consumer")
 
     override def destroyConsumer(consumer: Client): IO[Unit] = IO.unit
@@ -704,11 +705,11 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit] = IO.unit
 
-    override def poll(consumer: Client, timeoutMillis: Int): IO[List[PolledRecord]] =
+    override def poll(consumer: Client, timeoutMillis: Int): IO[Polled] =
       inPoll.getAndSet(None).flatMap(_.sequence_) *> queued.modify {
         case head :: tail => (tail, List(head))
         case Nil          => (Nil, Nil)
-      }.flatMap(polled => if polled.isEmpty then IO.sleep(5.millis).as(Nil) else IO.pure(polled))
+      }.flatMap(polled => if polled.isEmpty then IO.sleep(5.millis).as(Polled.empty) else IO.pure(Polled.records(polled)))
 
     override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]] =
       pendingRebalances.getAndSet(Nil).flatTap: rebalances =>
