@@ -90,6 +90,12 @@ void *xkafka_admin_alter_topic_configs(rd_kafka_t *client, const char *const *to
 int xkafka_admin_elect_preferred_leaders(rd_kafka_t *client, const char *const *topics, const int32_t *partitions, size_t count,
                                          int timeout_ms, int32_t *codes, char *error, size_t error_size, int32_t *error_code);
 
+void *xkafka_socket_open(const char *host, int port, int timeout_ms, int tls, const char *ca_location, const char *ca_pem,
+                         const char *certificate_location, const char *key_location, const char *certificate_pem, const char *key_pem,
+                         const char *key_password, int verify_hostname, char *error, size_t error_size, int32_t *error_code);
+int xkafka_socket_write(void *handle, const void *data, size_t size, char *error, size_t error_size, int32_t *error_code);
+int xkafka_socket_read(void *handle, void *out, size_t size, char *error, size_t error_size, int32_t *error_code);
+
 /* What every job starts with. `run` makes the call and writes its result;
  * `release` frees the job's own copies. */
 typedef struct xkafka_job_s {
@@ -1044,6 +1050,113 @@ int xkafka_async_admin_elect_preferred_leaders(rd_kafka_t *client, const char *c
         call->codes = codes;
         call->result = result;
         return xkafka_job_start(&call->job, done, token);
+}
+
+/* ---- The group connection's sockets ---- */
+
+typedef struct {
+        xkafka_job_t job;
+        char *strings[8]; /* host, then the TLS settings in the order open takes them */
+        int port;
+        int timeout_ms;
+        int tls;
+        int verify_hostname;
+        xkafka_error_slots_t slots;
+        void **result;
+} xkafka_socket_open_job_t;
+
+static void xkafka_socket_open_run(xkafka_job_t *job) {
+        xkafka_socket_open_job_t *call = (xkafka_socket_open_job_t *)job;
+        char **v = call->strings;
+
+        *call->result = xkafka_socket_open(v[0], call->port, call->timeout_ms, call->tls, v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                                           call->verify_hostname, call->slots.error, call->slots.error_size, call->slots.error_code);
+}
+
+static void xkafka_socket_open_release(xkafka_job_t *job) {
+        xkafka_socket_open_job_t *call = (xkafka_socket_open_job_t *)job;
+        size_t index;
+
+        for (index = 0; index < 8; index++)
+                free(call->strings[index]);
+}
+
+int xkafka_async_socket_open(const char *host, int port, int timeout_ms, int tls, const char *ca_location, const char *ca_pem,
+                             const char *certificate_location, const char *key_location, const char *certificate_pem, const char *key_pem,
+                             const char *key_password, int verify_hostname, char *error, size_t error_size, int32_t *error_code,
+                             void **result, xkafka_done_t done, int64_t token) {
+        const char *strings[8] = {host, ca_location, ca_pem, certificate_location, key_location, certificate_pem, key_pem, key_password};
+        xkafka_socket_open_job_t *call = (xkafka_socket_open_job_t *)calloc(1, sizeof(xkafka_socket_open_job_t));
+        size_t index;
+
+        if (call == NULL)
+                return -1;
+        call->job.run = xkafka_socket_open_run;
+        call->job.release = xkafka_socket_open_release;
+        for (index = 0; index < 8; index++) {
+                call->strings[index] = xkafka_copy_string(strings[index]);
+                if (call->strings[index] == NULL && strings[index] != NULL) {
+                        xkafka_socket_open_release(&call->job);
+                        free(call);
+                        return -1;
+                }
+        }
+        call->port = port;
+        call->timeout_ms = timeout_ms;
+        call->tls = tls;
+        call->verify_hostname = verify_hostname;
+        call->slots.error = error;
+        call->slots.error_size = error_size;
+        call->slots.error_code = error_code;
+        call->result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+typedef struct {
+        xkafka_job_t job;
+        void *handle;
+        void *bytes;
+        size_t size;
+        int writing;
+        xkafka_error_slots_t slots;
+        int32_t *result;
+} xkafka_socket_io_job_t;
+
+static void xkafka_socket_io_run(xkafka_job_t *job) {
+        xkafka_socket_io_job_t *call = (xkafka_socket_io_job_t *)job;
+        xkafka_error_slots_t *s = &call->slots;
+
+        *call->result = call->writing ? xkafka_socket_write(call->handle, call->bytes, call->size, s->error, s->error_size, s->error_code)
+                                      : xkafka_socket_read(call->handle, call->bytes, call->size, s->error, s->error_size, s->error_code);
+}
+
+static int xkafka_socket_io(void *handle, void *bytes, size_t size, int writing, char *error, size_t error_size, int32_t *error_code,
+                            int32_t *result, xkafka_done_t done, int64_t token) {
+        xkafka_socket_io_job_t *call = (xkafka_socket_io_job_t *)calloc(1, sizeof(xkafka_socket_io_job_t));
+
+        if (call == NULL)
+                return -1;
+        call->job.run = xkafka_socket_io_run;
+        call->handle = handle;
+        call->bytes = bytes;
+        call->size = size;
+        call->writing = writing;
+        call->slots.error = error;
+        call->slots.error_size = error_size;
+        call->slots.error_code = error_code;
+        call->result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+/* The bytes are the caller's and must stay put until `done` is called. */
+int xkafka_async_socket_write(void *handle, const void *data, size_t size, char *error, size_t error_size, int32_t *error_code,
+                              int32_t *result, xkafka_done_t done, int64_t token) {
+        return xkafka_socket_io(handle, (void *)data, size, 1, error, error_size, error_code, result, done, token);
+}
+
+int xkafka_async_socket_read(void *handle, void *out, size_t size, char *error, size_t error_size, int32_t *error_code, int32_t *result,
+                             xkafka_done_t done, int64_t token) {
+        return xkafka_socket_io(handle, out, size, 0, error, error_size, error_code, result, done, token);
 }
 
 #endif

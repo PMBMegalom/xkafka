@@ -341,7 +341,8 @@ def fetchLibrdkafka(log: Logger, buildRoot: File): File = {
 
 // The C shim both librdkafka backends call. Scala Native compiles it from its resources; the JavaScript backend links it into a shared library.
 val librdkafkaShim =
-  Seq("xkafka_librdkafka.c", "xkafka_librdkafka_async.c", "xkafka_crypto.c").map(repositoryRoot / "modules" / "client" / "native" / "src" / "main" /
+  Seq("xkafka_librdkafka.c", "xkafka_librdkafka_async.c", "xkafka_crypto.c", "xkafka_socket.c").map(repositoryRoot / "modules" / "client" / "native" /
+    "src" / "main" /
     "resources" /
     "scala-native" / _)
 
