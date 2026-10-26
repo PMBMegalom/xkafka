@@ -48,7 +48,7 @@ final class StreamsDriverSuite extends CatsEffectSuite:
 
       for
         _      <- transactionUnder(server, topic, group, Identity(-1, ""), 7L)
-        stored <- groupOffsets(server, group)
+        stored <- committedOffsets(server, group)
       yield assertEquals(stored, Map(partitionOf(topic) -> 7L))
 
   test(broker("a transaction under a member the group does not have is refused, and leaves the group's offsets as they were")):
@@ -59,7 +59,7 @@ final class StreamsDriverSuite extends CatsEffectSuite:
       for
         _       <- transactionUnder(server, topic, group, Identity(-1, ""), 7L)
         refused <- transactionUnder(server, topic, group, Identity(5, "stranger-member"), 9L).attempt
-        stored  <- groupOffsets(server, group)
+        stored  <- committedOffsets(server, group)
       yield
         assertEquals(
           refused.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
@@ -230,6 +230,11 @@ final class StreamsDriverSuite extends CatsEffectSuite:
   /** Offsets here are only ever recorded by a transaction. */
   private object NoCommitter extends OffsetCommitter[IO]:
     override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.raiseError(new IllegalStateException("unused"))
+
+  /** Read again, up to 50 times, until a committed transaction's offsets appear: the broker applies them after the commit returns. */
+  private def committedOffsets(server: String, group: ConsumerGroup, attempts: Int = 50): IO[Map[TopicPartition, Long]] =
+    groupOffsets(server, group).flatMap: stored =>
+      if stored.nonEmpty || attempts <= 1 then IO.pure(stored) else IO.sleep(100.millis) *> committedOffsets(server, group, attempts - 1)
 
   private def groupOffsets(server: String, group: ConsumerGroup): IO[Map[TopicPartition, Long]] =
     ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
