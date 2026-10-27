@@ -212,17 +212,14 @@ final class ConnectionsSuite extends CatsEffectSuite:
   private def code(outcome: Either[Throwable, ?]): Option[ErrorCode] =
     outcome.left.toOption.collect { case error: KafkaException.BackendFailure => error.code }.flatten
 
-  private def sasl(mechanism: SaslMechanism): SecuritySettings =
-    SecuritySettings
-      .SaslPlaintext(SaslSettings.from(mechanism, "user", "secret").fold(errors => fail(s"invalid test SASL settings: $errors"), identity))
+  private def sasl(mechanism: SaslMechanism): SecuritySettings = SecuritySettings.SaslPlaintext(SaslSettings.from(mechanism, "user", "secret").orFail)
 
   private def connections(
       broker: FakeBroker,
       security: SecuritySettings = SecuritySettings.Plaintext,
       servers: NonEmptyList[String] = NonEmptyList.one("broker-1:9092")
   ): Connections[IO] =
-    val settings =
-      ClientSettings.from(servers, Some("fake-client"), security = security).fold(errors => fail(s"invalid test settings: $errors"), identity)
+    val settings = ClientSettings.from(servers, Some("fake-client"), security = security).orFail
     Connections(broker, PlatformCrypto[IO], settings, 1.second)
 
 object ConnectionsSuite:

@@ -65,10 +65,7 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
       test("a client key encrypted with PBES2 is read on Scala.js, Scala Native, and Java 21 or newer, and refused on Java 17".ignore)(IO.unit)
     case Some((authority, server, file, encrypted, certificate, key, password, pbes2)) =>
       def presenting(clientCertificate: ClientCertificate): SecuritySettings =
-        SecuritySettings.Tls(
-          TlsSettings.from(CertificateAuthority.PemFile(authority), clientCertificate = Some(clientCertificate))
-            .fold(errors => fail(s"invalid test TLS settings: $errors"), identity)
-        )
+        SecuritySettings.Tls(TlsSettings.from(CertificateAuthority.PemFile(authority), clientCertificate = Some(clientCertificate)).orFail)
 
       test("round trip over TLS with a client certificate file"):
         roundTrip(server, presenting(ClientCertificate.PemFile(file, None)))
@@ -181,13 +178,10 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
   private val utf8Serializer   = Serializer.utf8[IO]
   private val utf8Deserializer = Deserializer.utf8[IO]
 
-  private def validTls(authority: CertificateAuthority): TlsSettings =
-    TlsSettings.from(authority).fold(errors => fail(s"invalid test TLS settings: $errors"), identity)
+  private def validTls(authority: CertificateAuthority): TlsSettings = TlsSettings.from(authority).orFail
 
-  private def validSasl(username: String, password: String): SaslSettings =
-    SaslSettings.from(SaslMechanism.ScramSha256, username, password).fold(errors => fail(s"invalid test SASL settings: $errors"), identity)
+  private def validSasl(username: String, password: String): SaslSettings = SaslSettings.from(SaslMechanism.ScramSha256, username, password).orFail
 
-  private def validTopic(value: String): Topic = Topic.from(value).fold(error => fail(s"invalid test topic: $error"), identity)
+  private def validTopic(value: String): Topic = Topic.from(value).orFail
 
-  private def validConsumerGroup(value: String): ConsumerGroup =
-    ConsumerGroup.from(value).fold(error => fail(s"invalid test consumer group: $error"), identity)
+  private def validConsumerGroup(value: String): ConsumerGroup = ConsumerGroup.from(value).orFail

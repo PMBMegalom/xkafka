@@ -57,7 +57,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
     val group          = validConsumerGroup(s"xkafka-integration-$suffix")
     val clientSettings = ClientSettings.from(NonEmptyList.one(bootstrapServer), metadataRefreshInterval = 30.seconds).toOption.get
     val headers        = Headers(Header("x-xkafka-integration", Some(Chunk.array(Array[Byte](1, 2, 3)))))
-    val partition      = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
+    val partition      = Partition.from(0).orFail
     val first          =
       ProducerRecord(
         topic = topic,
@@ -126,7 +126,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
   private def controlRoundTrip(bootstrapServer: String): IO[Unit] =
     val suffix         = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
     val topic          = validTopic(s"xkafka-control-integration-$suffix")
-    val partition      = Partition.from(0).fold(error => fail(s"invalid test partition: $error"), identity)
+    val partition      = Partition.from(0).orFail
     val topicPartition = TopicPartition(topic, partition)
     val group          = validConsumerGroup(s"xkafka-control-integration-$suffix")
 
@@ -232,10 +232,8 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
   private val utf8Serializer   = Serializer.utf8[IO]
   private val utf8Deserializer = Deserializer.utf8[IO]
 
-  private def validTopic(value: String): Topic = Topic.from(value).fold(error => fail(s"invalid test topic: $error"), identity)
+  private def validTopic(value: String): Topic = Topic.from(value).orFail
 
-  private def validTopicPattern(value: String): TopicPattern =
-    TopicPattern.from(value).fold(error => fail(s"invalid test topic pattern: $error"), identity)
+  private def validTopicPattern(value: String): TopicPattern = TopicPattern.from(value).orFail
 
-  private def validConsumerGroup(value: String): ConsumerGroup =
-    ConsumerGroup.from(value).fold(error => fail(s"invalid test consumer group: $error"), identity)
+  private def validConsumerGroup(value: String): ConsumerGroup = ConsumerGroup.from(value).orFail

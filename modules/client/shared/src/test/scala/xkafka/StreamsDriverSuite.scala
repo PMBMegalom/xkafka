@@ -213,7 +213,7 @@ final class StreamsDriverSuite extends CatsEffectSuite:
     val offset =
       new CommittableOffset[IO]:
         override val topicPartition: TopicPartition                  = partitionOf(topic)
-        override val nextOffset: Offset                              = Offset.from(next).fold(error => fail(error.message), identity)
+        override val nextOffset: Offset                              = Offset.from(next).orFail
         override val committer: OffsetCommitter[IO]                  = NoCommitter
         override private[xkafka] def membership: GroupMembership[IO] = named
 
@@ -240,13 +240,10 @@ final class StreamsDriverSuite extends CatsEffectSuite:
     ClientSettings.from(NonEmptyList.one(server)).liftTo[IO].flatMap: client =>
       PlatformKafkaClient().admin(client).use(_.listConsumerGroupOffsets(group)).map(_.view.mapValues(_.offset.value).toMap)
 
-  private def partitionOf(topic: Topic): TopicPartition = TopicPartition(topic, Partition.from(0).fold(error => fail(error.message), identity))
+  private def partitionOf(topic: Topic): TopicPartition = TopicPartition(topic, Partition.from(0).orFail)
 
-  private def uniqueTopic(label: String): Topic =
-    Topic.from(s"xkafka-streams-driver-$label-$backend-${System.nanoTime()}").fold(error => fail(error.message), identity)
+  private def uniqueTopic(label: String): Topic = Topic.from(s"xkafka-streams-driver-$label-$backend-${System.nanoTime()}").orFail
 
-  private def uniqueGroup(label: String): ConsumerGroup =
-    ConsumerGroup.from(s"xkafka-streams-driver-$label-$backend-${System.nanoTime()}").fold(error => fail(error.message), identity)
+  private def uniqueGroup(label: String): ConsumerGroup = ConsumerGroup.from(s"xkafka-streams-driver-$label-$backend-${System.nanoTime()}").orFail
 
-  private def uniqueTransactionalId(): TransactionalId =
-    TransactionalId.from(s"xkafka-streams-driver-$backend-${System.nanoTime()}").fold(error => fail(error.message), identity)
+  private def uniqueTransactionalId(): TransactionalId = TransactionalId.from(s"xkafka-streams-driver-$backend-${System.nanoTime()}").orFail
