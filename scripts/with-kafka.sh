@@ -15,6 +15,10 @@ partitioned_topic="xkafka-partitioned"
 cluster_name="xkafka-cluster-$$"
 cluster_ports=("${XKAFKA_CLUSTER_PORT_1:-19096}" "${XKAFKA_CLUSTER_PORT_2:-19097}" "${XKAFKA_CLUSTER_PORT_3:-19098}")
 election_topic="xkafka-election"
+# Brokers of the oldest and newest releases xkafka's streams groups support, beside the main broker's, for the streams group tests.
+streams_name="xkafka-streams-$$"
+streams_releases=(4.2.2 4.4.0)
+streams_ports=("${XKAFKA_STREAMS_PORT_1:-19100}" "${XKAFKA_STREAMS_PORT_2:-19101}")
 username="xkafka"
 password="xkafka-secret"
 key_password="xkafka-key-secret"
@@ -49,6 +53,13 @@ cleanup() {
     docker rm --force --volumes "$cluster_name-$node" >/dev/null 2>&1 || true
   done
   docker network rm "$cluster_name" >/dev/null 2>&1 || true
+  for release in "${streams_releases[@]}"; do
+    if [[ "$status" -ne 0 ]]; then
+      docker logs "$streams_name-$release" >"$logs_dir/streams-$release.log" 2>&1 || true
+      docker logs --tail 50 "$streams_name-$release" || true
+    fi
+    docker rm --force --volumes "$streams_name-$release" >/dev/null 2>&1 || true
+  done
   rm -rf "$secrets_dir"
   exit "$status"
 }
@@ -138,6 +149,8 @@ docker run --detach --rm \
   --env KAFKA_LISTENER_NAME_SASLTLS_PLAIN_SASL_JAAS_CONFIG="org.apache.kafka.common.security.plain.PlainLoginModule required user_$username=\"$password\";" \
   --env KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
   --env KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+  --env KAFKA_GROUP_STREAMS_MIN_HEARTBEAT_INTERVAL_MS=500 \
+  --env KAFKA_GROUP_STREAMS_HEARTBEAT_INTERVAL_MS=500 \
   --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
   --env KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
   --env KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR=1 \
@@ -175,6 +188,37 @@ for node in 1 2 3; do
     apache/kafka:4.3.1 >/dev/null
 done
 
+# Streams group members heartbeat every half second on these brokers and the main one, so the tests see a rebalance within seconds.
+for index in "${!streams_releases[@]}"; do
+  release="${streams_releases[$index]}"
+  docker run --detach --rm \
+    --name "$streams_name-$release" \
+    --publish "127.0.0.1:${streams_ports[$index]}:9092" \
+    --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1" \
+    --health-interval 2s \
+    --health-timeout 5s \
+    --health-retries 30 \
+    --health-start-period 10s \
+    --env KAFKA_NODE_ID=1 \
+    --env KAFKA_PROCESS_ROLES=broker,controller \
+    --env KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,HOST:PLAINTEXT \
+    --env KAFKA_LISTENERS=CONTROLLER://:29093,INTERNAL://:19092,HOST://:9092 \
+    --env KAFKA_ADVERTISED_LISTENERS=INTERNAL://localhost:19092,HOST://127.0.0.1:"${streams_ports[$index]}" \
+    --env KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL \
+    --env KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+    --env KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:29093 \
+    --env KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+    --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
+    --env KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
+    --env KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
+    --env KAFKA_GROUP_STREAMS_MIN_HEARTBEAT_INTERVAL_MS=500 \
+    --env KAFKA_GROUP_STREAMS_HEARTBEAT_INTERVAL_MS=500 \
+    --env KAFKA_HEAP_OPTS="-Xmx384m -Xms384m" \
+    --env KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
+    --env CLUSTER_ID=6N8i5pUjV-gOEvM--Z08uy \
+    "apache/kafka:$release" >/dev/null
+done
+
 await_healthy() {
   for _ in $(seq 1 60); do
     status="$(docker inspect --format '{{.State.Health.Status}}' "$1")"
@@ -194,6 +238,9 @@ await_healthy() {
 await_healthy "$container_name"
 for node in 1 2 3; do
   await_healthy "$cluster_name-$node"
+done
+for release in "${streams_releases[@]}"; do
+  await_healthy "$streams_name-$release"
 done
 
 # SCRAM credentials live in the metadata log, so the user is created once the broker is serving, one
@@ -235,6 +282,7 @@ done
 export XKAFKA_CLUSTER_BOOTSTRAP_SERVERS="127.0.0.1:${cluster_ports[0]},127.0.0.1:${cluster_ports[1]},127.0.0.1:${cluster_ports[2]}"
 export XKAFKA_CLUSTER_ELECTION_TOPIC="$election_topic"
 export XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS="127.0.0.1:$host_port"
+export XKAFKA_STREAMS_BROKERS="${streams_releases[0]}=127.0.0.1:${streams_ports[0]},4.3.1=127.0.0.1:$host_port,${streams_releases[1]}=127.0.0.1:${streams_ports[1]}"
 export XKAFKA_INTEGRATION_PARTITIONED_TOPIC="$partitioned_topic"
 export XKAFKA_SECURITY_TLS_BOOTSTRAP_SERVERS="127.0.0.1:$tls_port"
 export XKAFKA_SECURITY_SASL_BOOTSTRAP_SERVERS="127.0.0.1:$sasl_port"

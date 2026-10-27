@@ -693,6 +693,19 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     )
   )
 
+// The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it.
+lazy val streamsFixture = project
+  .in(file("modules/streams-fixture"))
+  .enablePlugins(NoPublishPlugin)
+  .settings(
+    headerLicense := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
+    libraryDependencies ++= Seq(
+      "org.apache.kafka" % "kafka-streams" % kafkaClientsVersion,
+      "org.slf4j"        % "slf4j-nop"     % slf4jVersion
+    ),
+    fork := true
+  )
+
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
