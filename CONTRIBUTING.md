@@ -37,6 +37,14 @@ same assertions against every backend. Docker is required:
 scripts/integration-test.sh
 ```
 
+The streams engine's tests run separately, against a broker of each Kafka
+release it supports and beside a Java Kafka Streams application, as CI does in
+a job of their own:
+
+```sh
+scripts/integration-test.sh --streams
+```
+
 `KafkaConformanceSuite` asserts that the backends agree. A case may name the
 backends known to diverge from it, and those are marked as expected to fail, so
 fixing a backend makes the marked case fail and the marker has to be removed
