@@ -118,7 +118,14 @@ private[xkafka] object Connections:
 
   /** How the client names itself to the broker, which keeps it for its metrics. */
   val SoftwareName    = "xkafka"
-  val SoftwareVersion = "unknown"
+  val SoftwareVersion = softwareVersion(internal.BuildInfo.version)
+
+  /** A release as the broker takes it: letters, digits, `-` and `.`, starting and ending with a letter or digit. Any other character becomes `-`.
+    */
+  def softwareVersion(release: String): String =
+    def plain(c: Char) = c.isLetterOrDigit && c < 128
+    val cleaned = release.map(c => if plain(c) || c == '-' || c == '.' then c else '-').dropWhile(!plain(_)).reverse.dropWhile(!plain(_)).reverse
+    if cleaned.isEmpty then "unknown" else cleaned
 
   /** How long to wait before asking again for a coordinator, the Java client's `retry.backoff.ms`. */
   val Backoff: FiniteDuration = 100.millis

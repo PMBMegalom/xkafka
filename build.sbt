@@ -8,7 +8,7 @@ import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
 ThisBuild / scalaVersion     := "3.3.8"
-ThisBuild / tlBaseVersion    := "0.5"
+ThisBuild / tlBaseVersion    := "0.6"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
 ThisBuild / homepage         := Some(url("https://github.com/PMBMegalom/xkafka"))
@@ -484,15 +484,20 @@ lazy val kernel = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/client"))
+  .enablePlugins(BuildInfoPlugin)
   .dependsOn(kernel)
   .settings(commonSettings)
   .settings(
     name        := "xkafka-client",
     description := "Cross-platform functional Kafka client for Scala",
-    Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md")
+    Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
+    // The release the group connection names to the broker.
+    buildInfoPackage := "xkafka.internal",
+    buildInfoKeys    := Seq[BuildInfoKey](version),
+    buildInfoOptions ++= Seq(BuildInfoOption.PackagePrivate, BuildInfoOption.ConstantValue)
   )
   .jsConfigure(
-    _.enablePlugins(ScalaJSBundlerPlugin, BuildInfoPlugin)
+    _.enablePlugins(ScalaJSBundlerPlugin)
   )
   .jsSettings(
     Compile / npmDependencies ++= Seq("koffi" -> koffiVersion, "@xkafka/librdkafka" -> librdkafkaShimId),
@@ -590,10 +595,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     // identity is removed along with the locks that name it.
     Test / npmUpdate := (Test / npmUpdate).dependsOn(npmLibrdkafka, forgetStaleLibrdkafka).value,
     // The identity of the library this build was made with, which the loaded library must report.
-    buildInfoPackage := "xkafka.internal.librdkafka",
-    buildInfoObject  := "LibraryIdentity",
-    buildInfoKeys    := Seq[BuildInfoKey]("shim" -> librdkafkaShimId),
-    buildInfoOptions ++= Seq(BuildInfoOption.PackagePrivate, BuildInfoOption.ConstantValue)
+    buildInfoKeys += BuildInfoKey("shim" -> librdkafkaShimId)
   )
   .nativeSettings(
     librdkafkaPrefix  := sys.env.get("XKAFKA_LIBRDKAFKA_PREFIX").fold(target.value / s"librdkafka-$librdkafkaVersion")(file),

@@ -26,6 +26,7 @@ import scala.scalajs.js.annotation.JSImport
 
 import cats.syntax.all.*
 import xkafka.KafkaException
+import xkafka.internal.BuildInfo
 
 /** The C shim's functions, declared to koffi from their prototypes.
   *
@@ -318,9 +319,9 @@ private[librdkafka] object Shim:
       reported = shim.shimId().asInstanceOf[String]
       _ <-
         Either.cond(
-          reported == LibraryIdentity.shim,
+          reported == BuildInfo.shim,
           (),
-          new KafkaException.BackendFailure(s"the xkafka librdkafka library at $path is $reported, but this xkafka needs ${LibraryIdentity.shim}")
+          new KafkaException.BackendFailure(s"the xkafka librdkafka library at $path is $reported, but this xkafka needs ${BuildInfo.shim}")
         )
     yield shim
 
