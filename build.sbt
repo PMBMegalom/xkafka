@@ -689,10 +689,11 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   )
   .jvmSettings(
     libraryDependencies ++= Seq(
-      "org.apache.kafka" % "kafka-clients" % kafkaClientsVersion,
-      "at.yawk.lz4"      % "lz4-java"      % lz4JavaVersion,
-      "org.slf4j"        % "slf4j-nop"     % slf4jVersion        % Test,
-      "org.apache.kafka" % "kafka-streams" % kafkaClientsVersion % Test
+      "org.apache.kafka" % "kafka-clients"            % kafkaClientsVersion,
+      "at.yawk.lz4"      % "lz4-java"                 % lz4JavaVersion,
+      "org.slf4j"        % "slf4j-nop"                % slf4jVersion        % Test,
+      "org.apache.kafka" % "kafka-streams"            % kafkaClientsVersion % Test,
+      "org.apache.kafka" % "kafka-streams-test-utils" % kafkaClientsVersion % Test
     )
   )
 
