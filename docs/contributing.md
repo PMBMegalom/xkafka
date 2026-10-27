@@ -25,6 +25,14 @@ one, as CI does with each on a runner of its own:
 scripts/integration-test.sh native
 ```
 
+The streams engine's tests run separately, against a broker of each Kafka
+release it supports and beside a Java Kafka Streams application, as CI does in
+a job of their own:
+
+```sh
+scripts/integration-test.sh --streams
+```
+
 Three suites need it:
 
 - `KafkaIntegrationSuite` covers produce, consume, and commit round trips.

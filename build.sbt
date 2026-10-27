@@ -223,6 +223,32 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "streams-integration",
+  name = "Streams broker tests",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    setupNode,
+    installNativeDependencies,
+    cacheLibrdkafkaLibrary.value.withCond(Some("matrix.platform == 'js'")),
+    WorkflowStep.Run(
+      List("scripts/integration-test.sh --streams ${{ matrix.platform }}"),
+      name = Some("Test the streams engine against each supported Kafka release, beside Java Streams")
+    ),
+    WorkflowStep.Use(
+      UseRef.Public("actions", "upload-artifact", "v7"),
+      name = Some("Keep the broker logs"),
+      cond = Some("failure()"),
+      params = Map("name" -> "streams-broker-logs-${{ matrix.platform }}", "path" -> "target/broker-logs")
+    )
+  ),
+  oses = List("ubuntu-24.04"),
+  scalas = Nil,
+  javas = List(JavaSpec.temurin("17")),
+  matrixAdds = Map("platform" -> List("jvm", "js", "native")),
+  matrixFailFast = Some(true),
+  timeoutMinutes = Some(45)
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "native-leaks",
   name = "Native leak check",
   steps = githubWorkflowJobSetup.value.toList ++ List(
@@ -297,7 +323,8 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (job.id == "publish") job.withNeeds((job.needs ++ List("integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
+    if (job.id == "publish")
+      job.withNeeds((job.needs ++ List("integration", "streams-integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
     else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
     else job
   }
