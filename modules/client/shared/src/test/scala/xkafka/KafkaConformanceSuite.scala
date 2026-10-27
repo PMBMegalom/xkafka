@@ -2261,6 +2261,15 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             List("retention.ms", "cleanup.policy", "segment.ms")
               .map(name => name -> configuration.get(name).map(entry => (entry.value, entry.source))).toMap
           )
+      // Read again, up to 50 times, until `retention.ms` comes from `source`: the broker applies a change after it answers.
+      def entriesFrom(
+          admin: KafkaAdminClient[IO],
+          source: ConfigurationSource,
+          attempts: Int = 50
+      ): IO[Map[String, Option[(ConfigurationValue, ConfigurationSource)]]] =
+        entries(admin).flatMap: read =>
+          if read("retention.ms").exists(_._2 == source) || attempts <= 1 then IO.pure(read)
+          else IO.sleep(100.millis) *> entriesFrom(admin, source, attempts - 1)
 
       for
         client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
@@ -2272,9 +2281,9 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               before <- entries(admin)
               first  <-
                 changing(admin, "retention.ms" -> ConfigurationChange.Set("123456789"), "cleanup.policy" -> ConfigurationChange.Append("compact"))
-              changed  <- entries(admin)
+              changed  <- entriesFrom(admin, ConfigurationSource.TopicOverride)
               second   <- changing(admin, "retention.ms" -> ConfigurationChange.Unset, "cleanup.policy" -> ConfigurationChange.Subtract("delete"))
-              restored <- entries(admin)
+              restored <- entriesFrom(admin, ConfigurationSource.Default)
             yield (before, first, changed, second, restored)
           .timeout(90.seconds)
       yield
