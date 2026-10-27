@@ -47,6 +47,22 @@ final class ConnectionsSuite extends CatsEffectSuite:
       assertEquals(received.map(r => (r.api, r.version, r.correlationId)), Vector((Api.ApiVersions, 4: Short, 0), (Api.FindCoordinator, 5: Short, 1)))
       assertEquals(received.map(_.clientId).distinct, Vector(Some("fake-client")))
 
+  test("a connection names xkafka and its release to the broker, in the form the broker takes"):
+    for
+      broker   <- FakeBroker(standard(versions()))
+      _        <- connections(broker).to("broker", 9092).use_
+      received <- broker.received
+    yield
+      assertEquals(received.head.body, compactString("xkafka") ++ compactString(Connections.softwareVersion(internal.BuildInfo.version)) ++ noTags)
+      assert(Connections.SoftwareVersion.matches("[a-zA-Z0-9](?:[a-zA-Z0-9\\-.]*[a-zA-Z0-9])?"), Connections.SoftwareVersion)
+      assert(Connections.SoftwareVersion.startsWith("0."), Connections.SoftwareVersion)
+
+  test("a release is named with any character the broker refuses turned into a dash, and nothing but a letter or digit at either end"):
+    assertEquals(Connections.softwareVersion("0.6.0+3-ba9f7fe+20261026-1650-SNAPSHOT"), "0.6.0-3-ba9f7fe-20261026-1650-SNAPSHOT")
+    assertEquals(Connections.softwareVersion("0.6.0"), "0.6.0")
+    assertEquals(Connections.softwareVersion("-.0.6é_1.-"), "0.6--1")
+    assertEquals(Connections.softwareVersion("+-"), "unknown")
+
   test("a broker that does not read the version asked for is asked again in one it lists"):
     val older = versions(apiVersions = 3)
     for
