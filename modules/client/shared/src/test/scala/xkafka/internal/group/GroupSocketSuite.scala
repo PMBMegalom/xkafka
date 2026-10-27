@@ -45,7 +45,7 @@ final class GroupSocketSuite extends CatsEffectSuite:
   private def env(name: String): Option[String] = PlatformKafkaClient.environment(name)
 
   private def tls(authority: CertificateAuthority, certificate: Option[ClientCertificate] = None): TlsSettings =
-    TlsSettings.from(authority, clientCertificate = certificate).fold(errors => fail(s"invalid test TLS settings: $errors"), identity)
+    TlsSettings.from(authority, clientCertificate = certificate).orFail
 
   /** Asks the broker which versions it reads, the first request any client sends. */
   private def apiVersions(socket: Socket[IO]): IO[ApiVersionsResponse] =

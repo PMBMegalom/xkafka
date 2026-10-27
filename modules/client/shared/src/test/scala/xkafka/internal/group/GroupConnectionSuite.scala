@@ -39,9 +39,7 @@ final class GroupConnectionSuite extends CatsEffectSuite:
   private def server(variable: String): Option[String] = env(variable).map(_.split(',').head)
 
   private def connections(servers: NonEmptyList[String], security: SecuritySettings): Connections[IO] =
-    val settings =
-      ClientSettings.from(servers, Some("xkafka-group-connection"), security = security)
-        .fold(errors => fail(s"invalid test settings: $errors"), identity)
+    val settings = ClientSettings.from(servers, Some("xkafka-group-connection"), security = security).orFail
     Connections(PlatformSockets[IO], PlatformCrypto[IO], settings, 30.seconds)
 
   /** Connects to the coordinator of a new group, which, asked again, names the broker it is. */
@@ -65,11 +63,10 @@ final class GroupConnectionSuite extends CatsEffectSuite:
     yield answer
 
   private def tls(authority: String, certificate: Option[ClientCertificate] = None): TlsSettings =
-    TlsSettings.from(CertificateAuthority.PemFile(authority), clientCertificate = certificate)
-      .fold(errors => fail(s"invalid test TLS settings: $errors"), identity)
+    TlsSettings.from(CertificateAuthority.PemFile(authority), clientCertificate = certificate).orFail
 
   private def sasl(mechanism: SaslMechanism, username: String, password: String): SaslSettings =
-    SaslSettings.from(mechanism, username, password).fold(errors => fail(s"invalid test SASL settings: $errors"), identity)
+    SaslSettings.from(mechanism, username, password).orFail
 
   server("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS") match
     case Some(plaintext) =>

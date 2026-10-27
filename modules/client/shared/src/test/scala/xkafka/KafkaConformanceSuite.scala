@@ -2596,19 +2596,16 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def uniqueTopic(label: String): Topic = validTopic(s"xkafka-conformance-$label-$backend-${System.nanoTime()}")
 
   private def uniqueTransactionalId(label: String): TransactionalId =
-    TransactionalId.from(s"xkafka-conformance-$label-$backend-${System.nanoTime()}")
-      .fold(error => fail(s"invalid test transactional id: ${error.message}"), identity)
+    TransactionalId.from(s"xkafka-conformance-$label-$backend-${System.nanoTime()}").orFail
 
   private def uniqueGroup(label: String): ConsumerGroup = validGroup(s"xkafka-conformance-$label-$backend-${System.nanoTime()}")
 
-  private def validTopic(value: String): Topic = Topic.from(value).fold(error => fail(s"invalid test topic: ${error.message}"), identity)
+  private def validTopic(value: String): Topic = Topic.from(value).orFail
 
-  private def validGroup(value: String): ConsumerGroup =
-    ConsumerGroup.from(value).fold(error => fail(s"invalid test consumer group: ${error.message}"), identity)
+  private def validGroup(value: String): ConsumerGroup = ConsumerGroup.from(value).orFail
 
-  private def validPartition(value: Int): Partition = Partition.from(value).fold(error => fail(s"invalid test partition: ${error.message}"), identity)
+  private def validPartition(value: Int): Partition = Partition.from(value).orFail
 
-  private def validOffset(value: Long): Offset = Offset.from(value).fold(error => fail(s"invalid test offset: ${error.message}"), identity)
+  private def validOffset(value: Long): Offset = Offset.from(value).orFail
 
-  private def validEpoch(value: Int): LeaderEpoch =
-    LeaderEpoch.from(value).fold(error => fail(s"invalid test leader epoch: ${error.message}"), identity)
+  private def validEpoch(value: Int): LeaderEpoch = LeaderEpoch.from(value).orFail

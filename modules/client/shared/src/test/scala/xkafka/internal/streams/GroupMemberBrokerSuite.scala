@@ -44,8 +44,7 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
     def active: IO[Set[TaskId]] = owned.get.map(_.active)
 
   private def running(server: String, rebalanceTimeout: FiniteDuration = 30.seconds, obliging: Boolean = true): Resource[IO, Running] =
-    val settings =
-      ClientSettings.from(NonEmptyList.one(server), Some("xkafka-streams-member")).fold(errors => fail(s"invalid test settings: $errors"), identity)
+    val settings    = ClientSettings.from(NonEmptyList.one(server), Some("xkafka-streams-member")).orFail
     val connections = Connections(PlatformSockets[IO], PlatformCrypto[IO], settings, 30.seconds)
     for
       memberId  <- Resource.eval(GroupMember.memberId[IO])

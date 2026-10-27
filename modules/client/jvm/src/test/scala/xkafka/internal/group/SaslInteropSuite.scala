@@ -35,7 +35,7 @@ import scodec.bits.ByteVector
 /** The SASL exchanges against the Java client's own SCRAM server, and PLAIN against the JDK's PLAIN client. */
 final class SaslInteropSuite extends CatsEffectSuite:
   private def settings(mechanism: SaslMechanism, username: String, password: String): SaslSettings =
-    SaslSettings.from(mechanism, username, password).fold(errors => fail(s"invalid test settings: $errors"), identity)
+    SaslSettings.from(mechanism, username, password).orFail
 
   /** A SCRAM server holding the credential for `stored`, as a broker holds it. */
   private def server(mechanism: ScramMechanism, stored: String): ScramSaslServer =

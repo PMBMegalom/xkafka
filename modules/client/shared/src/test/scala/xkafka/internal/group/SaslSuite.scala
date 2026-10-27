@@ -34,7 +34,7 @@ final class SaslSuite extends CatsEffectSuite:
   private val crypto = PlatformCrypto[IO]
 
   private def settings(mechanism: SaslMechanism, username: String, password: String): SaslSettings =
-    SaslSettings.from(mechanism, username, password).fold(errors => fail(s"invalid test settings: $errors"), identity)
+    SaslSettings.from(mechanism, username, password).orFail
 
   /** A broker that answers each message with the next of its answers, recording what it was sent. */
   private final case class Broker(sent: Ref[IO, List[String]], answers: Ref[IO, List[String]]):
