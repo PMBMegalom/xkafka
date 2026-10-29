@@ -137,43 +137,45 @@ final class KafkaSecuritySuite extends CatsEffectSuite:
         else refuse(tlsServer, SecuritySettings.Tls(validTls(CertificateAuthority.PemFile(plainDir))), ErrorCode.SslAuthenticationFailed)
 
   private def roundTrip(bootstrapServer: String, security: SecuritySettings): IO[Unit] =
-    val suffix = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topic  = validTopic(s"xkafka-security-$suffix")
-    val group  = validConsumerGroup(s"xkafka-security-$suffix")
-    val record = ProducerRecord(topic, "security-key", s"security-value-${PlatformKafkaClient.name}")
+    Names.fresh:
+      val suffix = s"${PlatformKafkaClient.name}-${summon[Names].id}"
+      val topic  = validTopic(s"xkafka-security-$suffix")
+      val group  = validConsumerGroup(s"xkafka-security-$suffix")
+      val record = ProducerRecord(topic, "security-key", s"security-value-${PlatformKafkaClient.name}")
 
-    for
-      clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer), security = security).liftTo[IO]
-      producerSettings <- ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).liftTo[IO]
-      consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
-      _                <-
-        PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record)))
-          .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("secure Kafka producer timed out")))
-      consumed <-
-        PlatformKafkaClient().consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.lastOrError)
-          .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("secure Kafka consumer timed out")))
-    yield
-      assertEquals(consumed.record.topicPartition.topic, topic)
-      assertEquals(consumed.record.key, record.key)
-      assertEquals(consumed.record.value, record.value)
+      for
+        clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer), security = security).liftTo[IO]
+        producerSettings <- ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer).liftTo[IO]
+        consumerSettings <- ConsumerSettings.from(clientSettings, group, utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest).liftTo[IO]
+        _                <-
+          PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(record)))
+            .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("secure Kafka producer timed out")))
+        consumed <-
+          PlatformKafkaClient().consumer(consumerSettings, Selection.Topics(NonEmptySet.one(topic))).use(_.records.take(1).compile.lastOrError)
+            .timeoutTo(60.seconds, IO.raiseError(new RuntimeException("secure Kafka consumer timed out")))
+      yield
+        assertEquals(consumed.record.topicPartition.topic, topic)
+        assertEquals(consumed.record.key, record.key)
+        assertEquals(consumed.record.value, record.value)
 
   private def refuse(bootstrapServer: String, security: SecuritySettings, expected: ErrorCode): IO[Unit] =
-    val suffix = s"${PlatformKafkaClient.name}-${System.currentTimeMillis()}"
-    val topic  = validTopic(s"xkafka-security-refused-$suffix")
+    Names.fresh:
+      val suffix = s"${PlatformKafkaClient.name}-${summon[Names].id}"
+      val topic  = validTopic(s"xkafka-security-refused-$suffix")
 
-    for
-      clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer), security = security).liftTo[IO]
-      producerSettings <-
-        ProducerSettings
-          .from(clientSettings, utf8Serializer, utf8Serializer, PlatformKafkaClient.impatientProducerProperties, enqueueTimeout = 10.seconds)
-          .liftTo[IO]
-      outcome <-
-        PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
-          .timeout(90.seconds).attempt
-    yield outcome match
-      case Right(_)                                   => fail("the producer reached the broker")
-      case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, Some(expected), error.getMessage)
-      case Left(error)                                => fail(s"expected a backend failure, got $error")
+      for
+        clientSettings   <- ClientSettings.from(NonEmptyList.one(bootstrapServer), security = security).liftTo[IO]
+        producerSettings <-
+          ProducerSettings
+            .from(clientSettings, utf8Serializer, utf8Serializer, PlatformKafkaClient.impatientProducerProperties, enqueueTimeout = 10.seconds)
+            .liftTo[IO]
+        outcome <-
+          PlatformKafkaClient().producer(producerSettings).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
+            .timeout(90.seconds).attempt
+      yield outcome match
+        case Right(_)                                   => fail("the producer reached the broker")
+        case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, Some(expected), error.getMessage)
+        case Left(error)                                => fail(s"expected a backend failure, got $error")
 
   private val utf8Serializer   = Serializer.utf8[IO]
   private val utf8Deserializer = Deserializer.utf8[IO]

@@ -44,9 +44,10 @@ final class GroupConnectionSuite extends CatsEffectSuite:
 
   /** Connects to the coordinator of a new group, which, asked again, names the broker it is. */
   private def reachesCoordinator(servers: NonEmptyList[String], security: SecuritySettings, expected: String): IO[Unit] =
-    val group = s"xkafka-group-connection-${PlatformKafkaClient.name}-${System.nanoTime()}"
-    connections(servers, security).coordinator(group).use(_.send(FindCoordinatorRequest(FindCoordinatorRequest.GroupKey, List(group)))).map: answer =>
-      assertEquals(answer.map(found => (found.errorCode, s"${found.host}:${found.port}")), List((0: Short, expected)))
+    Names.fresh:
+      val group = summon[Names](s"xkafka-group-connection-${PlatformKafkaClient.name}")
+      connections(servers, security).coordinator(group).use(_.send(FindCoordinatorRequest(FindCoordinatorRequest.GroupKey, List(group)))).map:
+        answer => assertEquals(answer.map(found => (found.errorCode, s"${found.host}:${found.port}")), List((0: Short, expected)))
 
   private def refused(server: String, security: SecuritySettings, code: ErrorCode): IO[Unit] =
     connections(NonEmptyList.one(server), security).coordinator("xkafka-group-connection-refused").use_.attempt.map:
@@ -75,30 +76,31 @@ final class GroupConnectionSuite extends CatsEffectSuite:
       test("the coordinator is reached through a bootstrap server listed after one that cannot be reached"):
         reachesCoordinator(NonEmptyList.of("127.0.0.1:1", plaintext), SecuritySettings.Plaintext, plaintext)
       test("the broker reads every version of the requests the connection makes, and answers each version of ApiVersions and FindCoordinator"):
-        val group           = s"xkafka-group-connection-versions-${PlatformKafkaClient.name}-${System.nanoTime()}"
-        val (host, port)    = Connections.address(plaintext)
-        def every(api: Api) = (api.lowest.toInt to api.highest.toInt).map(_.toShort).toList
-        for
-          _       <- connections(NonEmptyList.one(plaintext), SecuritySettings.Plaintext).coordinator(group).use_
-          answers <-
-            PlatformSockets[IO].connect(host, port, None, 30.seconds).use: socket =>
-              for
-                listed <- every(Api.ApiVersions).traverse(version => exchange(socket, ApiVersionsRequest("xkafka", "0.6.0"), version))
-                found  <-
-                  every(Api.FindCoordinator)
-                    .traverse(version => exchange(socket, FindCoordinatorRequest(FindCoordinatorRequest.GroupKey, List(group)), version))
-              yield (listed, found)
-        yield
-          val (listed, found) = answers
-          assertEquals(listed.map(_.errorCode), every(Api.ApiVersions).as(0: Short))
-          // Which heartbeat versions a broker reads depends on its release, which the group member's tests check.
-          Api.values.filterNot(_ == Api.StreamsGroupHeartbeat).foreach: api =>
-            val offered = listed.head.apis.find(_.key == api.key)
-            assert(offered.exists(range => range.min <= api.lowest && range.max >= api.highest), s"$api: the broker reads $offered")
-          assertEquals(
-            found.map(_.map(c => (c.key, c.errorCode, s"${c.host}:${c.port}"))),
-            every(Api.FindCoordinator).as(List((group, 0: Short, plaintext)))
-          )
+        Names.fresh:
+          val group           = summon[Names](s"xkafka-group-connection-versions-${PlatformKafkaClient.name}")
+          val (host, port)    = Connections.address(plaintext)
+          def every(api: Api) = (api.lowest.toInt to api.highest.toInt).map(_.toShort).toList
+          for
+            _       <- connections(NonEmptyList.one(plaintext), SecuritySettings.Plaintext).coordinator(group).use_
+            answers <-
+              PlatformSockets[IO].connect(host, port, None, 30.seconds).use: socket =>
+                for
+                  listed <- every(Api.ApiVersions).traverse(version => exchange(socket, ApiVersionsRequest("xkafka", "0.6.0"), version))
+                  found  <-
+                    every(Api.FindCoordinator)
+                      .traverse(version => exchange(socket, FindCoordinatorRequest(FindCoordinatorRequest.GroupKey, List(group)), version))
+                yield (listed, found)
+          yield
+            val (listed, found) = answers
+            assertEquals(listed.map(_.errorCode), every(Api.ApiVersions).as(0: Short))
+            // Which heartbeat versions a broker reads depends on its release, which the group member's tests check.
+            Api.values.filterNot(_ == Api.StreamsGroupHeartbeat).foreach: api =>
+              val offered = listed.head.apis.find(_.key == api.key)
+              assert(offered.exists(range => range.min <= api.lowest && range.max >= api.highest), s"$api: the broker reads $offered")
+            assertEquals(
+              found.map(_.map(c => (c.key, c.errorCode, s"${c.host}:${c.port}"))),
+              every(Api.FindCoordinator).as(List((group, 0: Short, plaintext)))
+            )
     case None =>
       test("the broker reads every version of the requests the connection makes, and answers each version of ApiVersions and FindCoordinator".ignore)(
         IO.unit
