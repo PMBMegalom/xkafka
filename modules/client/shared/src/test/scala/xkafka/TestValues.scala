@@ -23,6 +23,8 @@ package xkafka
 
 import cats.Show
 import cats.data.Validated
+import cats.effect.IO
+import cats.effect.std.UUIDGen
 import cats.syntax.show.*
 import munit.{Assertions, Location}
 
@@ -33,3 +35,17 @@ extension [E: Show, A](result: Either[E, A])
 extension [E: Show, A](result: Validated[E, A])
   /** The value a test built, or a failure at the caller's line saying why the value is invalid. */
   def orFail(using Location): A = result.toEither.orFail
+
+/** What makes the names one test gives its topics, groups and transactions its own, so tests that share a broker never meet: a random id drawn as the
+  * test starts.
+  */
+final case class Names(id: String):
+  /** `label`, made this test's own. */
+  def apply(label: String): String = s"$label-$id"
+
+object Names:
+  /** Names of their own, drawn when the effect runs. */
+  val draw: IO[Names] = UUIDGen[IO].randomUUID.map(uuid => Names(uuid.toString))
+
+  /** Runs `test` with names of its own. */
+  def fresh[A](test: Names ?=> IO[A]): IO[A] = draw.flatMap(names => test(using names))

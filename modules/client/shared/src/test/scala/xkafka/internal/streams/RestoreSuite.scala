@@ -39,7 +39,7 @@ final class RestoreSuite extends CatsEffectSuite:
   private val driver  = KafkaClientPlatform.driver[IO]
   private val backend = PlatformKafkaClient.name
 
-  private def topic(label: String): Topic = Topic.from(s"xkafka-restore-$label-$backend-${System.nanoTime()}").orFail
+  private def topic(label: String)(using names: Names): Topic = Topic.from(s"xkafka-restore-$backend-${names(label)}").orFail
 
   private def partition(topic: Topic, n: Int): TopicPartition = TopicPartition(topic, Partition.from(n).orFail)
 
@@ -52,7 +52,8 @@ final class RestoreSuite extends CatsEffectSuite:
   private def transactionally(server: String)(use: Transaction[IO, Option[String], Option[String]] => IO[Unit]): IO[Unit] =
     for
       client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
-      id       <- TransactionalId.from(s"xkafka-restore-$backend-${System.nanoTime()}").liftTo[IO]
+      names    <- Names.draw
+      id       <- TransactionalId.from(s"xkafka-restore-$backend-${names("transaction")}").liftTo[IO]
       settings <- TransactionalProducerSettings.from(client, id, Serializer.utf8[IO].option, Serializer.utf8[IO].option).liftTo[IO]
       _        <- PlatformKafkaClient().transactionalProducer(settings).use(_.transactionally(use))
     yield ()
@@ -76,45 +77,54 @@ final class RestoreSuite extends CatsEffectSuite:
     test(
       "a store holds the latest committed value of each key, without earlier or aborted writes, keys removed later or records without a key, across partitions"
     ):
-      val changelog = topic("latest")
-      val empty     = topic("empty")
-      for
-        // Current times: records written in 1970 fall outside the broker's retention, which deletes them while the test runs.
-        now <- IO.realTime.map(_.toMillis)
-        _   <- create(server, changelog, empty)
-        _   <-
-          transactionally(server)(
-            _.produce(NonEmptyList.of(
-              record(changelog, 0, "k1", Some("a"), now),
-              record(changelog, 0, "k2", Some("b"), now + 100),
-              record(changelog, 1, "k5", Some("e"), now + 200),
-              record(changelog, 1, "", Some("no key"), now + 210)
-            )).void
-          )
-        _ <-
-          transactionally(server)(t =>
-            t.produce(NonEmptyList.one(record(changelog, 0, "k1", Some("aborted"), now + 250))) *> IO.raiseError(new RuntimeException("abort"))
-          ).attempt
-        _ <-
-          transactionally(server)(
-            _.produce(NonEmptyList.of(
-              record(changelog, 0, "k2", None, now + 300),
-              record(changelog, 0, "k3", Some("c"), now + 400),
-              record(changelog, 0, "k1", Some("a2"), now + 500)
-            )).void
-          )
-        restored <-
-          restoring(server).use: consumer =>
-            Restore(
-              driver,
-              consumer,
-              Map(partition(changelog, 0) -> "kept", partition(changelog, 1) -> "kept", partition(empty, 0) -> "none", partition(empty, 1) -> "none")
+      Names.fresh:
+        val changelog = topic("latest")
+        val empty     = topic("empty")
+        for
+          // Current times: records written in 1970 fall outside the broker's retention, which deletes them while the test runs.
+          now <- IO.realTime.map(_.toMillis)
+          _   <- create(server, changelog, empty)
+          _   <-
+            transactionally(server)(
+              _.produce(NonEmptyList.of(
+                record(changelog, 0, "k1", Some("a"), now),
+                record(changelog, 0, "k2", Some("b"), now + 100),
+                record(changelog, 1, "k5", Some("e"), now + 200),
+                record(changelog, 1, "", Some("no key"), now + 210)
+              )).void
             )
-      yield assertEquals(
-        restored,
-        Map(
-          "kept" ->
-            Map(text("k1") -> Stored(text("a2"), now + 500), text("k3") -> Stored(text("c"), now + 400), text("k5") -> Stored(text("e"), now + 200)),
-          "none" -> Map.empty
+          _ <-
+            transactionally(server)(t =>
+              t.produce(NonEmptyList.one(record(changelog, 0, "k1", Some("aborted"), now + 250))) *> IO.raiseError(new RuntimeException("abort"))
+            ).attempt
+          _ <-
+            transactionally(server)(
+              _.produce(NonEmptyList.of(
+                record(changelog, 0, "k2", None, now + 300),
+                record(changelog, 0, "k3", Some("c"), now + 400),
+                record(changelog, 0, "k1", Some("a2"), now + 500)
+              )).void
+            )
+          restored <-
+            restoring(server).use: consumer =>
+              Restore(
+                driver,
+                consumer,
+                Map(
+                  partition(changelog, 0) -> "kept",
+                  partition(changelog, 1) -> "kept",
+                  partition(empty, 0)     -> "none",
+                  partition(empty, 1)     -> "none"
+                )
+              )
+        yield assertEquals(
+          restored,
+          Map(
+            "kept" -> Map(
+              text("k1") -> Stored(text("a2"), now + 500),
+              text("k3") -> Stored(text("c"), now + 400),
+              text("k5") -> Stored(text("e"), now + 200)
+            ),
+            "none" -> Map.empty
+          )
         )
-      )

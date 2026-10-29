@@ -39,7 +39,7 @@ final class StreamsDriverSuite extends CatsEffectSuite:
 
   private def broker(name: String): TestOptions = if bootstrapServers.isEmpty then TestOptions(name).ignore else TestOptions(name)
 
-  private def withBroker(run: String => IO[Unit]): IO[Unit] = bootstrapServers.fold(IO.unit)(run)
+  private def withBroker(run: Names ?=> String => IO[Unit]): IO[Unit] = bootstrapServers.fold(IO.unit)(server => Names.fresh(run(server)))
 
   test(broker("a transaction records offsets under a group identity built from its parts")):
     withBroker: server =>
@@ -146,9 +146,10 @@ final class StreamsDriverSuite extends CatsEffectSuite:
 
   /** A consumer of the topic's only partition from its start, under read_committed, as a restore reads a changelog. */
   private def reading(server: String, topic: Topic, reportEnds: Boolean): Resource[IO, driver.Client] =
-    Resource.make(
-      driver.consumer(server, None, uniqueGroup("restore").value, "earliest", Map("isolation.level" -> "read_committed"), reportEnds)
-    )(driver.destroyConsumer).evalTap(consumer => driver.assign(consumer, Vector(partitionOf(topic)), Vector.empty))
+    Resource.eval(Names.draw).flatMap: names =>
+      Resource.make(
+        driver.consumer(server, None, uniqueGroup("restore")(using names).value, "earliest", Map("isolation.level" -> "read_committed"), reportEnds)
+      )(driver.destroyConsumer).evalTap(consumer => driver.assign(consumer, Vector(partitionOf(topic)), Vector.empty))
 
   /** The offsets read up to the first end the consumer reports, and that end. */
   private def toEnd(consumer: driver.Client): IO[(List[Long], PartitionEnd)] =
@@ -185,11 +186,12 @@ final class StreamsDriverSuite extends CatsEffectSuite:
     yield ()
 
   private def transactionally[A](server: String)(use: Transaction[IO, String, String] => IO[A]): IO[A] =
-    for
-      client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
-      settings <- TransactionalProducerSettings.from(client, uniqueTransactionalId(), Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
-      result   <- PlatformKafkaClient().transactionalProducer(settings).use(_.transactionally(use))
-    yield result
+    Names.fresh:
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        settings <- TransactionalProducerSettings.from(client, uniqueTransactionalId, Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+        result   <- PlatformKafkaClient().transactionalProducer(settings).use(_.transactionally(use))
+      yield result
 
   private def codeOf(outcome: Either[Throwable, Unit]): Option[ErrorCode] =
     outcome.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten
@@ -217,15 +219,16 @@ final class StreamsDriverSuite extends CatsEffectSuite:
         override val committer: OffsetCommitter[IO]                  = NoCommitter
         override private[xkafka] def membership: GroupMembership[IO] = named
 
-    for
-      client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
-      settings <- TransactionalProducerSettings.from(client, uniqueTransactionalId(), Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
-      _        <-
-        PlatformKafkaClient().transactionalProducer(settings).use: producer =>
-          producer.transactionally: transaction =>
-            transaction.produce(NonEmptyList.one(ProducerRecord(topic, "key", "value"))) *>
-              transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(List(offset)))
-    yield ()
+    Names.fresh:
+      for
+        client   <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        settings <- TransactionalProducerSettings.from(client, uniqueTransactionalId, Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+        _        <-
+          PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+            producer.transactionally: transaction =>
+              transaction.produce(NonEmptyList.one(ProducerRecord(topic, "key", "value"))) *>
+                transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(List(offset)))
+      yield ()
 
   /** Offsets here are only ever recorded by a transaction. */
   private object NoCommitter extends OffsetCommitter[IO]:
@@ -242,8 +245,10 @@ final class StreamsDriverSuite extends CatsEffectSuite:
 
   private def partitionOf(topic: Topic): TopicPartition = TopicPartition(topic, Partition.from(0).orFail)
 
-  private def uniqueTopic(label: String): Topic = Topic.from(s"xkafka-streams-driver-$label-$backend-${System.nanoTime()}").orFail
+  private def uniqueTopic(label: String)(using names: Names): Topic = Topic.from(s"xkafka-streams-driver-$backend-${names(label)}").orFail
 
-  private def uniqueGroup(label: String): ConsumerGroup = ConsumerGroup.from(s"xkafka-streams-driver-$label-$backend-${System.nanoTime()}").orFail
+  private def uniqueGroup(label: String)(using names: Names): ConsumerGroup =
+    ConsumerGroup.from(s"xkafka-streams-driver-$backend-${names(label)}").orFail
 
-  private def uniqueTransactionalId(): TransactionalId = TransactionalId.from(s"xkafka-streams-driver-$backend-${System.nanoTime()}").orFail
+  private def uniqueTransactionalId(using names: Names): TransactionalId =
+    TransactionalId.from(s"xkafka-streams-driver-$backend-${names("transaction")}").orFail
