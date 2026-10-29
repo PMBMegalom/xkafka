@@ -30,7 +30,6 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
-import driver.StartAt
 
 /** Stores refilled from changelogs written in transactions, against the broker, on every platform. */
 final class RestoreSuite extends CatsEffectSuite:
@@ -73,27 +72,6 @@ final class RestoreSuite extends CatsEffectSuite:
       driver.consumer(server, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
     )(driver.destroyConsumer)
 
-  /** Waits, reading again up to 50 times, until no transaction on `partitions` is still being completed: until the end a read_committed reader
-    * reaches is the high watermark, which counts the commit markers. A commit returns before the broker writes its markers, and the engine restores
-    * only after fetching its committed offsets in stable mode, which waits for them.
-    */
-  private def settled(server: String, partitions: Vector[TopicPartition], attempts: Int = 50): IO[Unit] =
-    val ends =
-      restoring(server).use: consumer =>
-        def read(seen: Map[TopicPartition, Long]): IO[Map[TopicPartition, Long]] =
-          if seen.size == partitions.size then IO.pure(seen)
-          else
-            driver.poll(consumer, Restore.PollMillis).flatMap: polled =>
-              read(
-                seen ++
-                  polled.ends
-                    .flatMap(end => partitions.find(p => p.topic.value == end.topic && p.partition.value == end.partition).map(_ -> end.offset))
-              )
-        driver.assign(consumer, partitions, partitions.map(StartAt(_, 0L, -1))) *> read(Map.empty).flatMap: reached =>
-          partitions.traverse(p => driver.watermarks(consumer, p, 10000).map(marks => reached(p) == marks._2)).map(_.forall(identity))
-    ends.flatMap: stable =>
-      if stable || attempts <= 1 then IO.unit else IO.sleep(100.millis) *> settled(server, partitions, attempts - 1)
-
   server.foreach: server =>
     test(
       "a store holds the latest committed value of each key, without earlier or aborted writes, keys removed later or records without a key, across partitions"
@@ -101,29 +79,30 @@ final class RestoreSuite extends CatsEffectSuite:
       val changelog = topic("latest")
       val empty     = topic("empty")
       for
-        _ <- create(server, changelog, empty)
-        _ <-
+        // Current times: records written in 1970 fall outside the broker's retention, which deletes them while the test runs.
+        now <- IO.realTime.map(_.toMillis)
+        _   <- create(server, changelog, empty)
+        _   <-
           transactionally(server)(
             _.produce(NonEmptyList.of(
-              record(changelog, 0, "k1", Some("a"), 1000L),
-              record(changelog, 0, "k2", Some("b"), 1100L),
-              record(changelog, 1, "k5", Some("e"), 1200L),
-              record(changelog, 1, "", Some("no key"), 1210L)
+              record(changelog, 0, "k1", Some("a"), now),
+              record(changelog, 0, "k2", Some("b"), now + 100),
+              record(changelog, 1, "k5", Some("e"), now + 200),
+              record(changelog, 1, "", Some("no key"), now + 210)
             )).void
           )
         _ <-
           transactionally(server)(t =>
-            t.produce(NonEmptyList.one(record(changelog, 0, "k1", Some("aborted"), 1250L))) *> IO.raiseError(new RuntimeException("abort"))
+            t.produce(NonEmptyList.one(record(changelog, 0, "k1", Some("aborted"), now + 250))) *> IO.raiseError(new RuntimeException("abort"))
           ).attempt
         _ <-
           transactionally(server)(
             _.produce(NonEmptyList.of(
-              record(changelog, 0, "k2", None, 1300L),
-              record(changelog, 0, "k3", Some("c"), 1400L),
-              record(changelog, 0, "k1", Some("a2"), 1500L)
+              record(changelog, 0, "k2", None, now + 300),
+              record(changelog, 0, "k3", Some("c"), now + 400),
+              record(changelog, 0, "k1", Some("a2"), now + 500)
             )).void
           )
-        _        <- settled(server, Vector(partition(changelog, 0), partition(changelog, 1)))
         restored <-
           restoring(server).use: consumer =>
             Restore(
@@ -134,7 +113,8 @@ final class RestoreSuite extends CatsEffectSuite:
       yield assertEquals(
         restored,
         Map(
-          "kept" -> Map(text("k1") -> Stored(text("a2"), 1500L), text("k3") -> Stored(text("c"), 1400L), text("k5") -> Stored(text("e"), 1200L)),
+          "kept" ->
+            Map(text("k1") -> Stored(text("a2"), now + 500), text("k3") -> Stored(text("c"), now + 400), text("k5") -> Stored(text("e"), now + 200)),
           "none" -> Map.empty
         )
       )
