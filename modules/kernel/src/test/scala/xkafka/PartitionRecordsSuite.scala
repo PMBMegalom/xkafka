@@ -27,7 +27,7 @@ import cats.data.NonEmptySet
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
-import fs2.concurrent.Channel
+import fs2.concurrent.{Channel, SignallingRef}
 import munit.CatsEffectSuite
 
 final class PartitionRecordsSuite extends CatsEffectSuite:
@@ -165,27 +165,26 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
 
   test("consumeChunk hands over every record and commits what it processed"):
     val expected = List(firstPartition -> "a", firstPartition -> "b", secondPartition -> "c")
+    val wanted   = Map(firstPartition -> 2L, secondPartition -> 3L)
+    // A batch keeps the highest offset per partition, so how the records were chunked does not change what is committed.
+    def highest(committals: Vector[(TopicPartition, Offset)]) = committals.groupBy(_._1).view.mapValues(_.map(_._2.value).max).toMap
 
     for
       assignment <- Ref[IO].of(Set(firstPartition, secondPartition))
       input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       processed  <- Ref[IO].of(Vector.empty[String])
-      committed  <- Ref[IO].of(Vector.empty[(TopicPartition, Offset)])
-      complete   <- Deferred[IO, Unit]
+      committed  <- SignallingRef[IO].of(Vector.empty[(TopicPartition, Offset)])
       _          <- expected.zipWithIndex.traverse_((entry, index) => input.send(recorded(entry._1, index.toLong, entry._2, committed)).void)
       consumer = testConsumer(assignment, input)
+      // A chunk is committed after its handler returns, so the wait is for the commits; past it, the assertions say what is missing.
       _ <-
-        consumer.consumeChunk: chunk =>
-          processed.updateAndGet(_ ++ chunk.toList.map(_.value)).flatMap(all => complete.complete(()).void.whenA(all.size == expected.size))
-            .as(CommitNow)
-        .race(complete.get).timeout(30.seconds)
+        consumer.consumeChunk(chunk => processed.update(_ ++ chunk.toList.map(_.value)).as(CommitNow))
+          .race(committed.waitUntil(committals => highest(committals) == wanted)).void.timeoutTo(30.seconds, IO.unit)
       handled    <- processed.get
       committals <- committed.get
     yield
       assertEquals(handled.toList.sorted, expected.map(_._2).sorted)
-      // A batch keeps the highest offset per partition, so how the records were chunked does not change what is committed.
-      val highest = committals.groupBy(_._1).view.mapValues(_.map(_._2.value).max).toMap
-      assertEquals(highest, Map(firstPartition -> 2L, secondPartition -> 3L))
+      assertEquals(highest(committals), wanted)
 
   private def testConsumer(
       currentAssignment: Ref[IO, Set[TopicPartition]],
