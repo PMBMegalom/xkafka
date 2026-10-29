@@ -21,11 +21,22 @@
 
 package xkafka
 
-import cats.effect.Async
-import internal.librdkafka.JsLibrdkafka
+import cats.effect.{Async, Resource}
+import cats.syntax.all.*
+import internal.librdkafka.{JsLibrdkafka, MockCluster}
 
 private[xkafka] object KafkaClientPlatform:
   def apply[F[_]: Async]: KafkaClient[F] = new DriverClient[F](new JsLibrdkafka[F])
 
 private[xkafka] object LibrdkafkaPlatform:
   def version: String = JsLibrdkafka.version
+
+  /** A mock cluster made for a producer created with `properties` (see [[internal.librdkafka.MockCluster]]). */
+  def mockCluster[F[_]: Async](properties: Map[String, String]): Resource[F, MockCluster[F]] =
+    val driver = new JsLibrdkafka[F]
+    Resource.make(driver.producer("localhost:9092", None, properties, 1000))(driver.destroyProducer(_, 1000)).evalMap: producer =>
+      driver.mockBootstraps(producer).map: servers =>
+        new MockCluster[F]:
+          val bootstrapServers: String                             = servers
+          def createTopic(name: String, partitions: Int): F[Unit]  = driver.mockCreateTopic(producer, name, partitions)
+          def failRequests(apiKey: Int, codes: List[Int]): F[Unit] = driver.mockFailRequests(producer, apiKey, codes)

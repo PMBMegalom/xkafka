@@ -74,6 +74,33 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
 
   override def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit] = F.blocking(Bindings.xkafka_producer_destroy(producer, timeoutMillis))
 
+  /** The bootstrap servers of the mock cluster librdkafka made for `client` (see [[MockCluster]]). */
+  private[xkafka] def mockBootstraps(client: Client): F[String] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val servers            = Bindings.xkafka_mock_bootstraps(client, error, ErrorBufferSize.toUSize, errorCode)
+        if servers == null then throw nativeError(error, errorCode) else fromCString(servers)
+
+  private[xkafka] def mockCreateTopic(client: Client, name: String, partitions: Int): F[Unit] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        if Bindings.xkafka_mock_topic_create(client, toCString(name), partitions, error, ErrorBufferSize.toUSize, errorCode) != 0 then
+          throw nativeError(error, errorCode)
+
+  private[xkafka] def mockFailRequests(client: Client, apiKey: Int, codes: List[Int]): F[Unit] =
+    F.blocking:
+      Zone.acquire: zone =>
+        given Zone             = zone
+        val (error, errorCode) = errorSlots
+        val values             = alloc[CInt](codes.size.max(1))
+        codes.zipWithIndex.foreach((code, index) => values(index) = code)
+        if Bindings.xkafka_mock_request_errors(client, apiKey.toShort, values, codes.size.toUSize, error, ErrorBufferSize.toUSize, errorCode) != 0
+        then throw nativeError(error, errorCode)
+
   override def consumer(
       bootstrapServers: String,
       clientId: Option[String],

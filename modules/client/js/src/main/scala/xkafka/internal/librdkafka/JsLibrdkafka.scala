@@ -77,6 +77,22 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit] = background(_.producerDestroy)(producer, timeoutMillis)
 
+  /** The bootstrap servers of the mock cluster librdkafka made for `client` (see [[MockCluster]]). */
+  private[xkafka] def mockBootstraps(client: Client): F[String] =
+    F.defer:
+      val error = ErrorSlot()
+      direct(_.mockBootstraps(client, error.message, ErrorBufferSize, error.code)).map(servers => error.orFail(servers).asInstanceOf[String])
+
+  private[xkafka] def mockCreateTopic(client: Client, name: String, partitions: Int): F[Unit] =
+    F.defer:
+      val error = ErrorSlot()
+      direct(_.mockTopicCreate(client, name, partitions, error.message, ErrorBufferSize, error.code)).flatMap(error.check)
+
+  private[xkafka] def mockFailRequests(client: Client, apiKey: Int, codes: List[Int]): F[Unit] =
+    F.defer:
+      val error = ErrorSlot()
+      direct(_.mockRequestErrors(client, apiKey, ints(codes.toVector), codes.size, error.message, ErrorBufferSize, error.code)).flatMap(error.check)
+
   override def consumer(
       bootstrapServers: String,
       clientId: Option[String],

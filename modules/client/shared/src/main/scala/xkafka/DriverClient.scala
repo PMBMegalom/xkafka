@@ -53,6 +53,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   // Admin calls are metadata round trips against the controller, so they are bounded on their own.
   private val AdminTimeoutMillis = 30000
 
+  /** The Java consumer's `retry.backoff.ms` and `retry.backoff.max.ms`. */
+  private val CoordinatorBackoff    = 100.millis
+  private val CoordinatorMaxBackoff = 1.second
+
   // The offsets `KafkaDriver.seek` reads as the ends of a partition's log.
   private val BeginningOffset = KafkaDriver.BeginningOffset
   private val EndOffset       = KafkaDriver.EndOffset
@@ -151,11 +155,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   override def consumer[K, V](settings: ConsumerSettings[F, K, V], selection: Selection): Resource[F, KafkaConsumer[F, K, V]] =
     for
-      client <- nativeClient(createConsumer(settings), driver.destroyConsumer)
-      leases <- Resource.eval(AssignmentLeases[F](settings.assignmentFencing))
-      hold   <- Resource.eval(RevocationHold[F](settings.rebalanceSafeCommits.map(_.limit)))
-      starts <- Resource.eval(startsFor(settings.startingOffsets, initialAssignment(selection)))
-      _      <- Resource.eval(client(select(client.handle, selection, starts)))
+      client   <- nativeClient(createConsumer(settings), driver.destroyConsumer)
+      leases   <- Resource.eval(AssignmentLeases[F](settings.assignmentFencing))
+      hold     <- Resource.eval(RevocationHold[F](settings.rebalanceSafeCommits.map(_.limit)))
+      supplied <- Resource.eval(startsFor(settings.startingOffsets, initialAssignment(selection)))
+      stored   <- Resource.eval(committedStarts(client, settings, initialAssignment(selection) -- supplied.map(_.partition)))
+      _        <- Resource.eval(client(select(client.handle, selection, supplied ++ stored)))
       // No rebalance ever revokes a partition named directly, so each keeps the lease it starts with.
       _ <-
         Resource.eval(
@@ -360,6 +365,32 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
           _.toVector.collect:
             case (partition, start) if partitions.contains(partition) => StartAt(partition, start.offset.value, start.leaderEpoch.fold(-1)(_.value))
         )
+
+  /** Where partitions named directly start when the application gives them no starting offset: at the group's committed offset, or else where the
+    * reset policy says. With offset reset set to fail, a partition without one is left to the client, which fails as that policy asks.
+    *
+    * The committed offsets are read here, asking again while the group's coordinator cannot answer, as the Java consumer does: librdkafka reads them
+    * once for partitions named directly, and a partition whose read fails never starts.
+    */
+  private def committedStarts[K, V](client: NativeClient, settings: ConsumerSettings[F, K, V], partitions: Set[TopicPartition]): F[Vector[StartAt]] =
+    if partitions.isEmpty then F.pure(Vector.empty)
+    else
+      val entries = partitions.toVector
+      untilAnswered(client(driver.committed(client.handle, entries, settings.requestTimeout.toMillis.toInt)), 0).map: stored =>
+        entries.zip(stored).flatMap: (partition, value) =>
+          if value.offset >= 0L then Some(StartAt(partition, value.offset, value.leaderEpoch))
+          else
+            settings.autoOffsetReset match
+              case AutoOffsetReset.Earliest => Some(StartAt(partition, BeginningOffset, -1))
+              case AutoOffsetReset.Latest   => Some(StartAt(partition, EndOffset, -1))
+              case AutoOffsetReset.Fail     => None
+
+  /** Asks again after a failure the broker may get over, waiting 100 ms and twice as long each time up to a second, as the Java consumer does. */
+  private def untilAnswered[A](request: F[A], attempt: Int): F[A] =
+    request.handleErrorWith:
+      case failure: KafkaException.BackendFailure if failure.retriable.contains(true) =>
+        F.sleep((CoordinatorBackoff * (1L << attempt.min(4))).min(CoordinatorMaxBackoff)) *> untilAnswered(request, attempt + 1)
+      case other => F.raiseError(other)
 
   private def initialAssignment(selection: Selection): Set[TopicPartition] =
     selection match
