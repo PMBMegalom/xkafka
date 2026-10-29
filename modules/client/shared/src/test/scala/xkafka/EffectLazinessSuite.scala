@@ -187,8 +187,10 @@ final class EffectLazinessSuite extends CatsEffectSuite:
       called("commit")(IO.unit)
     override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit]  = called("pause")(IO.unit)
     override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = called("resume")(IO.unit)
-    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = waiting("committed")
-    override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)]                 = waiting("watermarks")
+    // A consumer naming its partitions reads their committed offsets as it is acquired, so this answers that none are committed.
+    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] =
+      called("committed")(IO.pure(partitions.map(_ => StoredOffset(-1L, -1, ""))))
+    override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)] = waiting("watermarks")
     override def offsetsForTimes(consumer: Client, searches: Vector[(TopicPartition, Timestamp)], timeoutMillis: Int): IO[Vector[Long]] =
       waiting("offsetsForTimes")
     override def positions(consumer: Client, partitions: Vector[TopicPartition]): IO[Vector[Long]]                      = waiting("positions")

@@ -40,6 +40,21 @@ private[xkafka] object Bindings:
 
   def xkafka_producer_destroy(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
 
+  def xkafka_mock_bootstraps(client: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CString = extern
+
+  def xkafka_mock_topic_create(client: CVoidPtr, topic: CString, partitions: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt =
+    extern
+
+  def xkafka_mock_request_errors(
+      client: CVoidPtr,
+      apiKey: CShort,
+      codes: Ptr[CInt],
+      count: CSize,
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_headers_new(count: CSize): CVoidPtr = extern
 
   def xkafka_headers_destroy(headers: CVoidPtr): Unit = extern

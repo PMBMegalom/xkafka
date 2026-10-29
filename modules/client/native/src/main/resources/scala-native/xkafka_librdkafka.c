@@ -1,6 +1,7 @@
 #ifdef SCALANATIVE_LINK_RDKAFKA
 
 #include <librdkafka/rdkafka.h>
+#include <librdkafka/rdkafka_mock.h>
 
 #include <pthread.h>
 #include <stdint.h>
@@ -790,6 +791,60 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
         }
         *status = 1;
         return message;
+}
+
+/* ---- Test hooks ----
+ * xkafka's own tests drive librdkafka's in-process mock cluster through these. Each acts only on the mock cluster librdkafka
+ * made for a client created with test.mock.num.brokers, and refuses any other client, so none of them can reach a real cluster. */
+
+static rd_kafka_mock_cluster_t *xkafka_mock_cluster_of(rd_kafka_t *client, char *error, size_t error_size, int32_t *error_code) {
+        rd_kafka_mock_cluster_t *cluster = client != NULL ? rd_kafka_handle_mock_cluster(client) : NULL;
+
+        if (cluster == NULL)
+                xkafka_set_error(error, error_size, error_code, "the client is not one librdkafka made a mock cluster for");
+        return cluster;
+}
+
+/* The mock cluster's bootstrap servers, which librdkafka owns, or NULL for a client without one. */
+const char *xkafka_mock_bootstraps(rd_kafka_t *client, char *error, size_t error_size, int32_t *error_code) {
+        rd_kafka_mock_cluster_t *cluster = xkafka_mock_cluster_of(client, error, error_size, error_code);
+
+        return cluster != NULL ? rd_kafka_mock_cluster_bootstraps(cluster) : NULL;
+}
+
+int xkafka_mock_topic_create(rd_kafka_t *client, const char *topic, int partitions, char *error, size_t error_size, int32_t *error_code) {
+        rd_kafka_mock_cluster_t *cluster = xkafka_mock_cluster_of(client, error, error_size, error_code);
+        rd_kafka_resp_err_t result;
+
+        if (cluster == NULL)
+                return -1;
+        result = rd_kafka_mock_topic_create(cluster, topic, partitions, 1);
+        if (result != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
+                return -1;
+        }
+        return 0;
+}
+
+/* The mock cluster answers the next `count` requests of API `api_key` with these error codes, one each. */
+int xkafka_mock_request_errors(rd_kafka_t *client, int16_t api_key, const int32_t *codes, size_t count, char *error,
+                               size_t error_size, int32_t *error_code) {
+        rd_kafka_mock_cluster_t *cluster = xkafka_mock_cluster_of(client, error, error_size, error_code);
+        rd_kafka_resp_err_t *errors;
+        size_t index;
+
+        if (cluster == NULL)
+                return -1;
+        errors = (rd_kafka_resp_err_t *)calloc(count > 0 ? count : 1, sizeof(*errors));
+        if (errors == NULL) {
+                xkafka_set_error(error, error_size, error_code, "could not allocate the request errors");
+                return -1;
+        }
+        for (index = 0; index < count; index++)
+                errors[index] = (rd_kafka_resp_err_t)codes[index];
+        rd_kafka_mock_push_request_errors_array(cluster, api_key, count, errors);
+        free(errors);
+        return 0;
 }
 
 void xkafka_message_destroy(rd_kafka_message_t *message) {

@@ -48,6 +48,7 @@ fi
 
 mkdir -p "$build/include/librdkafka" "$(dirname "$output")"
 cp "$source/src/rdkafka.h" "$build/include/librdkafka/rdkafka.h"
+cp "$source/src/rdkafka_mock.h" "$build/include/librdkafka/rdkafka_mock.h"
 
 objects=""
 for shim in "$@"; do

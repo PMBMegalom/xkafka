@@ -292,8 +292,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def startAt(consumer: JavaConsumer[Array[Byte], Array[Byte]], starts: Vector[StartAt]): Unit =
     starts.foreach: start =>
-      val epoch = if start.leaderEpoch < 0 then Optional.empty[Integer] else Optional.of(Integer.valueOf(start.leaderEpoch))
-      consumer.seek(javaTopicPartition(start.partition), new JavaOffsetAndMetadata(start.offset, epoch, ""))
+      val partition = javaTopicPartition(start.partition)
+      start.offset match
+        case KafkaDriver.BeginningOffset => consumer.seekToBeginning(List(partition).asJava)
+        case KafkaDriver.EndOffset       => consumer.seekToEnd(List(partition).asJava)
+        case offset                      =>
+          val epoch = if start.leaderEpoch < 0 then Optional.empty[Integer] else Optional.of(Integer.valueOf(start.leaderEpoch))
+          consumer.seek(partition, new JavaOffsetAndMetadata(offset, epoch, ""))
 
   /** The listener hears a revocation before every assignment, whichever protocol the group uses, so an assignment only ever adds partitions. */
   override def cooperative(consumer: Client): F[Boolean] = F.pure(true)

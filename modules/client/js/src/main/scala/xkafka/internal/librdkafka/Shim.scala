@@ -48,9 +48,13 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val shimId      = f("const char *xkafka_shim_id(void)")
   val errorString = f("const char *xkafka_error_string(int32_t code)")
 
-  val producerNew     = f(s"void *xkafka_producer_new(const char *brokers, const char *client_id, $Properties, $Error)")
-  val producerDestroy = f(s"int xkafka_async_producer_destroy(void *producer, int timeout_ms, $Done)")
-  val consumerNew     =
+  val producerNew = f(s"void *xkafka_producer_new(const char *brokers, const char *client_id, $Properties, $Error)")
+
+  val mockBootstraps    = f(s"const char *xkafka_mock_bootstraps(void *client, $Error)")
+  val mockTopicCreate   = f(s"int xkafka_mock_topic_create(void *client, const char *topic, int partitions, $Error)")
+  val mockRequestErrors = f(s"int xkafka_mock_request_errors(void *client, int16_t api_key, const int32_t *codes, size_t count, $Error)")
+  val producerDestroy   = f(s"int xkafka_async_producer_destroy(void *producer, int timeout_ms, $Done)")
+  val consumerNew       =
     f(
       s"void *xkafka_consumer_new(const char *brokers, const char *client_id, const char *group_id, const char *auto_offset_reset, $Properties, $Error)"
     )

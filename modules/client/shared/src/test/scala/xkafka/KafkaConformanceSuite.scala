@@ -2127,6 +2127,33 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         read     <- firstOffsets(settings, Selection.Partitions(NonEmptySet.one(partition)), 2)
       yield assertEquals(read, List(4L, 5L))
 
+  test(conformance("a consumer naming its partitions starts each at its group's committed offset")):
+    withBroker: server =>
+      val topic     = uniqueTopic("named-committed")
+      val partition = TopicPartition(topic, validPartition(0))
+      val group     = uniqueGroup("named-committed")
+      for
+        _        <- produceValues(server, partition, 3)
+        _        <- consumerSettings(server, group).flatMap(settings => commitFirst(settings, topic))
+        settings <- consumerSettings(server, group)
+        read     <- firstOffsets(settings, Selection.Partitions(NonEmptySet.one(partition)), 2)
+      yield assertEquals(read, List(1L, 2L))
+
+  test(conformance("a consumer naming its partitions with offset reset latest and nothing committed reads only what arrives after it starts")):
+    withBroker: server =>
+      val topic     = uniqueTopic("named-latest")
+      val partition = TopicPartition(topic, validPartition(0))
+      // librdkafka reports no position before a record is read, so records keep arriving until the consumer reads one.
+      val arriving = (produceValues(server, partition, 1) *> IO.sleep(300.millis)).foreverM
+      for
+        _        <- produceValues(server, partition, 3)
+        settings <- consumerSettings(server, uniqueGroup("named-latest")).map(_.withAutoOffsetReset(AutoOffsetReset.Latest))
+        first    <-
+          PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(partition))).use: consumer =>
+            IO.race(arriving, consumer.records.take(1).map(_.record.offset.value).compile.lastOrError)
+          .timeout(60.seconds)
+      yield assert(first.toOption.exists(_ >= 3L), s"the first record read was $first, before the consumer started")
+
   test(conformance("with offset reset set to fail, a group without a committed offset fails as needing a reset")):
     withBroker: server =>
       val topic = uniqueTopic("reset-fail-none")
