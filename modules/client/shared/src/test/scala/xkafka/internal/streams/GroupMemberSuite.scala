@@ -31,7 +31,8 @@ import cats.effect.std.UUIDGen
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import munit.CatsEffectSuite
-import internal.group.Connection
+import scodec.bits.ByteVector
+import internal.group.{Connection, Crypto, Digest}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest, StreamsGroupHeartbeatResponse}
 
 /** How a streams group member paces its heartbeats, finds its coordinator and tells its engine, over a coordinator the tests script, in simulated
@@ -189,6 +190,21 @@ final class GroupMemberSuite extends CatsEffectSuite:
       left <- IO.ref(List(dashed, plain))
       id   <- GroupMember.memberId[IO](using summon, uuids(left))
     yield assertEquals(id, "ASPN70VniavN7wEjRWeJqw")
+
+  test("a random UUID takes its bits from the platform's random bytes, with the version 4 and variant bits Java's sets"):
+    def from(fill: Int): IO[UUID] =
+      val crypto =
+        new Crypto[IO]:
+          def hash(digest: Digest, data: ByteVector): IO[ByteVector]                  = IO.raiseError(new AssertionError("unused"))
+          def hmac(digest: Digest, key: ByteVector, data: ByteVector): IO[ByteVector] = IO.raiseError(new AssertionError("unused"))
+          def pbkdf2(digest: Digest, password: ByteVector, salt: ByteVector, iterations: Int): IO[ByteVector] =
+            IO.raiseError(new AssertionError("unused"))
+          def randomBytes(count: Int): IO[ByteVector] = IO.pure(ByteVector.fill(count.toLong)(fill.toByte))
+      GroupMember.uuids(crypto).randomUUID
+    (from(0xff), from(0x00), from(0x5a)).tupled.map: (ones, zeros, mixed) =>
+      assertEquals(ones.toString, "ffffffff-ffff-4fff-bfff-ffffffffffff")
+      assertEquals(zeros.toString, "00000000-0000-4000-8000-000000000000")
+      assertEquals((mixed.version, mixed.variant), (4, 2))
 
 object GroupMemberSuite:
   val CloseTimeout: FiniteDuration = 3.seconds

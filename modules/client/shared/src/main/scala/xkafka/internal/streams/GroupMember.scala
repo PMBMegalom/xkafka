@@ -22,6 +22,8 @@
 package xkafka
 package internal.streams
 
+import java.util.UUID
+
 import scala.concurrent.duration.*
 
 import cats.{Functor, Monad}
@@ -30,7 +32,7 @@ import cats.effect.std.{NonEmptyHotswap, Queue, Random, Supervisor, UUIDGen}
 import cats.syntax.all.*
 import fs2.Stream
 import scodec.bits.ByteVector
-import internal.group.Connection
+import internal.group.{Connection, Crypto}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request}
 
 /** A member of a streams group, heartbeating to the group's coordinator on fibers of its own. The engine carries out the changes it is told of and
@@ -103,6 +105,14 @@ private[xkafka] object GroupMember:
       def committed(topics: List[OffsetFetchRequest.Topic]): F[OffsetFetchRequest.Answer] =
         current.get
           .flatMap(member => loop.send(OffsetFetchRequest(identity.groupId, Some(identity.memberId), member.epoch, topics, requireStable = true)))
+
+  /** Random UUIDs (version 4) from the platform's secure random bytes, as Java's `UUID.randomUUID` makes them. */
+  def uuids[F[_]](crypto: Crypto[F])(using F: Functor[F]): UUIDGen[F] =
+    new UUIDGen[F]:
+      def randomUUID: F[UUID] =
+        crypto.randomBytes(16).map: random =>
+          val bytes = random.update(6, ((random(6) & 0x0f) | 0x40).toByte).update(8, ((random(8) & 0x3f) | 0x80).toByte)
+          new UUID(bytes.take(8).toLong(), bytes.drop(8).toLong())
 
   /** A new member id as the Java client makes one: a random UUID in URL-safe base64 without padding, never starting with a dash. */
   def memberId[F[_]](using F: Monad[F], uuids: UUIDGen[F]): F[String] =

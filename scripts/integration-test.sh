@@ -14,7 +14,7 @@ if [[ "${1:-}" == "--streams" ]]; then
 fi
 
 if [[ "$streams" == true ]]; then
-  suites='xkafka.internal.streams.GroupMemberBrokerSuite xkafka.internal.streams.RestoreSuite'
+  suites='xkafka.internal.streams.GroupMemberBrokerSuite xkafka.internal.streams.RestoreSuite xkafka.internal.streams.EngineBrokerSuite'
 else
   suites='xkafka.KafkaIntegrationSuite xkafka.KafkaConformanceSuite xkafka.KafkaSecuritySuite xkafka.PartitionPausingSuite xkafka.KafkaClusterSuite xkafka.StreamsDriverSuite xkafka.internal.group.GroupSocketSuite xkafka.internal.group.GroupConnectionSuite'
 fi
