@@ -75,8 +75,10 @@ final class EngineBrokerSuite extends CatsEffectSuite:
     PlatformKafkaClient().producer(ProducerSettings.from(client(server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
       .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(records))).void
 
-  /** Reads `topic` from its start until the latest count of each key is `expected`, failing after two minutes. */
-  private def latest(server: String, topic: Topic, expected: Map[String, Long]): IO[Unit] =
+  /** Reads `topic` from its start until the latest count of each key is `expected`, failing after two minutes: under read_committed where the engine
+    * writes exactly once, so that only what its committed transactions wrote is read.
+    */
+  private def latest(server: String, topic: Topic, expected: Map[String, Long])(using guarantee: Engine.Guarantee): IO[Unit] =
     Names.fresh:
       val counts   = Deserializer.instance[IO, Long]((_, _, value) => IO(ByteBuffer.wrap(value.get.toArray).getLong))
       val settings =
@@ -85,36 +87,61 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
           Deserializer.utf8[IO],
           counts,
-          AutoOffsetReset.Earliest
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == Engine.Guarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
         ).orFail
       PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
         consumer.records.scan(Map.empty[String, Long])((seen, record) => seen.updated(record.record.key, record.record.value)).find(_ == expected)
           .compile.lastOrError.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $expected"))).void
 
-  /** Runs the engine for `app` while `use` runs, failing if the engine stops first. */
-  private def running(server: String, app: Counting)(use: IO[Unit]): IO[Unit] =
-    Engine(PlatformKafkaClient(), KafkaClientPlatform.driver[IO], client(server), app.application, app.topology, commitInterval = 1.second)
+  /** Runs the engine for `app` while `use` runs, failing if the engine stops first, committing every second at least once and at Java's interval
+    * exactly once.
+    */
+  private def running(server: String, app: Counting)(use: IO[Unit])(using guarantee: Engine.Guarantee): IO[Unit] =
+    val interval = Option.when(guarantee == Engine.Guarantee.AtLeastOnce)(1.second)
+    Engine(PlatformKafkaClient(), KafkaClientPlatform.driver[IO], client(server), app.application, app.topology, guarantee, interval)
       .use(engine => engine.race(use).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure)))
+
+  /** Writes a record for each key in a transaction that aborts. */
+  private def aborted(server: String, topic: Topic, keys: List[String]): IO[Unit] =
+    Names.fresh:
+      val id       = TransactionalId.from(summon[Names]("xkafka-engine-aborted")).orFail
+      val settings = TransactionalProducerSettings.from(client(server), id, Serializer.utf8[IO], Serializer.utf8[IO]).orFail
+      PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+        producer.transactionally: transaction =>
+          transaction.produce(NonEmptyList.fromListUnsafe(keys.map(key => ProducerRecord(topic, key, "aborted")))) *>
+            IO.raiseError(new RuntimeException("abort"))
+        .attempt.void
 
   private val first  = Map("a" -> 1, "b" -> 2, "c" -> 3, "d" -> 4)
   private val second = Map("a" -> 2, "c" -> 1, "e" -> 5)
 
   private def total(counts: Map[String, Int]*): Map[String, Long] = counts.toList.combineAll.view.mapValues(_.toLong).toMap
 
-  brokers.foreach: (release, server) =>
-    test(s"$release: an engine counts each key's records, writing each count to its output and to its store's changelog"):
+  for
+    (release, server)      <- brokers
+    given Engine.Guarantee <- Engine.Guarantee.values.toList
+    under = summon[Engine.Guarantee]
+  do
+    test(s"$release, $under: an engine counts each key's records, writing each count to its output and to its store's changelog"):
       counting(server): app =>
         produce(server, app.input, first) *>
           running(server, app)(latest(server, app.output, total(first)) *> latest(server, app.changelog, total(first)))
 
-    test(s"$release: an engine counts through a repartition topic, which it writes and reads back"):
+    test(s"$release, $under: an engine counts through a repartition topic, which it writes and reads back"):
       // Each key's records have values starting with each letter in turn, so the letters' counts mix records of every key and both partitions.
       val letters = "xyz"
       counting(server, byLetter): app =>
         produce(server, app.input, first, (_, n) => s"${letters(n % 3)}-$n") *>
           running(server, app)(latest(server, app.output, Map("x" -> 5L, "y" -> 3L, "z" -> 2L)))
 
-    test(s"$release: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
+    if under == Engine.Guarantee.ExactlyOnce then
+      test(s"$release, $under: an engine reads only what committed transactions wrote to its input"):
+        counting(server): app =>
+          aborted(server, app.input, List("a", "b", "e")) *> produce(server, app.input, first) *>
+            running(server, app)(latest(server, app.output, total(first)))
+
+    test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>
         produce(server, app.input, first) *> running(server, app)(latest(server, app.output, total(first))) *> produce(server, app.input, second) *>
           running(server, app)(latest(server, app.output, total(first, second)))
