@@ -1,0 +1,305 @@
+/*
+ * Copyright (c) 2026 xkafka contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+package xkafka
+package internal.streams
+
+import scala.concurrent.duration.*
+
+import cats.data.NonEmptyList
+import cats.effect.{IO, Ref}
+import cats.effect.std.Queue
+import cats.effect.testkit.TestControl
+import cats.syntax.all.*
+import fs2.{Chunk, Stream}
+import munit.CatsEffectSuite
+import internal.driver.{KafkaDriver, PolledRecord, StartAt}
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest}
+import internal.protocol.OffsetFetchRequest.Stored as Fetched
+// `streams` alone names this package, so the program's own package is named in full.
+import xkafka.streams.{KStream, Serde, Store, Topology}
+
+/** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
+  * simulated time, on every platform.
+  */
+final class EngineSuite extends CatsEffectSuite:
+  import EngineSuite.*
+
+  test("assigned tasks start where the group committed them, or at the start of their partitions, with their stores restored"):
+    val fetched =
+      OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, 3, Some(PartitionTime.encode(1234L)), 0), Fetched("in", 1, -1L, -1, None, 0)), 0)
+    run(committed = _ => IO.pure(fetched)): world =>
+      for
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0), TaskId("0", 1)), Set.empty, Set.empty)))
+        _ <- IO.sleep(100.millis)
+        // Older than the partition time stored with the offset, which the task keeps.
+        _       <- world.records(record(0, 5L, "k", 1000L))
+        _       <- IO.sleep(1.second)
+        log     <- world.log.get
+        fetches <- world.fetches.get
+      yield
+        assertEquals(fetches, List(List(OffsetFetchRequest.Topic("in", List(0, 1)))))
+        assertEquals(
+          log.collect { case Event.Restored(changelogs) => changelogs }.toSet,
+          Set(Map(partition("app-counts-changelog", 0) -> "counts"), Map(partition("app-counts-changelog", 1) -> "counts"))
+        )
+        val starts = Set(StartAt(partition("in", 0), 5L, -1), StartAt(partition("in", 1), KafkaDriver.BeginningOffset, -1))
+        assertEquals(log.collect { case Event.Read(read) => read.toSet }, List(starts))
+        assertEquals(log.dropWhile(!_.isInstanceOf[Event.Read]).take(2).last, Event.Assigned(1))
+        assertEquals(
+          log.collect { case Event.Committed(topics) => topics.flatMap(_.partitions).map(_.metadata) },
+          List(List(Some(PartitionTime.encode(1234L))))
+        )
+
+  test("a fetch the coordinator cannot answer yet, or that meets offsets a transaction has yet to settle, goes again after waits that double"):
+    val unsettled = OffsetFetchRequest.Answer(List(Fetched("in", 0, -1L, -1, None, 88)), 0)
+    val answers   = List(OffsetFetchRequest.Answer(Nil, 14), unsettled, OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0))
+    run(committed = n => IO.pure(answers(n))): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(1.second) *> (world.fetchedAt.get, world.log.get).tupled.map: (times, log) =>
+        assertEquals(times.map(_ - times.head), List(0L, 100L, 300L))
+        assertEquals(log.collect { case Event.Read(starts) => starts }, List(Vector(StartAt(partition("in", 0), 5L, -1))))
+
+  test(
+    "every interval, each task that read something commits the offset after its last record, with that record's leader epoch and its partition time"
+  ):
+    run(): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 0), TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(0, 5L, "k", 2000L, leaderEpoch = 3), record(0, 6L, "k", 1000L, leaderEpoch = 4))
+        _       <- IO.sleep(1.second)
+        first   <- world.commits.get
+        _       <- IO.sleep(2.seconds)
+        later   <- world.commits.get
+        written <- world.written.get
+      yield
+        val partitionTime = Some(PartitionTime.encode(2000L))
+        assertEquals(first, List(List(OffsetCommitRequest.Topic("in", List(OffsetCommitRequest.Partition(0, 7L, 4, partitionTime))))))
+        assertEquals(later, first, "nothing was read since, so nothing more is committed")
+        assertEquals(
+          written.map(r => (r.topic.value, r.partition.map(_.value))),
+          List(("app-counts-changelog", Some(0)), ("out", None), ("app-counts-changelog", Some(0)), ("out", None))
+        )
+
+  test("tasks given back are committed before the member hears they are, and their partitions are no longer read"):
+    run(): world =>
+      for
+        _   <- world.tell(assign(TaskId("0", 0), TaskId("0", 1)))
+        _   <- IO.sleep(100.millis)
+        _   <- world.records(record(0, 5L, "k", 1000L), record(1, 8L, "k", 1000L))
+        _   <- IO.sleep(200.millis)
+        _   <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1))))
+        _   <- IO.sleep(200.millis)
+        log <- world.log.get
+      yield
+        val after = log.dropWhile(_ != Event.Assigned(1)).tail
+        assertEquals(
+          after,
+          List(
+            Event.Committed(List(OffsetCommitRequest.Topic("in", List(OffsetCommitRequest.Partition(1, 9L, -1, Some(PartitionTime.encode(1000L))))))),
+            Event.Read(Vector(StartAt(partition("in", 0), 6L, -1))),
+            Event.Revoked(2)
+          )
+        )
+
+  test("lost tasks are dropped without a commit"):
+    run(): world =>
+      for
+        _   <- world.tell(assign(TaskId("0", 0)))
+        _   <- IO.sleep(100.millis)
+        _   <- world.records(record(0, 5L, "k", 1000L))
+        _   <- IO.sleep(200.millis)
+        _   <- world.tell(MemberAction.LoseAll)
+        _   <- IO.sleep(2.seconds)
+        log <- world.log.get
+      yield
+        assertEquals(log.collect { case committed: Event.Committed => committed }, Nil)
+        assertEquals(log.last, Event.Read(Vector.empty))
+
+  test("a commit the coordinator cannot take yet goes again after a wait"):
+    val answers = List(113, 16, 0).map(code => List(OffsetCommitRequest.Answer("in", 0, code.toShort)))
+    run(commit = (n, _) => IO.pure(answers(n))): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
+        world.committedAt.get.map(times => assertEquals(times.map(_ - times.head), List(0L, 100L, 300L)))
+
+  test("a commit from a member the group no longer counts is dropped, and the engine goes on"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 25)))): world =>
+      for
+        _         <- world.tell(assign(TaskId("0", 0)))
+        _         <- IO.sleep(100.millis)
+        _         <- world.records(record(0, 5L, "k", 1000L))
+        _         <- IO.sleep(3.seconds)
+        _         <- world.records(record(0, 6L, "k", 1000L))
+        _         <- IO.sleep(100.millis)
+        committed <- world.committedAt.get
+        written   <- world.written.get
+        ended     <- world.ended
+      yield
+        assertEquals(committed.size, 1)
+        assertEquals(written.size, 4)
+        assertEquals(ended, None)
+
+  test("any other refusal of a commit stops the engine with it"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 29)))): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
+        world.ended.map: ended =>
+          assertEquals(
+            ended.flatMap(_.left.toOption).collect { case error: KafkaException.BackendFailure => error.code },
+            Some(Some(ErrorCode.TopicAuthorizationFailed))
+          )
+
+  test("records of partitions the engine does not run are skipped, and nothing is polled while it runs no task"):
+    run(): world =>
+      for
+        _       <- IO.sleep(1.second)
+        early   <- world.polls.get
+        _       <- world.tell(assign(TaskId("0", 0)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(3, 5L, "k", 1000L))
+        _       <- IO.sleep(200.millis)
+        written <- world.written.get
+      yield
+        assertEquals(early, 0)
+        assertEquals(written, Nil)
+
+  test("released, the engine asks its member to leave and waits for it no longer than the close timeout"):
+    val run =
+      World().flatMap: world =>
+        Engine.running("app", counting, world.member(leave = IO.never), world.plane, 1.second, CloseTimeout).use(_ => IO.unit) *>
+          (IO.monotonic, world.log.get).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (released, log) =>
+      assertEquals(released, CloseTimeout)
+      assertEquals(log, List(Event.Leave))
+
+object EngineSuite:
+  val CloseTimeout: FiniteDuration = 3.seconds
+
+  private val text = Serde.utf8[IO]
+
+  private val counting: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).count(Store("counts")).toStream
+        .to(Topic.from("out").orFail, text, Serde.long[IO])
+    ).orFail
+
+  def partition(topic: String, n: Int): TopicPartition = TopicPartition(Topic.from(topic).orFail, Partition.from(n).orFail)
+
+  def assign(tasks: TaskId*): MemberAction = MemberAction.Assign(1, Assignment(tasks.toSet, Set.empty, Set.empty))
+
+  def record(partition: Int, offset: Long, key: String, timestamp: Long, leaderEpoch: Int = -1): PolledRecord =
+    PolledRecord(
+      "in",
+      partition,
+      offset,
+      Some(timestamp),
+      1,
+      leaderEpoch,
+      Some(Chunk.array(key.getBytes)),
+      Some(Chunk.array("v".getBytes)),
+      Headers.empty
+    )
+
+  /** What the engine did, in order. */
+  enum Event derives CanEqual:
+    case Read(starts: Vector[StartAt])
+    case Restored(changelogs: Map[TopicPartition, String])
+    case Committed(topics: List[OffsetCommitRequest.Topic])
+    case Assigned(round: Long)
+    case Revoked(round: Long)
+    case Leave
+
+  /** A member and a data plane the tests script, recording what the engine does with them. */
+  final class World(
+      changes: Queue[IO, Option[MemberAction]],
+      incoming: Queue[IO, PolledRecord],
+      val log: Ref[IO, List[Event]],
+      val fetches: Ref[IO, List[List[OffsetFetchRequest.Topic]]],
+      val fetchedAt: Ref[IO, List[Long]],
+      val commits: Ref[IO, List[List[OffsetCommitRequest.Topic]]],
+      val committedAt: Ref[IO, List[Long]],
+      val written: Ref[IO, List[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]],
+      val polls: Ref[IO, Int],
+      outcome: Ref[IO, Option[Either[Throwable, Unit]]]
+  ):
+    def tell(change: MemberAction): IO[Unit]                = changes.offer(Some(change))
+    def records(polled: PolledRecord*): IO[Unit]            = polled.toList.traverse_(incoming.offer)
+    def ended: IO[Option[Either[Throwable, Unit]]]          = outcome.get
+    def finished(result: Either[Throwable, Unit]): IO[Unit] = outcome.set(Some(result))
+
+    private def logged(event: Event): IO[Unit] = log.update(_ :+ event)
+    private def now: IO[Long]                  = IO.monotonic.map(_.toMillis)
+
+    def member(
+        committed: Int => IO[OffsetFetchRequest.Answer] = _ => IO.pure(OffsetFetchRequest.Answer(Nil, 0)),
+        commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
+          (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0)))),
+        leave: IO[Unit] = IO.unit
+    ): GroupMember[IO] =
+      val (fetch, send) = (committed, commit)
+      val leaving       = leave
+      new GroupMember[IO]:
+        def changes: Stream[IO, MemberAction]                                                     = Stream.fromQueueNoneTerminated(World.this.changes)
+        def revoked(round: Long): IO[Unit]                                                        = logged(Event.Revoked(round))
+        def assigned(round: Long): IO[Unit]                                                       = logged(Event.Assigned(round))
+        def leave: IO[Unit]                                                                       = logged(Event.Leave) *> leaving
+        def epoch: IO[Int]                                                                        = IO.pure(1)
+        def commit(topics: List[OffsetCommitRequest.Topic]): IO[List[OffsetCommitRequest.Answer]] =
+          (now.flatMap(at => committedAt.update(_ :+ at)) *> commits.modify(before => (before :+ topics, before.size))).flatMap: n =>
+            send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
+        def committed(topics: List[OffsetFetchRequest.Topic]): IO[OffsetFetchRequest.Answer] =
+          (now.flatMap(at => fetchedAt.update(_ :+ at)) *> fetches.modify(before => (before :+ topics, before.size))).flatMap(fetch)
+
+    val plane: Engine.Plane[IO] =
+      new Engine.Plane[IO]:
+        def read(starts: Vector[StartAt]): IO[Unit] = logged(Event.Read(starts))
+        def poll: IO[List[PolledRecord]]            =
+          polls.update(_ + 1) *> incoming.tryTakeN(None)
+            .flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
+        def restore(changelogs: Map[TopicPartition, String]): IO[Map[String, Map[Chunk[Byte], Stored]]] =
+          logged(Event.Restored(changelogs)).as(Map.empty)
+        def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] = written.update(_ ++ records.toList)
+
+  object World:
+    def apply(): IO[World] =
+      (
+        Queue.unbounded[IO, Option[MemberAction]],
+        Queue.unbounded[IO, PolledRecord],
+        IO.ref(List.empty[Event]),
+        IO.ref(List.empty[List[OffsetFetchRequest.Topic]]),
+        IO.ref(List.empty[Long]),
+        IO.ref(List.empty[List[OffsetCommitRequest.Topic]]),
+        IO.ref(List.empty[Long]),
+        IO.ref(List.empty[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]),
+        IO.ref(0),
+        IO.ref(Option.empty[Either[Throwable, Unit]])
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _))
+
+  /** Runs the counting program's engine with a commit interval of a second over a member answering as given, while `script` runs. */
+  def run(
+      committed: Int => IO[OffsetFetchRequest.Answer] = _ => IO.pure(OffsetFetchRequest.Answer(Nil, 0)),
+      commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
+        (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0))))
+  )(script: World => IO[Unit]): IO[Unit] =
+    val program =
+      World().flatMap: world =>
+        Engine.running("app", counting, world.member(committed, commit), world.plane, 1.second, CloseTimeout).use: running =>
+          running.attempt.flatMap(world.finished).start *> script(world)
+    TestControl.executeEmbed(program.timeout(1.minute))
