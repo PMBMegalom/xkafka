@@ -412,6 +412,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       List(
         rejected(Errors.ILLEGAL_GENERATION) -> Some(ErrorCode.IllegalGeneration),
         rejected(Errors.UNKNOWN_MEMBER_ID)  -> Some(ErrorCode.UnknownMemberId),
+        rejected(Errors.STALE_MEMBER_EPOCH) -> Some(ErrorCode.fromProtocol(Errors.STALE_MEMBER_EPOCH.code.toInt)),
         // Worded as the Java client words a commit it refuses once the consumer has left its group.
         new CommitFailedException(
           "Offset commit cannot be completed since the consumer is not part of an active group for auto partition assignment; it is likely that the consumer was kicked out of the group."
