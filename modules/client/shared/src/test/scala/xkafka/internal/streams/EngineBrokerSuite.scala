@@ -99,8 +99,38 @@ final class EngineBrokerSuite extends CatsEffectSuite:
     */
   private def running(server: String, app: Counting)(use: IO[Unit])(using guarantee: Engine.Guarantee): IO[Unit] =
     val interval = Option.when(guarantee == Engine.Guarantee.AtLeastOnce)(1.second)
-    Engine(PlatformKafkaClient(), KafkaClientPlatform.driver[IO], client(server), app.application, app.topology, guarantee, interval)
-      .use(engine => engine.race(use).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure)))
+    Engine(
+      PlatformKafkaClient(),
+      KafkaClientPlatform.driver[IO],
+      client(server),
+      app.application,
+      app.topology,
+      guarantee,
+      interval,
+      purgeInterval = 1.second
+    ).use(engine => engine.race(use).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure)))
+
+  /** Waits up to a minute until each partition of `topic` starts where `group` committed it, past some records: under exactly once, a partition ends
+    * with the marker of the transaction that committed it, after the offset committed.
+    */
+  private def purgedTo(server: String, group: String, topic: Topic): IO[Unit] =
+    Names.fresh:
+      val partitions = Set(0, 1).map(n => TopicPartition(topic, Partition.from(n).orFail))
+      val settings   =
+        ConsumerSettings
+          .from(client(server), ConsumerGroup.from(summon[Names]("xkafka-engine-watermarks")).orFail, Deserializer.utf8[IO], Deserializer.utf8[IO])
+          .orFail
+      (admin(server), PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptyList.fromListUnsafe(partitions.toList).toNes))).tupled
+        .use: (admin, consumer) =>
+          def check(left: Int): IO[Unit] =
+            (consumer.beginningOffsets(partitions), admin.listConsumerGroupOffsets(ConsumerGroup.from(group).orFail)).tupled.flatMap:
+              (beginnings, committed) =>
+                val ours = committed.view.filterKeys(partitions).mapValues(_.offset).toMap
+                if ours.nonEmpty && ours.forall((partition, offset) => beginnings.get(partition).contains(offset)) && ours.values.exists(_.value > 0)
+                then IO.unit
+                else if left <= 0 then IO.raiseError(new AssertionError(s"$topic starts at $beginnings, committed at $ours"))
+                else IO.sleep(500.millis) *> check(left - 1)
+          check(120)
 
   /** Writes a record for each key in a transaction that aborts. */
   private def aborted(server: String, topic: Topic, keys: List[String]): IO[Unit] =
@@ -132,8 +162,10 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       // Each key's records have values starting with each letter in turn, so the letters' counts mix records of every key and both partitions.
       val letters = "xyz"
       counting(server, byLetter): app =>
-        produce(server, app.input, first, (_, n) => s"${letters(n % 3)}-$n") *>
-          running(server, app)(latest(server, app.output, Map("x" -> 5L, "y" -> 3L, "z" -> 2L)))
+        produce(server, app.input, first, (_, n) => s"${letters(n % 3)}-$n") *> running(server, app):
+          latest(server, app.output, Map("x" -> 5L, "y" -> 3L, "z" -> 2L)) *>
+            // Purged once read and committed.
+            purgedTo(server, app.application, Topic.from(s"${app.application}-by-letter-repartition").orFail)
 
     if under == Engine.Guarantee.ExactlyOnce then
       test(s"$release, $under: an engine reads only what committed transactions wrote to its input"):

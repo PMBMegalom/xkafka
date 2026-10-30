@@ -35,7 +35,7 @@ import internal.driver.{KafkaDriver, PolledRecord, StartAt}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KStream, Serde, Store, Topology}
+import xkafka.streams.{KStream, Repartition, Serde, Store, Topology}
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
   * simulated time, on every platform.
@@ -266,11 +266,64 @@ final class EngineSuite extends CatsEffectSuite:
       world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
         world.ended.map(ended => assertEquals(ended, Some(Left(fenced))))
 
+  /** Feeds a task of each sub-topology of the repartitioning program, waits `seconds` and gives the purges made. */
+  private def purges(world: World, seconds: Int): IO[List[Map[TopicPartition, Offset]]] =
+    for
+      _   <- world.tell(assign(TaskId("0", 0), TaskId("1", 0)))
+      _   <- IO.sleep(100.millis)
+      _   <- world.records(record(0, 5L, "k", 1000L, value = "x1"))
+      _   <- world.records((3L to 4L).map(n => record(0, n, "x", 1000L, topic = "app-by-letter-repartition"))*)
+      _   <- IO.sleep(seconds.seconds)
+      log <- world.log.get
+    yield log.collect { case Event.Purged(before) => before }
+
+  private val purged = Map(partition("app-by-letter-repartition", 0) -> Offset.from(5L).orFail)
+
+  test("at least once, once the purge interval has passed, each repartition partition loses the records before where its task last committed"):
+    run(topology = byLetter)(world => purges(world, 5).map(made => assertEquals(made, List(purged))))
+
+  test("exactly once, once the purge interval has passed, each repartition partition loses the records before where its task last committed"):
+    run(topology = byLetter, failing = exactlyOnce)(world => purges(world, 5).map(made => assertEquals(made, List(purged))))
+
+  test("a purge that fails leaves the engine running, and the next goes after another interval"):
+    run(topology = byLetter): world =>
+      (world.failPurges *> purges(world, 5), world.ended).tupled.map: (made, ended) =>
+        assertEquals(made, List(purged, purged))
+        assertEquals(ended, None)
+
+  test("tasks run at once up to the concurrency given, each reading its records in order"):
+    run(topology = slow, concurrency = 2): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0), TaskId("0", 1)))
+        _     <- IO.sleep(100.millis)
+        start <- IO.monotonic.map(_.toMillis)
+        _     <- world.records(record(0, 5L, "k", 1000L, value = "a"), record(1, 7L, "k", 1000L, value = "c"), record(0, 6L, "k", 1000L, value = "b"))
+        _     <- IO.sleep(4.seconds)
+        wrote <- world.wroteAt.get
+      yield
+        assertEquals(wrote.map(_._2.filter(_ != "c")), List(List("a", "b")))
+        // Both tasks at once: as long as the task with two records takes, and less than the three seconds of one after the other.
+        val took = wrote.map(_._1 - start)
+        assert(took.forall(t => t >= 2000L && t < 2200L), s"written after $took ms")
+
+  test("with a concurrency of one, tasks run one after another"):
+    run(topology = slow, concurrency = 1): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0), TaskId("0", 1)))
+        _     <- IO.sleep(100.millis)
+        start <- IO.monotonic.map(_.toMillis)
+        _     <- world.records(record(0, 5L, "k", 1000L, value = "a"), record(1, 7L, "k", 1000L, value = "c"), record(0, 6L, "k", 1000L, value = "b"))
+        _     <- IO.sleep(4.seconds)
+        wrote <- world.wroteAt.get
+      yield
+        val took = wrote.map(_._1 - start)
+        assert(took.forall(t => t >= 3000L && t < 3200L), s"written after $took ms")
+
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout"):
     val run =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, CloseTimeout).use(_ => IO.unit) *>
-          (IO.monotonic, world.log.get).tupled
+        Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout)
+          .use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (released, log) =>
       assertEquals(released, CloseTimeout)
       assertEquals(log, List(Event.Leave))
@@ -279,6 +332,21 @@ object EngineSuite:
   val CloseTimeout: FiniteDuration = 3.seconds
 
   private val text = Serde.utf8[IO]
+
+  val PurgeInterval: FiniteDuration = 2.seconds
+
+  /** Counts by the value's first letter, through the repartition topic `app-by-letter-repartition`, read by the tasks of sub-topology 1. */
+  private val byLetter: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("in").orFail, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts"))
+        .toStream.to(Topic.from("out").orFail, text, Serde.long[IO])
+    ).orFail
+
+  /** Waits a second over each value, then writes it unchanged. */
+  private val slow: Topology[IO] =
+    Topology
+      .of(KStream(Topic.from("in").orFail, text, text).evalMapValues(value => IO.sleep(1.second).as(value)).to(Topic.from("out").orFail, text, text))
+      .orFail
 
   private val counting: Topology[IO] =
     Topology.of(
@@ -290,16 +358,24 @@ object EngineSuite:
 
   def assign(tasks: TaskId*): MemberAction = MemberAction.Assign(1, Assignment(tasks.toSet, Set.empty, Set.empty))
 
-  def record(partition: Int, offset: Long, key: String, timestamp: Long, leaderEpoch: Int = -1): PolledRecord =
+  def record(
+      partition: Int,
+      offset: Long,
+      key: String,
+      timestamp: Long,
+      leaderEpoch: Int = -1,
+      value: String = "v",
+      topic: String = "in"
+  ): PolledRecord =
     PolledRecord(
-      "in",
+      topic,
       partition,
       offset,
       Some(timestamp),
       1,
       leaderEpoch,
       Some(Chunk.array(key.getBytes)),
-      Some(Chunk.array("v".getBytes)),
+      Some(Chunk.array(value.getBytes)),
       Headers.empty
     )
 
@@ -312,6 +388,7 @@ object EngineSuite:
     case Revoked(round: Long)
     case Leave
     case Transaction(written: Int, offsets: Map[TopicPartition, OffsetAndMetadata])
+    case Purged(before: Map[TopicPartition, Offset])
 
   /** A member and a data plane the tests script, recording what the engine does with them. */
   final class World(
@@ -325,8 +402,13 @@ object EngineSuite:
       val written: Ref[IO, List[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]],
       val polls: Ref[IO, Int],
       transacted: Ref[IO, Int],
-      outcome: Ref[IO, Option[Either[Throwable, Unit]]]
+      outcome: Ref[IO, Option[Either[Throwable, Unit]]],
+      val wroteAt: Ref[IO, List[(Long, List[String])]],
+      purging: Ref[IO, IO[Unit]]
   ):
+    /** Makes each purge fail after it is logged. */
+    def failPurges: IO[Unit] = purging.set(IO.raiseError(new RuntimeException("purge refused")))
+
     def tell(change: MemberAction): IO[Unit]                = changes.offer(Some(change))
     def records(polled: PolledRecord*): IO[Unit]            = polled.toList.traverse_(incoming.offer)
     def ended: IO[Option[Either[Throwable, Unit]]]          = outcome.get
@@ -372,7 +454,10 @@ object EngineSuite:
             .flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
         def restore(changelogs: Map[TopicPartition, String]): IO[Map[String, Map[Chunk[Byte], Stored]]] =
           logged(Event.Restored(changelogs)).as(Map.empty)
-        def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] = written.update(_ ++ records.toList)
+        def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] =
+          val values = records.toList.flatMap(_.value).map(value => new String(value.toArray))
+          written.update(_ ++ records.toList) *> now.flatMap(at => wroteAt.update(_ :+ (at, values)))
+        def purge(before: Map[TopicPartition, Offset]): IO[Unit] = logged(Event.Purged(before)) *> purging.get.flatten
 
   object World:
     def apply(): IO[World] =
@@ -387,21 +472,26 @@ object EngineSuite:
         IO.ref(List.empty[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]),
         IO.ref(0),
         IO.ref(0),
-        IO.ref(Option.empty[Either[Throwable, Unit]])
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(Option.empty[Either[Throwable, Unit]]),
+        IO.ref(List.empty[(Long, List[String])]),
+        IO.ref(IO.unit)
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _))
 
-  /** Runs the counting program's engine with a commit interval of a second over a member answering as given, while `script` runs: at least once, or
-    * exactly once with transactions that fail as `failing` says.
+  /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
+    * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.
     */
   def run(
       committed: Int => IO[OffsetFetchRequest.Answer] = _ => IO.pure(OffsetFetchRequest.Answer(Nil, 0)),
       commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
         (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0)))),
-      failing: Option[Int => Option[Throwable]] = None
+      failing: Option[Int => Option[Throwable]] = None,
+      topology: Topology[IO] = counting,
+      concurrency: Int = 1
   )(script: World => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
         val transactions = failing.map(world.transactions)
-        Engine.running("app", counting, world.member(committed, commit), world.plane, transactions, 1.second, CloseTimeout).use: running =>
+        val member       = world.member(committed, commit)
+        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout).use: running =>
           running.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(1.minute))
