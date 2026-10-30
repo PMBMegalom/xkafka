@@ -32,6 +32,8 @@ import Wire.*
   * Answers are read as the version they answer.
   */
 private[xkafka] enum Api(val key: Short, val lowest: Short, val highest: Short, val flexible: Boolean) derives CanEqual:
+  case OffsetCommit          extends Api(8, 9, 9, true)
+  case OffsetFetch           extends Api(9, 9, 9, true)
   case FindCoordinator       extends Api(10, 4, 6, true)
   case SaslHandshake         extends Api(17, 1, 1, false)
   case ApiVersions           extends Api(18, 3, 4, true)
@@ -193,6 +195,79 @@ private[xkafka] final case class StreamsGroupHeartbeatResponse(
     endpointInformationEpoch: Int,
     partitionsByUserEndpoint: Option[List[StreamsGroup.EndpointPartitions]]
 )
+
+/** Offsets a member commits for its group under its id and epoch (KIP-848), which the coordinator takes only from a member at its current epoch. */
+private[xkafka] final case class OffsetCommitRequest(
+    groupId: String,
+    memberId: String,
+    memberEpoch: Int,
+    instanceId: Option[String],
+    topics: List[OffsetCommitRequest.Topic]
+) extends Request[List[OffsetCommitRequest.Answer]]:
+  import OffsetCommitRequest.*
+  val api: Api         = Api.OffsetCommit
+  def body: ByteVector =
+    compactString(groupId) ++ int32(memberEpoch) ++ compactString(memberId) ++ compactNullableString(instanceId) ++
+      compactArray(topics)(writeTopic) ++ noTags
+
+  def response(version: Short): Read[List[Answer]] =
+    val partition = (readInt32, readInt16).tupled <* skipTags
+    val topic     = (readCompactString, readCompactArray(partition)).tupled <* skipTags
+    readInt32 *> readCompactArray(topic).map(_.flatMap((name, partitions) => partitions.map((index, code) => Answer(name, index, code)))) <* skipTags
+
+private[xkafka] object OffsetCommitRequest:
+  final case class Topic(name: String, partitions: List[Partition])
+
+  /** The next offset to read in a partition, with the leader epoch of the record before it, or -1, and the metadata kept beside it. */
+  final case class Partition(index: Int, offset: Long, leaderEpoch: Int, metadata: Option[String])
+
+  /** The coordinator's answer for one partition: 0, or the error that kept its offset from being stored. */
+  final case class Answer(topic: String, partition: Int, errorCode: Short)
+
+  private def writeTopic(topic: Topic): ByteVector = compactString(topic.name) ++ compactArray(topic.partitions)(writePartition) ++ noTags
+
+  private def writePartition(partition: Partition): ByteVector =
+    int32(partition.index) ++ int64(partition.offset) ++ int32(partition.leaderEpoch) ++ compactNullableString(partition.metadata) ++ noTags
+
+/** The offsets a group has stored for the partitions asked about, read by a member under its id and epoch (KIP-848). With `requireStable`, a
+  * partition whose offsets a transaction has yet to settle answers an error to try again with.
+  */
+private[xkafka] final case class OffsetFetchRequest(
+    groupId: String,
+    memberId: Option[String],
+    memberEpoch: Int,
+    topics: List[OffsetFetchRequest.Topic],
+    requireStable: Boolean
+) extends Request[OffsetFetchRequest.Answer]:
+  import OffsetFetchRequest.*
+  val api: Api         = Api.OffsetFetch
+  def body: ByteVector =
+    val group = compactString(groupId) ++ compactNullableString(memberId) ++ int32(memberEpoch) ++ compactArray(topics)(writeTopic) ++ noTags
+    unsignedVarint(2) ++ group ++ boolean(requireStable) ++ noTags
+
+  def response(version: Short): Read[Answer] =
+    val partition = (readInt32, readInt64, readInt32, readCompactNullableString, readInt16).tupled <* skipTags
+    val topic     =
+      (readCompactString, readCompactArray(partition)).mapN((name, partitions) =>
+        partitions.map((index, offset, leaderEpoch, metadata, code) => Stored(name, index, offset, leaderEpoch, metadata, code))
+      ) <* skipTags
+    val group = (readCompactString *> readCompactArray(topic).map(_.flatten), readInt16).mapN(Answer.apply) <* skipTags
+    val one   =
+      readCompactArray(group).flatMap:
+        case List(answer) => answer.pure[Read]
+        case other        => fail[Answer](s"an answer for ${other.size} groups came for one")
+    readInt32 *> one <* skipTags
+
+private[xkafka] object OffsetFetchRequest:
+  final case class Topic(name: String, partitions: List[Int])
+
+  /** What the group stored for one partition: offset -1 when nothing is, and the partition's own error, or 0. */
+  final case class Stored(topic: String, partition: Int, offset: Long, leaderEpoch: Int, metadata: Option[String], errorCode: Short)
+
+  /** The answer for the group: an error for the group as a whole, or 0, and each partition's own. */
+  final case class Answer(partitions: List[Stored], errorCode: Short)
+
+  private def writeTopic(topic: Topic): ByteVector = compactString(topic.name) ++ compactArray(topic.partitions)(int32) ++ noTags
 
 /** The structures a streams group's heartbeat carries. */
 private[xkafka] object StreamsGroup:

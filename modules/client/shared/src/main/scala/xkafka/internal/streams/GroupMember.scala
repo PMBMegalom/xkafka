@@ -31,6 +31,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import scodec.bits.ByteVector
 import internal.group.Connection
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request}
 
 /** A member of a streams group, heartbeating to the group's coordinator on fibers of its own. The engine carries out the changes it is told of and
   * confirms each by its round.
@@ -49,6 +50,19 @@ private[xkafka] trait GroupMember[F[_]]:
 
   /** Gives back the active tasks through `changes`, tells the coordinator the member leaves and waits until it has answered. */
   def leave: F[Unit]
+
+  /** The member's epoch: 0 until the coordinator has taken it in, and again after it was fenced, until it is taken in again. */
+  def epoch: F[Int]
+
+  /** Commits offsets for the group under the member's id and current epoch, through its connection to the coordinator, answering each partition's
+    * error code, or 0. The coordinator checks the epoch, not which tasks the member runs, so the engine commits only for its own.
+    */
+  def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]]
+
+  /** The offsets the group stored for these partitions, read under the member's id and current epoch. A partition whose offsets a transaction has yet
+    * to settle answers an error to ask again with.
+    */
+  def committed(topics: List[OffsetFetchRequest.Topic]): F[OffsetFetchRequest.Answer]
 
 private[xkafka] object GroupMember:
   /** The first wait before a heartbeat that failed goes again, the Java client's `retry.backoff.ms`. */
@@ -72,7 +86,8 @@ private[xkafka] object GroupMember:
       out        <- Resource.eval(Queue.unbounded[F, Option[Either[Throwable, MemberAction]]])
       ended      <- Resource.eval(Deferred[F, Either[Throwable, Unit]])
       timer      <- Resource.eval(F.ref(0L))
-      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held)
+      current    <- Resource.eval(F.ref(Member(identity)))
+      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current)
       _ <- Resource.make(supervisor.supervise(loop.run(Member(identity)).void))(_ => leaving(events, ended, closeTimeout))
       _ <- Resource.eval(events.offer(MemberEvent.Start))
     yield new GroupMember[F]:
@@ -80,6 +95,14 @@ private[xkafka] object GroupMember:
       def revoked(round: Long): F[Unit]    = events.offer(MemberEvent.Revoked(round))
       def assigned(round: Long): F[Unit]   = events.offer(MemberEvent.Assigned(round))
       def leave: F[Unit]                   = events.offer(MemberEvent.Leave) *> ended.get.rethrow
+      def epoch: F[Int]                    = current.get.map(_.epoch)
+
+      def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]] =
+        current.get.flatMap(member => loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, member.epoch, None, topics)))
+
+      def committed(topics: List[OffsetFetchRequest.Topic]): F[OffsetFetchRequest.Answer] =
+        current.get
+          .flatMap(member => loop.send(OffsetFetchRequest(identity.groupId, Some(identity.memberId), member.epoch, topics, requireStable = true)))
 
   /** A new member id as the Java client makes one: a random UUID in URL-safe base64 without padding, never starting with a dash. */
   def memberId[F[_]](using F: Monad[F], uuids: UUIDGen[F]): F[String] =
@@ -110,14 +133,18 @@ private[xkafka] object GroupMember:
       out: Queue[F, Option[Either[Throwable, MemberAction]]],
       ended: Deferred[F, Either[Throwable, Unit]],
       timer: Ref[F, Long],
-      held: NonEmptyHotswap[F, Option[Connection[F]]]
+      held: NonEmptyHotswap[F, Option[Connection[F]]],
+      current: Ref[F, Member]
   )(using F: Temporal[F]):
     import MemberAction.*
 
     def run(member: Member): F[Unit] =
       events.take.flatMap: event =>
         val (next, actions) = member.next(event)
-        actions.traverse_(perform) *> run(next)
+        current.set(next) *> actions.traverse_(perform) *> run(next)
+
+    /** Sends a request of the engine's over the member's connection, which it gives up, to be made again, if the request fails. */
+    def send[R](request: Request[R]): F[R] = connection.flatMap(_.send(request)).onError(_ => drop)
 
     private def perform(action: MemberAction): F[Unit] =
       action match
