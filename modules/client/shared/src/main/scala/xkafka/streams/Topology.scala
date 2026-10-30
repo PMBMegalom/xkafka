@@ -23,6 +23,7 @@ package xkafka
 package streams
 
 import cats.{ApplicativeThrow, Show}
+import cats.arrow.FunctionK
 import cats.data.NonEmptyList
 
 /** The name of a state store, from which its changelog topic `<application id>-<name>-changelog` is named. */
@@ -75,12 +76,28 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** Each change to the table, as a record. */
   case ToStream[F[_], K, V]() extends Step[F, K, V, K, V]
 
+  def mapK[G[_]](fk: FunctionK[F, G]): Step[G, K, V, K2, V2] =
+    this match
+      case Filter(keep)                             => Filter(keep)
+      case Map(change)                              => Map(change)
+      case MapValues(change)                        => MapValues(change)
+      case FlatMap(change)                          => FlatMap(change)
+      case Peek(effect)                             => Peek((key, value) => fk(effect(key, value)))
+      case EvalMapValues(change)                    => EvalMapValues(value => fk(change(value)))
+      case Aggregate(store, key, value, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
+      case ToStream()                               => ToStream()
+
 /** The steps between a segment's origin, whose records are keyed `K` with values `V`, and its last step, which gives `K2` and `V2`. */
 private[xkafka] enum Chain[F[_], K, V, K2, V2]:
   case Start[F[_], K, V]()                                                                           extends Chain[F, K, V, K, V]
   case Then[F[_], K, V, K1, V1, K2, V2](init: Chain[F, K, V, K1, V1], last: Step[F, K1, V1, K2, V2]) extends Chain[F, K, V, K2, V2]
 
   def andThen[K3, V3](step: Step[F, K2, V2, K3, V3]): Chain[F, K, V, K3, V3] = Then(this, step)
+
+  def mapK[G[_]](fk: FunctionK[F, G]): Chain[G, K, V, K2, V2] =
+    this match
+      case Start()          => Start()
+      case Then(init, last) => Then(init.mapK(fk), last.mapK(fk))
 
   /** The stores of its steps, in the order the steps come. */
   def stores: List[Store] =
@@ -96,13 +113,24 @@ private[xkafka] enum Origin[F[_], K, V]:
   case Input(topic: Topic, key: Serde[F, K], value: Serde[F, V])
   case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])
 
+  def mapK[G[_]](fk: FunctionK[F, G]): Origin[G, K, V] =
+    this match
+      case Input(topic, key, value)               => Input(topic, key.mapK(fk), value.mapK(fk))
+      case Repartitioned(repartition, key, value) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk))
+
 /** Where a segment writes to: the repartition topic the next segment reads, or the pipeline's output topic. */
 private[xkafka] enum End[F[_], K, V]:
   case Repartitioning(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])
   case Output(topic: Topic, key: Serde[F, K], value: Serde[F, V])
 
+  def mapK[G[_]](fk: FunctionK[F, G]): End[G, K, V] =
+    this match
+      case Repartitioning(repartition, key, value) => Repartitioning(repartition, key.mapK(fk), value.mapK(fk))
+      case Output(topic, key, value)               => Output(topic, key.mapK(fk), value.mapK(fk))
+
 /** The records between two topics, which become one sub-topology. */
-private[xkafka] final case class Segment[F[_], K, V, K2, V2](origin: Origin[F, K, V], chain: Chain[F, K, V, K2, V2], end: End[F, K2, V2])
+private[xkafka] final case class Segment[F[_], K, V, K2, V2](origin: Origin[F, K, V], chain: Chain[F, K, V, K2, V2], end: End[F, K2, V2]):
+  def mapK[G[_]](fk: FunctionK[F, G]): Segment[G, K, V, K2, V2] = Segment(origin.mapK(fk), chain.mapK(fk), end.mapK(fk))
 
 /** A segment still being added to. */
 private[xkafka] final case class Open[F[_], K, V, K2, V2](origin: Origin[F, K, V], chain: Chain[F, K, V, K2, V2]):
@@ -193,10 +221,13 @@ final class KTable[F[_], K, V] private[xkafka] (stream: KStream[F, K, V]):
 final class Pipeline[F[_]] private[xkafka] (
     private[xkafka] val segments: NonEmptyList[Segment[F, ?, ?, ?, ?]],
     private[xkafka] val problems: Vector[TopologyError]
-)
+):
+  def mapK[G[_]](fk: FunctionK[F, G]): Pipeline[G] = new Pipeline(segments.map(_.mapK(fk)), problems)
 
 /** A streams program: its pipelines, in the order a Java program building the same topology makes them, which numbers their sub-topologies. */
-final class Topology[F[_]] private (private[xkafka] val pipelines: NonEmptyList[Pipeline[F]])
+final class Topology[F[_]] private (private[xkafka] val pipelines: NonEmptyList[Pipeline[F]]):
+  /** The same program with its effects in `G`, as its serdes and effectful steps are mapped. */
+  def mapK[G[_]](fk: FunctionK[F, G]): Topology[G] = new Topology(pipelines.map(_.mapK(fk)))
 
 object Topology:
   /** The longest store or repartition name, as Java allows. */

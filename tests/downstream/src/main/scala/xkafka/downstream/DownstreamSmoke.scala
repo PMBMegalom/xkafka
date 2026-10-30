@@ -28,6 +28,7 @@ import cats.data.{NonEmptyList, NonEmptyMap, ValidatedNel, NonEmptySet}
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
+import xkafka.streams.{ApplicationId, KStream, Serde, Store, StreamsSettings, Topology}
 
 object DownstreamSmoke extends IOApp.Simple:
   private val bootstrapServer = sys.env.getOrElse(
@@ -73,6 +74,21 @@ object DownstreamSmoke extends IOApp.Simple:
         .use(_.records.take(1).compile.lastOrError)
         .timeout(60.seconds)
       _ <- IO.raiseUnless(transacted.record.value == expected.value)(new AssertionError(s"unexpected transacted value: ${transacted.record.value}"))
+      // A streams program counts the topic's records by key.
+      counts           = Topic.from(s"xkafka-downstream-counts-$suffix").fold(error => throw new IllegalArgumentException(error.toString), identity)
+      application      = ApplicationId.from(s"xkafka-downstream-streams-$suffix").fold(error => throw new IllegalArgumentException(error.message), identity)
+      streamsSettings <- IO.fromEither(
+        StreamsSettings.from(client, application).toEither.leftMap(errors => new IllegalArgumentException(errors.toList.map(_.message).mkString("; ")))
+      )
+      topology <- IO.fromEither(
+        Topology.of(KStream(topic, Serde.utf8[IO], Serde.utf8[IO]).groupByKey(Serde.utf8[IO], Serde.utf8[IO]).count(Store("counts")).toStream.to(counts, Serde.utf8[IO], Serde.long[IO]))
+          .leftMap(errors => new IllegalArgumentException(errors.toList.map(_.message).mkString("; ")))
+      )
+      counted <- KafkaClient[IO].streams(streamsSettings, topology).use: streams =>
+        val read = KafkaClient[IO].consumer(consumerSettings, Selection.Topics(NonEmptySet.one(counts))).use(_.records.take(1).compile.lastOrError)
+        streams.run.race(read).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the streams application stopped")), IO.pure))
+      .timeout(120.seconds)
+      _ <- IO.raiseUnless(counted.record.key == expected.key)(new AssertionError(s"unexpected counted key: ${counted.record.key}"))
       // The record was read, so the whole partition can go.
       cut = NonEmptyMap.one(consumed.offset.topicPartition, consumed.offset.nextOffset)
       deleted <- KafkaClient[IO].admin(client).use(_.deleteRecords(cut)).timeout(60.seconds)

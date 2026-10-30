@@ -31,7 +31,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KStream, Pipeline, Repartition, Serde, Store, Topology}
+import xkafka.streams.{ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, Store, StreamsPhase, StreamsSettings, Topology}
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
 final class EngineBrokerSuite extends CatsEffectSuite:
@@ -78,7 +78,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   /** Reads `topic` from its start until the latest count of each key is `expected`, failing after two minutes: under read_committed where the engine
     * writes exactly once, so that only what its committed transactions wrote is read.
     */
-  private def latest(server: String, topic: Topic, expected: Map[String, Long])(using guarantee: Engine.Guarantee): IO[Unit] =
+  private def latest(server: String, topic: Topic, expected: Map[String, Long])(using guarantee: ProcessingGuarantee): IO[Unit] =
     Names.fresh:
       val counts   = Deserializer.instance[IO, Long]((_, _, value) => IO(ByteBuffer.wrap(value.get.toArray).getLong))
       val settings =
@@ -88,7 +88,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           Deserializer.utf8[IO],
           counts,
           AutoOffsetReset.Earliest,
-          isolationLevel = if guarantee == Engine.Guarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
         ).orFail
       PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
         consumer.records.scan(Map.empty[String, Long])((seen, record) => seen.updated(record.record.key, record.record.value)).find(_ == expected)
@@ -97,8 +97,8 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   /** Runs the engine for `app` while `use` runs, failing if the engine stops first, committing every second at least once and at Java's interval
     * exactly once.
     */
-  private def running(server: String, app: Counting)(use: IO[Unit])(using guarantee: Engine.Guarantee): IO[Unit] =
-    val interval = Option.when(guarantee == Engine.Guarantee.AtLeastOnce)(1.second)
+  private def running(server: String, app: Counting)(use: IO[Unit])(using guarantee: ProcessingGuarantee): IO[Unit] =
+    val interval = Option.when(guarantee == ProcessingGuarantee.AtLeastOnce)(1.second)
     Engine(
       PlatformKafkaClient(),
       KafkaClientPlatform.driver[IO],
@@ -108,7 +108,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       guarantee,
       interval,
       purgeInterval = 1.second
-    ).use(engine => engine.race(use).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure)))
+    ).use(engine => engine.run.race(use).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure)))
 
   /** Waits up to a minute until each partition of `topic` starts where `group` committed it, past some records: under exactly once, a partition ends
     * with the marker of the transaction that committed it, after the offset committed.
@@ -149,14 +149,26 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def total(counts: Map[String, Int]*): Map[String, Long] = counts.toList.combineAll.view.mapValues(_.toLong).toMap
 
   for
-    (release, server)      <- brokers
-    given Engine.Guarantee <- Engine.Guarantee.values.toList
-    under = summon[Engine.Guarantee]
+    (release, server)         <- brokers
+    given ProcessingGuarantee <- ProcessingGuarantee.values.toList
+    under = summon[ProcessingGuarantee]
   do
     test(s"$release, $under: an engine counts each key's records, writing each count to its output and to its store's changelog"):
       counting(server): app =>
         produce(server, app.input, first) *>
           running(server, app)(latest(server, app.output, total(first)) *> latest(server, app.changelog, total(first)))
+
+    test(s"$release, $under: a client runs a streams program, whose state reaches running"):
+      counting(server): app =>
+        val settings =
+          StreamsSettings
+            .from(client(server), ApplicationId.from(app.application).orFail, under, Option.when(under == ProcessingGuarantee.AtLeastOnce)(1.second))
+            .orFail
+        produce(server, app.input, first) *> PlatformKafkaClient().streams(settings, app.topology).use: streams =>
+          val running = streams.state.find(_.phase == StreamsPhase.Running).compile.lastOrError.timeout(2.minutes).void
+          streams.run.race(running *> latest(server, app.output, total(first))).flatMap:
+            case Left(_)  => IO.raiseError(new AssertionError("the application stopped"))
+            case Right(_) => IO.unit
 
     test(s"$release, $under: an engine counts through a repartition topic, which it writes and reads back"):
       // Each key's records have values starting with each letter in turn, so the letters' counts mix records of every key and both partitions.
@@ -167,7 +179,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             // Purged once read and committed.
             purgedTo(server, app.application, Topic.from(s"${app.application}-by-letter-repartition").orFail)
 
-    if under == Engine.Guarantee.ExactlyOnce then
+    if under == ProcessingGuarantee.ExactlyOnce then
       test(s"$release, $under: an engine reads only what committed transactions wrote to its input"):
         counting(server): app =>
           aborted(server, app.input, List("a", "b", "e")) *> produce(server, app.input, first) *>

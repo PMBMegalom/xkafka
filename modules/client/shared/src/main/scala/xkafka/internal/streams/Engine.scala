@@ -30,12 +30,13 @@ import cats.effect.{Async, Resource}
 import cats.effect.std.{Queue, UUIDGen}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
-import fs2.Chunk
+import fs2.{Chunk, Stream}
+import fs2.concurrent.SignallingRef
 import driver.{KafkaDriver, PolledRecord, StartAt}
 import group.{Connections, PlatformCrypto, PlatformSockets}
 import protocol.{OffsetCommitRequest, OffsetFetchRequest}
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{Origin, Segment, Topology}
+import xkafka.streams.{KafkaStreams, Origin, ProcessingGuarantee, Segment, StreamsPhase, StreamsProblem, StreamsState, Topology}
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
   * one consumer and write through one producer. At least once, they commit what they read through the member; exactly once, in the transaction that
@@ -45,13 +46,11 @@ private[xkafka] object Engine:
   /** How long each poll of the input waits for records. */
   val PollMillis = 100
 
-  /** How the engine commits, with how often it does by default, Java Streams' `commit.interval.ms` for each. */
-  enum Guarantee(val commitInterval: FiniteDuration) derives CanEqual:
-    /** Commits through the member after the records are written, so a task that moves on reads again what it read since. */
-    case AtLeastOnce extends Guarantee(30.seconds)
-
-    /** Commits in the transaction that writes the records (EOS v2), so a task that moves on finds what it wrote only with the offsets it read. */
-    case ExactlyOnce extends Guarantee(100.millis)
+  /** How often the engine commits by default under each guarantee, Java Streams' `commit.interval.ms` for it. */
+  def commitInterval(guarantee: ProcessingGuarantee): FiniteDuration =
+    guarantee match
+      case ProcessingGuarantee.AtLeastOnce => 30.seconds
+      case ProcessingGuarantee.ExactlyOnce => 100.millis
 
   /** How often the engine deletes the records of its repartition topics that it committed past, Java Streams' `repartition.purge.interval.ms`. */
   val PurgeInterval: FiniteDuration = 30.seconds
@@ -97,12 +96,12 @@ private[xkafka] object Engine:
       settings: ClientSettings,
       application: String,
       topology: Topology[F],
-      guarantee: Guarantee = Guarantee.AtLeastOnce,
+      guarantee: ProcessingGuarantee = ProcessingGuarantee.AtLeastOnce,
       commitInterval: Option[FiniteDuration] = None,
       concurrency: Int = 1,
       purgeInterval: FiniteDuration = PurgeInterval,
       closeTimeout: FiniteDuration = 30.seconds
-  )(using F: Async[F]): Resource[F, F[Unit]] =
+  )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
     val servers     = settings.bootstrapServers.toList.mkString(",")
     val properties  = settings.properties ++ ClientProperties.security(settings.security) ++ ClientProperties(settings)
@@ -118,15 +117,15 @@ private[xkafka] object Engine:
         MemberIdentity(application, memberId, processId, Declaration(application, topology), RebalanceTimeout.toMillis.toInt, None, Nil, None)
       member <- GroupMember(connections.coordinator(application), identity, closeTimeout)
       admin  <- client.admin(settings)
-      input  <- consumer(if guarantee == Guarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)
+      input  <- consumer(if guarantee == ProcessingGuarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)
       bytes = Serializer.bytes[F].option
       producer <-
         ProducerSettings.from(settings, bytes, bytes, ClientProperties.producer).toEither.leftMap(new KafkaException.InvalidSettings(_))
           .liftTo[Resource[F, *]].flatMap(client.producer)
       transactions <-
         guarantee match
-          case Guarantee.AtLeastOnce => Resource.pure[F, Option[Transactions[F]]](None)
-          case Guarantee.ExactlyOnce =>
+          case ProcessingGuarantee.AtLeastOnce => Resource.pure[F, Option[Transactions[F]]](None)
+          case ProcessingGuarantee.ExactlyOnce =>
             // Java's form, the application id, the process id and the thread's index, for the one loop here.
             (TransactionalId.from(s"$application-$processId-1"), ConsumerGroup.from(application)).tupled.leftMap(new KafkaException.InvalidValue(_))
               .liftTo[Resource[F, *]].flatMap: (id, group) =>
@@ -143,7 +142,7 @@ private[xkafka] object Engine:
           def purge(before: Map[TopicPartition, Offset]): F[Unit]                                             =
             NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
       running <-
-        val interval = commitInterval.getOrElse(guarantee.commitInterval)
+        val interval = commitInterval.getOrElse(Engine.commitInterval(guarantee))
         running(application, topology, member, plane, transactions, interval, concurrency, purgeInterval, closeTimeout)
     yield running
 
@@ -205,16 +204,33 @@ private[xkafka] object Engine:
       concurrency: Int,
       purgeInterval: FiniteDuration,
       closeTimeout: FiniteDuration
-  )(using F: Async[F]): Resource[F, F[Unit]] =
+  )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val segments = topology.pipelines.toList.flatMap(_.segments.toList).zipWithIndex.map((segment, id) => id.toString -> segment).toMap
     for
       changes <- Resource.eval(Queue.unbounded[F, Either[Throwable, MemberAction]])
       _       <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
       started <- Resource.eval(F.monotonic)
-      loop = Loop(application, segments, member, plane, transactions, changes, commitInterval, concurrency, purgeInterval)
+      phase   <- Resource.eval(SignallingRef[F].of[StreamsPhase](StreamsPhase.Joining))
+      loop = Loop(application, segments, member, plane, transactions, changes, commitInterval, concurrency, purgeInterval, phase)
       running <-
         Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
-    yield running.joinWithNever
+    yield new KafkaStreams[F]:
+      def run: F[Unit]                   = running.joinWithNever
+      def state: Stream[F, StreamsState] = (phase, member.reports).mapN((now, reported) => StreamsState(now, problemsOf(reported))).discrete.changes
+
+  /** What the coordinator last reported wrong with the group, and why it refuses the member its topics, if it does. */
+  private def problemsOf(member: Member): List[StreamsProblem] =
+    member.statuses.map: status =>
+      status.code.toInt match
+        case 0    => StreamsProblem.StaleTopology(status.detail)
+        case 1    => StreamsProblem.MissingSourceTopics(status.detail)
+        case 2    => StreamsProblem.IncorrectlyPartitionedTopics(status.detail)
+        case 3    => StreamsProblem.MissingInternalTopics(status.detail)
+        case 4    => StreamsProblem.ShutdownRequested(status.detail)
+        case 5    => StreamsProblem.AssignmentDelayed(status.detail)
+        case 6    => StreamsProblem.MissingClientTags(status.detail)
+        case code => StreamsProblem.Other(code, status.detail)
+    ++ member.unauthorized.map(StreamsProblem.TopicAuthorizationFailed(_)).toList
 
   /** How the engine reads its tasks' input and changelogs and writes what they write. */
   trait Plane[F[_]]:
@@ -259,7 +275,8 @@ private[xkafka] object Engine:
       changes: Queue[F, Either[Throwable, MemberAction]],
       commitInterval: FiniteDuration,
       concurrency: Int,
-      purgeInterval: FiniteDuration
+      purgeInterval: FiniteDuration,
+      phase: SignallingRef[F, StreamsPhase]
   )(using F: Async[F]):
     import MemberAction.*
 
@@ -330,10 +347,11 @@ private[xkafka] object Engine:
         case Assign(round, assignment) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
           val added = (assignment.active -- kept.keySet).toList
-          start(added).flatMap: started =>
-            val now = running.copy(tasks = kept ++ started)
-            reassign(now) *> member.assigned(round).as(now)
-        case LoseAll => reassign(running.copy(tasks = Map.empty)).as(running.copy(tasks = Map.empty))
+          phase.set(StreamsPhase.Restoring).whenA(added.exists(id => segments(id.subtopology).chain.stores.nonEmpty)) *> start(added).flatMap:
+            started =>
+              val now = running.copy(tasks = kept ++ started)
+              reassign(now) *> member.assigned(round) *> phase.set(StreamsPhase.Running).as(now)
+        case LoseAll => phase.set(StreamsPhase.Lost) *> reassign(running.copy(tasks = Map.empty)).as(running.copy(tasks = Map.empty))
         case _       => F.pure(running)
 
     /** Reads each partition its task holds from where that task is. */

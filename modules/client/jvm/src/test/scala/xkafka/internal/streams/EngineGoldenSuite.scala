@@ -29,6 +29,7 @@ import scala.concurrent.duration.*
 import munit.FunSuite
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.apache.kafka.streams.StreamsConfig
+import xkafka.streams.ProcessingGuarantee
 
 /** The engine's defaults, compared with what Java Streams configures for the same guarantee. */
 final class EngineGoldenSuite extends FunSuite:
@@ -41,11 +42,11 @@ final class EngineGoldenSuite extends FunSuite:
 
   test("each guarantee commits at Java's interval for it"):
     assertEquals(
-      Engine.Guarantee.AtLeastOnce.commitInterval,
+      Engine.commitInterval(ProcessingGuarantee.AtLeastOnce),
       java(StreamsConfig.AT_LEAST_ONCE).getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG).toLong.millis
     )
     assertEquals(
-      Engine.Guarantee.ExactlyOnce.commitInterval,
+      Engine.commitInterval(ProcessingGuarantee.ExactlyOnce),
       java(StreamsConfig.EXACTLY_ONCE_V2).getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG).toLong.millis
     )
 

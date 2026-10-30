@@ -30,12 +30,13 @@ import cats.effect.std.Queue
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
+import fs2.concurrent.{Signal, SignallingRef}
 import munit.CatsEffectSuite
 import internal.driver.{KafkaDriver, PolledRecord, StartAt}
-import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest}
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KStream, Repartition, Serde, Store, Topology}
+import xkafka.streams.{KafkaStreams, KStream, Repartition, Serde, Store, StreamsPhase, StreamsProblem, StreamsState, Topology}
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
   * simulated time, on every platform.
@@ -319,6 +320,67 @@ final class EngineSuite extends CatsEffectSuite:
         val took = wrote.map(_._1 - start)
         assert(took.forall(t => t >= 3000L && t < 3200L), s"written after $took ms")
 
+  /** Runs the counting program's engine while `script` runs with it, recording the states it reports. */
+  private def watched(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
+    val program =
+      World().flatMap: world =>
+        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout).use: streams =>
+          streams.state.evalMap(state => world.states.update(_ :+ state)).compile.drain.start *> script(world, streams)
+    TestControl.executeEmbed(program.timeout(1.minute))
+
+  test("the state goes from joining, through restoring the stores of tasks given, to running, and to lost when tasks are lost"):
+    watched: (world, _) =>
+      for
+        _      <- world.restoreFor(500.millis)
+        _      <- IO.sleep(100.millis)
+        _      <- world.tell(assign(TaskId("0", 0)))
+        _      <- IO.sleep(300.millis)
+        during <- world.states.get
+        _      <- IO.sleep(500.millis)
+        _      <- world.tell(MemberAction.LoseAll)
+        _      <- IO.sleep(300.millis)
+        states <- world.states.get
+      yield
+        assertEquals(during.map(_.phase), List(StreamsPhase.Joining, StreamsPhase.Restoring))
+        assertEquals(states.map(_.phase), List(StreamsPhase.Joining, StreamsPhase.Restoring, StreamsPhase.Running, StreamsPhase.Lost))
+
+  test("what the coordinator reports about the group, and its refusal of the member's topics, show as the state's problems"):
+    watched: (world, _) =>
+      val statuses = List(StreamsGroup.Status(1, "missing"), StreamsGroup.Status(5, "delayed"), StreamsGroup.Status(9, "new"))
+      for
+        _      <- IO.sleep(100.millis)
+        _      <- world.report(_.copy(statuses = statuses, unauthorized = Some("denied")))
+        _      <- IO.sleep(100.millis)
+        _      <- world.report(_.copy(statuses = Nil, unauthorized = None))
+        _      <- IO.sleep(100.millis)
+        states <- world.states.get
+      yield assertEquals(
+        states.map(_.problems),
+        List(
+          Nil,
+          List(
+            StreamsProblem.MissingSourceTopics("missing"),
+            StreamsProblem.AssignmentDelayed("delayed"),
+            StreamsProblem.Other(9, "new"),
+            StreamsProblem.TopicAuthorizationFailed("denied")
+          ),
+          Nil
+        )
+      )
+
+  test("an application can stop itself on a state it sees, giving back its tasks as it leaves"):
+    val run =
+      World().flatMap: world =>
+        val refused = world.report(_.copy(unauthorized = Some("denied"))).delayBy(2.seconds).start
+        val stopped =
+          Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout).use: streams =>
+            val unauthorized = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
+            refused *> IO.race(streams.run, unauthorized)
+        stopped *> (IO.monotonic, world.log.get).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (at, log) =>
+      assertEquals(at, 2.seconds)
+      assertEquals(log, List(Event.Leave))
+
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout"):
     val run =
       World().flatMap: world =>
@@ -404,8 +466,17 @@ object EngineSuite:
       transacted: Ref[IO, Int],
       outcome: Ref[IO, Option[Either[Throwable, Unit]]],
       val wroteAt: Ref[IO, List[(Long, List[String])]],
-      purging: Ref[IO, IO[Unit]]
+      purging: Ref[IO, IO[Unit]],
+      reported: SignallingRef[IO, Member],
+      restoring: Ref[IO, FiniteDuration],
+      val states: Ref[IO, List[StreamsState]]
   ):
+    /** Changes what the member reports about the group. */
+    def report(change: Member => Member): IO[Unit] = reported.update(change)
+
+    /** Makes each restore take this long. */
+    def restoreFor(time: FiniteDuration): IO[Unit] = restoring.set(time)
+
     /** Makes each purge fail after it is logged. */
     def failPurges: IO[Unit] = purging.set(IO.raiseError(new RuntimeException("purge refused")))
 
@@ -431,6 +502,7 @@ object EngineSuite:
         def assigned(round: Long): IO[Unit]                                                       = logged(Event.Assigned(round))
         def leave: IO[Unit]                                                                       = logged(Event.Leave) *> leaving
         def epoch: IO[Int]                                                                        = IO.pure(1)
+        def reports: Signal[IO, Member]                                                           = reported
         def commit(topics: List[OffsetCommitRequest.Topic]): IO[List[OffsetCommitRequest.Answer]] =
           (now.flatMap(at => committedAt.update(_ :+ at)) *> commits.modify(before => (before :+ topics, before.size))).flatMap: n =>
             send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
@@ -453,11 +525,13 @@ object EngineSuite:
           polls.update(_ + 1) *> incoming.tryTakeN(None)
             .flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
         def restore(changelogs: Map[TopicPartition, String]): IO[Map[String, Map[Chunk[Byte], Stored]]] =
-          logged(Event.Restored(changelogs)).as(Map.empty)
+          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)).as(Map.empty)
         def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] =
           val values = records.toList.flatMap(_.value).map(value => new String(value.toArray))
           written.update(_ ++ records.toList) *> now.flatMap(at => wroteAt.update(_ :+ (at, values)))
         def purge(before: Map[TopicPartition, Offset]): IO[Unit] = logged(Event.Purged(before)) *> purging.get.flatten
+
+  private val identity = MemberIdentity("app", "member", "process", StreamsGroup.Topology(0, Nil), 300000, None, Nil, None)
 
   object World:
     def apply(): IO[World] =
@@ -474,8 +548,11 @@ object EngineSuite:
         IO.ref(0),
         IO.ref(Option.empty[Either[Throwable, Unit]]),
         IO.ref(List.empty[(Long, List[String])]),
-        IO.ref(IO.unit)
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(IO.unit),
+        SignallingRef[IO].of(Member(identity)),
+        IO.ref(Duration.Zero: FiniteDuration),
+        IO.ref(List.empty[StreamsState])
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.
@@ -493,5 +570,5 @@ object EngineSuite:
         val transactions = failing.map(world.transactions)
         val member       = world.member(committed, commit)
         Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout).use: running =>
-          running.attempt.flatMap(world.finished).start *> script(world)
+          running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(1.minute))
