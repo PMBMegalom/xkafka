@@ -148,7 +148,7 @@ final class EngineSuite extends CatsEffectSuite:
         _         <- world.records(record(0, 5L, "k", 1000L))
         _         <- IO.sleep(3.seconds)
         _         <- world.records(record(0, 6L, "k", 1000L))
-        _         <- IO.sleep(100.millis)
+        _         <- IO.sleep(300.millis)
         committed <- world.committedAt.get
         written   <- world.written.get
         ended     <- world.ended
