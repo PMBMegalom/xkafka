@@ -24,13 +24,13 @@ package internal.streams
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 import internal.group.{Connections, PlatformCrypto, PlatformSockets}
-import internal.protocol.StreamsGroup
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 
 /** Streams group members joining the Java Streams application `scripts/integration-test.sh` runs, on each broker release it lists. */
 final class GroupMemberBrokerSuite extends CatsEffectSuite:
@@ -40,17 +40,30 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
   private val topology    = StreamsGroup.Topology(0, List(StreamsGroup.Subtopology("0", List(s"$application-input"), Nil, Nil, Nil, Nil, Nil)))
 
   /** A member whose engine runs what it is told, and gives back tasks only if `obliging`, with what it runs and every change it was told of. */
-  private final class Running(val member: GroupMember[IO], val owned: Ref[IO, Assignment], val told: Ref[IO, Vector[MemberAction]]):
+  private final class Running(
+      val member: GroupMember[IO],
+      val memberId: String,
+      val owned: Ref[IO, Assignment],
+      val told: Ref[IO, Vector[MemberAction]]
+  ):
     def active: IO[Set[TaskId]] = owned.get.map(_.active)
 
-  private def running(server: String, rebalanceTimeout: FiniteDuration = 30.seconds, obliging: Boolean = true): Resource[IO, Running] =
-    val settings    = ClientSettings.from(NonEmptyList.one(server), Some("xkafka-streams-member")).orFail
-    val connections = Connections(PlatformSockets[IO], PlatformCrypto[IO], settings, 30.seconds)
+  private def connections(server: String): Connections[IO] =
+    val settings = ClientSettings.from(NonEmptyList.one(server), Some("xkafka-streams-member")).orFail
+    Connections(PlatformSockets[IO], PlatformCrypto[IO], settings, 30.seconds)
+
+  private def running(
+      server: String,
+      rebalanceTimeout: FiniteDuration = 30.seconds,
+      obliging: Boolean = true,
+      group: String = application,
+      declared: StreamsGroup.Topology = topology
+  ): Resource[IO, Running] =
     for
       memberId  <- Resource.eval(GroupMember.memberId[IO])
       processId <- Resource.eval(UUIDGen[IO].randomUUID.map(_.toString))
-      identity = MemberIdentity(application, memberId, processId, topology, rebalanceTimeout.toMillis.toInt, None, Nil, None)
-      member <- GroupMember(connections.coordinator(application), identity, 10.seconds)
+      identity = MemberIdentity(group, memberId, processId, declared, rebalanceTimeout.toMillis.toInt, None, Nil, None)
+      member <- GroupMember(connections(server).coordinator(group), identity, 10.seconds)
       owned  <- Resource.eval(IO.ref(Assignment.empty))
       told   <- Resource.eval(IO.ref(Vector.empty[MemberAction]))
       engine =
@@ -62,7 +75,7 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
               case MemberAction.LoseAll                          => owned.set(Assignment.empty)
               case _                                             => IO.unit)
       _ <- engine.compile.drain.background
-    yield Running(member, owned, told)
+    yield Running(member, memberId, owned, told)
 
   /** Waits up to a minute for `condition` to hold. */
   private def eventually(what: String)(condition: IO[Boolean]): IO[Unit] =
@@ -78,7 +91,80 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
       val Array(release, server) = entry.split('=')
       (release, server)
 
+  /** Offsets here are only ever recorded by a transaction. */
+  private object Unused extends OffsetCommitter[IO]:
+    override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.raiseError(new IllegalStateException("unused"))
+
+  /** A member of a new group of its own, without Java, reading a new topic of two partitions, once the coordinator has taken it in. */
+  private def alone(server: String)(test: (Running, String, String) => IO[Unit]): IO[Unit] =
+    Names.fresh:
+      val group    = summon[Names](s"xkafka-streams-offsets-${PlatformKafkaClient.name}")
+      val topic    = s"$group-input"
+      val made     = NewTopic.from(Topic.from(topic).orFail, 2, 1).orFail
+      val admin    = PlatformKafkaClient().admin(ClientSettings.from(NonEmptyList.one(server)).orFail)
+      val declared = StreamsGroup.Topology(0, List(StreamsGroup.Subtopology("0", List(topic), Nil, Nil, Nil, Nil, Nil)))
+      admin.use(_.createTopics(NonEmptySet.one(made))) *> running(server, group = group, declared = declared).use: one =>
+        eventually("the coordinator taking the member in")(one.member.epoch.map(_ > 0)) *> test(one, group, topic) *> one.member.leave
+
   brokers.foreach: (release, server) =>
+    test(s"$release: a member commits offsets under its epoch and reads them back"):
+      alone(server): (one, _, topic) =>
+        import OffsetCommitRequest.{Answer, Partition, Topic as Committed}
+        import OffsetFetchRequest.{Stored, Topic as Asked}
+        for
+          answers <- one.member.commit(List(Committed(topic, List(Partition(0, 5L, -1, Some("first")), Partition(1, 7L, 3, None)))))
+          stored  <- one.member.committed(List(Asked(topic, List(0, 1))))
+        yield
+          assertEquals(answers, List(Answer(topic, 0, 0), Answer(topic, 1, 0)))
+          assertEquals(stored, OffsetFetchRequest.Answer(List(Stored(topic, 0, 5L, -1, Some("first"), 0), Stored(topic, 1, 7L, 3, Some(""), 0)), 0))
+
+    test(s"$release: offsets a transaction records for the member are read only once it commits"):
+      alone(server): (one, group, topic) =>
+        val driver    = KafkaClientPlatform.driver[IO]
+        val asked     = List(OffsetFetchRequest.Topic(topic, List(0)))
+        val committed = one.member.committed(asked).map(_.partitions.map(stored => (stored.offset, stored.errorCode)))
+        for
+          epoch <- one.member.epoch
+          named =
+            GroupMembership.Backend[IO](
+              driver.groupMetadataFor(ConsumerGroup.from(group).orFail, epoch, one.memberId).widen[GroupHandle],
+              handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
+            )
+          offset =
+            new CommittableOffset[IO]:
+              override val topicPartition: TopicPartition                  = TopicPartition(Topic.from(topic).orFail, Partition.from(0).orFail)
+              override val nextOffset: Offset                              = Offset.from(4L).orFail
+              override val committer: OffsetCommitter[IO]                  = Unused
+              override private[xkafka] def membership: GroupMembership[IO] = named
+          client   = ClientSettings.from(NonEmptyList.one(server)).orFail
+          settings =
+            TransactionalProducerSettings.from(client, TransactionalId.from(s"$group-transaction").orFail, Serializer.utf8[IO], Serializer.utf8[IO])
+              .orFail
+          pending <-
+            PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+              producer.transactionally(transaction => transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(List(offset))) *> committed)
+          // The coordinator writes the transaction's markers after the commit returns.
+          _ <- eventually("the committed offset being read")(committed.map(_ == List((4L, 0.toShort))))
+        // UNSTABLE_OFFSET_COMMIT, with no offset.
+        yield assertEquals(pending, List((-1L, 88.toShort)))
+
+    test(s"$release: a commit under an epoch the member is not at, or an id the group does not have, is refused and stores nothing"):
+      alone(server): (one, group, topic) =>
+        import OffsetCommitRequest.{Answer, Partition, Topic as Committed}
+        def commit(memberId: String, epoch: Int) =
+          connections(server).coordinator(group)
+            .use(_.send(OffsetCommitRequest(group, memberId, epoch, None, List(Committed(topic, List(Partition(0, 9L, -1, None)))))))
+        for
+          epoch   <- one.member.epoch
+          ahead   <- commit(one.memberId, epoch + 1)
+          behind  <- commit(one.memberId, epoch - 1)
+          unknown <- commit("stranger", epoch)
+          stored  <- one.member.committed(List(OffsetFetchRequest.Topic(topic, List(0))))
+        yield
+          // STALE_MEMBER_EPOCH either way, and UNKNOWN_MEMBER_ID.
+          assertEquals((ahead, behind, unknown), (List(Answer(topic, 0, 113)), List(Answer(topic, 0, 113)), List(Answer(topic, 0, 25))))
+          assertEquals(stored.partitions.map(_.offset), List(-1L))
+
     test(s"$release: a member joins beside a Java member, takes half the tasks and leaves"):
       running(server).use: one =>
         eventually("a member taking half the tasks")(one.active.map(_.size == 2)) *> one.member.leave

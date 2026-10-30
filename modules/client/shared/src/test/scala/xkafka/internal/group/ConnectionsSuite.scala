@@ -305,11 +305,12 @@ object ConnectionsSuite:
           IO:
             Reply.Body(
               request.api match
-                case Api.ApiVersions           => apiVersions(listed)
-                case Api.FindCoordinator       => findCoordinator("group", "broker", 9092)
-                case Api.SaslHandshake         => saslHandshake(0, List("PLAIN"))
-                case Api.SaslAuthenticate      => saslAuthenticate(0, None)
-                case Api.StreamsGroupHeartbeat => throw new IllegalStateException("a test that sends heartbeats scripts their answers")
+                case Api.ApiVersions                                                => apiVersions(listed)
+                case Api.FindCoordinator                                            => findCoordinator("group", "broker", 9092)
+                case Api.SaslHandshake                                              => saslHandshake(0, List("PLAIN"))
+                case Api.SaslAuthenticate                                           => saslAuthenticate(0, None)
+                case Api.StreamsGroupHeartbeat | Api.OffsetCommit | Api.OffsetFetch =>
+                  throw new IllegalStateException(s"a test that sends ${request.api} requests scripts their answers")
             )
       )
 

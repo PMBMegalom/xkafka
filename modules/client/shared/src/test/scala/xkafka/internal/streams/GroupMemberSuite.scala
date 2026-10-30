@@ -32,7 +32,7 @@ import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import munit.CatsEffectSuite
 import internal.group.Connection
-import internal.protocol.{Request, StreamsGroup, StreamsGroupHeartbeatRequest, StreamsGroupHeartbeatResponse}
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest, StreamsGroupHeartbeatResponse}
 
 /** How a streams group member paces its heartbeats, finds its coordinator and tells its engine, over a coordinator the tests script, in simulated
   * time, on every platform.
@@ -86,6 +86,47 @@ final class GroupMemberSuite extends CatsEffectSuite:
     TestControl.executeEmbed(run.timeout(1.minute)).map: (sent, opened) =>
       assert(sent(1)._1 >= 80L && sent(1)._1 <= 120L, s"the second heartbeat went at ${sent(1)._1} ms")
       assertEquals(opened, 2)
+
+  test("commits and reads of offsets go under the member's id and the epoch it is at, and one that fails gives up its connection for a new one"):
+    val failure = new KafkaException.BackendFailure("gone", Some(ErrorCode.RequestTimedOut), Some(true))
+    val offsets = List(OffsetCommitRequest.Topic("input", List(OffsetCommitRequest.Partition(0, 5L, -1, Some("meta")))))
+    val asked   = List(OffsetFetchRequest.Topic("input", List(0)))
+    val run     =
+      Coordinator(
+        (_, request) => IO.pure(answer(request, active = Some(Set.empty))),
+        {
+          case (0, _)                      => IO.raiseError(failure)
+          case (_, _: OffsetCommitRequest) => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
+          case (_, _: OffsetFetchRequest)  => IO.pure(OffsetFetchRequest.Answer(Nil, 0))
+        }
+      ).flatMap: coordinator =>
+        member(coordinator).use: member =>
+          for
+            before <- member.epoch
+            _      <- IO.sleep(100.millis)
+            after  <- member.epoch
+            first  <- member.commit(offsets).attempt
+            opened <- coordinator.opened
+            second <- member.commit(offsets)
+            read   <- member.committed(asked)
+            counts <- (coordinator.opened, coordinator.closed).tupled
+            made   <- coordinator.requests
+          yield (before, after, first, opened, second, read, counts, made)
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (before, after, first, opened, second, read, counts, made) =>
+      assertEquals((before, after), (0, 1))
+      assertEquals(first, Left(failure))
+      assertEquals(opened, 1)
+      assertEquals(second, List(OffsetCommitRequest.Answer("input", 0, 0)))
+      assertEquals(read, OffsetFetchRequest.Answer(Nil, 0))
+      assertEquals(counts, (2, 1))
+      assertEquals(
+        made,
+        List(
+          OffsetCommitRequest("app", "member", 1, None, offsets),
+          OffsetCommitRequest("app", "member", 1, None, offsets),
+          OffsetFetchRequest("app", Some("member"), 1, asked, requireStable = true)
+        )
+      )
 
   test("an error the member cannot recover from ends the changes with it after every task is dropped, and leaving fails with it"):
     val run =
@@ -199,13 +240,18 @@ object GroupMemberSuite:
       None
     )
 
-  /** A coordinator that answers the `n`th heartbeat as `script` says, counting the connections made to it and closed. */
+  /** A coordinator that answers the `n`th heartbeat as `script` says, and the `n`th other request as `others` does, counting the connections made to
+    * it and closed.
+    */
   final class Coordinator(
       script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
+      others: PartialFunction[(Int, Request[?]), IO[Any]],
       log: Ref[IO, Vector[(Long, StreamsGroupHeartbeatRequest)]],
+      made: Ref[IO, Vector[Request[?]]],
       counts: Ref[IO, (Int, Int)]
   ):
     def sent: IO[List[(Long, StreamsGroupHeartbeatRequest)]] = log.get.map(_.toList)
+    def requests: IO[List[Request[?]]]                       = made.get.map(_.toList)
     def opened: IO[Int]                                      = counts.get.map(_._1)
     def closed: IO[Int]                                      = counts.get.map(_._2)
 
@@ -217,8 +263,13 @@ object GroupMemberSuite:
               case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
                   .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
                   .map(_.asInstanceOf[R])
-              case other => IO.raiseError(new AssertionError(s"unexpected request $other"))
+              case other => made.modify(before => (before :+ other, before.size)).flatMap: n =>
+                  others.applyOrElse((n, other), _ => IO.raiseError(new AssertionError(s"unexpected request $other"))).map(_.asInstanceOf[R])
 
   object Coordinator:
-    def apply(script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse]): IO[Coordinator] =
-      (IO.ref(Vector.empty[(Long, StreamsGroupHeartbeatRequest)]), IO.ref((0, 0))).mapN(new Coordinator(script, _, _))
+    def apply(
+        script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
+        others: PartialFunction[(Int, Request[?]), IO[Any]] = PartialFunction.empty
+    ): IO[Coordinator] =
+      (IO.ref(Vector.empty[(Long, StreamsGroupHeartbeatRequest)]), IO.ref(Vector.empty[Request[?]]), IO.ref((0, 0)))
+        .mapN(new Coordinator(script, others, _, _, _))

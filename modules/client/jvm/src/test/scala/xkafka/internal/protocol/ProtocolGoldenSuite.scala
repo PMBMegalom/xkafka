@@ -290,8 +290,115 @@ final class ProtocolGoldenSuite extends FunSuite:
         s"$version"
       )
 
+  private def commitRequest: OffsetCommitRequest =
+    import OffsetCommitRequest.*
+    OffsetCommitRequest(
+      "app",
+      "member",
+      3,
+      Some("instance"),
+      List(
+        Topic("input", List(Partition(0, 5L, 2, Some("meta")), Partition(1, 6000000000L, -1, None))),
+        Topic("other", List(Partition(3, 0L, 1, Some(""))))
+      )
+    )
+
+  private def javaCommitRequest: OffsetCommitRequestData =
+    import OffsetCommitRequestData as J
+    def partition(index: Int, offset: Long, leaderEpoch: Int, metadata: String) =
+      new J.OffsetCommitRequestPartition().setPartitionIndex(index).setCommittedOffset(offset).setCommittedLeaderEpoch(leaderEpoch)
+        .setCommittedMetadata(metadata)
+    new J().setGroupId("app").setGenerationIdOrMemberEpoch(3).setMemberId("member").setGroupInstanceId("instance").setTopics(
+      List(
+        new J.OffsetCommitRequestTopic().setName("input")
+          .setPartitions(List(partition(0, 5L, 2, "meta"), partition(1, 6000000000L, -1, null)).asJava),
+        new J.OffsetCommitRequestTopic().setName("other").setPartitions(List(partition(3, 0L, 1, "")).asJava)
+      ).asJava
+    )
+
+  test("OffsetCommit"):
+    versions(Api.OffsetCommit).foreach: version =>
+      val key = ApiKeys.OFFSET_COMMIT
+      assertEquals(Frame.request(commitRequest, version, CorrelationId, ClientId), javaRequest(key, version, javaCommitRequest), s"$version")
+      import OffsetCommitResponseData as J
+      def partition(index: Int, code: Int) = tagged(new J.OffsetCommitResponsePartition().setPartitionIndex(index).setErrorCode(code.toShort))
+      val answer                           =
+        tagged(new J().setThrottleTimeMs(4).setTopics(
+          List(
+            tagged(new J.OffsetCommitResponseTopic().setName("input").setPartitions(List(partition(0, 0), partition(1, 113)).asJava)),
+            new J.OffsetCommitResponseTopic().setName("other").setPartitions(List(partition(3, 25)).asJava)
+          ).asJava
+        ))
+      assertEquals(
+        Frame.response(commitRequest, version, CorrelationId)(javaResponse(key, version, answer)),
+        Right(
+          List(OffsetCommitRequest.Answer("input", 0, 0), OffsetCommitRequest.Answer("input", 1, 113), OffsetCommitRequest.Answer("other", 3, 25))
+        ),
+        s"$version"
+      )
+
+  private def fetchRequest: OffsetFetchRequest =
+    OffsetFetchRequest("app", Some("member"), 3, List(OffsetFetchRequest.Topic("input", List(0, 1)), OffsetFetchRequest.Topic("other", Nil)), true)
+
+  private def javaFetchRequest: OffsetFetchRequestData =
+    import OffsetFetchRequestData as J
+    new J().setRequireStable(true).setGroups(
+      List(new J.OffsetFetchRequestGroup().setGroupId("app").setMemberId("member").setMemberEpoch(3).setTopics(
+        List(
+          new J.OffsetFetchRequestTopics().setName("input").setPartitionIndexes(List[Integer](0, 1).asJava),
+          new J.OffsetFetchRequestTopics().setName("other").setPartitionIndexes(List.empty[Integer].asJava)
+        ).asJava
+      )).asJava
+    )
+
+  test("OffsetFetch"):
+    versions(Api.OffsetFetch).foreach: version =>
+      val key = ApiKeys.OFFSET_FETCH
+      assertEquals(Frame.request(fetchRequest, version, CorrelationId, ClientId), javaRequest(key, version, javaFetchRequest), s"$version")
+      val anonymous     = OffsetFetchRequest("app", None, -1, List(OffsetFetchRequest.Topic("input", List(0))), false)
+      val javaAnonymous =
+        new OffsetFetchRequestData().setGroups(
+          List(new OffsetFetchRequestData.OffsetFetchRequestGroup().setGroupId("app").setMemberId(null).setMemberEpoch(-1).setTopics(
+            List(new OffsetFetchRequestData.OffsetFetchRequestTopics().setName("input").setPartitionIndexes(List[Integer](0).asJava)).asJava
+          )).asJava
+        )
+      assertEquals(Frame.request(anonymous, version, CorrelationId, ClientId), javaRequest(key, version, javaAnonymous), s"$version")
+      import OffsetFetchResponseData as J
+      def partition(index: Int, offset: Long, leaderEpoch: Int, metadata: String, code: Int) =
+        tagged(
+          new J.OffsetFetchResponsePartitions().setPartitionIndex(index).setCommittedOffset(offset).setCommittedLeaderEpoch(leaderEpoch)
+            .setMetadata(metadata).setErrorCode(code.toShort)
+        )
+      val answer =
+        tagged(new J().setThrottleTimeMs(4).setGroups(
+          List(tagged(new J.OffsetFetchResponseGroup().setGroupId("app").setErrorCode(0).setTopics(
+            List(
+              tagged(
+                new J.OffsetFetchResponseTopics().setName("input")
+                  .setPartitions(List(partition(0, 5L, 2, "meta", 0), partition(1, -1L, -1, null, 88)).asJava)
+              ),
+              new J.OffsetFetchResponseTopics().setName("other").setPartitions(List(partition(3, 6000000000L, 1, "", 0)).asJava)
+            ).asJava
+          ))).asJava
+        ))
+      import OffsetFetchRequest.{Answer, Stored}
+      assertEquals(
+        Frame.response(fetchRequest, version, CorrelationId)(javaResponse(key, version, answer)),
+        Right(Answer(
+          List(Stored("input", 0, 5L, 2, Some("meta"), 0), Stored("input", 1, -1L, -1, None, 88), Stored("other", 3, 6000000000L, 1, Some(""), 0)),
+          0
+        )),
+        s"$version"
+      )
+      val refused = new J().setGroups(List(new J.OffsetFetchResponseGroup().setGroupId("app").setErrorCode(113)).asJava)
+      assertEquals(Frame.response(fetchRequest, version, CorrelationId)(javaResponse(key, version, refused)), Right(Answer(Nil, 113)), s"$version")
+      val two = new J().setGroups(List(new J.OffsetFetchResponseGroup().setGroupId("app"), new J.OffsetFetchResponseGroup().setGroupId("b")).asJava)
+      assert(Frame.response(fetchRequest, version, CorrelationId)(javaResponse(key, version, two)).isLeft, s"$version")
+
   private val keys: List[(Api, ApiKeys)] =
     List(
+      Api.OffsetCommit          -> ApiKeys.OFFSET_COMMIT,
+      Api.OffsetFetch           -> ApiKeys.OFFSET_FETCH,
       Api.ApiVersions           -> ApiKeys.API_VERSIONS,
       Api.FindCoordinator       -> ApiKeys.FIND_COORDINATOR,
       Api.SaslHandshake         -> ApiKeys.SASL_HANDSHAKE,
@@ -317,7 +424,30 @@ final class ProtocolGoldenSuite extends FunSuite:
       (Api.SaslHandshake, 0) -> (true, true),
       // Versions 0 and 1 are not flexible, and version 0 answers without the session lifetime.
       (Api.SaslAuthenticate, 0) -> (false, false),
-      (Api.SaslAuthenticate, 1) -> (false, false)
+      (Api.SaslAuthenticate, 1) -> (false, false),
+      // Versions 2 to 7 are not flexible.
+      (Api.OffsetCommit, 2) -> (false, false),
+      (Api.OffsetCommit, 3) -> (false, false),
+      (Api.OffsetCommit, 4) -> (false, false),
+      (Api.OffsetCommit, 5) -> (false, false),
+      (Api.OffsetCommit, 6) -> (false, false),
+      (Api.OffsetCommit, 7) -> (false, false),
+      // Version 8 has version 9's bytes; version 9 is the first a member of a group under KIP-848 may send.
+      (Api.OffsetCommit, 8) -> (true, true),
+      // Version 10 names topics by id (KIP-848).
+      (Api.OffsetCommit, 10) -> (false, false),
+      // Versions 1 to 5 are not flexible, and versions 1 to 7 ask about one group.
+      (Api.OffsetFetch, 1) -> (false, false),
+      (Api.OffsetFetch, 2) -> (false, false),
+      (Api.OffsetFetch, 3) -> (false, false),
+      (Api.OffsetFetch, 4) -> (false, false),
+      (Api.OffsetFetch, 5) -> (false, false),
+      (Api.OffsetFetch, 6) -> (false, false),
+      (Api.OffsetFetch, 7) -> (false, false),
+      // Version 8 asks without the member's id and epoch; its answer is laid out as version 9's.
+      (Api.OffsetFetch, 8) -> (false, true),
+      // Version 10 names topics by id (KIP-848).
+      (Api.OffsetFetch, 10) -> (false, false)
     )
 
   private def every(key: ApiKeys): List[Short] = (key.oldestVersion.toInt to key.latestVersion(true).toInt).map(_.toShort).toList
@@ -368,7 +498,71 @@ final class ProtocolGoldenSuite extends FunSuite:
           SaslHandshakeResponse(0, List("PLAIN"))
         )
       case Api.StreamsGroupHeartbeat => Sample(heartbeatRequest, javaHeartbeatRequest, javaHeartbeatAnswer(version), heartbeatAnswer(version))
-      case Api.SaslAuthenticate      =>
+      case Api.OffsetCommit          =>
+        import OffsetCommitRequestData as J
+        import OffsetCommitResponseData as A
+        Sample(
+          OffsetCommitRequest(
+            "app",
+            "member",
+            3,
+            None,
+            List(OffsetCommitRequest.Topic("input", List(OffsetCommitRequest.Partition(0, 5L, 2, Some("meta")))))
+          ),
+          new J().setGroupId("app").setGenerationIdOrMemberEpoch(3).setMemberId("member").setTopics(
+            List(new J.OffsetCommitRequestTopic().setName("input").setPartitions(
+              List(
+                new J.OffsetCommitRequestPartition().setPartitionIndex(0).setCommittedOffset(5L).setCommittedLeaderEpoch(2)
+                  .setCommittedMetadata("meta")
+              ).asJava
+            )).asJava
+          ),
+          new A().setTopics(
+            List(
+              new A.OffsetCommitResponseTopic().setName("input")
+                .setPartitions(List(new A.OffsetCommitResponsePartition().setPartitionIndex(0)).asJava)
+            ).asJava
+          ),
+          List(OffsetCommitRequest.Answer("input", 0, 0))
+        )
+      case Api.OffsetFetch =>
+        import OffsetFetchRequestData as J
+        import OffsetFetchResponseData as A
+        val grouped = version >= 8
+        Sample(
+          OffsetFetchRequest("app", Some("member"), 3, List(OffsetFetchRequest.Topic("input", List(0))), version >= 7),
+          if grouped then
+            new J().setRequireStable(true).setGroups(
+              List(
+                new J.OffsetFetchRequestGroup().setGroupId("app").setMemberId("member").setMemberEpoch(3)
+                  .setTopics(List(new J.OffsetFetchRequestTopics().setName("input").setPartitionIndexes(List[Integer](0).asJava)).asJava)
+              ).asJava
+            )
+          else
+            new J().setGroupId("app").setRequireStable(version >= 7)
+              .setTopics(List(new J.OffsetFetchRequestTopic().setName("input").setPartitionIndexes(List[Integer](0).asJava)).asJava)
+          ,
+          if grouped then
+            new A().setGroups(
+              List(new A.OffsetFetchResponseGroup().setGroupId("app").setTopics(
+                List(new A.OffsetFetchResponseTopics().setName("input").setPartitions(
+                  List(
+                    new A.OffsetFetchResponsePartitions().setPartitionIndex(0).setCommittedOffset(5L).setCommittedLeaderEpoch(2).setMetadata("meta")
+                  ).asJava
+                )).asJava
+              )).asJava
+            )
+          else
+            new A().setTopics(
+              List(new A.OffsetFetchResponseTopic().setName("input").setPartitions(
+                List(new A.OffsetFetchResponsePartition().setPartitionIndex(0).setCommittedOffset(5L).setCommittedLeaderEpoch(2).setMetadata("meta"))
+                  .asJava
+              )).asJava
+            )
+          ,
+          OffsetFetchRequest.Answer(List(OffsetFetchRequest.Stored("input", 0, 5L, 2, Some("meta"), 0)), 0)
+        )
+      case Api.SaslAuthenticate =>
         val token = ByteVector("n,,n=user,r=nonce".getBytes("UTF-8"))
         Sample(
           SaslAuthenticateRequest(token),
