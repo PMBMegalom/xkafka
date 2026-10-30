@@ -53,6 +53,9 @@ private[xkafka] object Engine:
     /** Commits in the transaction that writes the records (EOS v2), so a task that moves on finds what it wrote only with the offsets it read. */
     case ExactlyOnce extends Guarantee(100.millis)
 
+  /** How often the engine deletes the records of its repartition topics that it committed past, Java Streams' `repartition.purge.interval.ms`. */
+  val PurgeInterval: FiniteDuration = 30.seconds
+
   /** How long a transaction may stay open before the coordinator aborts it, Java Streams' `transaction.timeout.ms` under exactly-once. */
   val TransactionTimeout: FiniteDuration = 10.seconds
 
@@ -96,6 +99,8 @@ private[xkafka] object Engine:
       topology: Topology[F],
       guarantee: Guarantee = Guarantee.AtLeastOnce,
       commitInterval: Option[FiniteDuration] = None,
+      concurrency: Int = 1,
+      purgeInterval: FiniteDuration = PurgeInterval,
       closeTimeout: FiniteDuration = 30.seconds
   )(using F: Async[F]): Resource[F, F[Unit]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
@@ -112,6 +117,7 @@ private[xkafka] object Engine:
       identity =
         MemberIdentity(application, memberId, processId, Declaration(application, topology), RebalanceTimeout.toMillis.toInt, None, Nil, None)
       member <- GroupMember(connections.coordinator(application), identity, closeTimeout)
+      admin  <- client.admin(settings)
       input  <- consumer(if guarantee == Guarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)
       bytes = Serializer.bytes[F].option
       producer <-
@@ -134,7 +140,11 @@ private[xkafka] object Engine:
           def restore(changelogs: Map[TopicPartition, String]): F[Map[String, Map[Chunk[Byte], Stored]]] =
             consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs))
           def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
-      running <- running(application, topology, member, plane, transactions, commitInterval.getOrElse(guarantee.commitInterval), closeTimeout)
+          def purge(before: Map[TopicPartition, Offset]): F[Unit]                                             =
+            NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
+      running <-
+        val interval = commitInterval.getOrElse(guarantee.commitInterval)
+        running(application, topology, member, plane, transactions, interval, concurrency, purgeInterval, closeTimeout)
     yield running
 
   /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
@@ -192,6 +202,8 @@ private[xkafka] object Engine:
       plane: Plane[F],
       transactions: Option[Transactions[F]],
       commitInterval: FiniteDuration,
+      concurrency: Int,
+      purgeInterval: FiniteDuration,
       closeTimeout: FiniteDuration
   )(using F: Async[F]): Resource[F, F[Unit]] =
     val segments = topology.pipelines.toList.flatMap(_.segments.toList).zipWithIndex.map((segment, id) => id.toString -> segment).toMap
@@ -199,8 +211,9 @@ private[xkafka] object Engine:
       changes <- Resource.eval(Queue.unbounded[F, Either[Throwable, MemberAction]])
       _       <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
       started <- Resource.eval(F.monotonic)
-      loop = Loop(application, segments, member, plane, transactions, changes, commitInterval)
-      running <- Resource.make(loop.run(Running(Map.empty, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
+      loop = Loop(application, segments, member, plane, transactions, changes, commitInterval, concurrency, purgeInterval)
+      running <-
+        Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
     yield running.joinWithNever
 
   /** How the engine reads its tasks' input and changelogs and writes what they write. */
@@ -217,11 +230,25 @@ private[xkafka] object Engine:
     /** Writes the records, waiting until each is delivered. */
     def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit]
 
+    /** Deletes the records of each partition before its offset, as far as the cluster lets it. */
+    def purge(before: Map[TopicPartition, Offset]): F[Unit]
+
   /** A task the engine runs: its program, what it holds, the partition it reads, and where the next commit puts it, once it has read past its start.
     */
-  private final case class Live[F[_]](task: Task[F], state: TaskState, input: TopicPartition, position: Long, read: Option[(Long, Int)])
+  private final case class Live[F[_]](
+      task: Task[F],
+      state: TaskState,
+      input: TopicPartition,
+      position: Long,
+      read: Option[(Long, Int)],
+      committed: Option[Long] = None,
+      purged: Option[Long] = None
+  ):
+    /** Committed where it read to. */
+    def settled: Live[F] = copy(read = None, committed = read.map(_._1).orElse(committed))
 
-  private final case class Running[F[_]](tasks: Map[TaskId, Live[F]], committed: FiniteDuration)
+  /** The tasks the engine runs, and when it last committed and purged. */
+  private final case class Running[F[_]](tasks: Map[TaskId, Live[F]], committed: FiniteDuration, purged: FiniteDuration)
 
   private final class Loop[F[_]](
       application: String,
@@ -230,12 +257,15 @@ private[xkafka] object Engine:
       plane: Plane[F],
       transactions: Option[Transactions[F]],
       changes: Queue[F, Either[Throwable, MemberAction]],
-      commitInterval: FiniteDuration
+      commitInterval: FiniteDuration,
+      concurrency: Int,
+      purgeInterval: FiniteDuration
   )(using F: Async[F]):
     import MemberAction.*
 
-    /** Carries out the changes the member told of since the last batch, then reads, processes and writes until the next commit. */
-    def run(running: Running[F]): F[Unit] = changes.tryTakeN(None).flatMap(_.foldLeftM(running)(change)).flatMap(window).flatMap(run)
+    /** Carries out the changes the member told of since the last batch, reads, processes and writes until the next commit, then purges what is due.
+      */
+    def run(running: Running[F]): F[Unit] = changes.tryTakeN(None).flatMap(_.foldLeftM(running)(change)).flatMap(window).flatMap(purge).flatMap(run)
 
     /** At least once: one batch, then a commit through the member once the interval has passed. Exactly once: once a poll brings records, a
       * transaction that writes the batches read until the interval has passed or the member has news, with the offsets read up to there. A
@@ -254,9 +284,29 @@ private[xkafka] object Engine:
                   if now - after.committed >= commitInterval || waiting > 0 then F.pure(after)
                   else poll(after).flatMap(process(after, _, write)).flatMap(more(_, write))
               transaction(write => process(running, polled, write).flatMap(more(_, write)).map(after => (after, offsetsOf(after))))
-                .flatMap(after => F.monotonic.map(now => after.copy(tasks = after.tasks.view.mapValues(_.copy(read = None)).toMap, committed = now)))
+                .flatMap(after => F.monotonic.map(now => after.copy(tasks = after.tasks.view.mapValues(_.settled).toMap, committed = now)))
                 .recoverWith:
                   case refused: KafkaException.BackendFailure if refused.code.exists(Refused) => restart(running)
+
+    /** Once the purge interval has passed since the last purge, deletes the records of each repartition topic partition before where its task last
+      * committed, where that moved since. Java Streams only logs a purge that fails, and tries those records again at the next.
+      */
+    private def purge(running: Running[F]): F[Running[F]] =
+      F.monotonic.flatMap: now =>
+        val due =
+          running.tasks.toList.flatMap: (id, live) =>
+            live.committed.filter(next => repartitioned(live) && !live.purged.contains(next)).flatMap(Offset.from(_).toOption).map(id -> _)
+        if now - running.purged < purgeInterval || due.isEmpty then F.pure(running)
+        else
+          plane.purge(due.map((id, offset) => running.tasks(id).input -> offset).toMap).attempt.map:
+            case Right(_) => running
+                .copy(tasks = running.tasks ++ due.map((id, offset) => id -> running.tasks(id).copy(purged = Some(offset.value))), purged = now)
+            case Left(_) => running.copy(purged = now)
+
+    private def repartitioned(live: Live[F]): Boolean =
+      segments.values.exists:
+        case Segment(Origin.Repartitioned(named, _, _), _, _) => live.input.topic.value == s"$application-${named.name}-repartition"
+        case _                                                => false
 
     /** The offset after the last record each task read since the last commit, with that record's leader epoch and the task's partition time. */
     private def offsetsOf(running: Running[F]): Map[TopicPartition, OffsetAndMetadata] =
@@ -328,7 +378,7 @@ private[xkafka] object Engine:
       * longer counts commits nothing: its tasks go to others, which read again from the group's last commit.
       */
     private def commit(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
-      val due    = running.tasks.view.filterKeys(tasks).toList.collect { case (id, live @ Live(_, _, _, _, Some(_))) => id -> live }
+      val due    = running.tasks.view.filterKeys(tasks).toList.filter(_._2.read.nonEmpty)
       val topics =
         due.groupMap(_._2.input.topic.value): (_, live) =>
           val (next, leaderEpoch) = live.read.get
@@ -340,22 +390,26 @@ private[xkafka] object Engine:
             case Some(code) if Gone(code) => F.pure(Some(()))
             case Some(code)               => F.raiseError(failure("committing", code))
             case None                     => F.pure(Option.when(answers.forall(_.errorCode == 0))(()))
-      if topics.isEmpty then F.pure(running) else sent.as(running.copy(tasks = running.tasks ++ due.map((id, live) => id -> live.copy(read = None))))
+      if topics.isEmpty then F.pure(running) else sent.as(running.copy(tasks = running.tasks ++ due.map((id, live) => id -> live.settled)))
 
     /** The next records, or none after a wait while no task runs, since the Java consumer refuses to poll with nothing assigned. */
     private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
 
-    /** Runs each record through its task in order, and writes what the tasks wrote, waiting until every record is delivered. */
+    /** Runs each task's records through it in order, up to `concurrency` tasks at once, and writes what the tasks wrote, waiting until every record
+      * is delivered.
+      */
     private def process(running: Running[F], polled: List[PolledRecord], write: Writer[F]): F[Running[F]] =
       val routes = running.tasks.map((id, live) => (live.input.topic.value, live.input.partition.value) -> id)
-      polled.foldLeftM((running.tasks, Vector.empty[TaskOutput])):
-        case ((tasks, written), record) => routes.get((record.topic, record.partition)).flatMap(id => tasks.get(id).map(id -> _)) match
-            case None             => F.pure((tasks, written))
-            case Some((id, live)) => live.task.process(live.state, inputOf(record)).map: (state, out) =>
-                val next = live.copy(state = state, position = record.offset + 1, read = Some((record.offset + 1, record.leaderEpoch)))
-                (tasks.updated(id, next), written ++ out)
-      .flatMap: (tasks, written) =>
-        written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records.toList).traverse_(write)).as(running.copy(tasks = tasks))
+      val byTask = polled.flatMap(record => routes.get((record.topic, record.partition)).map(_ -> record)).groupMap(_._1)(_._2)
+      byTask.toList.parTraverseN(concurrency): (id, records) =>
+        records.foldLeftM((running.tasks(id), Vector.empty[TaskOutput])):
+          case ((live, written), record) => live.task.process(live.state, inputOf(record)).map: (state, out) =>
+              (live.copy(state = state, position = record.offset + 1, read = Some((record.offset + 1, record.leaderEpoch))), written ++ out)
+        .map(id -> _)
+      .flatMap: done =>
+        val written = done.flatMap(_._2._2)
+        written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))
+          .as(running.copy(tasks = running.tasks ++ done.map((id, ran) => id -> ran._1)))
 
     private def inputOf(record: PolledRecord): TaskInput = TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers)
 

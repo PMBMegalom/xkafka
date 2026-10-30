@@ -49,6 +49,9 @@ final class EngineGoldenSuite extends FunSuite:
       java(StreamsConfig.EXACTLY_ONCE_V2).getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG).toLong.millis
     )
 
+  test("repartition topics are purged at Java's interval"):
+    assertEquals(Engine.PurgeInterval, java(StreamsConfig.AT_LEAST_ONCE).getLong(StreamsConfig.REPARTITION_PURGE_INTERVAL_MS_CONFIG).toLong.millis)
+
   test("exactly once, a transaction may stay open as long as Java's producer lets one"):
     val producer = java(StreamsConfig.EXACTLY_ONCE_V2).getProducerConfigs("client")
     assertEquals(Engine.TransactionTimeout, producer.get(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG).toString.toLong.millis)
