@@ -23,6 +23,7 @@ package xkafka
 
 import cats.arrow.FunctionK
 import cats.effect.{Async, MonadCancelThrow, Resource}
+import streams.{KafkaStreams, StreamsSettings, Topology}
 
 trait KafkaClient[F[_]]:
   self =>
@@ -37,6 +38,11 @@ trait KafkaClient[F[_]]:
   /** Administers topics and consumer groups. It neither produces nor consumes. */
   def admin(settings: ClientSettings): Resource[F, KafkaAdminClient[F]]
 
+  /** Runs a streams program as one member of its application's group, beside the application's other members, whether those run xkafka or Java Kafka
+    * Streams. The member joins as the resource is acquired, and released, gives back its tasks, committing them, and leaves.
+    */
+  def streams(settings: StreamsSettings, topology: Topology[F]): Resource[F, KafkaStreams[F]]
+
   final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F])(using MonadCancelThrow[F], MonadCancelThrow[G]): KafkaClient[G] =
     new KafkaClient[G]:
       override def producer[K, V](settings: ProducerSettings[G, K, V]): Resource[G, KafkaProducer[G, K, V]] =
@@ -49,6 +55,9 @@ trait KafkaClient[F[_]]:
         self.transactionalProducer(settings.mapK(gk)).map(_.imapK(fk)(gk)).mapK(fk)
 
       override def admin(settings: ClientSettings): Resource[G, KafkaAdminClient[G]] = self.admin(settings).map(_.mapK(fk)).mapK(fk)
+
+      override def streams(settings: StreamsSettings, topology: Topology[G]): Resource[G, KafkaStreams[G]] =
+        self.streams(settings, topology.mapK(gk)).map(_.mapK(fk)).mapK(fk)
 
 object KafkaClient:
   /** The client for the platform this runs on. */

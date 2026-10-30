@@ -31,6 +31,7 @@ import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
 import cats.effect.std.{NonEmptyHotswap, Queue, Random, Supervisor, UUIDGen}
 import cats.syntax.all.*
 import fs2.Stream
+import fs2.concurrent.{Signal, SignallingRef}
 import scodec.bits.ByteVector
 import internal.group.{Connection, Crypto}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request}
@@ -55,6 +56,11 @@ private[xkafka] trait GroupMember[F[_]]:
 
   /** The member's epoch: 0 until the coordinator has taken it in, and again after it was fenced, until it is taken in again. */
   def epoch: F[Int]
+
+  /** The member as it is, then each time it changes: what the coordinator last reported about the group, and why it refuses the member its topics, if
+    * it does.
+    */
+  def reports: Signal[F, Member]
 
   /** Commits offsets for the group under the member's id and current epoch, through its connection to the coordinator, answering each partition's
     * error code, or 0. The coordinator checks the epoch, not which tasks the member runs, so the engine commits only for its own.
@@ -88,7 +94,7 @@ private[xkafka] object GroupMember:
       out        <- Resource.eval(Queue.unbounded[F, Option[Either[Throwable, MemberAction]]])
       ended      <- Resource.eval(Deferred[F, Either[Throwable, Unit]])
       timer      <- Resource.eval(F.ref(0L))
-      current    <- Resource.eval(F.ref(Member(identity)))
+      current    <- Resource.eval(SignallingRef[F].of(Member(identity)))
       loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current)
       _ <- Resource.make(supervisor.supervise(loop.run(Member(identity)).void))(_ => leaving(events, ended, closeTimeout))
       _ <- Resource.eval(events.offer(MemberEvent.Start))
@@ -98,6 +104,7 @@ private[xkafka] object GroupMember:
       def assigned(round: Long): F[Unit]   = events.offer(MemberEvent.Assigned(round))
       def leave: F[Unit]                   = events.offer(MemberEvent.Leave) *> ended.get.rethrow
       def epoch: F[Int]                    = current.get.map(_.epoch)
+      def reports: Signal[F, Member]       = current
 
       def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]] =
         current.get.flatMap(member => loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, member.epoch, None, topics)))
@@ -144,7 +151,7 @@ private[xkafka] object GroupMember:
       ended: Deferred[F, Either[Throwable, Unit]],
       timer: Ref[F, Long],
       held: NonEmptyHotswap[F, Option[Connection[F]]],
-      current: Ref[F, Member]
+      current: SignallingRef[F, Member]
   )(using F: Temporal[F]):
     import MemberAction.*
 

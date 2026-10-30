@@ -129,6 +129,25 @@ final class GroupMemberSuite extends CatsEffectSuite:
         )
       )
 
+  test("a heartbeat refused the application's topics goes again after a wait, and the refusal is reported until one is accepted"):
+    val run =
+      Coordinator: (n, request) =>
+        val answered = answer(request, error = if n == 1 then 29 else 0, active = Some(Set.empty), interval = 1000)
+        IO.pure(if n == 1 then answered.copy(errorMessage = Some("denied")) else answered)
+      .flatMap: coordinator =>
+        member(coordinator).use: member =>
+          for
+            _       <- IO.sleep(1050.millis)
+            refused <- member.reports.get.map(_.unauthorized)
+            _       <- IO.sleep(1.second)
+            later   <- member.reports.get.map(_.unauthorized)
+            sent    <- coordinator.sent
+          yield (refused, later, sent.map(_._1))
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (refused, later, times) =>
+      assertEquals((refused, later), (Some("denied"), None))
+      // The second heartbeat is refused; the third goes after a wait of 100 ms, a fifth either way, and the member stays in the group.
+      assert(times(2) - times(1) >= 80L && times(2) - times(1) <= 120L, s"heartbeats went at $times")
+
   test("an error the member cannot recover from ends the changes with it after every task is dropped, and leaving fails with it"):
     val run =
       Coordinator((_, request) => IO.pure(answer(request, error = 42))).flatMap: coordinator =>

@@ -135,6 +135,8 @@ private[xkafka] enum MemberAction derives CanEqual:
   *   the assignment the coordinator gave last
   * @param reported
   *   the tasks the last heartbeat reported, or none when the next one must report them whatever they are
+  * @param unauthorized
+  *   why the coordinator last refused the member its topics, until it next accepts a heartbeat
   */
 private[xkafka] final case class Member(
     identity: MemberIdentity,
@@ -148,7 +150,8 @@ private[xkafka] final case class Member(
     reported: Option[Assignment],
     inFlight: Boolean,
     failures: Int,
-    statuses: List[StreamsGroup.Status]
+    statuses: List[StreamsGroup.Status],
+    unauthorized: Option[String] = None
 ):
   import Member.*
   import MemberAction.*
@@ -210,7 +213,11 @@ private[xkafka] final case class Member(
           case NotCoordinator | NotAvailable => retry(rediscover = true, backoff = false)
           case LoadInProgress                => retry(rediscover = false, backoff = true)
           case FencedEpoch | UnknownMember   => fenced
-          case code                          =>
+          // Java Streams reports this and goes on heartbeating, so that the application can see it and decide.
+          case TopicAuthorizationFailed =>
+            val detail = response.errorMessage.getOrElse("the application may not use some of its topics")
+            copy(unauthorized = Some(detail)).retry(rediscover = false, backoff = true)
+          case code =>
             val detail = response.errorMessage.getOrElse(s"the coordinator refused the heartbeat with error $code")
             fail(new KafkaException.BackendFailure(detail, Some(ErrorCode.fromProtocol(code)), Some(false)))
 
@@ -222,7 +229,8 @@ private[xkafka] final case class Member(
         epoch = response.memberEpoch,
         endpointEpoch = response.endpointInformationEpoch,
         failures = 0,
-        statuses = response.statuses.getOrElse(statuses)
+        statuses = response.statuses.getOrElse(statuses),
+        unauthorized = None
       )
     (response.activeTasks, response.standbyTasks, response.warmupTasks) match
       case (None, None, None)                          => updated.settle(Some(response.heartbeatIntervalMs.millis))
@@ -291,11 +299,13 @@ private[xkafka] object Member:
 
   private val LeaveEpoch = -1
 
-  private val LoadInProgress: Short = 14  // COORDINATOR_LOAD_IN_PROGRESS
-  private val NotAvailable: Short   = 15  // COORDINATOR_NOT_AVAILABLE
-  private val NotCoordinator: Short = 16  // NOT_COORDINATOR
-  private val UnknownMember: Short  = 25  // UNKNOWN_MEMBER_ID
-  private val FencedEpoch: Short    = 110 // FENCED_MEMBER_EPOCH
+  private val LoadInProgress: Short = 14 // COORDINATOR_LOAD_IN_PROGRESS
+  private val NotAvailable: Short   = 15 // COORDINATOR_NOT_AVAILABLE
+  private val NotCoordinator: Short = 16 // NOT_COORDINATOR
+  private val UnknownMember: Short  = 25 // UNKNOWN_MEMBER_ID
+
+  private val TopicAuthorizationFailed: Short = 29  // TOPIC_AUTHORIZATION_FAILED
+  private val FencedEpoch: Short              = 110 // FENCED_MEMBER_EPOCH
 
   private def wire(tasks: Set[TaskId]): List[StreamsGroup.Tasks] =
     tasks.groupBy(_.subtopology).toList.sortBy(_._1).map((id, group) => StreamsGroup.Tasks(id, group.toList.map(_.partition).sorted))

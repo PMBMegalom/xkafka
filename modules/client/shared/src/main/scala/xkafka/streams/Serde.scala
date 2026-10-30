@@ -25,10 +25,12 @@ package streams
 import java.nio.ByteBuffer
 
 import cats.ApplicativeThrow
+import cats.arrow.FunctionK
 import fs2.Chunk
 
 /** How a streams program writes and reads one type, since a streams application both writes and reads its topics. */
-final case class Serde[F[_], A](serializer: Serializer[F, A], deserializer: Deserializer[F, A])
+final case class Serde[F[_], A](serializer: Serializer[F, A], deserializer: Deserializer[F, A]):
+  def mapK[G[_]](fk: FunctionK[F, G]): Serde[G, A] = Serde(serializer.mapK(fk), deserializer.mapK(fk))
 
 object Serde:
   /** Bytes as they are. */

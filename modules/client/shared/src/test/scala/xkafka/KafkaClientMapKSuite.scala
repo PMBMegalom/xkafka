@@ -27,6 +27,7 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import munit.CatsEffectSuite
+import streams.{ApplicationId, KafkaStreams, KStream, Serde, StreamsPhase, StreamsSettings, StreamsState, Topology}
 
 final class KafkaClientMapKSuite extends CatsEffectSuite:
   private type ErrorIO[A] = EitherT[IO, String, A]
@@ -84,6 +85,23 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override val topicPartition: TopicPartition      = TopicPartition(topic, Partition.from(0).toOption.get)
       override val nextOffset: Offset                  = Offset.from(1L).toOption.get
       override val committer: OffsetCommitter[ErrorIO] = from
+
+  test("a streams program transformed between effects runs its effects in the source effect, and its state comes back"):
+    val text     = Serde.utf8[ErrorIO]
+    val topic    = Topic.from("in").toOption.get
+    val program  = KStream(topic, text, text).evalMapValues(_ => EitherT.leftT[IO, String]("refused")).to(topic, text, text)
+    val settings = StreamsSettings.from(ClientSettings.from(NonEmptyList.one("localhost:9092")).orFail, ApplicationId.from("app").orFail).orFail
+    val running  = source.imapK(ioToErrorIO)(errorIOToIO).streams(settings, Topology.of(program).orFail)
+    val observed =
+      running.use(streams =>
+        EitherT.liftF[IO, String, (Either[Throwable, Either[String, Unit]], Either[String, List[StreamsState]])](
+          (streams.run.value.attempt, streams.state.compile.toList.value).tupled
+        )
+      )
+    observed.value.map: result =>
+      val (ran, states) = result.toOption.get
+      assertEquals(ran.left.toOption.map(_.getMessage), Some("refused"))
+      assertEquals(states, Right(List(StreamsState(StreamsPhase.Running, Nil))))
 
   test("KafkaClient transforms settings, resources, and returned algebras between effects"):
     val topic            = Topic.from("events").toOption.get
@@ -181,6 +199,17 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def flush: IO[Unit] = IO.unit
 
             override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(Partition.from(0).toOption.get))
+
+      // Runs one record through the program's first step, so that its effects show where they run.
+      override def streams(settings: StreamsSettings, topology: Topology[IO]): Resource[IO, KafkaStreams[IO]] =
+        Resource.pure:
+          new KafkaStreams[IO]:
+            override def run: IO[Unit] =
+              internal.streams.Task[IO](settings.applicationId.value, topology.pipelines.head.segments.head, 0).process(
+                internal.streams.TaskState.empty,
+                internal.streams.TaskInput(Some(Chunk.array("k".getBytes)), Some(Chunk.array("v".getBytes)), 0L, Headers.empty)
+              ).void
+            override def state: Stream[IO, StreamsState] = Stream.emit(StreamsState(StreamsPhase.Running, Nil))
 
       override def admin(settings: ClientSettings): Resource[IO, KafkaAdminClient[IO]] =
         Resource.pure:
