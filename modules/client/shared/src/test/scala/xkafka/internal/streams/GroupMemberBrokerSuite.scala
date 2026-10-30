@@ -106,6 +106,28 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
       admin.use(_.createTopics(NonEmptySet.one(made))) *> running(server, group = group, declared = declared).use: one =>
         eventually("the coordinator taking the member in")(one.member.epoch.map(_ > 0)) *> test(one, group, topic) *> one.member.leave
 
+  /** Runs a transaction that records offset 4 of the topic's partition 0 for `group` under `memberId` at `epoch`, then runs `inside` before it
+    * commits.
+    */
+  private def recording[A](server: String, group: String, topic: String, memberId: String, epoch: Int)(inside: IO[A]): IO[A] =
+    val driver = KafkaClientPlatform.driver[IO]
+    val named  =
+      GroupMembership.Backend[IO](
+        driver.groupMetadataFor(ConsumerGroup.from(group).orFail, epoch, memberId).widen[GroupHandle],
+        handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
+      )
+    val offset =
+      new CommittableOffset[IO]:
+        override val topicPartition: TopicPartition                  = TopicPartition(Topic.from(topic).orFail, Partition.from(0).orFail)
+        override val nextOffset: Offset                              = Offset.from(4L).orFail
+        override val committer: OffsetCommitter[IO]                  = Unused
+        override private[xkafka] def membership: GroupMembership[IO] = named
+    val client   = ClientSettings.from(NonEmptyList.one(server)).orFail
+    val settings =
+      TransactionalProducerSettings.from(client, TransactionalId.from(s"$group-transaction").orFail, Serializer.utf8[IO], Serializer.utf8[IO]).orFail
+    PlatformKafkaClient().transactionalProducer(settings).use: producer =>
+      producer.transactionally(transaction => transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(List(offset))) *> inside)
+
   brokers.foreach: (release, server) =>
     test(s"$release: a member commits offsets under its epoch and reads them back"):
       alone(server): (one, _, topic) =>
@@ -120,33 +142,35 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
 
     test(s"$release: offsets a transaction records for the member are read only once it commits"):
       alone(server): (one, group, topic) =>
-        val driver    = KafkaClientPlatform.driver[IO]
-        val asked     = List(OffsetFetchRequest.Topic(topic, List(0)))
-        val committed = one.member.committed(asked).map(_.partitions.map(stored => (stored.offset, stored.errorCode)))
+        val committed = one.member.committed(List(OffsetFetchRequest.Topic(topic, List(0)))).map(_.partitions.map(s => (s.offset, s.errorCode)))
         for
-          epoch <- one.member.epoch
-          named =
-            GroupMembership.Backend[IO](
-              driver.groupMetadataFor(ConsumerGroup.from(group).orFail, epoch, one.memberId).widen[GroupHandle],
-              handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
-            )
-          offset =
-            new CommittableOffset[IO]:
-              override val topicPartition: TopicPartition                  = TopicPartition(Topic.from(topic).orFail, Partition.from(0).orFail)
-              override val nextOffset: Offset                              = Offset.from(4L).orFail
-              override val committer: OffsetCommitter[IO]                  = Unused
-              override private[xkafka] def membership: GroupMembership[IO] = named
-          client   = ClientSettings.from(NonEmptyList.one(server)).orFail
-          settings =
-            TransactionalProducerSettings.from(client, TransactionalId.from(s"$group-transaction").orFail, Serializer.utf8[IO], Serializer.utf8[IO])
-              .orFail
-          pending <-
-            PlatformKafkaClient().transactionalProducer(settings).use: producer =>
-              producer.transactionally(transaction => transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(List(offset))) *> committed)
+          epoch   <- one.member.epoch
+          pending <- recording(server, group, topic, one.memberId, epoch)(committed)
           // The coordinator writes the transaction's markers after the commit returns.
           _ <- eventually("the committed offset being read")(committed.map(_ == List((4L, 0.toShort))))
         // UNSTABLE_OFFSET_COMMIT, with no offset.
         yield assertEquals(pending, List((-1L, 88.toShort)))
+
+    test(
+      s"$release: a transaction recording offsets under an epoch the member is not at, or an id the group does not have, fails and stores nothing"
+    ):
+      alone(server): (one, group, topic) =>
+        def code(memberId: String, epoch: Int) =
+          recording(server, group, topic, memberId, epoch)(IO.unit).attempt.map(_.left.toOption.collect { case e: KafkaException.BackendFailure =>
+            e.code
+          })
+        for
+          epoch   <- one.member.epoch
+          ahead   <- code(one.memberId, epoch + 1)
+          behind  <- code(one.memberId, epoch - 1)
+          unknown <- code("stranger", epoch)
+          stored  <- one.member.committed(List(OffsetFetchRequest.Topic(topic, List(0))))
+        yield
+          // ILLEGAL_GENERATION, or STALE_MEMBER_EPOCH, which 4.4.0 has also answered.
+          val wrongEpoch = Set(ErrorCode.IllegalGeneration, ErrorCode.fromProtocol(113))
+          assert(List(ahead, behind).forall(_.flatten.exists(wrongEpoch)), s"refused as $ahead and $behind")
+          assertEquals(unknown, Some(Some(ErrorCode.UnknownMemberId)))
+          assertEquals(stored.partitions.map(_.offset), List(-1L))
 
     test(s"$release: a commit under an epoch the member is not at, or an id the group does not have, is refused and stores nothing"):
       alone(server): (one, group, topic) =>

@@ -38,14 +38,23 @@ import protocol.{OffsetCommitRequest, OffsetFetchRequest}
 import xkafka.streams.{Origin, Segment, Topology}
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
-  * one consumer, write through one producer, and commit what they read through the member, at least once.
+  * one consumer and write through one producer. At least once, they commit what they read through the member; exactly once, in the transaction that
+  * writes what they wrote.
   */
 private[xkafka] object Engine:
   /** How long each poll of the input waits for records. */
   val PollMillis = 100
 
-  /** How often the engine commits what its tasks have read, Java Streams' `commit.interval.ms` under at-least-once. */
-  val CommitInterval: FiniteDuration = 30.seconds
+  /** How the engine commits, with how often it does by default, Java Streams' `commit.interval.ms` for each. */
+  enum Guarantee(val commitInterval: FiniteDuration) derives CanEqual:
+    /** Commits through the member after the records are written, so a task that moves on reads again what it read since. */
+    case AtLeastOnce extends Guarantee(30.seconds)
+
+    /** Commits in the transaction that writes the records (EOS v2), so a task that moves on finds what it wrote only with the offsets it read. */
+    case ExactlyOnce extends Guarantee(100.millis)
+
+  /** How long a transaction may stay open before the coordinator aborts it, Java Streams' `transaction.timeout.ms` under exactly-once. */
+  val TransactionTimeout: FiniteDuration = 10.seconds
 
   /** How long the coordinator waits for a member to give back its tasks, Java's `max.poll.interval.ms`, which Java Streams sends as its rebalance
     * timeout.
@@ -72,6 +81,10 @@ private[xkafka] object Engine:
   /** Answers saying the group no longer counts the member, which hears so in its next heartbeat and drops its tasks. */
   private val Gone: Set[Short] = Set(UnknownMember, FencedEpoch)
 
+  /** How the coordinator refuses offsets a transaction records under an epoch the member is not at, either way, or an id the group does not have.
+    */
+  private val Refused: Set[ErrorCode] = Set(ErrorCode.IllegalGeneration, ErrorCode.fromProtocol(StaleEpoch.toInt), ErrorCode.UnknownMemberId)
+
   /** The engine of `application` running `topology` over the brokers `settings` name. Released, it gives back its tasks, committing them, and leaves
     * the group, waiting at most `closeTimeout`. The effect it gives completes with the error that stops the engine, and otherwise does not complete.
     */
@@ -81,7 +94,8 @@ private[xkafka] object Engine:
       settings: ClientSettings,
       application: String,
       topology: Topology[F],
-      commitInterval: FiniteDuration = CommitInterval,
+      guarantee: Guarantee = Guarantee.AtLeastOnce,
+      commitInterval: Option[FiniteDuration] = None,
       closeTimeout: FiniteDuration = 30.seconds
   )(using F: Async[F]): Resource[F, F[Unit]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
@@ -97,11 +111,22 @@ private[xkafka] object Engine:
       processId <- Resource.eval(UUIDGen[F].randomUUID.map(_.toString))
       identity =
         MemberIdentity(application, memberId, processId, Declaration(application, topology), RebalanceTimeout.toMillis.toInt, None, Nil, None)
-      member   <- GroupMember(connections.coordinator(application), identity, closeTimeout)
-      input    <- consumer("read_uncommitted", reportEnds = false)
+      member <- GroupMember(connections.coordinator(application), identity, closeTimeout)
+      input  <- consumer(if guarantee == Guarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)
+      bytes = Serializer.bytes[F].option
       producer <-
-        ProducerSettings.from(settings, Serializer.bytes[F].option, Serializer.bytes[F].option, ClientProperties.producer).toEither
-          .leftMap(new KafkaException.InvalidSettings(_)).liftTo[Resource[F, *]].flatMap(client.producer)
+        ProducerSettings.from(settings, bytes, bytes, ClientProperties.producer).toEither.leftMap(new KafkaException.InvalidSettings(_))
+          .liftTo[Resource[F, *]].flatMap(client.producer)
+      transactions <-
+        guarantee match
+          case Guarantee.AtLeastOnce => Resource.pure[F, Option[Transactions[F]]](None)
+          case Guarantee.ExactlyOnce =>
+            // Java's form, the application id, the process id and the thread's index, for the one loop here.
+            (TransactionalId.from(s"$application-$processId-1"), ConsumerGroup.from(application)).tupled.leftMap(new KafkaException.InvalidValue(_))
+              .liftTo[Resource[F, *]].flatMap: (id, group) =>
+                TransactionalProducerSettings.from(settings, id, bytes, bytes, TransactionTimeout, ClientProperties.producer).toEither
+                  .leftMap(new KafkaException.InvalidSettings(_)).liftTo[Resource[F, *]].flatMap(client.transactionalProducer)
+                  .map(producer => Some(transactional(driver, producer, member, group, memberId)))
       plane =
         new Plane[F]:
           def read(starts: Vector[StartAt]): F[Unit] = driver.assign(input, starts.map(_.partition), starts)
@@ -109,8 +134,53 @@ private[xkafka] object Engine:
           def restore(changelogs: Map[TopicPartition, String]): F[Map[String, Map[Chunk[Byte], Stored]]] =
             consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs))
           def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
-      running <- running(application, topology, member, plane, commitInterval, closeTimeout)
+      running <- running(application, topology, member, plane, transactions, commitInterval.getOrElse(guarantee.commitInterval), closeTimeout)
     yield running
+
+  /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
+  private def transactional[F[_]](
+      driver: KafkaDriver[F],
+      producer: KafkaTransactionalProducer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]],
+      member: GroupMember[F],
+      group: ConsumerGroup,
+      memberId: String
+  )(using F: Async[F]): Transactions[F] =
+    new Transactions[F]:
+      def apply[A](body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A] =
+        producer.transactionally: transaction =>
+          body(records => transaction.produce(records).void).flatMap: (result, offsets) =>
+            if offsets.isEmpty then F.pure(result)
+            else
+              member.epoch.flatMap: epoch =>
+                val named =
+                  GroupMembership.Backend[F](
+                    driver.groupMetadataFor(group, epoch, memberId).widen[GroupHandle],
+                    handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
+                  )
+                val committable =
+                  offsets.toList.map: (partition, offset) =>
+                    new CommittableOffset[F]:
+                      override val topicPartition: TopicPartition                 = partition
+                      override val nextOffset: Offset                             = offset.offset
+                      override val leaderEpoch: Option[LeaderEpoch]               = offset.leaderEpoch
+                      override val metadata: String                               = offset.metadata
+                      override val committer: OffsetCommitter[F]                  = InTransaction[F]
+                      override private[xkafka] def membership: GroupMembership[F] = named
+                transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(committable)).as(result)
+
+  /** Offsets the engine records only in its transactions. */
+  private final class InTransaction[F[_]](using F: Async[F]) extends OffsetCommitter[F]:
+    override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
+      F.raiseError(new IllegalStateException("the engine records these offsets only in its transactions"))
+
+  /** Writes records, waiting until each is delivered. */
+  type Writer[F[_]] = NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] => F[Unit]
+
+  /** Runs a body that writes records inside a transaction, which also records the offsets the body gives, then commits. A body that fails, or a
+    * commit that does, aborts the transaction.
+    */
+  trait Transactions[F[_]]:
+    def apply[A](body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A]
 
   /** The engine of `application` running `topology` as `member`, reading and writing through `plane`. Released, it gives back its tasks through the
     * member, committing them, waiting at most `closeTimeout`.
@@ -120,6 +190,7 @@ private[xkafka] object Engine:
       topology: Topology[F],
       member: GroupMember[F],
       plane: Plane[F],
+      transactions: Option[Transactions[F]],
       commitInterval: FiniteDuration,
       closeTimeout: FiniteDuration
   )(using F: Async[F]): Resource[F, F[Unit]] =
@@ -128,7 +199,7 @@ private[xkafka] object Engine:
       changes <- Resource.eval(Queue.unbounded[F, Either[Throwable, MemberAction]])
       _       <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
       started <- Resource.eval(F.monotonic)
-      loop = Loop(application, segments, member, plane, changes, commitInterval)
+      loop = Loop(application, segments, member, plane, transactions, changes, commitInterval)
       running <- Resource.make(loop.run(Running(Map.empty, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
     yield running.joinWithNever
 
@@ -157,18 +228,49 @@ private[xkafka] object Engine:
       segments: Map[String, Segment[F, ?, ?, ?, ?]],
       member: GroupMember[F],
       plane: Plane[F],
+      transactions: Option[Transactions[F]],
       changes: Queue[F, Either[Throwable, MemberAction]],
       commitInterval: FiniteDuration
   )(using F: Async[F]):
     import MemberAction.*
 
-    /** Carries out the changes the member told of since the last batch, then reads, processes and writes the next batch, committing once the interval
-      * has passed.
+    /** Carries out the changes the member told of since the last batch, then reads, processes and writes until the next commit. */
+    def run(running: Running[F]): F[Unit] = changes.tryTakeN(None).flatMap(_.foldLeftM(running)(change)).flatMap(window).flatMap(run)
+
+    /** At least once: one batch, then a commit through the member once the interval has passed. Exactly once: once a poll brings records, a
+      * transaction that writes the batches read until the interval has passed or the member has news, with the offsets read up to there. A
+      * transaction the coordinator refuses for the member's identity leaves the tasks to start again from what the group committed.
       */
-    def run(running: Running[F]): F[Unit] =
-      changes.tryTakeN(None).flatMap(_.foldLeftM(running)(change)).flatMap(batch).flatMap: after =>
-        F.monotonic.flatMap: now =>
-          if now - after.committed >= commitInterval then commit(after, after.tasks.keySet).map(_.copy(committed = now)).flatMap(run) else run(after)
+    private def window(running: Running[F]): F[Running[F]] =
+      transactions match
+        case None => poll(running).flatMap(process(running, _, plane.write)).flatMap: after =>
+            F.monotonic.flatMap: now =>
+              if now - after.committed >= commitInterval then commit(after, after.tasks.keySet).map(_.copy(committed = now)) else F.pure(after)
+        case Some(transaction) => poll(running).flatMap: polled =>
+            if polled.isEmpty then F.pure(running)
+            else
+              def more(after: Running[F], write: Writer[F]): F[Running[F]] =
+                (F.monotonic, changes.size).tupled.flatMap: (now, waiting) =>
+                  if now - after.committed >= commitInterval || waiting > 0 then F.pure(after)
+                  else poll(after).flatMap(process(after, _, write)).flatMap(more(_, write))
+              transaction(write => process(running, polled, write).flatMap(more(_, write)).map(after => (after, offsetsOf(after))))
+                .flatMap(after => F.monotonic.map(now => after.copy(tasks = after.tasks.view.mapValues(_.copy(read = None)).toMap, committed = now)))
+                .recoverWith:
+                  case refused: KafkaException.BackendFailure if refused.code.exists(Refused) => restart(running)
+
+    /** The offset after the last record each task read since the last commit, with that record's leader epoch and the task's partition time. */
+    private def offsetsOf(running: Running[F]): Map[TopicPartition, OffsetAndMetadata] =
+      running.tasks.values.toList.flatMap: live =>
+        live.read.map: (next, leaderEpoch) =>
+          live.input ->
+            OffsetAndMetadata(Offset.from(next).toOption.get, LeaderEpoch.from(leaderEpoch).toOption, PartitionTime.encode(live.state.partitionTime))
+      .toMap
+
+    /** Starts every task again from what the group committed, dropping what it held and where it read to since. */
+    private def restart(running: Running[F]): F[Running[F]] =
+      (start(running.tasks.keys.toList), F.monotonic).tupled.flatMap: (started, now) =>
+        val again = running.copy(tasks = started, committed = now)
+        reassign(again).as(again)
 
     private def change(running: Running[F], told: Either[Throwable, MemberAction]): F[Running[F]] =
       told.liftTo[F].flatMap:
@@ -240,20 +342,20 @@ private[xkafka] object Engine:
             case None                     => F.pure(Option.when(answers.forall(_.errorCode == 0))(()))
       if topics.isEmpty then F.pure(running) else sent.as(running.copy(tasks = running.tasks ++ due.map((id, live) => id -> live.copy(read = None))))
 
-    /** Reads the next records, runs each through its task in order, and writes what the tasks wrote, waiting until every record is delivered. */
-    private def batch(running: Running[F]): F[Running[F]] =
-      // The Java consumer refuses to poll with nothing assigned.
-      val polling = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
-      polling.flatMap: polled =>
-        val routes = running.tasks.map((id, live) => (live.input.topic.value, live.input.partition.value) -> id)
-        polled.foldLeftM((running.tasks, Vector.empty[TaskOutput])):
-          case ((tasks, written), record) => routes.get((record.topic, record.partition)).flatMap(id => tasks.get(id).map(id -> _)) match
-              case None             => F.pure((tasks, written))
-              case Some((id, live)) => live.task.process(live.state, inputOf(record)).map: (state, out) =>
-                  val next = live.copy(state = state, position = record.offset + 1, read = Some((record.offset + 1, record.leaderEpoch)))
-                  (tasks.updated(id, next), written ++ out)
-        .flatMap: (tasks, written) =>
-          written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records.toList).traverse_(plane.write)).as(running.copy(tasks = tasks))
+    /** The next records, or none after a wait while no task runs, since the Java consumer refuses to poll with nothing assigned. */
+    private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
+
+    /** Runs each record through its task in order, and writes what the tasks wrote, waiting until every record is delivered. */
+    private def process(running: Running[F], polled: List[PolledRecord], write: Writer[F]): F[Running[F]] =
+      val routes = running.tasks.map((id, live) => (live.input.topic.value, live.input.partition.value) -> id)
+      polled.foldLeftM((running.tasks, Vector.empty[TaskOutput])):
+        case ((tasks, written), record) => routes.get((record.topic, record.partition)).flatMap(id => tasks.get(id).map(id -> _)) match
+            case None             => F.pure((tasks, written))
+            case Some((id, live)) => live.task.process(live.state, inputOf(record)).map: (state, out) =>
+                val next = live.copy(state = state, position = record.offset + 1, read = Some((record.offset + 1, record.leaderEpoch)))
+                (tasks.updated(id, next), written ++ out)
+      .flatMap: (tasks, written) =>
+        written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records.toList).traverse_(write)).as(running.copy(tasks = tasks))
 
     private def inputOf(record: PolledRecord): TaskInput = TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers)
 
