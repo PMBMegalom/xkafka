@@ -50,13 +50,32 @@ object ProduceExample extends IOApp.Simple:
     yield ()
 ```
 
+## Streams
+
+xkafka also runs Kafka Streams programs, written with its own DSL, as members of
+a streams application beside Java Kafka Streams instances, on brokers of Kafka
+4.2 or newer. Members hand tasks to each other as they join and leave, at least
+once or exactly once:
+
+```scala
+val text = Serde.utf8[IO]
+val words =
+  KStream(input, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(output, text, Serde.long[IO])
+
+Topology.of(words).liftTo[IO].flatMap: topology =>
+  KafkaClient[IO].streams(settings, topology).use(_.run)
+```
+
+See [Streams](https://pmbmegalom.github.io/xkafka/streams.html) for programs,
+guarantees, state and standby tasks.
+
 ## Documentation
 
 The full documentation lives at
 [pmbmegalom.github.io/xkafka](https://pmbmegalom.github.io/xkafka/), covering
 settings and validation, producing and consuming, offsets and commits,
-transactions, topic administration, transport security, the error model,
-serialization, and the subtle differences between the three runtimes.
+transactions, streams, topic administration, transport security, the error
+model, serialization, and the subtle differences between the three runtimes.
 
 ## Versioning
 
