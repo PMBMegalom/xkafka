@@ -44,6 +44,8 @@ fi
 
 cleanup() {
   status=$?
+  # Bash 3.2, as macOS ships it, reports 0 here when an unbound variable stopped the script, so only a finished command counts as success.
+  [[ "$status" -ne 0 || "${finished:-}" == 1 ]] || status=1
   # A failure keeps each broker's whole log in target/broker-logs, for a test that failed long before the tails printed here.
   if [[ "$status" -ne 0 ]]; then
     mkdir -p "$logs_dir"
@@ -330,3 +332,4 @@ export XKAFKA_SECURITY_PASSWORD="$password"
 
 cd "$working_directory"
 "$@"
+finished=1
