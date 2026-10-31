@@ -378,7 +378,8 @@ final class EngineSuite extends CatsEffectSuite:
             refused *> IO.race(streams.run, unauthorized)
         stopped *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (at, log) =>
-      assertEquals(at, 2.seconds)
+      // Leaving waits for the standby reader to finish its poll.
+      assert(at >= 2.seconds && at <= 2.seconds + Engine.PollMillis.millis, s"stopped at $at")
       assertEquals(log, List(Event.Leave))
 
   private def changelog(n: Int) = partition("app-counts-changelog", n)
@@ -484,13 +485,13 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(log.collect { case followed: Event.Followed => followed }.last, Event.Followed(Vector.empty))
         assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 0L)))
 
-  test("released, the engine asks its member to leave and waits for it no longer than the close timeout"):
+  test("released, the engine asks its member to leave and waits for it no longer than the close timeout and one poll of its standby reader"):
     val run =
       World().flatMap: world =>
         Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout)
           .use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (released, log) =>
-      assertEquals(released, CloseTimeout)
+      assert(released >= CloseTimeout && released <= CloseTimeout + Engine.PollMillis.millis, s"released at $released")
       assertEquals(log, List(Event.Leave))
 
 object EngineSuite:
