@@ -169,7 +169,7 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
           stored  <- one.member.committed(List(OffsetFetchRequest.Topic(topic, List(0))))
         yield
           // ILLEGAL_GENERATION, or STALE_MEMBER_EPOCH, which 4.4.0 has also answered.
-          val wrongEpoch = Set(ErrorCode.IllegalGeneration, ErrorCode.fromProtocol(113))
+          val wrongEpoch = Set(ErrorCode.IllegalGeneration, ErrorCode.StaleMemberEpoch)
           assert(List(ahead, behind).forall(_.flatten.exists(wrongEpoch)), s"refused as $ahead and $behind")
           assertEquals(unknown, Some(Some(ErrorCode.UnknownMemberId)))
           assertEquals(stored.partitions.map(_.offset), List(-1L))

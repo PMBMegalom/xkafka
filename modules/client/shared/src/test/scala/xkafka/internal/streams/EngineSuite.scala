@@ -235,7 +235,7 @@ final class EngineSuite extends CatsEffectSuite:
         )
 
   // ILLEGAL_GENERATION or STALE_MEMBER_EPOCH for an epoch the member is not at, and UNKNOWN_MEMBER_ID.
-  List(ErrorCode.IllegalGeneration, ErrorCode.fromProtocol(113), ErrorCode.UnknownMemberId).foreach: code =>
+  List(ErrorCode.IllegalGeneration, ErrorCode.StaleMemberEpoch, ErrorCode.UnknownMemberId).foreach: code =>
     test(s"exactly once, a transaction refused for the member's identity with $code starts the tasks again from what the group committed"):
       refusedWith(code)
 

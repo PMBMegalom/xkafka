@@ -90,7 +90,7 @@ private[xkafka] object Engine:
 
   /** How the coordinator refuses offsets a transaction records under an epoch the member is not at, either way, or an id the group does not have.
     */
-  private val Refused: Set[ErrorCode] = Set(ErrorCode.IllegalGeneration, ErrorCode.fromProtocol(StaleEpoch.toInt), ErrorCode.UnknownMemberId)
+  private val Refused: Set[ErrorCode] = Set(ErrorCode.IllegalGeneration, ErrorCode.StaleMemberEpoch, ErrorCode.UnknownMemberId)
 
   /** The engine of `application` running `topology` over the brokers `settings` name. Released, it gives back its tasks, committing them, and leaves
     * the group, waiting at most `closeTimeout`. `watch` lets a test see what the engine reads and writes.
