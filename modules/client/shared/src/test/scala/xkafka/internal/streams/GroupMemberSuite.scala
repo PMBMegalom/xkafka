@@ -148,6 +148,73 @@ final class GroupMemberSuite extends CatsEffectSuite:
       // The second heartbeat is refused; the third goes after a wait of 100 ms, a fifth either way, and the member stays in the group.
       assert(times(2) - times(1) >= 80L && times(2) - times(1) <= 120L, s"heartbeats went at $times")
 
+  /** The times of the heartbeats carrying task offsets, over heartbeats every 300 ms and offsets asked for every second. */
+  private def carried(read: IO[TaskOffsets]): IO[List[(Long, StreamsGroupHeartbeatRequest)]] =
+    val run =
+      Coordinator((_, request) => IO.pure(answer(request, active = Some(Set.empty), interval = 300, offsetInterval = 1000))).flatMap: coordinator =>
+        member(coordinator).use(member => member.offsetsFrom(read) *> IO.sleep(2500.millis)) *> coordinator.sent
+    TestControl.executeEmbed(run.timeout(1.minute)).map(_.filter((_, sent) => sent.taskOffsets.nonEmpty || sent.taskEndOffsets.nonEmpty))
+
+  private def offsetsAt(n: Long) = TaskOffsets(List(StreamsGroup.TaskOffset("0", 1, n)), List(StreamsGroup.TaskOffset("0", 1, 5L)))
+
+  test("the joining heartbeat carries the task offsets, and later ones only those that changed"):
+    carried(IO.pure(offsetsAt(2L))).map: sent =>
+      assertEquals(sent.map(_._1), List(0L))
+      assertEquals(sent.map(sent => (sent._2.taskOffsets, sent._2.taskEndOffsets)), List((Some(offsetsAt(2L).positions), Some(offsetsAt(2L).ends))))
+
+  test("a member fenced and joining again sends its task offsets again, though they did not change"):
+    val run =
+      Coordinator((n, request) =>
+        IO.pure(answer(request, error = if n == 2 then 110 else 0, active = Some(Set.empty), interval = 300, offsetInterval = 60000))
+      ).flatMap: coordinator =>
+        member(coordinator).use(member => member.offsetsFrom(IO.pure(offsetsAt(2L))) *> IO.sleep(1.second)) *> coordinator.sent
+    TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
+      val joins = sent.filter(_._2.memberEpoch == 0)
+      assertEquals(joins.size, 2)
+      assertEquals(joins.map(_._2.taskOffsets), List.fill(2)(Some(offsetsAt(2L).positions)))
+      assertEquals(sent.filter(_._2.memberEpoch > 0).flatMap(_._2.taskOffsets), Nil)
+
+  test("a heartbeat reporting tasks the engine took on carries the task offsets that changed, before the interval for them has passed"):
+    val run =
+      IO.ref(0L).flatMap: reads =>
+        Coordinator((_, request) => IO.pure(answer(request, active = Some(Set(TaskId("0", 0))), interval = 5000, offsetInterval = 60000))).flatMap:
+          coordinator =>
+            member(coordinator).use: member =>
+              member.offsetsFrom(reads.updateAndGet(_ + 1).map(offsetsAt)) *> member.changes.head.compile.lastOrError.flatMap:
+                case MemberAction.Assign(round, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(100.millis)
+                case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+            *> coordinator.sent
+    TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
+      val reporting = sent.filter((_, request) => request.memberEpoch > 0 && request.activeTasks.nonEmpty)
+      assertEquals(reporting.map(_._1), List(500L))
+      assertEquals(reporting.map(_._2.taskOffsets.isDefined), List(true))
+
+  test(
+    "where only the changelog ends change, each heartbeat after the interval carries them, as Java's member restarts the interval only on sending positions"
+  ):
+    val read =
+      IO.ref(0L).map(ends =>
+        ends.updateAndGet(_ + 1).map(n => TaskOffsets(List(StreamsGroup.TaskOffset("0", 1, 2L)), List(StreamsGroup.TaskOffset("0", 1, n))))
+      )
+    read.flatMap(carried).map: sent =>
+      assertEquals(sent.map(_._1), List(0L, 1200L, 1500L, 1800L, 2100L, 2400L))
+      assertEquals(sent.map(_._2.taskOffsets.isDefined), List(true, false, false, false, false, false))
+
+  test("a member leaving sends no task offsets, though the interval for them has passed"):
+    val run =
+      IO.ref(0L).flatMap: reads =>
+        Coordinator((_, request) => IO.pure(answer(request, active = Some(Set.empty), interval = 5000, offsetInterval = 1000))).flatMap:
+          coordinator =>
+            member(coordinator).use(member => member.offsetsFrom(reads.updateAndGet(_ + 1).map(offsetsAt)) *> IO.sleep(1500.millis)) *>
+              coordinator.sent
+    TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
+      assertEquals(sent.map(sent => (sent._2.memberEpoch, sent._2.taskOffsets.isDefined)), List((0, true), (-1, false)))
+
+  test("task offsets that change are sent each interval the coordinator asks for them, the ends only where they changed too"):
+    IO.ref(0L).flatMap(reads => carried(reads.updateAndGet(_ + 1).map(offsetsAt))).map: sent =>
+      assertEquals(sent.map(_._1), List(0L, 1200L, 2400L))
+      assertEquals(sent.map(_._2.taskEndOffsets.isDefined), List(true, false, false))
+
   test("an error the member cannot recover from ends the changes with it after every task is dropped, and leaving fails with it"):
     val run =
       Coordinator((_, request) => IO.pure(answer(request, error = 42))).flatMap: coordinator =>
@@ -251,7 +318,8 @@ object GroupMemberSuite:
       request: StreamsGroupHeartbeatRequest,
       error: Short = 0,
       active: Option[Set[TaskId]] = None,
-      interval: Int = 5000
+      interval: Int = 5000,
+      offsetInterval: Int = 60000
   ): StreamsGroupHeartbeatResponse =
     def wire(tasks: Set[TaskId]) =
       tasks.toList.sortBy(t => (t.subtopology, t.partition)).map(t => StreamsGroup.Tasks(t.subtopology, List(t.partition)))
@@ -265,7 +333,7 @@ object GroupMemberSuite:
       epoch,
       interval,
       -1L,
-      60000,
+      offsetInterval,
       None,
       tasks.map(wire),
       tasks.map(_ => Nil),

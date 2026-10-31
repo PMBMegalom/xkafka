@@ -34,7 +34,7 @@ import fs2.Stream
 import fs2.concurrent.{Signal, SignallingRef}
 import scodec.bits.ByteVector
 import internal.group.{Connection, Crypto}
-import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request}
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest}
 
 /** A member of a streams group, heartbeating to the group's coordinator on fibers of its own. The engine carries out the changes it is told of and
   * confirms each by its round.
@@ -72,6 +72,15 @@ private[xkafka] trait GroupMember[F[_]]:
     */
   def committed(topics: List[OffsetFetchRequest.Topic]): F[OffsetFetchRequest.Answer]
 
+  /** Where the member's tasks are in their changelogs and where those end, each summed by task, which heartbeats carry as Java's member sends them:
+    * when joining, and when they changed, at the coordinator's interval or as the member reports tasks. A read that fails leaves them out of that
+    * heartbeat.
+    */
+  def offsetsFrom(read: F[TaskOffsets]): F[Unit]
+
+/** Where tasks are in their changelogs, and where those end, each summed over a task's changelog partitions. */
+private[xkafka] final case class TaskOffsets(positions: List[StreamsGroup.TaskOffset], ends: List[StreamsGroup.TaskOffset])
+
 private[xkafka] object GroupMember:
   /** The first wait before a heartbeat that failed goes again, the Java client's `retry.backoff.ms`. */
   val Backoff: FiniteDuration = 100.millis
@@ -95,7 +104,10 @@ private[xkafka] object GroupMember:
       ended      <- Resource.eval(Deferred[F, Either[Throwable, Unit]])
       timer      <- Resource.eval(F.ref(0L))
       current    <- Resource.eval(SignallingRef[F].of(Member(identity)))
-      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current)
+      offsets    <- Resource.eval(F.ref(Option.empty[F[TaskOffsets]]))
+      offsetsAt  <- Resource.eval(F.ref(Option.empty[FiniteDuration]))
+      sent       <- Resource.eval(F.ref(Option.empty[TaskOffsets]))
+      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current, offsets, offsetsAt, sent)
       _ <- Resource.make(supervisor.supervise(loop.run(Member(identity)).void))(_ => leaving(events, ended, closeTimeout))
       _ <- Resource.eval(events.offer(MemberEvent.Start))
     yield new GroupMember[F]:
@@ -108,6 +120,8 @@ private[xkafka] object GroupMember:
 
       def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]] =
         current.get.flatMap(member => loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, member.epoch, None, topics)))
+
+      def offsetsFrom(read: F[TaskOffsets]): F[Unit] = offsets.set(Some(read))
 
       def committed(topics: List[OffsetFetchRequest.Topic]): F[OffsetFetchRequest.Answer] =
         current.get
@@ -151,7 +165,10 @@ private[xkafka] object GroupMember:
       ended: Deferred[F, Either[Throwable, Unit]],
       timer: Ref[F, Long],
       held: NonEmptyHotswap[F, Option[Connection[F]]],
-      current: SignallingRef[F, Member]
+      current: SignallingRef[F, Member],
+      offsets: Ref[F, Option[F[TaskOffsets]]],
+      offsetsAt: Ref[F, Option[FiniteDuration]],
+      offsetsSent: Ref[F, Option[TaskOffsets]]
   )(using F: Temporal[F]):
     import MemberAction.*
 
@@ -165,9 +182,9 @@ private[xkafka] object GroupMember:
 
     private def perform(action: MemberAction): F[Unit] =
       action match
-        case Send(request) =>
+        case Send(heartbeat) =>
           val answer =
-            connection.flatMap(_.send(request)).attempt.flatMap:
+            withOffsets(heartbeat).flatMap(request => connection.flatMap(_.send(request))).attempt.flatMap:
               case Right(response)             => events.offer(MemberEvent.Answered(response))
               case Left(error: KafkaException) => drop *> events.offer(MemberEvent.RequestFailed(error))
               case Left(other)                 => drop *> events.offer(MemberEvent.RequestFailed(unexpected(other)))
@@ -178,6 +195,23 @@ private[xkafka] object GroupMember:
         case change @ (Revoke(_, _) | Assign(_, _) | LoseAll) => out.offer(Some(Right(change)))
         case Fail(error)                                      => out.offer(Some(Left(error))) *> ended.complete(Left(error)).void
         case Done                                             => out.offer(None) *> ended.complete(Right(())).void
+
+    /** The heartbeat with the task offsets, as Java's member adds them: always when joining; otherwise, when it reports tasks or once the
+      * coordinator's interval for them has passed, each of the two lists that changed since it was last sent. A member leaving sends none.
+      */
+    private def withOffsets(heartbeat: StreamsGroupHeartbeatRequest): F[StreamsGroupHeartbeatRequest] =
+      (current.get, offsets.get, offsetsAt.get, offsetsSent.get, F.monotonic).tupled.flatMap: (member, read, at, last, now) =>
+        val joining = heartbeat.memberEpoch == 0
+        // A joining heartbeat always reports the member's tasks.
+        val due = heartbeat.activeTasks.isDefined || member.taskOffsetInterval.exists(interval => at.forall(now - _ >= interval))
+        read.filter(_ => due && heartbeat.memberEpoch >= 0).fold(F.pure(heartbeat)): reading =>
+          reading.attempt.flatMap:
+            case Right(read @ TaskOffsets(positions, ends)) =>
+              val newPositions = Option.when(joining || !last.exists(_.positions == positions))(positions)
+              val newEnds      = Option.when(joining || !last.exists(_.ends == ends))(ends)
+              (offsetsAt.set(Some(now)).whenA(newPositions.nonEmpty) *> offsetsSent.set(Some(read)))
+                .as(heartbeat.copy(taskOffsets = newPositions, taskEndOffsets = newEnds))
+            case Left(_) => F.pure(heartbeat)
 
     /** Sends `Due` after `after`, unless another heartbeat was planned meanwhile. */
     private def due(after: FiniteDuration): F[Unit] =

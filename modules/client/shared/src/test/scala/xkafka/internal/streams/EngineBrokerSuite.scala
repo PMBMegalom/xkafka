@@ -27,9 +27,11 @@ import java.nio.ByteBuffer
 import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
+import fs2.Chunk
 import munit.CatsEffectSuite
+import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, Store, StreamsPhase, StreamsSettings, Topology}
 
@@ -143,6 +145,30 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             IO.raiseError(new RuntimeException("abort"))
         .attempt.void
 
+  /** An engine for `app`, as `running` starts it, whose restores and the changelogs it follows are recorded. */
+  private def watched(server: String, app: Counting, restores: Ref[IO, List[Map[TopicPartition, Long]]], follows: Ref[IO, List[Vector[StartAt]]])(
+      using guarantee: ProcessingGuarantee
+  ) =
+    val interval                                         = Option.when(guarantee == ProcessingGuarantee.AtLeastOnce)(1.second)
+    def watch(plane: Engine.Plane[IO]): Engine.Plane[IO] =
+      new Engine.Plane[IO]:
+        export plane.{ends, followed, poll, purge, read, write}
+        def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], held: Map[String, Map[Chunk[Byte], Stored]]) =
+          restores.update(_ :+ from) *> plane.restore(changelogs, from, held)
+        def follow(starts: Vector[StartAt]) = follows.update(_ :+ starts) *> plane.follow(starts)
+    Engine(PlatformKafkaClient(), KafkaClientPlatform.driver[IO], client(server), app.application, app.topology, guarantee, interval, watch = watch)
+
+  /** Waits up to a minute for `condition` to hold. */
+  private def eventually(what: String)(condition: IO[Boolean]): IO[Unit] =
+    def loop(left: Int): IO[Unit] =
+      condition.flatMap: holds =>
+        if holds then IO.unit
+        else if left <= 0 then IO.raiseError(new AssertionError(s"$what did not happen within a minute"))
+        else IO.sleep(250.millis) *> loop(left - 1)
+    loop(240)
+
+  private val third = Map("b" -> 1, "d" -> 2)
+
   private val first  = Map("a" -> 1, "b" -> 2, "c" -> 3, "d" -> 4)
   private val second = Map("a" -> 2, "c" -> 1, "e" -> 5)
 
@@ -184,6 +210,21 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         counting(server): app =>
           aborted(server, app.input, List("a", "b", "e")) *> produce(server, app.input, first) *>
             running(server, app)(latest(server, app.output, total(first)))
+
+    test(s"$release, $under: a standby made active restores only what it had not read, and the counts go on"):
+      counting(server): app =>
+        val recorded = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
+        recorded.flatMap: (restores, follows) =>
+          produce(server, app.input, first) *> watched(server, app, restores, follows).allocated.flatMap: (_, leaving) =>
+            latest(server, app.output, total(first)) *> watched(server, app, restores, follows).use: stayer =>
+              val following = follows.get.map(_.exists(_.nonEmpty))
+              val promoted  = restores.get.map(_.exists(from => from.nonEmpty && from.values.exists(_ > 0)))
+              val steps     =
+                eventually("the second engine standing by for a task")(following) *> produce(server, app.input, second) *>
+                  latest(server, app.output, total(first, second)) *> leaving *>
+                  eventually("the second engine restoring its standby task from where it read to")(promoted) *> produce(server, app.input, third) *>
+                  latest(server, app.output, total(first, second, third))
+              stayer.run.race(steps).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure))
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

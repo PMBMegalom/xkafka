@@ -33,26 +33,31 @@ private[xkafka] object Restore:
   /** How long each poll waits for records. */
   val PollMillis = 500
 
-  /** Reads each changelog partition `changelogs` names, with the store it backs, from its start to its end, through `consumer`, which reads under
-    * read_committed and reports the ends it reaches. Each store holds the latest value of each key, and a record with no value removes its key.
-    * Records without a key, which no store writes, are skipped.
+  /** Reads each changelog partition `changelogs` names, with the store it backs, from where `from` says, or its start, to its end, through
+    * `consumer`, which reads under read_committed and reports the ends it reaches, onto what `held` already holds. Each store holds the latest value
+    * of each key, and a record with no value removes its key. Records without a key, which no store writes, are skipped.
     */
-  def apply[F[_]](driver: KafkaDriver[F], consumer: driver.Client, changelogs: Map[TopicPartition, String])(using
-      F: Monad[F]
-  ): F[Map[String, Map[Chunk[Byte], Stored]]] =
+  def apply[F[_]](
+      driver: KafkaDriver[F],
+      consumer: driver.Client,
+      changelogs: Map[TopicPartition, String],
+      from: Map[TopicPartition, Long] = Map.empty,
+      held: Map[String, Map[Chunk[Byte], Stored]] = Map.empty
+  )(using F: Monad[F]): F[Map[String, Map[Chunk[Byte], Stored]]] =
     val stores   = changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> store)
     val starting = changelogs.keys.toVector
     def read(left: Set[(String, Int)], restored: Map[String, Map[Chunk[Byte], Stored]]): F[Map[String, Map[Chunk[Byte], Stored]]] =
       if left.isEmpty then F.pure(restored)
       else
         driver.poll(consumer, PollMillis).flatMap: polled =>
-          val applied =
-            polled.records.foldLeft(restored)((now, record) => stores.get((record.topic, record.partition)).fold(now)(apply(now, _, record)))
-          read(left -- polled.ends.map(end => (end.topic, end.partition)), applied)
-    driver.assign(consumer, starting, starting.map(StartAt(_, 0L, -1))) *>
-      read(stores.keySet, stores.values.map(_ -> Map.empty[Chunk[Byte], Stored]).toMap)
+          val after =
+            polled.records.foldLeft(restored)((now, record) => stores.get((record.topic, record.partition)).fold(now)(applied(now, _, record)))
+          read(left -- polled.ends.map(end => (end.topic, end.partition)), after)
+    driver.assign(consumer, starting, starting.map(partition => StartAt(partition, from.getOrElse(partition, 0L), -1))) *>
+      read(stores.keySet, stores.values.map(store => store -> held.getOrElse(store, Map.empty[Chunk[Byte], Stored])).toMap)
 
-  private def apply(restored: Map[String, Map[Chunk[Byte], Stored]], store: String, record: PolledRecord): Map[String, Map[Chunk[Byte], Stored]] =
+  /** The stores with one changelog record applied to `store`. */
+  def applied(restored: Map[String, Map[Chunk[Byte], Stored]], store: String, record: PolledRecord): Map[String, Map[Chunk[Byte], Stored]] =
     record.key.fold(restored): key =>
       val contents = restored.getOrElse(store, Map.empty)
       restored.updated(store, record.value.fold(contents - key)(value => contents.updated(key, Stored(value, record.timestamp.getOrElse(-1L)))))
