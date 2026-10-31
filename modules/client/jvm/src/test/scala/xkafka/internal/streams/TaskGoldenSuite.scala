@@ -63,9 +63,11 @@ final class TaskGoldenSuite extends CatsEffectSuite:
   test("stateless steps write what Java writes, with each record's timestamp and headers"):
     same(
       KStream(in, text, text).filter((_, v) => v.nonEmpty).peek((_, _) => IO.unit).map((k, v) => (v, k)).mapValues(_.toUpperCase)
-        .flatMap((k, v) => List(k -> v, s"$k!" -> v)).selectKey((k, v) => k + v).evalMapValues(v => IO.pure(v + v)).to(out, text, text),
+        .flatMap((k, v) => List(k -> v, s"$k!" -> v)).selectKey((k, v) => k + v).evalMapValues(v => IO.pure(v + v))
+        .evalFilter((k, _) => IO.pure(!k.contains("!"))).evalMap((k, v) => IO.pure((v, s"$k:$v"))).to(out, text, text),
       _.stream[String, String]("in").filter((_, v) => v.nonEmpty).peek((_, _) => ()).map((k, v) => KeyValue(v, k)).mapValues(_.toUpperCase)
-        .flatMap((k, v) => java.util.List.of(KeyValue(k, v), KeyValue(s"$k!", v))).selectKey((k, v) => k + v).mapValues(v => v + v).to("out"),
+        .flatMap((k, v) => java.util.List.of(KeyValue(k, v), KeyValue(s"$k!", v))).selectKey((k, v) => k + v).mapValues(v => v + v)
+        .filter((k, _) => !k.contains("!")).map((k, v) => KeyValue(v, s"$k:$v")).to("out"),
       Nil
     )
 

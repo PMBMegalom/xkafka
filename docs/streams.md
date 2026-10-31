@@ -40,13 +40,14 @@ A program is a `Topology` of pipelines, each from an input topic to an output
 topic. A pipeline is built from a `KStream`:
 
 - `filter`, `map`, `mapValues`, `flatMap`, `selectKey` and `peek`, and
-  `evalMapValues` for a step that runs an effect;
+  `evalFilter`, `evalMap` and `evalMapValues` for steps that run an effect;
 - `groupByKey` and `groupBy`, then `count`, `reduce` or `aggregate` into a named
   `Store`, giving a `KTable` whose `toStream` is each change to it;
 - `to`, which ends the pipeline at its output topic.
 
-Records whose key changes before they are grouped go through a repartition topic,
-which `groupBy` names with a `Repartition`. A store keeps its contents in a
+Records whose key may have changed before they are grouped, after `map`,
+`flatMap`, `selectKey` or `evalMap`, go through a repartition topic. `groupBy`
+names it with a `Repartition`, and so does `groupByKey` after such a step. A store keeps its contents in a
 changelog topic. The application's own topics are named after it:
 `<application id>-<store>-changelog` and `<application id>-<name>-repartition`.
 The broker creates them as the application first joins.
@@ -86,7 +87,7 @@ application writes to Kafka, not what its effects do elsewhere.
 
 A member processes one task at a time by default, as a single Java Kafka Streams
 thread does. With `concurrency` set above one, up to that many tasks process at
-once, each its own records in order. This helps where `evalMapValues` waits on
+once, each its own records in order. This helps where an effectful step waits on
 something outside Kafka.
 
 ## State

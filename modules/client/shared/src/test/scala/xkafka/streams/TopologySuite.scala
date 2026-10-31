@@ -133,8 +133,17 @@ final class TopologySuite extends CatsEffectSuite:
     )
     assert(Topology.of(rekeyed.groupByKey(Repartition("rekeyed"), text, text).count(Store("counts")).toStream.to(topic("out"), text, count)).isRight)
 
+  test("records an effect may have given a new key cannot be grouped by key without a repartition name"):
+    val remapped = KStream(topic("in"), text, text).evalMap((k, v) => IO.pure((v, k)))
+    assertEquals(
+      Topology.of(remapped.groupByKey(text, text).count(Store("counts")).toStream.to(topic("out"), text, count)).left.map(_.toList),
+      Left(List(TopologyError.UnnamedRepartition))
+    )
+
   test("records grouped by the key they were read with need no repartition name"):
-    val grouped = KStream(topic("in"), text, text).filter((_, v) => v.nonEmpty).mapValues(_.trim).groupByKey(text, text).count(Store("counts"))
+    val grouped =
+      KStream(topic("in"), text, text).filter((_, v) => v.nonEmpty).mapValues(_.trim).evalFilter((_, v) => IO.pure(v.nonEmpty)).groupByKey(text, text)
+        .count(Store("counts"))
     assert(Topology.of(grouped.toStream.to(topic("out"), text, count)).isRight)
 
   test("a table's changes start with the key they were grouped by, so grouping them by key again needs no repartition"):

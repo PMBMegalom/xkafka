@@ -102,8 +102,11 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case Step.MapValues(change) => passing(Vector(record.copy(value = change(record.value))))
       case Step.FlatMap(change)   =>
         passing(change(record.key, record.value).toVector.map((k, v) => Travelling(k, v, record.timestamp, record.headers)))
-      case Step.Peek(effect)                             => effect(record.key, record.value) *> passing(Vector(record))
-      case Step.EvalMapValues(change)                    => change(record.value).flatMap(v => passing(Vector(record.copy(value = v))))
+      case Step.Peek(effect)          => effect(record.key, record.value) *> passing(Vector(record))
+      case Step.EvalMapValues(change) => change(record.value).flatMap(v => passing(Vector(record.copy(value = v))))
+      case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
+      case Step.EvalMap(change)       => change(record.key, record.value)
+          .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
       case Step.ToStream()                               => passing(Vector(record))
       case Step.Aggregate(store, key, value, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
