@@ -734,7 +734,8 @@ lazy val streamsFixture = project
       "org.apache.kafka" % "kafka-streams" % kafkaClientsVersion,
       "org.slf4j"        % "slf4j-nop"     % slf4jVersion
     ),
-    fork := true
+    Compile / mainClass := Some("xkafka.fixture.StreamsFixture"),
+    fork                := true
   )
 
 lazy val docs = project
