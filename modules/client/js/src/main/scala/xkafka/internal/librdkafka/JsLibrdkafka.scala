@@ -66,6 +66,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
           Completions.forget(token)
           callback(Left(Failures.plain("could not start a thread for a librdkafka call")))
 
+  /** Starts a shim call that hands back something to free, then reads and frees it in `read`, as one step. A cancel between the two would leave it
+    * unfreed, and destroying its client would then wait forever. A cancel waits for the call to report either way.
+    */
+  private def taking[A](function: Shim => js.Dynamic)(arguments: js.Any*)(read: => F[A]): F[A] =
+    F.uncancelable(_ => background(function)(arguments*) *> F.defer(read))
+
   /** Runs a call that does not wait, on the calling thread. */
   private def direct[A](call: Shim => A): F[A] = shim.flatMap(loaded => F.delay(call(loaded)))
 
@@ -275,7 +281,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       val error  = ErrorSlot()
       val status = Buffers.alloc(4)
       val result = Result()
-      background(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+      taking(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value):
         status.readInt32LE(0) match
           case negative if negative < 0 => F.raiseError(error.failure)
           case 0                        => F.pure(Polled.empty)
@@ -371,17 +377,16 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       val (topics, values) = partitionArrays(partitions)
       val error            = ErrorSlot()
       val result           = Result()
-      background(_.committed)(consumer, topics, values, partitions.size, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *>
-        F.defer:
-          val committed = result.pointer
-          if committed == null then F.raiseError(error.failure)
-          else
-            direct: shim =>
-              try Vector.tabulate(partitions.size): index =>
-                  val size     = js.Array[js.Any](0)
-                  val metadata = chunk(shim.committedMetadataAt(committed, index, size), size(0)).fold("")(bytes => new String(bytes.toArray, UTF_8))
-                  StoredOffset(long(shim.committedOffsetAt(committed, index)), shim.committedEpochAt(committed, index).asInstanceOf[Int], metadata)
-              finally shim.committedDestroy(committed): Unit
+      taking(_.committed)(consumer, topics, values, partitions.size, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value):
+        val committed = result.pointer
+        if committed == null then F.raiseError(error.failure)
+        else
+          direct: shim =>
+            try Vector.tabulate(partitions.size): index =>
+                val size     = js.Array[js.Any](0)
+                val metadata = chunk(shim.committedMetadataAt(committed, index, size), size(0)).fold("")(bytes => new String(bytes.toArray, UTF_8))
+                StoredOffset(long(shim.committedOffsetAt(committed, index)), shim.committedEpochAt(committed, index).asInstanceOf[Int], metadata)
+            finally shim.committedDestroy(committed): Unit
 
   override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): F[(Long, Long)] =
     F.defer:
@@ -450,7 +455,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     F.defer:
       val error  = ErrorSlot()
       val result = Result()
-      background(_.metadata)(client, optional(topic), timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+      taking(_.metadata)(client, optional(topic), timeoutMillis, error.message, ErrorBufferSize, error.code, result.value):
         val metadata = result.pointer
         if metadata == null then F.raiseError(error.failure)
         else
@@ -537,7 +542,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     F.defer:
       val error  = ErrorSlot()
       val result = Result()
-      background(_.describeConfigs)(
+      taking(_.describeConfigs)(
         admin,
         strings(topics.map(_.value)),
         topics.size,
@@ -546,7 +551,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         ErrorBufferSize,
         error.code,
         result.value
-      ) *> F.defer:
+      ):
         val configs = result.pointer
         if configs == null then F.raiseError(error.failure)
         else
@@ -564,7 +569,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       val entries = LibrdkafkaAnswers.configurationChanges(changes)
       val error   = ErrorSlot()
       val result  = Result()
-      background(_.alterTopicConfigs)(
+      taking(_.alterTopicConfigs)(
         (Seq[js.Any](
           admin,
           strings(entries.map(_._1)),
@@ -574,7 +579,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
           entries.size,
           timeoutMillis
         ) ++ errorArguments(error) :+ result.value)*
-      ) *> F.defer:
+      ):
         val configs = result.pointer
         if configs == null then F.raiseError(error.failure)
         else
@@ -603,7 +608,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     F.defer:
       val error  = ErrorSlot()
       val result = Result()
-      background(_.listGroups)(admin, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+      taking(_.listGroups)(admin, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value):
         val groups = result.pointer
         if groups == null then F.raiseError(error.failure)
         else
@@ -618,7 +623,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     F.defer:
       val error  = ErrorSlot()
       val result = Result()
-      background(_.describeCluster)(admin, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value) *> F.defer:
+      taking(_.describeCluster)(admin, timeoutMillis, error.message, ErrorBufferSize, error.code, result.value):
         val cluster = result.pointer
         if cluster == null then F.raiseError(error.failure)
         else
@@ -637,7 +642,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     F.defer:
       val error  = ErrorSlot()
       val result = Result()
-      background(_.describeTopics)(
+      taking(_.describeTopics)(
         admin,
         strings(topics.map(_.value)),
         topics.size,
@@ -646,7 +651,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         ErrorBufferSize,
         error.code,
         result.value
-      ) *> F.defer:
+      ):
         val described = result.pointer
         if described == null then F.raiseError(error.failure)
         else
@@ -682,7 +687,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     F.defer:
       val error  = ErrorSlot()
       val result = Result()
-      background(_.describeGroups)(
+      taking(_.describeGroups)(
         admin,
         strings(groups.map(_.value)),
         groups.size,
@@ -691,7 +696,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         ErrorBufferSize,
         error.code,
         result.value
-      ) *> F.defer:
+      ):
         val descriptions = result.pointer
         if descriptions == null then F.raiseError(error.failure)
         else
@@ -743,7 +748,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       val (topics, values) = partitionArrays(named)
       val error            = ErrorSlot()
       val result           = Result()
-      background(_.listGroupOffsets)(
+      taking(_.listGroupOffsets)(
         admin,
         group.value,
         topics,
@@ -754,7 +759,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         ErrorBufferSize,
         error.code,
         result.value
-      ) *> F.defer:
+      ):
         val committed = result.pointer
         if committed == null then F.raiseError(error.failure)
         else
