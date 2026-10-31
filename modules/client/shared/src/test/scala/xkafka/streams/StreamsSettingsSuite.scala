@@ -57,6 +57,18 @@ final class StreamsSettingsSuite extends FunSuite:
       ))
     )
 
+  test("a refused application id or settings are raised with every reason"):
+    type Raised[A] = Either[Throwable, A]
+    def reasons(raised: Raised[?]) = raised.left.toOption.collect { case refused: InvalidStreamsSettings => refused.errors.toList }
+    assertEquals(reasons(ApplicationId.from("").liftTo[Raised]), Some(List(StreamsSettingsError.EmptyApplicationId)))
+    val refused = StreamsSettings.from(client, app, concurrency = 0, closeTimeout = Duration.Zero).liftTo[Raised]
+    assertEquals(
+      reasons(refused),
+      Some(List(StreamsSettingsError.NonPositiveConcurrency(0), StreamsSettingsError.NonPositiveCloseTimeout(Duration.Zero)))
+    )
+    assertEquals(refused.left.toOption.map(_.getMessage), Some("concurrency must be positive, was 0; close timeout must be positive, was 0 days"))
+    assertEquals(StreamsSettings.from(client, app).liftTo[Raised].map(_.concurrency), Right(1))
+
   test("each setting can be changed, and invalid changes are refused"):
     val settings = StreamsSettings.from(client, app).orFail
     val changed  =

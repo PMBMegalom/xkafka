@@ -24,8 +24,8 @@ package streams
 
 import scala.concurrent.duration.*
 
-import cats.Show
-import cats.data.ValidatedNel
+import cats.{ApplicativeThrow, Show}
+import cats.data.{NonEmptyList, ValidatedNel}
 import cats.syntax.all.*
 
 /** Names a streams application: its group, and the start of each internal topic's name. It takes the characters a topic name takes. */
@@ -73,6 +73,18 @@ enum StreamsSettingsError derives CanEqual:
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
+
+  /** Carries the reason a value was rejected into `F`. */
+  extension [A](result: Either[StreamsSettingsError, A])
+    def liftTo[F[_]](using F: ApplicativeThrow[F]): F[A] = F.fromEither(result.left.map(error => InvalidStreamsSettings(NonEmptyList.one(error))))
+
+  /** Carries every reason settings were rejected into `F`. */
+  extension [A](result: ValidatedNel[StreamsSettingsError, A])
+    def liftTo[F[_]](using F: ApplicativeThrow[F]): F[A] = F.fromEither(result.toEither.left.map(InvalidStreamsSettings(_)))
+
+/** Streams settings or an application id that could not be built, with every reason they could not. */
+final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError])
+    extends RuntimeException(errors.toList.map(_.message).mkString("; "))
 
 /** How a streams application connects, names itself and runs.
   *
