@@ -50,6 +50,9 @@ final class EngineGoldenSuite extends FunSuite:
       java(StreamsConfig.EXACTLY_ONCE_V2).getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG).toLong.millis
     )
 
+  test("a store taken away is kept as long as Java keeps a task's state directory"):
+    assertEquals(Engine.StateCleanupDelay, java(StreamsConfig.AT_LEAST_ONCE).getLong(StreamsConfig.STATE_CLEANUP_DELAY_MS_CONFIG).toLong.millis)
+
   test("repartition topics are purged at Java's interval"):
     assertEquals(Engine.PurgeInterval, java(StreamsConfig.AT_LEAST_ONCE).getLong(StreamsConfig.REPARTITION_PURGE_INTERVAL_MS_CONFIG).toLong.millis)
 

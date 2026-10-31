@@ -44,7 +44,13 @@ final class ProtocolGoldenSuite extends FunSuite:
 
   private def javaRequest(key: ApiKeys, version: Short, body: Message): ByteVector =
     val header = new RequestHeaderData().setRequestApiKey(key.id).setRequestApiVersion(version).setCorrelationId(CorrelationId).setClientId(ClientId)
-    framed(bytes(header, key.requestHeaderVersion(version)), bytes(body, version))
+    // The heartbeat goes through the Java client's builder, which leaves out what an older version cannot carry.
+    val built =
+      body match
+        case heartbeat: StreamsGroupHeartbeatRequestData =>
+          new org.apache.kafka.common.requests.StreamsGroupHeartbeatRequest.Builder(heartbeat.duplicate()).build(version).data()
+        case other => other
+    framed(bytes(header, key.requestHeaderVersion(version)), bytes(built, version))
 
   /** An answer as the broker sends it, with a tagged field this codec does not know in every flexible structure that has room for one. */
   private def javaResponse(key: ApiKeys, version: Short, body: Message): ByteVector =

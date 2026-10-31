@@ -137,6 +137,8 @@ private[xkafka] enum MemberAction derives CanEqual:
   *   the tasks the last heartbeat reported, or none when the next one must report them whatever they are
   * @param unauthorized
   *   why the coordinator last refused the member its topics, until it next accepts a heartbeat
+  * @param taskOffsetInterval
+  *   how often the coordinator asks for the offsets of the member's tasks' changelogs
   */
 private[xkafka] final case class Member(
     identity: MemberIdentity,
@@ -151,7 +153,8 @@ private[xkafka] final case class Member(
     inFlight: Boolean,
     failures: Int,
     statuses: List[StreamsGroup.Status],
-    unauthorized: Option[String] = None
+    unauthorized: Option[String] = None,
+    taskOffsetInterval: Option[FiniteDuration] = None
 ):
   import Member.*
   import MemberAction.*
@@ -230,7 +233,8 @@ private[xkafka] final case class Member(
         endpointEpoch = response.endpointInformationEpoch,
         failures = 0,
         statuses = response.statuses.getOrElse(statuses),
-        unauthorized = None
+        unauthorized = None,
+        taskOffsetInterval = Option.when(response.taskOffsetIntervalMs > 0)(response.taskOffsetIntervalMs.millis).orElse(taskOffsetInterval)
       )
     (response.activeTasks, response.standbyTasks, response.warmupTasks) match
       case (None, None, None)                          => updated.settle(Some(response.heartbeatIntervalMs.millis))

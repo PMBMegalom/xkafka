@@ -28,8 +28,8 @@ import Wire.*
 
 /** A request the group connection makes, with the versions this codec writes it in.
   *
-  * Each request is written the same way in every version listed for it, which is what lets the connection take the highest one the broker also reads.
-  * Answers are read as the version they answer.
+  * Each request is written the same way in every version listed for it, which is what lets the connection take the highest one the broker also reads,
+  * except where the Java client leaves out in an older version what it cannot carry. Answers are read as the version they answer.
   */
 private[xkafka] enum Api(val key: Short, val lowest: Short, val highest: Short, val flexible: Boolean) derives CanEqual:
   case OffsetCommit          extends Api(8, 9, 9, true)
@@ -55,6 +55,10 @@ private[xkafka] final case class ApiVersion(key: Short, min: Short, max: Short)
 private[xkafka] sealed trait Request[R]:
   def api: Api
   def body: ByteVector
+
+  /** The request as written in `version`, which only a request that leaves something out of an older version reads. */
+  def body(@scala.annotation.unused version: Short): ByteVector = body
+
   def response(version: Short): Read[R]
 
 private[xkafka] final case class ApiVersionsRequest(clientSoftwareName: String, clientSoftwareVersion: String) extends Request[ApiVersionsResponse]:
@@ -138,6 +142,10 @@ private[xkafka] final case class StreamsGroupHeartbeatRequest(
       compactNullableArray(warmupTasks)(writeTasks) ++ compactNullableString(processId) ++ nullableStruct(userEndpoint)(writeEndpoint) ++
       compactNullableArray(clientTags)(writeKeyValue) ++ compactNullableArray(taskOffsets)(writeTaskOffset) ++
       compactNullableArray(taskEndOffsets)(writeTaskOffset) ++ boolean(shutdownApplication) ++ noTags
+
+  /** Version 0 carries no task offsets and no warm-up tasks, which a broker reading only it refuses, so the Java client leaves them out there. */
+  override def body(version: Short): ByteVector =
+    if version == 0 then copy(taskOffsets = None, taskEndOffsets = None, warmupTasks = warmupTasks.map(_ => Nil)).body else body
 
   /** Version 1 replaces the 32-bit recovery lag of version 0 with a 64-bit one, and adds whether the broker wants the topology described. */
   def response(version: Short): Read[StreamsGroupHeartbeatResponse] =
@@ -344,7 +352,7 @@ private[xkafka] object Frame:
   /** The request with its header, after its size. */
   def request(request: Request[?], version: Short, correlationId: Int, clientId: String): ByteVector =
     val header  = int16(request.api.key.toInt) ++ int16(version.toInt) ++ int32(correlationId) ++ nullableString(Some(clientId))
-    val message = header ++ (if request.api.flexible then noTags else ByteVector.empty) ++ request.body
+    val message = header ++ (if request.api.flexible then noTags else ByteVector.empty) ++ request.body(version)
     int32(message.size.toInt) ++ message
 
   /** Reads the answer to a request sent in `version` from what followed its size. */

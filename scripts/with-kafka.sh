@@ -157,6 +157,7 @@ docker run --detach --rm \
   --env KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
   --env KAFKA_GROUP_STREAMS_MIN_HEARTBEAT_INTERVAL_MS=500 \
   --env KAFKA_GROUP_STREAMS_HEARTBEAT_INTERVAL_MS=500 \
+  --env KAFKA_GROUP_STREAMS_NUM_STANDBY_REPLICAS=1 \
   --env KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
   --env KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
   --env KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR=1 \
@@ -195,7 +196,8 @@ if [[ "$streams" == false ]]; then
       apache/kafka:4.3.1 >/dev/null
   done
 else
-  # Streams group members heartbeat every half second on these brokers and the main one, so the tests see a rebalance within seconds.
+  # Streams group members heartbeat every half second on these brokers and the main one, so the tests see a rebalance within seconds, and
+  # each task has a standby wherever a group has a second member to keep it.
   for index in "${!streams_releases[@]}"; do
     release="${streams_releases[$index]}"
     docker run --detach --rm \
@@ -220,6 +222,7 @@ else
       --env KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0 \
       --env KAFKA_GROUP_STREAMS_MIN_HEARTBEAT_INTERVAL_MS=500 \
       --env KAFKA_GROUP_STREAMS_HEARTBEAT_INTERVAL_MS=500 \
+      --env KAFKA_GROUP_STREAMS_NUM_STANDBY_REPLICAS=1 \
       --env KAFKA_HEAP_OPTS="-Xmx384m -Xms384m" \
       --env KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
       --env CLUSTER_ID=6N8i5pUjV-gOEvM--Z08uy \

@@ -104,7 +104,9 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
       val admin    = PlatformKafkaClient().admin(ClientSettings.from(NonEmptyList.one(server)).orFail)
       val declared = StreamsGroup.Topology(0, List(StreamsGroup.Subtopology("0", List(topic), Nil, Nil, Nil, Nil, Nil)))
       admin.use(_.createTopics(NonEmptySet.one(made))) *> running(server, group = group, declared = declared).use: one =>
-        eventually("the coordinator taking the member in")(one.member.epoch.map(_ > 0)) *> test(one, group, topic) *> one.member.leave
+        eventually("the coordinator taking the member in")(one.member.epoch.map(_ > 0)) *>
+          // The epoch moves as tasks are given, so the tests start from the one the member runs both its tasks at.
+          eventually("the member running both tasks")(one.active.map(_.size == 2)) *> test(one, group, topic) *> one.member.leave
 
   /** Runs a transaction that records offset 4 of the topic's partition 0 for `group` under `memberId` at `epoch`, then runs `inside` before it
     * commits.

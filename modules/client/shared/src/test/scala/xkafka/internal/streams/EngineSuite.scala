@@ -381,6 +381,109 @@ final class EngineSuite extends CatsEffectSuite:
       assertEquals(at, 2.seconds)
       assertEquals(log, List(Event.Leave))
 
+  private def changelog(n: Int) = partition("app-counts-changelog", n)
+
+  private def logged(key: String, count: Long, offset: Long): PolledRecord =
+    PolledRecord(
+      "app-counts-changelog",
+      1,
+      offset,
+      Some(1000L),
+      1,
+      -1,
+      Some(Chunk.array(key.getBytes)),
+      Some(Chunk.array(java.nio.ByteBuffer.allocate(8).putLong(count).array)),
+      Headers.empty
+    )
+
+  test("a standby task follows its changelog from the start, and where it is and where the changelog ends are its task offsets"):
+    run(): world =>
+      for
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- IO.sleep(500.millis)
+        _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+        _       <- world.endsAt(Map(changelog(1) -> 5L))
+        _       <- IO.sleep(500.millis)
+        log     <- world.log.get
+        offsets <- world.taskOffsets
+      yield
+        assertEquals(log.collect { case followed: Event.Followed => followed }, List(Event.Followed(Vector(StartAt(changelog(1), 0L, -1)))))
+        assertEquals(log.last, Event.Assigned(1))
+        assertEquals(offsets, TaskOffsets(List(StreamsGroup.TaskOffset("0", 1, 2L)), List(StreamsGroup.TaskOffset("0", 1, 5L))))
+
+  test("a standby task made active restores only what it had not read, onto what it holds, and is no longer followed"):
+    run(): world =>
+      for
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- IO.sleep(500.millis)
+        _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+        _       <- IO.sleep(500.millis)
+        _       <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _       <- IO.sleep(500.millis)
+        log     <- world.log.get
+        from    <- world.restoredFrom.get
+        offsets <- world.taskOffsets
+      yield
+        assertEquals(from.map(_._1), List(Map(changelog(1) -> 2L)))
+        assertEquals(from.map(_._2("counts").keySet.map(key => new String(key.toArray))), List(Set("k")))
+        assertEquals(log.collect { case followed: Event.Followed => followed }.last, Event.Followed(Vector.empty))
+        assertEquals(offsets, TaskOffsets(Nil, Nil))
+
+  test("a changelog record read again from before where a standby task has read to is not applied again"):
+    run(): world =>
+      for
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(logged("k", 1L, 0L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield
+        val held = from.map(_._2("counts").values.map(stored => java.nio.ByteBuffer.wrap(stored.value.toArray).getLong).toList)
+        assertEquals((from.map(_._1), held), (List(Map(changelog(1) -> 2L)), List(List(2L))))
+
+  /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
+  private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
+    for
+      _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+      _       <- IO.sleep(500.millis)
+      _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+      _       <- IO.sleep(500.millis)
+      _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty)))
+      _       <- IO.sleep(500.millis)
+      offsets <- world.taskOffsets
+      _       <- IO.sleep(later)
+      _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+      _       <- IO.sleep(500.millis)
+      from    <- world.restoredFrom.get
+    yield (from.map(_._1), offsets)
+
+  test("a standby taken away keeps its store, reported in task offsets, and its task made active soon after restores only what it had not read"):
+    run(): world =>
+      droppedThenActive(world, 1.minute).map: (from, offsets) =>
+        assertEquals(from, List(Map(changelog(1) -> 2L)))
+        assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 2L)))
+
+  test("a standby taken away longer ago than Java's cleanup delay is forgotten, and its task restores from the start"):
+    run(): world =>
+      droppedThenActive(world, Engine.StateCleanupDelay).map((from, _) => assertEquals(from, List(Map.empty[TopicPartition, Long])))
+
+  test("lost tasks are no longer stood by, but their stores are kept and reported, as Java keeps a lost task's state directory"):
+    run(): world =>
+      for
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- IO.sleep(500.millis)
+        _       <- world.tell(MemberAction.LoseAll)
+        _       <- IO.sleep(500.millis)
+        log     <- world.log.get
+        offsets <- world.taskOffsets
+      yield
+        assertEquals(log.collect { case followed: Event.Followed => followed }.last, Event.Followed(Vector.empty))
+        assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 0L)))
+
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout"):
     val run =
       World().flatMap: world =>
@@ -451,6 +554,7 @@ object EngineSuite:
     case Leave
     case Transaction(written: Int, offsets: Map[TopicPartition, OffsetAndMetadata])
     case Purged(before: Map[TopicPartition, Offset])
+    case Followed(starts: Vector[StartAt])
 
   /** A member and a data plane the tests script, recording what the engine does with them. */
   final class World(
@@ -469,8 +573,21 @@ object EngineSuite:
       purging: Ref[IO, IO[Unit]],
       reported: SignallingRef[IO, Member],
       restoring: Ref[IO, FiniteDuration],
-      val states: Ref[IO, List[StreamsState]]
+      val states: Ref[IO, List[StreamsState]],
+      standingBy: Queue[IO, PolledRecord],
+      ending: Ref[IO, Map[TopicPartition, Long]],
+      val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]],
+      offsetsRead: Ref[IO, IO[TaskOffsets]]
   ):
+    /** Changelog records for the standby tasks to follow. */
+    def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
+
+    /** Where changelog partitions end. */
+    def endsAt(ends: Map[TopicPartition, Long]): IO[Unit] = ending.set(ends)
+
+    /** The task offsets the engine gives its member to send. */
+    def taskOffsets: IO[TaskOffsets] = offsetsRead.get.flatten
+
     /** Changes what the member reports about the group. */
     def report(change: Member => Member): IO[Unit] = reported.update(change)
 
@@ -503,6 +620,7 @@ object EngineSuite:
         def leave: IO[Unit]                                                                       = logged(Event.Leave) *> leaving
         def epoch: IO[Int]                                                                        = IO.pure(1)
         def reports: Signal[IO, Member]                                                           = reported
+        def offsetsFrom(read: IO[TaskOffsets]): IO[Unit]                                          = offsetsRead.set(read)
         def commit(topics: List[OffsetCommitRequest.Topic]): IO[List[OffsetCommitRequest.Answer]] =
           (now.flatMap(at => committedAt.update(_ :+ at)) *> commits.modify(before => (before :+ topics, before.size))).flatMap: n =>
             send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
@@ -524,8 +642,16 @@ object EngineSuite:
         def poll: IO[List[PolledRecord]]            =
           polls.update(_ + 1) *> incoming.tryTakeN(None)
             .flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
-        def restore(changelogs: Map[TopicPartition, String]): IO[Map[String, Map[Chunk[Byte], Stored]]] =
-          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)).as(Map.empty)
+        def restore(
+            changelogs: Map[TopicPartition, String],
+            from: Map[TopicPartition, Long],
+            held: Map[String, Map[Chunk[Byte], Stored]]
+        ): IO[Map[String, Map[Chunk[Byte], Stored]]] =
+          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)).as(held)
+        def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
+        def followed: IO[List[PolledRecord]]          =
+          standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
+        def ends(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, Long]] = ending.get.map(_.view.filterKeys(partitions.toSet).toMap)
         def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] =
           val values = records.toList.flatMap(_.value).map(value => new String(value.toArray))
           written.update(_ ++ records.toList) *> now.flatMap(at => wroteAt.update(_ :+ (at, values)))
@@ -551,8 +677,12 @@ object EngineSuite:
         IO.ref(IO.unit),
         SignallingRef[IO].of(Member(identity)),
         IO.ref(Duration.Zero: FiniteDuration),
-        IO.ref(List.empty[StreamsState])
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(List.empty[StreamsState]),
+        Queue.unbounded[IO, PolledRecord],
+        IO.ref(Map.empty[TopicPartition, Long]),
+        IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]),
+        IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets")))
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.
@@ -571,4 +701,4 @@ object EngineSuite:
         val member       = world.member(committed, commit)
         Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout).use: running =>
           running.run.attempt.flatMap(world.finished).start *> script(world)
-    TestControl.executeEmbed(program.timeout(1.minute))
+    TestControl.executeEmbed(program.timeout(15.minutes))
