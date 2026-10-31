@@ -86,10 +86,21 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override val nextOffset: Offset                  = Offset.from(1L).toOption.get
       override val committer: OffsetCommitter[ErrorIO] = from
 
-  test("a streams program transformed between effects runs its effects in the source effect, and its state comes back"):
+  private val refusing: List[(String, KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String])] =
+    List(
+      "evalMapValues" -> (_.evalMapValues(_ => EitherT.leftT[IO, String]("refused"))),
+      "evalFilter"    -> (_.evalFilter((_, _) => EitherT.leftT[IO, Boolean]("refused"))),
+      "evalMap"       -> (_.evalMap((_, _) => EitherT.leftT[IO, (String, String)]("refused")))
+    )
+
+  for (name, refuse) <- refusing do
+    test(s"a streams program transformed between effects runs its effects in the source effect, and its state comes back: $name"):
+      streamsRefused(refuse)
+
+  private def streamsRefused(refuse: KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String]) =
     val text     = Serde.utf8[ErrorIO]
     val topic    = Topic.from("in").toOption.get
-    val program  = KStream(topic, text, text).evalMapValues(_ => EitherT.leftT[IO, String]("refused")).to(topic, text, text)
+    val program  = refuse(KStream(topic, text, text)).to(topic, text, text)
     val settings = StreamsSettings.from(ClientSettings.from(NonEmptyList.one("localhost:9092")).orFail, ApplicationId.from("app").orFail).orFail
     val running  = source.imapK(ioToErrorIO)(errorIOToIO).streams(settings, Topology.of(program).orFail)
     val observed =

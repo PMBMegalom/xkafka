@@ -125,6 +125,18 @@ final class TopologyGoldenSuite extends FunSuite:
       )
     )
 
+  test("a key an effect may have changed is repartitioned, as Java repartitions a key map changes"):
+    assertEquals(
+      ours(
+        KStream(topic("in"), text, text).evalFilter((_, v) => IO.pure(v.nonEmpty)).evalMap((k, v) => IO.pure((v, k)))
+          .groupByKey(Repartition("remapped"), text, text).count(Store("counts")).toStream.to(topic("out"), text, count)
+      ),
+      declaredByJava(
+        _.stream[String, String]("in").filter((_, v) => v.nonEmpty).map((k, v) => org.apache.kafka.streams.KeyValue(v, k))
+          .groupByKey(Grouped.as("remapped")).count(Materialized.as("counts")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long))
+      )
+    )
+
   test("grouping a table's changes again makes a third sub-topology"):
     assertEquals(
       ours(

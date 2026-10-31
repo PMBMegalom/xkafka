@@ -75,6 +75,8 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   case FlatMap[F[_], K, V, K2, V2](change: (K, V) => Iterable[(K2, V2)]) extends Step[F, K, V, K2, V2]
   case Peek[F[_], K, V](effect: (K, V) => F[Unit])                       extends Step[F, K, V, K, V]
   case EvalMapValues[F[_], K, V, V2](change: V => F[V2])                 extends Step[F, K, V, K, V2]
+  case EvalFilter[F[_], K, V](keep: (K, V) => F[Boolean])                extends Step[F, K, V, K, V]
+  case EvalMap[F[_], K, V, K2, V2](change: (K, V) => F[(K2, V2)])        extends Step[F, K, V, K2, V2]
 
   /** Folds each key's records into `store`: a key's first record becomes `start`, and each later one is added with `add`. */
   case Aggregate[F[_], K, V, A](store: Store, key: Serde[F, K], value: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A)
@@ -91,6 +93,8 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case FlatMap(change)                          => FlatMap(change)
       case Peek(effect)                             => Peek((key, value) => fk(effect(key, value)))
       case EvalMapValues(change)                    => EvalMapValues(value => fk(change(value)))
+      case EvalFilter(keep)                         => EvalFilter((key, value) => fk(keep(key, value)))
+      case EvalMap(change)                          => EvalMap((key, value) => fk(change(key, value)))
       case Aggregate(store, key, value, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
       case ToStream()                               => ToStream()
 
@@ -171,6 +175,14 @@ final class KStream[F[_], K, V] private[xkafka] (
     * replayed after a crash or a fencing.
     */
   def evalMapValues[V2](change: V => F[V2]): KStream[F, K, V2] = step(Step.EvalMapValues(change), changesKey = false)
+
+  /** Keeps the records `keep` gives true for. The effect runs again for records replayed after a crash or a fencing. */
+  def evalFilter(keep: (K, V) => F[Boolean]): KStream[F, K, V] = step(Step.EvalFilter(keep), changesKey = false)
+
+  /** Replaces each record with what `change` gives. Its output is written once under exactly-once processing, but the effect runs again for records
+    * replayed after a crash or a fencing.
+    */
+  def evalMap[K2, V2](change: (K, V) => F[(K2, V2)]): KStream[F, K2, V2] = step(Step.EvalMap(change), changesKey = true)
 
   /** Groups records by a new key, through the repartition topic `repartition` names. */
   def groupBy[K2](repartition: Repartition, key: Serde[F, K2], value: Serde[F, V])(change: (K, V) => K2): KGroupedStream[F, K2, V] =
