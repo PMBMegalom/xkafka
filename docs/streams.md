@@ -118,6 +118,10 @@ def runUntilRefused(streams: KafkaStreams[IO]): IO[Unit] =
   IO.race(streams.run, refused).void
 ```
 
+A broker configured with a topology description plugin asks the members of a
+streams group for a description of their topology. xkafka members don't send
+one, and keep their tasks without it.
+
 ## Stores and standbys
 
 Stores are held in memory. A member given a task refills the task's stores from

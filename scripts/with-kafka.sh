@@ -200,6 +200,10 @@ else
   # each task has a standby wherever a group has a second member to keep it. A member killed outright loses its tasks after six seconds.
   for index in "${!streams_releases[@]}"; do
     release="${streams_releases[$index]}"
+    # From 4.4 a broker can keep a description of each streams group's topology, which it then asks the group's members for.
+    described=()
+    [[ "$release" == 4.2.* || "$release" == 4.3.* ]] ||
+      described=(--env KAFKA_GROUP_STREAMS_TOPOLOGY_DESCRIPTION_PLUGIN_CLASS=org.apache.kafka.server.streams.InMemoryTopologyDescriptionPlugin)
     docker run --detach --rm \
       --name "$streams_name-$release" \
       --publish "127.0.0.1:${streams_ports[$index]}:9092" \
@@ -225,6 +229,7 @@ else
       --env KAFKA_GROUP_STREAMS_NUM_STANDBY_REPLICAS=1 \
       --env KAFKA_GROUP_STREAMS_MIN_SESSION_TIMEOUT_MS=6000 \
       --env KAFKA_GROUP_STREAMS_SESSION_TIMEOUT_MS=6000 \
+      ${described[@]+"${described[@]}"} \
       --env KAFKA_HEAP_OPTS="-Xmx384m -Xms384m" \
       --env KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
       --env CLUSTER_ID=6N8i5pUjV-gOEvM--Z08uy \

@@ -29,8 +29,8 @@ import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import munit.CatsEffectSuite
-import internal.group.{Connections, PlatformCrypto, PlatformSockets}
-import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
+import internal.group.{Connection, Connections, PlatformCrypto, PlatformSockets}
+import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatResponse}
 
 /** Streams group members joining the Java Streams application `scripts/integration-test.sh` runs, on each broker release it lists. */
 final class GroupMemberBrokerSuite extends CatsEffectSuite:
@@ -57,13 +57,14 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
       rebalanceTimeout: FiniteDuration = 30.seconds,
       obliging: Boolean = true,
       group: String = application,
-      declared: StreamsGroup.Topology = topology
+      declared: StreamsGroup.Topology = topology,
+      watch: Connection[IO] => Connection[IO] = identity
   ): Resource[IO, Running] =
     for
       memberId  <- Resource.eval(GroupMember.memberId[IO])
       processId <- Resource.eval(UUIDGen[IO].randomUUID.map(_.toString))
       identity = MemberIdentity(group, memberId, processId, declared, rebalanceTimeout.toMillis.toInt, None, Nil, None)
-      member <- GroupMember(connections(server).coordinator(group), identity, 10.seconds)
+      member <- GroupMember(connections(server).coordinator(group).map(watch), identity, 10.seconds)
       owned  <- Resource.eval(IO.ref(Assignment.empty))
       told   <- Resource.eval(IO.ref(Vector.empty[MemberAction]))
       engine =
@@ -96,14 +97,14 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
     override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.raiseError(new IllegalStateException("unused"))
 
   /** A member of a new group of its own, without Java, reading a new topic of two partitions, once the coordinator has taken it in. */
-  private def alone(server: String)(test: (Running, String, String) => IO[Unit]): IO[Unit] =
+  private def alone(server: String, watch: Connection[IO] => Connection[IO] = identity)(test: (Running, String, String) => IO[Unit]): IO[Unit] =
     Names.fresh:
       val group    = summon[Names](s"xkafka-streams-offsets-${PlatformKafkaClient.name}")
       val topic    = s"$group-input"
       val made     = NewTopic.from(Topic.from(topic).orFail, 2, 1).orFail
       val admin    = PlatformKafkaClient().admin(ClientSettings.from(NonEmptyList.one(server)).orFail)
       val declared = StreamsGroup.Topology(0, List(StreamsGroup.Subtopology("0", List(topic), Nil, Nil, Nil, Nil, Nil)))
-      admin.use(_.createTopics(NonEmptySet.one(made))) *> running(server, group = group, declared = declared).use: one =>
+      admin.use(_.createTopics(NonEmptySet.one(made))) *> running(server, group = group, declared = declared, watch = watch).use: one =>
         eventually("the coordinator taking the member in")(one.member.epoch.map(_ > 0)) *>
           // The epoch moves as tasks are given, so the tests start from the one the member runs both its tasks at.
           eventually("the member running both tasks")(one.active.map(_.size == 2)) *> test(one, group, topic) *> one.member.leave
@@ -210,6 +211,30 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
           _ <- eventually("the first member taking tasks back")(first.active.map(_.size == 2))
           _ <- first.member.leave
         yield ()
+
+    // From 4.4 a broker with a topology description plugin, as `scripts/with-kafka.sh` starts it, asks members for their topology's description.
+    if !List("4.2.", "4.3.").exists(release.startsWith) then
+      test(s"$release: a member the broker asks for its topology's description keeps its tasks without sending one"):
+        IO.ref(false).flatMap: asked =>
+          val watching: Connection[IO] => Connection[IO] =
+            connection =>
+              new Connection[IO]:
+                override def send[R](request: Request[R]): IO[R] =
+                  connection.send(request).flatTap:
+                    case answer: StreamsGroupHeartbeatResponse => asked.update(_ || answer.topologyDescriptionRequired)
+                    case _                                     => IO.unit
+          alone(server, watching): (one, _, _) =>
+            for
+              _     <- eventually("the broker asking for the topology's description")(asked.get)
+              epoch <- one.member.epoch
+              _     <- IO.sleep(5.seconds)
+              tasks <- one.active
+              after <- one.member.epoch
+              told  <- one.told.get
+            yield
+              assertEquals(tasks.size, 2)
+              assertEquals(after, epoch)
+              assert(!told.contains(MemberAction.LoseAll), s"the member lost its tasks: $told")
 
     test(s"$release: a member that holds on to its tasks past its rebalance timeout is fenced, drops them and joins again"):
       running(server, rebalanceTimeout = 3.seconds, obliging = false).use: stubborn =>
