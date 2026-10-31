@@ -231,10 +231,17 @@ private[xkafka] object Engine:
       // poll with nothing assigned, and would not read in polls that do not wait.
       read      <- Resource.eval(Queue.unbounded[F, PolledRecord])
       following <- Resource.eval(F.ref(false))
-      _         <-
-        following.get.ifM(plane.followed.flatMap(_.traverse_(read.offer)), F.sleep(PollMillis.millis))
-          // A poll can meet the follower just after its last standby went; the next goes on.
-          .handleErrorWith(_ => F.sleep(PollMillis.millis)).foreverM.background
+      stopping  <- Resource.eval(F.ref(false))
+      // Released, the fiber is asked to stop and ends after its poll, so that no poll is cut short before the follower is destroyed.
+      _ <-
+        def reading: F[Unit] =
+          stopping.get.ifM(
+            F.unit,
+            following.get.ifM(plane.followed.flatMap(_.traverse_(read.offer)), F.sleep(PollMillis.millis))
+              // A poll can meet the follower just after its last standby went; the next goes on.
+              .handleErrorWith(_ => F.sleep(PollMillis.millis)) *> reading
+          )
+        Resource.make(reading.start)(fiber => stopping.set(true) *> fiber.join.void)
       loop =
         Loop(
           application,
