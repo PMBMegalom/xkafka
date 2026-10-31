@@ -34,6 +34,9 @@ import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, StreamsConfig}
 /** A Kafka Streams application for the streams group tests to join, one instance on each broker `XKAFKA_STREAMS_BROKERS` lists (as
   * `version=host:port`, comma separated) for each backend named in the arguments. Each copies `xkafka-streams-<backend>-input`, which it makes with
   * four partitions, to `xkafka-streams-<backend>-output`, as the group `xkafka-streams-<backend>`, until the process is stopped.
+  *
+  * For the fleet tests, it also starts and stops Java members of their applications on the broker of release `Fleet.Release`, as each backend's
+  * tests ask on `xkafka-fleet-<backend>-control` (see [[Fleet]]).
   */
 object StreamsFixture:
   val Partitions = 4
@@ -45,7 +48,11 @@ object StreamsFixture:
         broker  <- brokers.map(_.split('=')(1))
         backend <- backends.toList
       yield start(broker, s"xkafka-streams-$backend")
-    sys.addShutdownHook(instances.foreach(_.close()))
+    val fleet = brokers.map(_.split('=')).collectFirst { case Array(Fleet.Release, broker) => broker }.toList.flatMap: broker =>
+      backends.toList.map(backend => Fleet(broker, backend))
+    sys.addShutdownHook:
+      fleet.foreach(_.close())
+      instances.foreach(_.close())
     println(s"streams fixture: ${instances.size} instances started")
     Thread.currentThread.join()
 

@@ -197,7 +197,7 @@ if [[ "$streams" == false ]]; then
   done
 else
   # Streams group members heartbeat every half second on these brokers and the main one, so the tests see a rebalance within seconds, and
-  # each task has a standby wherever a group has a second member to keep it.
+  # each task has a standby wherever a group has a second member to keep it. A member killed outright loses its tasks after six seconds.
   for index in "${!streams_releases[@]}"; do
     release="${streams_releases[$index]}"
     docker run --detach --rm \
@@ -223,6 +223,8 @@ else
       --env KAFKA_GROUP_STREAMS_MIN_HEARTBEAT_INTERVAL_MS=500 \
       --env KAFKA_GROUP_STREAMS_HEARTBEAT_INTERVAL_MS=500 \
       --env KAFKA_GROUP_STREAMS_NUM_STANDBY_REPLICAS=1 \
+      --env KAFKA_GROUP_STREAMS_MIN_SESSION_TIMEOUT_MS=6000 \
+      --env KAFKA_GROUP_STREAMS_SESSION_TIMEOUT_MS=6000 \
       --env KAFKA_HEAP_OPTS="-Xmx384m -Xms384m" \
       --env KAFKA_LOG_DIRS=/tmp/kraft-combined-logs \
       --env CLUSTER_ID=6N8i5pUjV-gOEvM--Z08uy \
