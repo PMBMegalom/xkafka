@@ -109,6 +109,22 @@ final class TopologySuite extends CatsEffectSuite:
       Left(List(TopologyError.InvalidName("bad name", "it may contain only [a-zA-Z0-9._-]"), TopologyError.DuplicateStore("bad name")))
     )
 
+  test("a refused program is raised with every reason, and an accepted one is given"):
+    type Raised[A] = Either[Throwable, A]
+    val twice =
+      KStream(topic("in"), text, text).groupByKey(text, text).count(Store("bad name")).toStream.groupByKey(text, count)
+        .reduce(Store("bad name"))((_, n) => n).toStream.to(topic("out"), text, count)
+    val raised = Topology.of(twice).liftTo[Raised]
+    assertEquals(
+      raised.left.toOption.collect { case refused: InvalidTopology => refused.errors.toList },
+      Some(List(TopologyError.InvalidName("bad name", "it may contain only [a-zA-Z0-9._-]"), TopologyError.DuplicateStore("bad name")))
+    )
+    assertEquals(
+      raised.left.toOption.map(_.getMessage),
+      Some("'bad name' cannot name a store or repartitioning: it may contain only [a-zA-Z0-9._-]; two stores are named 'bad name'")
+    )
+    assert(Topology.of(counting("in", "fine", "fine")).liftTo[Raised].isRight)
+
   test("records whose key changed cannot be grouped by key without a repartition name, and can with one"):
     val rekeyed = KStream(topic("in"), text, text).selectKey((_, v) => v)
     assertEquals(

@@ -60,6 +60,13 @@ enum TopologyError derives CanEqual:
 object TopologyError:
   given Show[TopologyError] = Show.show(_.message)
 
+  /** Carries every reason a topology could not be built into `F`. */
+  extension [A](result: Either[NonEmptyList[TopologyError], A])
+    def liftTo[F[_]](using F: ApplicativeThrow[F]): F[A] = F.fromEither(result.left.map(InvalidTopology(_)))
+
+/** A topology that could not be built, with every reason it could not. */
+final class InvalidTopology(val errors: NonEmptyList[TopologyError]) extends RuntimeException(errors.toList.map(_.message).mkString("; "))
+
 /** What a pipeline does to a record keyed `K` with a value `V`, giving records keyed `K2` with values `V2`. */
 private[xkafka] enum Step[F[_], K, V, K2, V2]:
   case Filter[F[_], K, V](keep: (K, V) => Boolean)                       extends Step[F, K, V, K, V]
