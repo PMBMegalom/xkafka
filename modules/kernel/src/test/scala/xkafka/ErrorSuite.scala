@@ -51,6 +51,9 @@ final class ErrorSuite extends FunSuite:
     assertEquals(ErrorCode.fromProtocol(27), ErrorCode.RebalanceInProgress)
     assertEquals(ErrorCode.fromProtocol(999), ErrorCode.Other(999))
     assertEquals(ErrorCode.fromProtocol(47), ErrorCode.InvalidProducerEpoch)
+    assertEquals(ErrorCode.fromProtocol(113), ErrorCode.StaleMemberEpoch)
+    assertEquals(ErrorCode.fromLibrdkafka(113), ErrorCode.StaleMemberEpoch)
+    assert(!ErrorCode.StaleMemberEpoch.retriable)
     // PRODUCER_FENCED and FENCED_INSTANCE_ID both say a newer client with the same identity took over.
     assertEquals(ErrorCode.fromProtocol(90), ErrorCode.Fenced)
     assertEquals(ErrorCode.fromProtocol(82), ErrorCode.Fenced)

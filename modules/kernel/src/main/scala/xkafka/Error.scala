@@ -72,6 +72,9 @@ enum ErrorCode derives CanEqual:
   /** The group does not know this member. */
   case UnknownMemberId
 
+  /** The member's epoch in its group is out of date: it learns the current one from its next heartbeat. */
+  case StaleMemberEpoch
+
   /** The broker has no group of this id, such as one it removed once its last member left and no committed offset kept it. */
   case GroupIdNotFound
 
@@ -144,35 +147,36 @@ object ErrorCode:
 
   private val protocol: Map[Int, ErrorCode] =
     Map(
-      1  -> OffsetOutOfRange,           // OFFSET_OUT_OF_RANGE
-      3  -> UnknownTopicOrPartition,    // UNKNOWN_TOPIC_OR_PARTITION
-      5  -> LeaderNotAvailable,         // LEADER_NOT_AVAILABLE
-      6  -> NotLeaderOrFollower,        // NOT_LEADER_OR_FOLLOWER
-      7  -> RequestTimedOut,            // REQUEST_TIMED_OUT
-      8  -> BrokerNotAvailable,         // BROKER_NOT_AVAILABLE
-      10 -> MessageTooLarge,            // MESSAGE_TOO_LARGE
-      12 -> OffsetMetadataTooLarge,     // OFFSET_METADATA_TOO_LARGE
-      13 -> NetworkException,           // NETWORK_EXCEPTION
-      14 -> CoordinatorLoadInProgress,  // COORDINATOR_LOAD_IN_PROGRESS
-      15 -> CoordinatorNotAvailable,    // COORDINATOR_NOT_AVAILABLE
-      16 -> NotCoordinator,             // NOT_COORDINATOR
-      17 -> InvalidTopic,               // INVALID_TOPIC_EXCEPTION
-      22 -> IllegalGeneration,          // ILLEGAL_GENERATION
-      24 -> InvalidGroupId,             // INVALID_GROUP_ID
-      25 -> UnknownMemberId,            // UNKNOWN_MEMBER_ID
-      27 -> RebalanceInProgress,        // REBALANCE_IN_PROGRESS
-      29 -> TopicAuthorizationFailed,   // TOPIC_AUTHORIZATION_FAILED
-      30 -> GroupAuthorizationFailed,   // GROUP_AUTHORIZATION_FAILED
-      31 -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
-      35 -> UnsupportedVersion,         // UNSUPPORTED_VERSION
-      40 -> InvalidConfiguration,       // INVALID_CONFIG
-      68 -> NonEmptyGroup,              // NON_EMPTY_GROUP
-      69 -> GroupIdNotFound,            // GROUP_ID_NOT_FOUND
-      86 -> GroupSubscribedToTopic,     // GROUP_SUBSCRIBED_TO_TOPIC
-      47 -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
-      58 -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
-      82 -> Fenced,                     // FENCED_INSTANCE_ID
-      90 -> Fenced                      // PRODUCER_FENCED
+      1   -> OffsetOutOfRange,           // OFFSET_OUT_OF_RANGE
+      3   -> UnknownTopicOrPartition,    // UNKNOWN_TOPIC_OR_PARTITION
+      5   -> LeaderNotAvailable,         // LEADER_NOT_AVAILABLE
+      6   -> NotLeaderOrFollower,        // NOT_LEADER_OR_FOLLOWER
+      7   -> RequestTimedOut,            // REQUEST_TIMED_OUT
+      8   -> BrokerNotAvailable,         // BROKER_NOT_AVAILABLE
+      10  -> MessageTooLarge,            // MESSAGE_TOO_LARGE
+      12  -> OffsetMetadataTooLarge,     // OFFSET_METADATA_TOO_LARGE
+      13  -> NetworkException,           // NETWORK_EXCEPTION
+      14  -> CoordinatorLoadInProgress,  // COORDINATOR_LOAD_IN_PROGRESS
+      15  -> CoordinatorNotAvailable,    // COORDINATOR_NOT_AVAILABLE
+      16  -> NotCoordinator,             // NOT_COORDINATOR
+      17  -> InvalidTopic,               // INVALID_TOPIC_EXCEPTION
+      22  -> IllegalGeneration,          // ILLEGAL_GENERATION
+      24  -> InvalidGroupId,             // INVALID_GROUP_ID
+      25  -> UnknownMemberId,            // UNKNOWN_MEMBER_ID
+      27  -> RebalanceInProgress,        // REBALANCE_IN_PROGRESS
+      29  -> TopicAuthorizationFailed,   // TOPIC_AUTHORIZATION_FAILED
+      30  -> GroupAuthorizationFailed,   // GROUP_AUTHORIZATION_FAILED
+      31  -> ClusterAuthorizationFailed, // CLUSTER_AUTHORIZATION_FAILED
+      35  -> UnsupportedVersion,         // UNSUPPORTED_VERSION
+      40  -> InvalidConfiguration,       // INVALID_CONFIG
+      68  -> NonEmptyGroup,              // NON_EMPTY_GROUP
+      69  -> GroupIdNotFound,            // GROUP_ID_NOT_FOUND
+      86  -> GroupSubscribedToTopic,     // GROUP_SUBSCRIBED_TO_TOPIC
+      47  -> InvalidProducerEpoch,       // INVALID_PRODUCER_EPOCH
+      58  -> SaslAuthenticationFailed,   // SASL_AUTHENTICATION_FAILED
+      82  -> Fenced,                     // FENCED_INSTANCE_ID
+      90  -> Fenced,                     // PRODUCER_FENCED
+      113 -> StaleMemberEpoch            // STALE_MEMBER_EPOCH
     )
 
   /** Classifies a Kafka protocol error code. */
