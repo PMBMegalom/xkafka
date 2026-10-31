@@ -144,6 +144,24 @@ final class StreamsDriverSuite extends CatsEffectSuite:
         polled <- reading(server, topic, reportEnds = false).use(pollFor(_, 5.seconds))
       yield assertEquals(polled.records.map(_.offset) -> polled.ends, List(0L) -> Nil)
 
+  // A standby's reader is cancelled mid-poll when its task goes. A poll cancelled once it has taken a record must still free it, or the
+  // consumer's destroy waits for it forever. A cancel waits for the poll to report, so the polls are short: the Java client reads every record
+  // in its first poll, and leaves the others waiting their whole timeout.
+  test(broker("a consumer whose polls were cancelled while records were waiting is destroyed")):
+    withBroker: server =>
+      val topic = uniqueTopic("cancelled-polls")
+      for
+        _        <- createTopic(server, topic)
+        _        <- produce(server, records(topic, 200))
+        names    <- Names.draw
+        consumer <- driver.consumer(server, None, uniqueGroup("cancelled")(using names).value, "earliest", Map.empty, false)
+        _        <- driver.assign(consumer, Vector(partitionOf(topic)), Vector.empty)
+        _        <- driver.poll(consumer, 5000)
+        _        <- driver.poll(consumer, 100).start.flatMap(poll => IO.sleep(1.millis) *> poll.cancel).replicateA_(100)
+        destroy  <- driver.destroyConsumer(consumer).start
+        _        <- destroy.joinWithNever.timeout(30.seconds)
+      yield ()
+
   /** A consumer of the topic's only partition from its start, under read_committed, as a restore reads a changelog. */
   private def reading(server: String, topic: Topic, reportEnds: Boolean): Resource[IO, driver.Client] =
     Resource.eval(Names.draw).flatMap: names =>
