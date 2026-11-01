@@ -74,6 +74,7 @@
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
+    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -136,9 +137,10 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         on macOS their locations have to be named when linking.</p>
         
         <h3 id="linking-an-application" class="section"><a class="anchor-link left" href="#linking-an-application"><i class="icofont-laika link">&#xef71;</i></a>Linking an application</h3>
-        <p>Published Native artifacts contain the C glue code and request <code>-lrdkafka</code>.
-        Applications with librdkafka installed in standard compiler and linker locations
-        need no additional xkafka settings. For a nonstandard installation:</p>
+        <p>Published Native artifacts contain the C glue code, which includes the headers
+        of librdkafka and OpenSSL, and request <code>-lrdkafka</code> and <code>-lcrypto</code>. Applications
+        with both installed in standard compiler and linker locations need no
+        additional xkafka settings. For a nonstandard installation:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
   .</span><span class="identifier">withCompileOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-I/path/to/librdkafka/include&quot;</span><span>)
   .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>)</span></code></pre>

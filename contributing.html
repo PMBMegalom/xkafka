@@ -74,6 +74,7 @@
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
+    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -120,6 +121,10 @@
         broker and its volume. Name a backend, <code>jvm</code>, <code>js</code> or <code>native</code>, to run only that
         one, as CI does with each on a runner of its own:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh native</span></code></pre>
+        <p>The streams engine&#39;s tests run separately, against a broker of each Kafka
+        release it supports and beside a Java Kafka Streams application, as CI does in
+        a job of their own:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh --streams</span></code></pre>
         <p>Three suites need it:</p>
         <ul>
           <li><code>KafkaIntegrationSuite</code> covers produce, consume, and commit round trips.</li>
