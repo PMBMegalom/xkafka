@@ -36,10 +36,12 @@ import munit.CatsEffectSuite
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, StringSerializer}
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
-import org.apache.kafka.streams.kstream.{EmitStrategy, Grouped, Materialized, Produced, TimeWindows as JavaTimeWindows, WindowedSerdes}
+import org.apache.kafka.streams.kstream.{
+  EmitStrategy, Grouped, Materialized, Produced, SlidingWindows as JavaSlidingWindows, TimeWindows as JavaTimeWindows, WindowedSerdes
+}
 import org.apache.kafka.streams.state.{Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{KStream, Pipeline, Repartition, Serde, Store, TimeWindows, Topology}
+import xkafka.streams.{KStream, Pipeline, Repartition, Serde, SlidingWindows, Store, TimeWindows, Topology}
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
   * for the same program and records, with Java's record cache off. Java runs each program twice: over an in-memory window store, which is what xkafka
@@ -101,7 +103,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   private def javaWindows(advance: Long) =
     JavaTimeWindows.ofSizeAndGrace(Duration.ofSeconds(10), Duration.ofSeconds(5)).advanceBy(Duration.ofMillis(advance))
 
-  private def inMemory(name: String, retention: Duration) = Stores.inMemoryWindowStore(name, retention, Duration.ofSeconds(10), false)
+  private def inMemory(name: String, retention: Duration, size: Duration) = Stores.inMemoryWindowStore(name, retention, size, false)
 
   test("counting in tumbling windows writes, logs and keeps what Java does, dropping records past the grace"):
     same[java.lang.Long](
@@ -192,6 +194,92 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       Duration.ofMinutes(1)
     )
 
+  private val sliding = SlidingWindows(5.seconds, grace = 5.seconds)
+
+  private def javaSliding = JavaSlidingWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(5))
+
+  test("counting in sliding windows writes, logs and keeps what Java does, early records in the window from 0 and late ones dropped"):
+    same[java.lang.Long](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).count(Store("counts")).toStream
+        .to(out, Serde.timeWindowed(text, 5.seconds), count),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSliding).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.Long)),
+      "counts",
+      count.deserializer,
+      size = Duration.ofSeconds(5)
+    )
+
+  // Sliding windows' own cases: early records out of order, records at equal times, and out-of-order records that several windows cover.
+  private val tangled =
+    List(
+      ("k1", "a", 1000L),
+      ("k4", "t", 4000L),
+      ("k4", "u", 2000L), // early, before the only other record, which the window from 0 holds
+      ("k1", "b", 4000L),
+      ("k1", "c", 2000L), // early, before a later early record
+      ("k1", "d", 3000L),
+      ("k1", "e", 4000L), // early, at the time of another
+      ("k2", "f", 10000L),
+      ("k2", "g", 10000L), // at the time of another
+      ("k2", "h", 12000L),
+      ("k2", "i", 10000L), // at the time of others, with a window starting just after
+      ("k2", "j", 13000L),
+      ("k2", "k", 11000L), // out of order, in several windows
+      ("k2", "l", 13000L),
+      ("k2", "m", 9000L), // out of order, before every other
+      ("k1", "n", 20000L),
+      ("k1", "o", 16000L),
+      ("k3", "p", 16000L),
+      ("k1", "s", 24000L),
+      ("k3", "q", 17000L), // its window ending at it has closed, so it is not made
+      ("k3", "r", 17000L)  // at the time of the last, whose window starting just after the one before holds it
+    )
+
+  test("reducing in sliding windows writes, logs and keeps what Java does, for records out of order, at equal times and early"):
+    same[String](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).reduce(Store("joined"))(_ + _).toStream
+        .to(out, Serde.timeWindowed(text, 5.seconds), text),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSliding)
+          .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.String)),
+      "joined",
+      text.deserializer,
+      tangled,
+      size = Duration.ofSeconds(5)
+    )
+
+  test("reducing in sliding windows emitted once they close writes what Java does"):
+    same[String](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).withRetention(1.minute).emitOnWindowClose.reduce(Store("joined"))(_ + _)
+        .toStream.to(out, Serde.timeWindowed(text, 5.seconds), text),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSliding).emitStrategy(EmitStrategy.onWindowClose)
+          .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.String)),
+      "joined",
+      text.deserializer,
+      closing,
+      Duration.ofMinutes(1),
+      Duration.ofSeconds(5)
+    )
+
+  test("aggregating sliding windows of records grouped by a new key goes through the repartition topic as Java's does"):
+    same[java.lang.Long](
+      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(sliding)
+        .aggregate(Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream.to(out, Serde.timeWindowed(text, 5.seconds), count),
+      materialized =>
+        _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaSliding).aggregate(
+          () => java.lang.Long.valueOf(100L),
+          (_, v, n) => java.lang.Long.valueOf(n + v.length),
+          materialized("lengths").withValueSerde(Serdes.Long)
+        ).toStream.to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.Long)),
+      "lengths",
+      count.deserializer,
+      size = Duration.ofSeconds(5)
+    )
+
   /** Runs `inputs` through the program ours and Java's ways and compares what each writes downstream and to the store's changelog, record for record
     * and byte for byte, and what Java's in-memory store and ours keep.
     */
@@ -201,7 +289,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       store: String,
       values: Deserializer[IO, ?],
       inputs: List[(String, String, Long)] = updates,
-      retention: Duration = Duration.ofSeconds(15)
+      retention: Duration = Duration.ofSeconds(15),
+      size: Duration = Duration.ofSeconds(10)
   ): IO[Unit] =
     val changelog = s"app-$store-changelog"
     ours(pipeline, inputs).flatMap: (written, state) =>
@@ -209,7 +298,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
         values.deserialize(in, Headers.empty, Some(stored.value)).map: value =>
           (String(key.take(key.size - 12).toArray), internal.streams.WindowStore.startOf(key)) -> (value.toString, stored.timestamp)
       .map: kept =>
-        val memory  = run(java(name => Materialized.as[String, V](inMemory(name, retention))), Some(store), inputs)
+        val memory  = run(java(name => Materialized.as[String, V](inMemory(name, retention, size))), Some(store), inputs)
         val rocksdb = run(java(name => Materialized.as[String, V, WindowStore[Bytes, Array[Byte]]](name).withRetention(retention)), None, inputs)
         assert(memory.out.nonEmpty, "Java wrote nothing, so there is nothing to compare")
         assertEquals(written.filter(_.topic == out).map(record), memory.out)

@@ -104,12 +104,8 @@ arrived, the window is closed and later records for it are dropped. Use
 end.
 
 The result is keyed by `Windowed[K]`: the original key and its `Window`, from
-`start` up to but not including `end`, in epoch milliseconds.
-
-To write windowed keys to a topic, use `Serde.timeWindowed(key, size)`. It
-writes the same bytes as Java's `WindowedSerdes.timeWindowedSerdeFrom`, so Java
-applications can read them. Only the window's start is written, which is why
-reading it back needs the window size.
+`start` to `end` in epoch milliseconds. A time window does not include its end;
+a sliding window, below, does.
 
 ### Final results only
 
@@ -160,6 +156,56 @@ between arrive within the second after the previous look for closed windows.
 Keeping windows longer, as `withRetention(10.minutes)` does in the example,
 keeps the window from 12:00 until its result has been sent. Java Kafka Streams
 has the same limit, and the same remedy.
+
+### Sliding windows
+
+Sliding windows answer questions like "how many records arrived within five
+minutes of each other?". Each window covers records at most a time difference
+apart. Windows are made only where records are, so there are no empty
+windows:
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def withinFiveMinutes(input: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(input, text, text)
+    .groupByKey(text, text)
+    .windowedBy(SlidingWindows(5.minutes, grace = 30.seconds))
+    .count(Store("counts-within-five-minutes"))
+    .toStream
+    .to(output, Serde.timeWindowed(text, 5.minutes), Serde.long[IO])
+```
+
+Each record ends a window, and a window also starts just after a record when
+later records follow it within the time difference. For example, with a
+five-second difference, records of one key at 10:00:00 and 10:00:01 give three
+windows:
+
+- the window ending at 10:00:00, with a count of 1;
+- the window ending at 10:00:01, holding both records, with a count of 2;
+- the window starting just after 10:00:00, holding only the later record, with
+  a count of 1.
+
+Records that arrive late within the grace update every window they fall in.
+Use `SlidingWindows.withNoGrace` for no grace.
+
+By default, windows are kept for twice the time difference plus the grace,
+because a new record can need windows that far back. That is also the shortest
+`withRetention` accepts. `emitOnWindowClose` works as for time windows.
+
+### Writing windowed keys
+
+To write windowed keys to a topic, use `Serde.timeWindowed(key, size)`, with the
+window size for time windows and the time difference for sliding windows. It
+writes the same bytes as Java's `WindowedSerdes.timeWindowedSerdeFrom`, so Java
+applications can read them. Only the window's start is written, which is why
+reading it back needs the size.
 
 ## Guarantees
 

@@ -23,7 +23,9 @@ package xkafka.streams
 
 import scala.concurrent.duration.FiniteDuration
 
-/** A span of time in epoch milliseconds, from `start`, included, to `end`, excluded. */
+/** A span of time in epoch milliseconds from `start`, included, to `end`: excluded for a time window, included for a sliding window, as in Java Kafka
+  * Streams.
+  */
 final case class Window(start: Long, end: Long)
 
 /** A key and the window its value covers. */
@@ -37,8 +39,11 @@ final case class TimeWindows private (size: FiniteDuration, advance: FiniteDurat
   private[xkafka] def advanceMillis: Long = advance.toMillis
   private[xkafka] def graceMillis: Long   = grace.toMillis
 
-  /** How long a window is kept: its size and its grace, as Java keeps it. */
+  /** How long a window is kept by default, and at least: its size and its grace, as Java keeps it. */
   private[xkafka] def retentionMillis: Long = sizeMillis + graceMillis
+
+  /** What the least retention is made of, for the reason a shorter one is refused. */
+  private[xkafka] def retentionRule: String = "the windows' size and grace"
 
   /** The windows a record at `timestamp` falls in, earliest first, as Java finds them. */
   private[xkafka] def windowsFor(timestamp: Long): List[Window] =
@@ -68,3 +73,29 @@ object TimeWindows:
 
   /** Windows of `size` starting every `advance`, each taking no late record. */
   def hoppingWithNoGrace(size: FiniteDuration, advance: FiniteDuration): TimeWindows = TimeWindows(size, advance, FiniteDuration(0, size.unit))
+
+/** Windows covering records at most `timeDifference` apart, start and end included, created only where records are, as Java Kafka Streams' sliding
+  * windows: each record makes the window that ends at it and, where later records are within the time difference, the window that starts just after
+  * it. A record later than its window's end by more than `grace` no longer counts.
+  */
+final case class SlidingWindows(timeDifference: FiniteDuration, grace: FiniteDuration):
+  private[xkafka] def differenceMillis: Long = timeDifference.toMillis
+  private[xkafka] def graceMillis: Long      = grace.toMillis
+
+  /** How long a window is kept by default, and at least: twice the time difference and the grace, which creating a window can reach back over. */
+  private[xkafka] def retentionMillis: Long = 2 * differenceMillis + graceMillis
+
+  /** What the least retention is made of, for the reason a shorter one is refused. */
+  private[xkafka] def retentionRule: String = "twice the windows' time difference and their grace"
+
+  /** Why these windows cannot be used, if they cannot. */
+  private[xkafka] def problem: Option[String] =
+    def whole(duration: FiniteDuration) = duration.toNanos % 1000000L == 0L
+    if timeDifference.length < 0 then Some(s"the time difference must not be negative, was $timeDifference")
+    else if grace.length < 0 then Some(s"the grace must not be negative, was $grace")
+    else if !whole(timeDifference) || !whole(grace) then Some("the time difference and grace must be whole milliseconds")
+    else None
+
+object SlidingWindows:
+  /** Sliding windows taking no late record. */
+  def withNoGrace(timeDifference: FiniteDuration): SlidingWindows = SlidingWindows(timeDifference, FiniteDuration(0, timeDifference.unit))

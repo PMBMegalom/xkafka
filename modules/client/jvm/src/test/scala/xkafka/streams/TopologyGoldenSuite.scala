@@ -34,7 +34,9 @@ import org.apache.kafka.clients.consumer.internals.StreamsRebalanceData
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, Topology as JavaTopology}
-import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, TimeWindows as JavaTimeWindows, WindowedSerdes}
+import org.apache.kafka.streams.kstream.{
+  Grouped, Materialized, Produced, SlidingWindows as JavaSlidingWindows, TimeWindows as JavaTimeWindows, WindowedSerdes
+}
 import org.apache.kafka.streams.processor.internals.{InternalTopologyBuilder, StreamThread, TopologyMetadata}
 import org.apache.kafka.streams.state.WindowStore
 import internal.protocol.StreamsGroup
@@ -82,6 +84,20 @@ final class TopologyGoldenSuite extends FunSuite:
           .windowedBy(JavaTimeWindows.ofSizeAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
           .count(Materialized.as[String, java.lang.Long, WindowStore[Bytes, Array[Byte]]]("kept").withRetention(java.time.Duration.ofHours(1)))
           .toStream.to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long))
+      )
+    )
+
+  test("a sliding window count declares its changelog kept for twice the time difference, the grace and a day, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(10.seconds, grace = 5.seconds)).count(Store("sliding"))
+          .toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count)
+      ),
+      declaredByJava(
+        _.stream[String, String]("in").groupByKey
+          .windowedBy(JavaSlidingWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
+          .count(Materialized.as[String, java.lang.Long, WindowStore[Bytes, Array[Byte]]]("sliding")).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long))
       )
     )
 

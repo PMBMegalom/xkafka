@@ -107,3 +107,30 @@ final class WindowsSuite extends CatsEffectSuite:
     )
     assertEquals(kept(15001001.micros), Some(List(TopologyError.InvalidWindows("counts", "the retention must be whole milliseconds"))))
     assertEquals(kept(15.seconds), None)
+
+  test("sliding windows of a negative time difference, negative grace, parts of a millisecond, or kept too briefly are refused, and of none are not"):
+    def refused(windows: SlidingWindows, retention: Option[FiniteDuration] = None) =
+      val windowed = KStream(topic, text, text).groupByKey(text, text).windowedBy(windows)
+      Topology
+        .of(retention.fold(windowed)(windowed.withRetention).count(Store("counts")).toStream.to(topic, Serde.timeWindowed(text, 1.second), count))
+        .left.toOption.map(_.toList)
+    assertEquals(
+      refused(SlidingWindows.withNoGrace(-1.second)),
+      Some(List(TopologyError.InvalidWindows("counts", "the time difference must not be negative, was -1 seconds")))
+    )
+    assertEquals(
+      refused(SlidingWindows(1.second, grace = -1.second)),
+      Some(List(TopologyError.InvalidWindows("counts", "the grace must not be negative, was -1 seconds")))
+    )
+    assertEquals(
+      refused(SlidingWindows(1.second, grace = 1.microsecond)),
+      Some(List(TopologyError.InvalidWindows("counts", "the time difference and grace must be whole milliseconds")))
+    )
+    assertEquals(
+      refused(SlidingWindows(10.seconds, grace = 5.seconds), Some(24999.millis)),
+      Some(List(TopologyError.InvalidWindows(
+        "counts",
+        "the retention must be at least twice the windows' time difference and their grace, 25000 ms, was 24999 milliseconds"
+      )))
+    )
+    assertEquals(refused(SlidingWindows.withNoGrace(0.seconds)), None)

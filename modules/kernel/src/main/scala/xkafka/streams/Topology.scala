@@ -102,6 +102,18 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       add: (K, V, A) => A
   ) extends Step[F, K, V, Windowed[K], A]
 
+  /** Folds each key's records into `store` in sliding `windows`, as Java's sliding window aggregation does, as for `WindowedAggregate`. */
+  case SlidingAggregate[F[_], K, V, A](
+      store: Store,
+      windows: SlidingWindows,
+      retention: Long,
+      emitOnClose: Boolean,
+      key: Serde[F, K],
+      value: Serde[F, A],
+      start: (K, V) => A,
+      add: (K, V, A) => A
+  ) extends Step[F, K, V, Windowed[K], A]
+
   /** Each change to the table, as a record. */
   case ToStream[F[_], K, V]() extends Step[F, K, V, K, V]
 
@@ -118,6 +130,8 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case Aggregate(store, key, value, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
       case WindowedAggregate(store, windows, retention, emitOnClose, key, value, start, add) =>
         WindowedAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), start, add)
+      case SlidingAggregate(store, windows, retention, emitOnClose, key, value, start, add) =>
+        SlidingAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), start, add)
       case ToStream() => ToStream()
 
 /** The steps between a segment's origin, whose records are keyed `K` with values `V`, and its last step, which gives `K2` and `V2`. */
@@ -140,6 +154,7 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
           (last match
             case Step.Aggregate(store, _, _, _, _)                  => List(store)
             case Step.WindowedAggregate(store, _, _, _, _, _, _, _) => List(store)
+            case Step.SlidingAggregate(store, _, _, _, _, _, _, _)  => List(store)
             case _                                                  => Nil)
 
   /** How long each window store of its steps keeps a window, in milliseconds, by store name. */
@@ -149,6 +164,7 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Then(init, last) => init.retentions ++
           (last match
             case Step.WindowedAggregate(store, _, retention, _, _, _, _, _) => Map(store.name -> retention)
+            case Step.SlidingAggregate(store, _, retention, _, _, _, _, _)  => Map(store.name -> retention)
             case _                                                          => Map.empty)
 
 /** Where a segment reads from: an input topic, or the repartition topic the segment before it writes. */
@@ -271,26 +287,37 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
   /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
   def windowedBy(windows: TimeWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, None, false, key, value)
 
+  /** The records split by key and by each sliding window they fall in, ready to be folded into a window store. */
+  def windowedBy(windows: SlidingWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, None, false, key, value)
+
 /** Records grouped by key and window, ready to be folded into a window store. Each update to a window goes downstream as it happens. A record later
   * than its window's end by more than the windows' grace is dropped, and a window is kept for its size and grace after its start.
   */
 final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
     grouped: KGroupedStream[F, K, V],
-    windows: TimeWindows,
+    windows: TimeWindows | SlidingWindows,
     retention: Option[FiniteDuration],
     emitOnClose: Boolean,
     key: Serde[F, K],
     value: Serde[F, V]
 ):
   private def aggregated[A](store: Store, serde: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A): KTable[F, Windowed[K], A] =
-    val least = windows.retentionMillis
-    val kept  =
-      windows.problem.orElse:
+    val (least, rule, problem) =
+      windows match
+        case time: TimeWindows       => (time.retentionMillis, time.retentionRule, time.problem)
+        case sliding: SlidingWindows => (sliding.retentionMillis, sliding.retentionRule, sliding.problem)
+    val kept =
+      problem.orElse:
         retention.flatMap: asked =>
           if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
-          else Option.when(asked.toMillis < least)(s"the retention must be at least the windows' size and grace, ${least} ms, was $asked")
+          else Option.when(asked.toMillis < least)(s"the retention must be at least $rule, ${least} ms, was $asked")
     val problems = kept.map(TopologyError.InvalidWindows(store.name, _)).toVector
-    KTable(grouped.folded(Step.WindowedAggregate(store, windows, retention.fold(least)(_.toMillis), emitOnClose, key, serde, start, add), problems))
+    val keep     = retention.fold(least)(_.toMillis)
+    val fold     =
+      windows match
+        case time: TimeWindows       => Step.WindowedAggregate(store, time, keep, emitOnClose, key, serde, start, add)
+        case sliding: SlidingWindows => Step.SlidingAggregate(store, sliding, keep, emitOnClose, key, serde, start, add)
+    KTable(grouped.folded(fold, problems))
 
   /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
     * emits once it closes may expire before it is emitted when the retention is no longer than that, as in Java Kafka Streams, so keep it longer

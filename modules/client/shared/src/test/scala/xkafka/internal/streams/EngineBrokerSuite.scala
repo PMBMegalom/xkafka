@@ -34,7 +34,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, Store, StreamsPhase, StreamsSettings, TimeWindows, Topology
+  ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, SlidingWindows, Store, StreamsPhase, StreamsSettings, TimeWindows,
+  Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -86,6 +87,11 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         ).orFail
       PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
         consumer.records.take(count.toLong).compile.drain.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $count records")))
+
+  /** Counts by key in sliding windows of five seconds, taking records up to an hour late. */
+  private def bySliding(input: Topic, output: Topic): Pipeline[IO] =
+    KStream(input, text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.seconds, grace = 1.hour)).count(Store("counts")).toStream
+      .to(output, Serde.timeWindowed(text, 5.seconds), Serde.long[IO])
 
   /** Writes a record for each key at each timestamp, in order. */
   private def produceAt(server: String, topic: Topic, records: List[(String, Long)]): IO[Unit] =
@@ -317,6 +323,18 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             ) *> produceAt(server, app.input, List(("a", first + 4000L), ("b", second))) *> running(server, app)(
               windowCounts(server, app.output, Map(("a", first) -> 4L, ("b", first) -> 1L, ("a", second) -> 1L, ("b", second) -> 1L))
             )
+
+    test(s"$release, $under: an engine counts in sliding windows, made where records are, its changelog kept as Java declares it"):
+      counting(server, bySliding): app =>
+        IO.realTime.flatMap: now =>
+          val at   = (now.toMillis / 60000L - 5L) * 60000L
+          val kept =
+            admin(server).use(_.describeTopicConfigurations(NonEmptySet.one(app.changelog))).map: described =>
+              described(app.changelog).flatMap(_.toOption).get.get("retention.ms").map(_.value)
+          produceAt(server, app.input, List(("a", at), ("a", at + 1000L), ("b", at + 2000L))) *> running(server, app):
+            // The first record's window, then the second's: the window starting just after the first, and its own, holding both.
+            windowCounts(server, app.output, Map(("a", at - 5000L) -> 1L, ("a", at + 1L) -> 1L, ("a", at - 4000L) -> 2L, ("b", at - 3000L) -> 1L))
+          *> kept.map(found => assertEquals(found, Some(ConfigurationValue.Present((2 * 5000L + 3600000L + 86400000L).toString))))
 
     test(s"$release, $under: an engine emitting windows once they close writes each window's final count once"):
       counting(server, finalByMinute): app =>
