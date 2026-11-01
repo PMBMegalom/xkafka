@@ -9,3 +9,7 @@ leak:_SM35scala.scalanative.unsafe.MemoryPoolD13allocateChunk
 # others. Suppress only what is allocated under librdkafka's call into
 # OpenSSL's generator.
 leak:rd_rand_bytes_by_ossl
+
+# xkafka's own random bytes, such as for a streams member's id, come from the
+# same per-thread generator, through the shim's call into it.
+leak:xkafka_random_bytes
