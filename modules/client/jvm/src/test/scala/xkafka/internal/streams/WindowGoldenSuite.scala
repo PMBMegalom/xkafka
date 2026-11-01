@@ -36,7 +36,7 @@ import munit.CatsEffectSuite
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, StringSerializer}
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
-import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, TimeWindows as JavaTimeWindows, WindowedSerdes}
+import org.apache.kafka.streams.kstream.{EmitStrategy, Grouped, Materialized, Produced, TimeWindows as JavaTimeWindows, WindowedSerdes}
 import org.apache.kafka.streams.state.{Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
 import xkafka.streams.{KStream, Pipeline, Repartition, Serde, Store, TimeWindows, Topology}
@@ -54,7 +54,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   private val out   = Topic.from("out").orFail
 
   // Windows of 10 s with 5 s of grace. Records come out of order: some within the grace, some past it, one on a window's first instant.
-  private val inputs =
+  private val updates =
     List(
       ("k1", "a", 1000L),
       ("k1", "b", 3000L),
@@ -70,13 +70,38 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       ("k1", "l", 50000L)
     )
 
+  // For windows that emit once they close: record time moves on a few seconds at a time, so each window closes and is emitted before it expires,
+  // with one record past the grace.
+  private val closing =
+    List(
+      ("k1", "a", 1000L),
+      ("k1", "b", 3000L),
+      ("k2", "c", 4000L),
+      ("k1", "d", 9000L),
+      ("k2", "e", 11000L),
+      ("k1", "f", 12000L),
+      ("k2", "g", 16000L), // closes [0, 10000)
+      ("k1", "h", 17000L),
+      ("k2", "i", 26000L), // closes [10000, 20000)
+      ("k1", "j", 14000L), // past the grace of [10000, 20000)
+      ("k1", "k", 31000L),
+      ("k2", "l", 38000L),
+      ("k1", "m", 47000L)
+    )
+
+  /** The header each input carries, naming its place among the inputs. */
+  private def traced(index: Int): Headers = Headers(Header("trace", Some(Chunk.array(index.toString.getBytes))))
+
+  /** The wall-clock time each input arrives at, 600 ms apart, so that some arrive within a second of the last look for closed windows. */
+  private def wall(index: Int): Long = index * 600L
+
   private val tumbling = TimeWindows.tumbling(10.seconds, grace = 5.seconds)
   private val hopping  = TimeWindows.hopping(10.seconds, advance = 5.seconds, grace = 5.seconds)
 
   private def javaWindows(advance: Long) =
     JavaTimeWindows.ofSizeAndGrace(Duration.ofSeconds(10), Duration.ofSeconds(5)).advanceBy(Duration.ofMillis(advance))
 
-  private def inMemory(name: String) = Stores.inMemoryWindowStore(name, Duration.ofSeconds(15), Duration.ofSeconds(10), false)
+  private def inMemory(name: String, retention: Duration) = Stores.inMemoryWindowStore(name, retention, Duration.ofSeconds(10), false)
 
   test("counting in tumbling windows writes, logs and keeps what Java does, dropping records past the grace"):
     same[java.lang.Long](
@@ -136,6 +161,37 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       assertEquals(written.map(_.toVector), Some(java.serializer.serialize("in", key).toVector))
       assertEquals(read, xkafka.streams.Windowed("key", xkafka.streams.Window(30000L, 40000L)))
 
+  test("counting in tumbling windows emitted once they close writes what Java does, looking for closed windows at most once a second"):
+    same[java.lang.Long](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).emitOnWindowClose.count(Store("counts")).toStream
+        .to(out, Serde.timeWindowed(text, 10.seconds), count),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L)).emitStrategy(EmitStrategy.onWindowClose)
+          .count(materialized("counts").withValueSerde(Serdes.Long)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long)),
+      "counts",
+      count.deserializer,
+      closing
+    )
+
+  // Kept only for their size and grace, hopping windows expire before they are emitted, in Java's in-memory store and ours alike; kept a minute,
+  // every window is emitted, and Java's stores agree.
+  test(
+    "reducing in hopping windows kept a minute, emitted once they close, writes what Java does, every window closed since the last, by start and key"
+  ):
+    same[String](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).withRetention(1.minute).emitOnWindowClose.reduce(Store("joined"))(_ + _)
+        .toStream.to(out, Serde.timeWindowed(text, 10.seconds), text),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L)).emitStrategy(EmitStrategy.onWindowClose)
+          .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.String)),
+      "joined",
+      text.deserializer,
+      closing,
+      Duration.ofMinutes(1)
+    )
+
   /** Runs `inputs` through the program ours and Java's ways and compares what each writes downstream and to the store's changelog, record for record
     * and byte for byte, and what Java's in-memory store and ours keep.
     */
@@ -143,16 +199,18 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       pipeline: Pipeline[IO],
       java: (String => Materialized[String, V, WindowStore[Bytes, Array[Byte]]]) => StreamsBuilder => Unit,
       store: String,
-      values: Deserializer[IO, ?]
+      values: Deserializer[IO, ?],
+      inputs: List[(String, String, Long)] = updates,
+      retention: Duration = Duration.ofSeconds(15)
   ): IO[Unit] =
     val changelog = s"app-$store-changelog"
-    ours(pipeline).flatMap: (written, state) =>
+    ours(pipeline, inputs).flatMap: (written, state) =>
       state.store(store).toList.traverse: (key, stored) =>
         values.deserialize(in, Headers.empty, Some(stored.value)).map: value =>
           (String(key.take(key.size - 12).toArray), internal.streams.WindowStore.startOf(key)) -> (value.toString, stored.timestamp)
       .map: kept =>
-        val memory  = run(java(name => Materialized.as[String, V](inMemory(name))), Some(store))
-        val rocksdb = run(java(name => Materialized.as[String, V, WindowStore[Bytes, Array[Byte]]](name)), None)
+        val memory  = run(java(name => Materialized.as[String, V](inMemory(name, retention))), Some(store), inputs)
+        val rocksdb = run(java(name => Materialized.as[String, V, WindowStore[Bytes, Array[Byte]]](name).withRetention(retention)), None, inputs)
         assert(memory.out.nonEmpty, "Java wrote nothing, so there is nothing to compare")
         assertEquals(written.filter(_.topic == out).map(record), memory.out)
         assertEquals(written.filter(_.topic.value == changelog).map(record), memory.topic(changelog))
@@ -163,39 +221,52 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, as Java's test driver runs it; with the last
     * segment's state, which holds the window store.
     */
-  private def ours(pipeline: Pipeline[IO]): IO[(Vector[TaskOutput], TaskState)] =
+  private def ours(pipeline: Pipeline[IO], inputs: List[(String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
     val tasks = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector.map(Task[IO]("app", _, 0))
-    def go(index: Int, input: TaskInput, states: Vector[TaskState]): IO[(Vector[TaskOutput], Vector[TaskState])] =
-      tasks(index).process(states(index), input).flatMap: (state, outputs) =>
+    def go(index: Int, input: TaskInput, states: Vector[TaskState], at: Long): IO[(Vector[TaskOutput], Vector[TaskState])] =
+      tasks(index).process(states(index), input, at).flatMap: (state, outputs) =>
         outputs.foldLeftM((Vector.empty[TaskOutput], states.updated(index, state))):
           case ((done, now), written) if written.topic.value.endsWith("-repartition") =>
-            go(index + 1, TaskInput(written.key, written.value, written.timestamp, written.headers), now).map((more, after) => (done ++ more, after))
+            go(index + 1, TaskInput(written.key, written.value, written.timestamp, written.headers), now, at)
+              .map((more, after) => (done ++ more, after))
           case ((done, now), written) => IO.pure((done :+ written, now))
-    inputs.foldLeftM((Vector.empty[TaskOutput], Vector.fill(tasks.size)(TaskState.empty))):
-      case ((done, states), (key, value, timestamp)) =>
-        go(0, TaskInput(Some(Chunk.array(key.getBytes)), Some(Chunk.array(value.getBytes)), timestamp, Headers.empty), states)
+    inputs.zipWithIndex.foldLeftM((Vector.empty[TaskOutput], Vector.fill(tasks.size)(TaskState.empty))):
+      case ((done, states), ((key, value, timestamp), index)) =>
+        go(0, TaskInput(Some(Chunk.array(key.getBytes)), Some(Chunk.array(value.getBytes)), timestamp, traced(index)), states, wall(index))
           .map((more, after) => (done ++ more, after))
     .map((written, states) => (written, states.last))
 
   /** What Java's test driver writes to each topic for `inputs`, and what the window store `kept` names holds after them. */
-  private def run(build: StreamsBuilder => Unit, kept: Option[String]): Ran =
+  private def run(build: StreamsBuilder => Unit, kept: Option[String], inputs: List[(String, String, Long)]): Ran =
     val properties = Properties()
     properties.put(StreamsConfig.APPLICATION_ID_CONFIG, "app")
     properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1")
     properties.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String.getClass)
     properties.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String.getClass)
     properties.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, "0")
+    // The test driver looks for closed windows on every record unless told otherwise; an application looks at most once a second.
+    properties.put(StreamsConfig.InternalConfig.EMIT_INTERVAL_MS_KSTREAMS_WINDOWED_AGGREGATION, 1000L)
     properties.put(StreamsConfig.STATE_DIR_CONFIG, java.nio.file.Files.createTempDirectory("xkafka-window-golden").toString)
     val builder = StreamsBuilder()
     build(builder)
-    val driver = TopologyTestDriver(builder.build(properties), properties)
+    val driver = TopologyTestDriver(builder.build(properties), properties, java.time.Instant.EPOCH)
     try
       val input = driver.createInputTopic("in", StringSerializer(), StringSerializer())
-      inputs.foreach((key, value, timestamp) => input.pipeInput(TestRecord(key, value, java.time.Instant.ofEpochMilli(timestamp))))
+      inputs.zipWithIndex.foreach:
+        case ((key, value, timestamp), index) =>
+          driver.advanceWallClockTime(Duration.ofMillis(wall(index) - (if index == 0 then 0L else wall(index - 1))))
+          val headers = org.apache.kafka.common.header.internals.RecordHeaders()
+          headers.add("trace", index.toString.getBytes)
+          input.pipeInput(TestRecord(key, value, headers, java.time.Instant.ofEpochMilli(timestamp)))
       val topics =
         driver.producedTopicNames.asScala.toList.map: name =>
           name -> driver.createOutputTopic(name, ByteArrayDeserializer(), ByteArrayDeserializer()).readRecordsToList.asScala.toVector.map: r =>
-            Output(Option(r.key).map(_.toVector), Option(r.value).map(_.toVector), r.timestamp, r.headers.toArray.length)
+            Output(
+              Option(r.key).map(_.toVector),
+              Option(r.value).map(_.toVector),
+              r.timestamp,
+              r.headers.toArray.toVector.map(h => h.key -> Option(h.value).map(String(_)))
+            )
       val held =
         kept.fold(Map.empty): name =>
           driver.getTimestampedWindowStore[String, Any](name).all.asScala.toList.map: kv =>
@@ -205,11 +276,16 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     finally driver.close()
 
   private def record(written: TaskOutput): Output =
-    Output(written.key.map(_.toVector), written.value.map(_.toVector), written.timestamp, written.headers.values.size)
+    Output(
+      written.key.map(_.toVector),
+      written.value.map(_.toVector),
+      written.timestamp,
+      written.headers.values.map(h => h.key -> h.value.map(v => String(v.toArray)))
+    )
 
 object WindowGoldenSuite:
-  /** A record as bytes, with how many headers it carries. */
-  final case class Output(key: Option[Vector[Byte]], value: Option[Vector[Byte]], timestamp: Long, headers: Int)
+  /** A record as bytes, with its headers. */
+  final case class Output(key: Option[Vector[Byte]], value: Option[Vector[Byte]], timestamp: Long, headers: Vector[(String, Option[String])])
 
   /** What Java wrote to each topic, and what its window store kept by key and window start. */
   final case class Ran(topics: Map[String, Vector[Output]], kept: Map[(String, Long), (String, Long)]):

@@ -218,7 +218,8 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
             override def run: IO[Unit] =
               internal.streams.Task[IO](settings.applicationId.value, topology.pipelines.head.segments.head, 0).process(
                 internal.streams.TaskState.empty,
-                internal.streams.TaskInput(Some(Chunk.array("k".getBytes)), Some(Chunk.array("v".getBytes)), 0L, Headers.empty)
+                internal.streams.TaskInput(Some(Chunk.array("k".getBytes)), Some(Chunk.array("v".getBytes)), 0L, Headers.empty),
+                0L
               ).void
             override def state: Stream[IO, StreamsState] = Stream.emit(StreamsState(StreamsPhase.Running, Nil))
 

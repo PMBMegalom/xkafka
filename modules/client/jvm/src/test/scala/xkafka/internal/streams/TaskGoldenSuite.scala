@@ -132,7 +132,7 @@ final class TaskGoldenSuite extends CatsEffectSuite:
   private def ours(pipeline: Pipeline[IO]): IO[(Vector[TaskOutput], Vector[TaskState])] =
     val tasks = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector.map(Task[IO]("app", _, 0))
     def run(index: Int, record: TaskInput, states: Vector[TaskState]): IO[(Vector[TaskOutput], Vector[TaskState])] =
-      tasks(index).process(states(index), record).flatMap: (state, outputs) =>
+      tasks(index).process(states(index), record, 0L).flatMap: (state, outputs) =>
         outputs.foldLeftM((Vector.empty[TaskOutput], states.updated(index, state))):
           case ((done, now), written) if written.topic.value.endsWith("-repartition") =>
             run(index + 1, TaskInput(written.key, written.value, written.timestamp, written.headers), now).map((more, after) => (done ++ more, after))

@@ -445,8 +445,11 @@ private[xkafka] object Engine:
     private def offsetsOf(running: Running[F]): Map[TopicPartition, OffsetAndMetadata] =
       running.tasks.values.toList.flatMap: live =>
         live.read.map: (next, leaderEpoch) =>
-          live.input ->
-            OffsetAndMetadata(Offset.from(next).toOption.get, LeaderEpoch.from(leaderEpoch).toOption, PartitionTime.encode(live.state.partitionTime))
+          live.input -> OffsetAndMetadata(
+            Offset.from(next).toOption.get,
+            LeaderEpoch.from(leaderEpoch).toOption,
+            PartitionTime.encode(live.state.partitionTime, live.state.lastEmitted)
+          )
       .toMap
 
     /** Starts every task again from what the group committed, dropping what it held and where it read to since. */
@@ -512,11 +515,13 @@ private[xkafka] object Engine:
         else
           (stored(asked), restore(tasks, standbys)).tupled.flatMap: (offsets, stores) =>
             inputs.traverse: (id, partition) =>
-              val found = offsets.get((partition.topic.value, partition.partition.value))
-              val time  = found.flatMap(_.metadata).flatMap(PartitionTime.decode).getOrElse(-1L)
-              val state = TaskState(WindowStore.prunedAll(stores.getOrElse(id, Map.empty), segments(id.subtopology).chain.retentions), time)
-              val from  = found.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)
-              val task  = new Task[F](application, segments(id.subtopology), id.partition)
+              val found   = offsets.get((partition.topic.value, partition.partition.value))
+              val time    = found.flatMap(_.metadata).flatMap(PartitionTime.decode).getOrElse(-1L)
+              val emitted = found.flatMap(_.metadata).fold(Map.empty[String, Long])(PartitionTime.processors)
+              val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), segments(id.subtopology).chain.retentions)
+              val state   = TaskState(kept, time, lastEmitted = emitted)
+              val from    = found.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)
+              val task    = new Task[F](application, segments(id.subtopology), id.partition)
               F.pure(id -> Live(task, state, partition, from, None))
             .map(_.toMap)
 
@@ -549,7 +554,8 @@ private[xkafka] object Engine:
       val topics =
         due.groupMap(_._2.input.topic.value): (_, live) =>
           val (next, leaderEpoch) = live.read.get
-          OffsetCommitRequest.Partition(live.input.partition.value, next, leaderEpoch, Some(PartitionTime.encode(live.state.partitionTime)))
+          OffsetCommitRequest
+            .Partition(live.input.partition.value, next, leaderEpoch, Some(PartitionTime.encode(live.state.partitionTime, live.state.lastEmitted)))
         .toList.map(OffsetCommitRequest.Topic(_, _))
       val sent =
         untilAnswered(member.commit(topics)): answers =>
@@ -568,11 +574,12 @@ private[xkafka] object Engine:
     private def process(running: Running[F], polled: List[PolledRecord], write: Writer[F]): F[Running[F]] =
       val routes = running.tasks.map((id, live) => (live.input.topic.value, live.input.partition.value) -> id)
       val byTask = polled.flatMap(record => routes.get((record.topic, record.partition)).map(_ -> record)).groupMap(_._1)(_._2)
-      byTask.toList.parTraverseN(concurrency): (id, records) =>
-        records.foldLeftM((running.tasks(id), Vector.empty[TaskOutput])):
-          case ((live, written), record) => live.task.process(live.state, inputOf(record)).map: (state, out) =>
-              (live.copy(state = state, position = record.offset + 1, read = Some((record.offset + 1, record.leaderEpoch))), written ++ out)
-        .map(id -> _)
+      F.realTime.flatMap: clock =>
+        byTask.toList.parTraverseN(concurrency): (id, records) =>
+          records.foldLeftM((running.tasks(id), Vector.empty[TaskOutput])):
+            case ((live, written), record) => live.task.process(live.state, inputOf(record), clock.toMillis).map: (state, out) =>
+                (live.copy(state = state, position = record.offset + 1, read = Some((record.offset + 1, record.leaderEpoch))), written ++ out)
+          .map(id -> _)
       .flatMap: done =>
         val written = done.flatMap(_._2._2)
         written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))

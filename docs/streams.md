@@ -111,6 +111,56 @@ writes the same bytes as Java's `WindowedSerdes.timeWindowedSerdeFrom`, so Java
 applications can read them. Only the window's start is written, which is why
 reading it back needs the window size.
 
+### Final results only
+
+By default, every update to a window goes downstream. To send only each
+window's final result, once the window has closed, add `emitOnWindowClose`:
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def finalPerMinute(input: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(input, text, text)
+    .groupByKey(text, text)
+    .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+    .withRetention(10.minutes)
+    .emitOnWindowClose
+    .count(Store("final-counts-per-minute"))
+    .toStream
+    .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+```
+
+A closed window's result is sent when the next record arrives, at most once a
+second, as in Java Kafka Streams. So results do not go out at the exact moment
+a window closes, and while no records arrive, they wait.
+
+If the work moves to another member, results that were already sent and
+committed are not sent again.
+
+By default a window is kept only for its size plus its grace, and with
+`emitOnWindowClose` that can lose results. Take one-minute windows with ten
+seconds of grace, which are kept for seventy seconds by default, and these
+records, timestamped:
+
+- 12:00:30, counted in the window from 12:00;
+- 12:02:05, the next record.
+
+The record at 12:02:05 closes the window from 12:00, whose grace ended at
+12:01:10. But it also starts the window from 12:02, which is more than seventy
+seconds after 12:00, so the window from 12:00 is removed before its result is
+sent. Its count never goes downstream. The same happens when the records in
+between arrive within the second after the previous look for closed windows.
+
+Keeping windows longer, as `withRetention(10.minutes)` does in the example,
+keeps the window from 12:00 until its result has been sent. Java Kafka Streams
+has the same limit, and the same remedy.
+
 ## Guarantees
 
 With `ProcessingGuarantee.AtLeastOnce`, the default, a member commits its

@@ -446,6 +446,36 @@ final class EngineSuite extends CatsEffectSuite:
         val held = from.map(_._2("counts").values.map(stored => java.nio.ByteBuffer.wrap(stored.value.toArray).getLong).toList)
         assertEquals((from.map(_._1), held), (List(Map(changelog(1) -> 2L)), List(List(2L))))
 
+  test("a task that emits windows once they close commits the close time it last emitted for, as Java does"):
+    run(topology = emitting): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 1000L))
+        _       <- IO.sleep(2.seconds)
+        _       <- world.records(record(1, 1L, "k", 20000L))
+        _       <- IO.sleep(2.seconds)
+        log     <- world.log.get
+        written <- world.written.get
+      yield
+        assertEquals(written.count(_.topic.value == "out"), 1)
+        assertEquals(
+          log.collect { case Event.Committed(topics) => topics.flatMap(_.partitions).flatMap(_.metadata) }.flatten.last,
+          PartitionTime.encode(20000L, Map("windows" -> 15000L))
+        )
+
+  test("a task started where the group committed emitted windows does not emit them again"):
+    val fetched = OffsetFetchRequest.Answer(List(Fetched("in", 1, 1L, -1, Some(PartitionTime.encode(20000L, Map("windows" -> 15000L))), 0)), 0)
+    run(committed = _ => IO.pure(fetched), topology = emitting): world =>
+      for
+        _       <- world.restoredAlso.set(Map("windows" -> Map(window("k", 0L) -> counted(5L))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 1L, "k", 20000L))
+        _       <- IO.sleep(2.seconds)
+        written <- world.written.get
+      yield assertEquals(written.count(_.topic.value == "out"), 0)
+
   test("a restored window store loses the windows its clock has expired, so a record for one starts it again"):
     run(topology = windowing): world =>
       for
@@ -546,6 +576,14 @@ object EngineSuite:
     Topology.of(
       KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .count(Store("windows")).toStream.to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  /** Counts as `windowing` does, keeping windows a minute and emitting each once it closes. */
+  private val emitting: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .withRetention(1.minute).emitOnWindowClose.count(Store("windows")).toStream
+        .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
     ).orFail
 
   private def counted(n: Long): Stored = Stored(Chunk.array(java.nio.ByteBuffer.allocate(8).putLong(n).array), 0L)

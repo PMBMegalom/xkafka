@@ -71,6 +71,20 @@ final class TopologyGoldenSuite extends FunSuite:
           .to("other-out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 60000L), Serdes.String))
     )
 
+  test("a window store kept longer declares its changelog kept that long and a day, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).withRetention(1.hour)
+          .count(Store("kept")).toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count)
+      ),
+      declaredByJava(
+        _.stream[String, String]("in").groupByKey
+          .windowedBy(JavaTimeWindows.ofSizeAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
+          .count(Materialized.as[String, java.lang.Long, WindowStore[Bytes, Array[Byte]]]("kept").withRetention(java.time.Duration.ofHours(1)))
+          .toStream.to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long))
+      )
+    )
+
   test("a stateless pipeline is one sub-topology reading its input"):
     assertEquals(
       ours(KStream(topic("in"), text, text).mapValues(_ + "!").to(topic("out"), text, text)),

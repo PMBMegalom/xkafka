@@ -92,3 +92,18 @@ final class WindowsSuite extends CatsEffectSuite:
       assertEquals(read, Windowed("k", Window(10000L, 20000L)))
       assertEquals(far.window, Window(Long.MaxValue - 5, Long.MaxValue))
       assert(short.isLeft)
+
+  test("a window store kept for less than its windows' size and grace, or for part of a millisecond, is refused"):
+    def kept(retention: FiniteDuration) =
+      Topology.of(
+        KStream(topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).withRetention(retention)
+          .count(Store("counts")).toStream.to(topic, Serde.timeWindowed(text, 10.seconds), count)
+      ).left.toOption.map(_.toList)
+    assertEquals(
+      kept(14999.millis),
+      Some(
+        List(TopologyError.InvalidWindows("counts", "the retention must be at least the windows' size and grace, 15000 ms, was 14999 milliseconds"))
+      )
+    )
+    assertEquals(kept(15001001.micros), Some(List(TopologyError.InvalidWindows("counts", "the retention must be whole milliseconds"))))
+    assertEquals(kept(15.seconds), None)

@@ -67,6 +67,26 @@ final class EngineBrokerSuite extends CatsEffectSuite:
     KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 1.hour)).count(Store("counts")).toStream
       .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
 
+  /** Counts by key in tumbling windows of a minute, taking records up to ten seconds late, kept an hour, writing only each window's final count. */
+  private def finalByMinute(input: Topic, output: Topic): Pipeline[IO] =
+    KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds)).withRetention(1.hour)
+      .emitOnWindowClose.count(Store("counts")).toStream.to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+
+  /** Waits up to two minutes until `topic` holds at least `count` records. */
+  private def holding(server: String, topic: Topic, count: Int)(using guarantee: ProcessingGuarantee): IO[Unit] =
+    Names.fresh:
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Deserializer.bytes[IO].option,
+          Deserializer.bytes[IO].option,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.take(count.toLong).compile.drain.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $count records")))
+
   /** Writes a record for each key at each timestamp, in order. */
   private def produceAt(server: String, topic: Topic, records: List[(String, Long)]): IO[Unit] =
     val made = records.map((key, at) => ProducerRecord(topic, key, s"$key-value", timestamp = Some(Timestamp.fromEpochMillis(at))))
@@ -90,6 +110,25 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         consumer.records.scan(Map.empty[(String, Long), Long]): (seen, record) =>
           seen.updated((record.record.key.key, record.record.key.window.start), record.record.value)
         .find(_ == expected).compile.lastOrError.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $expected"))).void
+
+  /** Reads `topic` from its start until it has held exactly the records `expected` gives, one for each key and window, and no more. */
+  private def windowRecords(server: String, topic: Topic, expected: Map[(String, Long), Long])(using guarantee: ProcessingGuarantee): IO[Unit] =
+    Names.fresh:
+      val counts   = Deserializer.instance[IO, Long]((_, _, value) => IO(ByteBuffer.wrap(value.get.toArray).getLong))
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Serde.timeWindowed(text, 1.minute).deserializer,
+          counts,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.scan(Vector.empty[((String, Long), Long)])((seen, record) =>
+          seen :+ ((record.record.key.key, record.record.key.window.start) -> record.record.value)
+        ).find(seen => seen.size == expected.size && seen.toMap == expected).compile.lastOrError
+          .timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held exactly $expected"))).void
 
   private def counting(server: String, program: (Topic, Topic) => Pipeline[IO] = byKey)(test: Counting => IO[Unit]): IO[Unit] =
     Names.fresh:
@@ -278,6 +317,17 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             ) *> produceAt(server, app.input, List(("a", first + 4000L), ("b", second))) *> running(server, app)(
               windowCounts(server, app.output, Map(("a", first) -> 4L, ("b", first) -> 1L, ("a", second) -> 1L, ("b", second) -> 1L))
             )
+
+    test(s"$release, $under: an engine emitting windows once they close writes each window's final count once"):
+      counting(server, finalByMinute): app =>
+        IO.realTime.flatMap: now =>
+          val first  = (now.toMillis / 60000L - 5L) * 60000L
+          val second = first + 60000L
+          running(server, app):
+            produceAt(server, app.input, List(("a", first), ("a", first + 1000L), ("b", first + 2000L))) *> holding(server, app.changelog, 3) *>
+              // Past the second within which the engine looked for closed windows, a record that closes the first minute.
+              IO.sleep(2.seconds) *> produceAt(server, app.input, List(("a", second + 15000L))) *>
+              windowRecords(server, app.output, Map(("a", first) -> 2L, ("b", first) -> 1L))
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

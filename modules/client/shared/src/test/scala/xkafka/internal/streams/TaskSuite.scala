@@ -26,6 +26,7 @@ package streams
 import scala.concurrent.duration.*
 
 import cats.effect.IO
+import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
 import xkafka.streams.{KStream, Pipeline, Serde, Store, TimeWindows, Topology}
@@ -62,13 +63,45 @@ final class TaskSuite extends CatsEffectSuite:
           .prunedAll(Map("windows" -> Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L))), Map("windows" -> 15000L)),
         30000L
       )
-    task(windowed, 0).process(restored, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty)).map: (state, written) =>
+    task(windowed, 0).process(restored, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L).map: (state, written) =>
       assertEquals(written.head, TaskOutput(Topic.from("app-windows-changelog").orFail, Some(0), Some(old), long(1), 2000L, Headers.empty))
       assertEquals(written(1).value, long(1))
       assertEquals(state.store("windows").keySet, Set(latest))
 
+  // Read in Java's AbstractKStreamTimeWindowAggregateProcessor and KStreamWindowAggregate: an emission ends at the window starting at the close
+  // time less the size, the next starts just after it, and a look that would end at the same windows emits nothing and keeps the close time.
+  test("windows emitted once they close come out once each, and a look that finds no new window keeps the close time last emitted for"):
+    val emitting =
+      KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).withRetention(1.minute)
+        .emitOnWindowClose.count(Store("windows")).toStream.to(out, Serde.timeWindowed(text, 10.seconds), count)
+    val counted = task(emitting, 0)
+    val inputs  = List(1000L, 12000L, 25000L, 31000L, 36000L)
+    inputs.zipWithIndex.foldLeftM((TaskState.empty, Vector.empty[Long], Vector.empty[Option[Long]])):
+      case ((state, emitted, lasts), (timestamp, index)) => counted
+          .process(state, TaskInput(bytes("k"), bytes("v"), timestamp, Headers.empty), index * 2000L).map: (after, written) =>
+            val starts = written.filter(_.topic == out).flatMap(_.key).map(key => java.nio.ByteBuffer.wrap(key.drop(key.size - 8).toArray).getLong)
+            (after, emitted ++ starts, lasts :+ after.lastEmitted.get("windows"))
+    .map: (_, emitted, lasts) =>
+      assertEquals(emitted, Vector(0L, 10000L, 20000L))
+      // The window at 10000 ends the emission at close time 20000; the look at 26000 would end at it again, so emits nothing and keeps 20000.
+      assertEquals(lasts, Vector(None, None, Some(20000L), Some(20000L), Some(31000L)))
+
+  // The example in the docs: a record at 2:05 both closes the window from 0:00 and starts the one from 2:00, past the default retention of 70 s.
+  test("a window kept only for its size and grace is removed before its result is sent when record time jumps, and kept longer it is sent"):
+    def emitted(retention: Option[FiniteDuration]) =
+      val windowed = KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+      val kept     = retention.fold(windowed)(windowed.withRetention)
+      val counted  = task(kept.emitOnWindowClose.count(Store("windows")).toStream.to(out, Serde.timeWindowed(text, 1.minute), count), 0)
+      for
+        first  <- counted.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 30000L, Headers.empty), 0L)
+        second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 125000L, Headers.empty), 2000L)
+      yield second._2.filter(_.topic == out).flatMap(_.key).map(key => java.nio.ByteBuffer.wrap(key.drop(key.size - 8).toArray).getLong)
+    (emitted(None), emitted(Some(10.minutes))).mapN: (lost, sent) =>
+      assertEquals(lost, Vector.empty)
+      assertEquals(sent, Vector(0L))
+
   test("each change to a store goes to its changelog on the task's own partition, without the record's headers"):
-    task(counting, 3).process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, trace)).map: (_, written) =>
+    task(counting, 3).process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, trace), 0L).map: (_, written) =>
       assertEquals(
         written,
         Vector(
@@ -80,8 +113,8 @@ final class TaskSuite extends CatsEffectSuite:
   test("the partition time is the largest timestamp read, kept between records"):
     val counted = task(counting, 0)
     for
-      first  <- counted.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 3000L, Headers.empty))
-      second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty))
+      first  <- counted.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 3000L, Headers.empty), 0L)
+      second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L)
     yield
       assertEquals((first._1.partitionTime, second._1.partitionTime), (3000L, 3000L))
       assertEquals(second._1.store("counts").get(Chunk.array("k".getBytes)), Some(Stored(long(2).get, 3000L)))
@@ -93,8 +126,8 @@ final class TaskSuite extends CatsEffectSuite:
       KStream(in, text, text).groupByKey(text, text).aggregate(Store("latest"), emptyIsNone)("")((_, v, _) => v).toStream.to(out, text, emptyIsNone)
     val running = task(latest, 0)
     for
-      first  <- running.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, Headers.empty))
-      second <- running.process(first._1, TaskInput(bytes("k"), bytes(""), 2000L, Headers.empty))
+      first  <- running.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, Headers.empty), 0L)
+      second <- running.process(first._1, TaskInput(bytes("k"), bytes(""), 2000L, Headers.empty), 0L)
     yield
       assertEquals(first._1.store("latest").keySet, Set(Chunk.array("k".getBytes)))
       assertEquals(second._1.store("latest"), Map.empty)
@@ -104,5 +137,5 @@ final class TaskSuite extends CatsEffectSuite:
     val dashIsNone =
       Serde[IO, String](Serializer.instance((t, h, k) => if k == "-" then IO.pure(None) else text.serializer.serialize(t, h, k)), text.deserializer)
     val counted = task(KStream(in, text, text).groupByKey(dashIsNone, text).count(Store("counts")).toStream.to(out, text, count), 0)
-    counted.process(TaskState.empty, TaskInput(bytes("-"), bytes("v"), 1000L, Headers.empty)).map: (state, written) =>
+    counted.process(TaskState.empty, TaskInput(bytes("-"), bytes("v"), 1000L, Headers.empty), 0L).map: (state, written) =>
       assertEquals((state.store("counts"), written), (Map.empty, Vector.empty))

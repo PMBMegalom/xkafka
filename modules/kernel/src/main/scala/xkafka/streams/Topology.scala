@@ -22,6 +22,8 @@
 package xkafka
 package streams
 
+import scala.concurrent.duration.FiniteDuration
+
 import cats.{ApplicativeThrow, Show}
 import cats.arrow.FunctionK
 import cats.data.NonEmptyList
@@ -86,10 +88,14 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   case Aggregate[F[_], K, V, A](store: Store, key: Serde[F, K], value: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A)
       extends Step[F, K, V, K, A]
 
-  /** Folds each key's records into `store`, once for each of `windows` a record falls in, as for `Aggregate`. */
+  /** Folds each key's records into `store`, once for each of `windows` a record falls in, as for `Aggregate`, keeping each window for `retention`
+    * milliseconds after its start, passing on each update, or with `emitOnClose` only each window's final value once it has closed.
+    */
   case WindowedAggregate[F[_], K, V, A](
       store: Store,
       windows: TimeWindows,
+      retention: Long,
+      emitOnClose: Boolean,
       key: Serde[F, K],
       value: Serde[F, A],
       start: (K, V) => A,
@@ -101,17 +107,18 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
 
   def mapK[G[_]](fk: FunctionK[F, G]): Step[G, K, V, K2, V2] =
     this match
-      case Filter(keep)                                              => Filter(keep)
-      case Map(change)                                               => Map(change)
-      case MapValues(change)                                         => MapValues(change)
-      case FlatMap(change)                                           => FlatMap(change)
-      case Peek(effect)                                              => Peek((key, value) => fk(effect(key, value)))
-      case EvalMapValues(change)                                     => EvalMapValues(value => fk(change(value)))
-      case EvalFilter(keep)                                          => EvalFilter((key, value) => fk(keep(key, value)))
-      case EvalMap(change)                                           => EvalMap((key, value) => fk(change(key, value)))
-      case Aggregate(store, key, value, start, add)                  => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
-      case WindowedAggregate(store, windows, key, value, start, add) => WindowedAggregate(store, windows, key.mapK(fk), value.mapK(fk), start, add)
-      case ToStream()                                                => ToStream()
+      case Filter(keep)                             => Filter(keep)
+      case Map(change)                              => Map(change)
+      case MapValues(change)                        => MapValues(change)
+      case FlatMap(change)                          => FlatMap(change)
+      case Peek(effect)                             => Peek((key, value) => fk(effect(key, value)))
+      case EvalMapValues(change)                    => EvalMapValues(value => fk(change(value)))
+      case EvalFilter(keep)                         => EvalFilter((key, value) => fk(keep(key, value)))
+      case EvalMap(change)                          => EvalMap((key, value) => fk(change(key, value)))
+      case Aggregate(store, key, value, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
+      case WindowedAggregate(store, windows, retention, emitOnClose, key, value, start, add) =>
+        WindowedAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), start, add)
+      case ToStream() => ToStream()
 
 /** The steps between a segment's origin, whose records are keyed `K` with values `V`, and its last step, which gives `K2` and `V2`. */
 private[xkafka] enum Chain[F[_], K, V, K2, V2]:
@@ -131,9 +138,9 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Start()          => Nil
       case Then(init, last) => init.stores ++
           (last match
-            case Step.Aggregate(store, _, _, _, _)            => List(store)
-            case Step.WindowedAggregate(store, _, _, _, _, _) => List(store)
-            case _                                            => Nil)
+            case Step.Aggregate(store, _, _, _, _)                  => List(store)
+            case Step.WindowedAggregate(store, _, _, _, _, _, _, _) => List(store)
+            case _                                                  => Nil)
 
   /** How long each window store of its steps keeps a window, in milliseconds, by store name. */
   def retentions: Map[String, Long] =
@@ -141,8 +148,8 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Start()          => Map.empty
       case Then(init, last) => init.retentions ++
           (last match
-            case Step.WindowedAggregate(store, windows, _, _, _, _) => Map(store.name -> windows.retentionMillis)
-            case _                                                  => Map.empty)
+            case Step.WindowedAggregate(store, _, retention, _, _, _, _, _) => Map(store.name -> retention)
+            case _                                                          => Map.empty)
 
 /** Where a segment reads from: an input topic, or the repartition topic the segment before it writes. */
 private[xkafka] enum Origin[F[_], K, V]:
@@ -262,7 +269,7 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
     aggregated(store, serde, (k, v) => add(k, v, initial), add)
 
   /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
-  def windowedBy(windows: TimeWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, key, value)
+  def windowedBy(windows: TimeWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, None, false, key, value)
 
 /** Records grouped by key and window, ready to be folded into a window store. Each update to a window goes downstream as it happens. A record later
   * than its window's end by more than the windows' grace is dropped, and a window is kept for its size and grace after its start.
@@ -270,12 +277,33 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
 final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
     grouped: KGroupedStream[F, K, V],
     windows: TimeWindows,
+    retention: Option[FiniteDuration],
+    emitOnClose: Boolean,
     key: Serde[F, K],
     value: Serde[F, V]
 ):
   private def aggregated[A](store: Store, serde: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A): KTable[F, Windowed[K], A] =
-    val problems = windows.problem.map(TopologyError.InvalidWindows(store.name, _)).toVector
-    KTable(grouped.folded(Step.WindowedAggregate(store, windows, key, serde, start, add), problems))
+    val least = windows.retentionMillis
+    val kept  =
+      windows.problem.orElse:
+        retention.flatMap: asked =>
+          if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
+          else Option.when(asked.toMillis < least)(s"the retention must be at least the windows' size and grace, ${least} ms, was $asked")
+    val problems = kept.map(TopologyError.InvalidWindows(store.name, _)).toVector
+    KTable(grouped.folded(Step.WindowedAggregate(store, windows, retention.fold(least)(_.toMillis), emitOnClose, key, serde, start, add), problems))
+
+  /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
+    * emits once it closes may expire before it is emitted when the retention is no longer than that, as in Java Kafka Streams, so keep it longer
+    * there.
+    */
+  def withRetention(retention: FiniteDuration): TimeWindowedKStream[F, K, V] =
+    TimeWindowedKStream(grouped, windows, Some(retention), emitOnClose, key, value)
+
+  /** Passes on only each window's final value, once the window has closed, in place of every update. Closed windows are looked for as records arrive,
+    * at most once a second, as Java Kafka Streams looks for them, so a window's value goes downstream with the first record after it closes once that
+    * second has passed.
+    */
+  def emitOnWindowClose: TimeWindowedKStream[F, K, V] = TimeWindowedKStream(grouped, windows, retention, true, key, value)
 
   /** Counts each key's records in each window in `store`. */
   def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long] =
