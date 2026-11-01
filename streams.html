@@ -106,11 +106,11 @@
       <main class="content">
 
         <h1 id="streams" class="title">Streams</h1>
-        <p><code>KafkaClient.streams</code> runs a Kafka Streams program as one member of its
-        application&#39;s group. The other members of the application may run xkafka or Java
-        Kafka Streams: they declare the same topology, read and write the same topics,
-        and hand tasks to each other as members join and leave.</p>
-        <p>An application joins a streams group, which needs brokers of Kafka 4.2 or newer.</p>
+        <p><code>KafkaClient.streams</code> runs a Kafka Streams program. Each running instance is one
+        member of the application, and the application can mix xkafka members with Java
+        Kafka Streams instances running the same program. Members share the work and
+        take it over from each other as they start and stop.</p>
+        <p>Streams applications need brokers of Kafka 4.2 or newer.</p>
         <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -130,63 +130,63 @@
     </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">StreamsSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">id</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">streams</span><span>(</span><span class="identifier">settings</span><span>, </span><span class="identifier">topology</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">run</span><span>)
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
-        <p>Acquiring the resource joins the group and starts processing. <code>run</code> waits while
-        the application runs, and fails with the error that stops it. Releasing the
-        resource gives back the member&#39;s tasks, committing them, and leaves the group,
-        waiting at most <code>closeTimeout</code>.</p>
+        <p>Acquiring the resource joins the application and starts processing. <code>run</code> waits
+        while the application runs, and fails with the error that stops it. Releasing
+        the resource commits the member&#39;s work, hands it back to the application, and
+        leaves, waiting at most <code>closeTimeout</code>.</p>
         
         <h2 id="programs" class="section"><a class="anchor-link left" href="#programs"><i class="icofont-laika link">&#xef71;</i></a>Programs</h2>
-        <p>A program is a <code>Topology</code> of pipelines, each from an input topic to an output
-        topic. A pipeline is built from a <code>KStream</code>:</p>
+        <p>A program is a <code>Topology</code> of pipelines, each reading an input topic and writing
+        an output topic. A pipeline starts from a <code>KStream</code> and is built with:</p>
         <ul>
-          <li><code>filter</code>, <code>map</code>, <code>mapValues</code>, <code>flatMap</code>, <code>selectKey</code> and <code>peek</code>, and
-          <code>evalFilter</code>, <code>evalMap</code> and <code>evalMapValues</code> for steps that run an effect;</li>
-          <li><code>groupByKey</code> and <code>groupBy</code>, then <code>count</code>, <code>reduce</code> or <code>aggregate</code> into a named
-          <code>Store</code>, giving a <code>KTable</code> whose <code>toStream</code> is each change to it;</li>
+          <li><code>filter</code>, <code>map</code>, <code>mapValues</code>, <code>flatMap</code>, <code>selectKey</code> and <code>peek</code>;</li>
+          <li><code>evalFilter</code>, <code>evalMap</code> and <code>evalMapValues</code>, which run an effect;</li>
+          <li><code>groupByKey</code> or <code>groupBy</code>, followed by <code>count</code>, <code>reduce</code> or <code>aggregate</code> into a
+          named <code>Store</code>. This gives a <code>KTable</code>, and its <code>toStream</code> is every change to it;</li>
           <li><code>to</code>, which ends the pipeline at its output topic.</li>
         </ul>
-        <p>Records whose key may have changed before they are grouped, after <code>map</code>,
-        <code>flatMap</code>, <code>selectKey</code> or <code>evalMap</code>, go through a repartition topic. <code>groupBy</code>
-        names it with a <code>Repartition</code>, and so does <code>groupByKey</code> after such a step. A store keeps its contents in a
-        changelog topic. The application&#39;s own topics are named after it:
-        <code>&lt;application id&gt;-&lt;store&gt;-changelog</code> and <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>.
-        The broker creates them as the application first joins.</p>
-        <p><code>Topology.of</code> checks the names and reports every problem at once, such as two
-        stores with one name or two pipelines reading one topic. <code>liftTo</code> raises the
-        problems in <code>F</code> as one <code>InvalidTopology</code>, and refused settings as one
+        <p>Grouping records whose key may have changed, after <code>map</code>, <code>flatMap</code>, <code>selectKey</code>
+        or <code>evalMap</code>, sends them through a repartition topic first. Name it with a
+        <code>Repartition</code>: <code>groupBy</code> always takes one, and <code>groupByKey</code> needs one after such
+        a step.</p>
+        <p>The application&#39;s own topics are named after its id: a store&#39;s changelog is
+        <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, and a repartition topic is
+        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>. The broker creates them when the
+        application first starts.</p>
+        <p><code>Topology.of</code> checks the program and reports every problem at once, such as two
+        stores with the same name or two pipelines reading the same topic. <code>liftTo</code>
+        raises them in <code>F</code> as an <code>InvalidTopology</code>, and refused settings as an
         <code>InvalidStreamsSettings</code>.</p>
-        <p>A <code>Serde</code> pairs the serializer and deserializer of one type, since a streams
+        <p>A <code>Serde</code> holds the serializer and deserializer of one type, since a streams
         application both reads and writes its topics. <code>Serde.utf8</code>, <code>Serde.long</code> and
-        <code>Serde.bytes</code> write what Java Kafka Streams&#39; <code>Serdes.String()</code>, <code>Serdes.Long()</code>
-        and <code>Serdes.ByteArray()</code> write.</p>
+        <code>Serde.bytes</code> write the same bytes as Java&#39;s <code>Serdes.String()</code>, <code>Serdes.Long()</code>
+        and <code>Serdes.ByteArray()</code>.</p>
         
         <h2 id="guarantees" class="section"><a class="anchor-link left" href="#guarantees"><i class="icofont-laika link">&#xef71;</i></a>Guarantees</h2>
-        <p><code>ProcessingGuarantee.AtLeastOnce</code>, the default, commits what each task read
-        after writing what it wrote, every 30 seconds. A task that moves to another
-        member reads again what it read since its last commit, and writes it again.</p>
-        <p><code>ProcessingGuarantee.ExactlyOnce</code> writes what the tasks wrote and commits what
-        they read in one transaction, every 100ms. A task that moves to another member
-        finds what it wrote only together with where it read to, so each record counts
-        once in the application&#39;s stores and outputs. It reads its input with
-        <code>IsolationLevel.ReadCommitted</code>.</p>
-        <p>These are the intervals Java Kafka Streams uses for each guarantee. Change them
-        with <code>commitInterval</code>.</p>
+        <p>With <code>ProcessingGuarantee.AtLeastOnce</code>, the default, a member commits its
+        progress every 30 seconds. If its work moves to another member, the records read
+        since the last commit are processed and written again.</p>
+        <p>With <code>ProcessingGuarantee.ExactlyOnce</code>, a member writes its output and commits
+        its progress together in one transaction, every 100ms. Each record then counts
+        exactly once in the application&#39;s stores and output topics, even when work
+        moves between members. Input is read with <code>IsolationLevel.ReadCommitted</code>.</p>
+        <p>These are the same intervals Java Kafka Streams uses. Change them with
+        <code>commitInterval</code>.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>Under either guarantee, an effectful step runs again for a record read again,
-          such as after a member stops without committing. Exactly once covers what the
-          application writes to Kafka, not what its effects do elsewhere.</p>
+          <p>Under either guarantee, an effectful step can run more than once for the same
+          record, such as after a member stops without committing. Exactly once applies to
+          what the application writes to Kafka, not to what its effects do elsewhere.</p>
         </div>
         
         <h2 id="concurrency" class="section"><a class="anchor-link left" href="#concurrency"><i class="icofont-laika link">&#xef71;</i></a>Concurrency</h2>
-        <p>A member processes one task at a time by default, as a single Java Kafka Streams
-        thread does. With <code>concurrency</code> set above one, up to that many tasks process at
-        once, each its own records in order. This helps where an effectful step waits on
-        something outside Kafka.</p>
+        <p>By default a member processes one task at a time, like a single Java Kafka
+        Streams thread. Set <code>concurrency</code> higher to process up to that many tasks at
+        once. Records within each task stay in order. This helps when an effectful step
+        waits on something outside Kafka.</p>
         
         <h2 id="state" class="section"><a class="anchor-link left" href="#state"><i class="icofont-laika link">&#xef71;</i></a>State</h2>
-        <p><code>state</code> gives the application&#39;s phase, first as it is and then each time it
-        changes, with what the group coordinator reports wrong with the application:</p>
+        <p><code>state</code> streams the application&#39;s current phase, and then each change to it:</p>
         <table>
           <thead>
             <tr>
@@ -197,27 +197,26 @@
           <tbody>
             <tr>
               <td><code>Joining</code></td>
-              <td>waiting for the group to give it tasks</td>
+              <td>waiting to be given work</td>
             </tr>
             <tr>
               <td><code>Restoring</code></td>
-              <td>refilling the stores of the tasks it was given from their changelogs</td>
+              <td>refilling its stores from their changelogs before processing</td>
             </tr>
             <tr>
               <td><code>Running</code></td>
-              <td>processing its tasks</td>
+              <td>processing</td>
             </tr>
             <tr>
               <td><code>Lost</code></td>
-              <td>its tasks were taken away without being given back, and it is joining again</td>
+              <td>its work was taken away, and it is joining again</td>
             </tr>
           </tbody>
         </table>
-        <p><code>problems</code> lists what the group coordinator reports, such as missing source
-        topics, internal topics being created, or the application being refused its
-        topics (<code>StreamsProblem.TopicAuthorizationFailed</code>). The member goes on as long as
-        it can, as Java Kafka Streams does, so an application that should stop on a
-        problem watches for it:</p>
+        <p>Each state also lists the <code>problems</code> the broker reports, such as a missing
+        input topic or the application not being allowed to use its topics
+        (<code>StreamsProblem.TopicAuthorizationFailed</code>). Like Java Kafka Streams, a member
+        keeps going for as long as it can. To stop on a problem, watch for it:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
@@ -225,21 +224,20 @@
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">runUntilRefused</span><span>(</span><span class="identifier">streams</span><span>: </span><span class="type-name">KafkaStreams</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
   </span><span class="keyword">val</span><span> </span><span class="identifier">refused</span><span> = </span><span class="identifier">streams</span><span>.</span><span class="identifier">state</span><span>.</span><span class="identifier">find</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">problems</span><span>.</span><span class="identifier">exists</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">isInstanceOf</span><span>[</span><span class="type-name">StreamsProblem</span><span>.</span><span class="type-name">TopicAuthorizationFailed</span><span>])).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
   </span><span class="type-name">IO</span><span>.</span><span class="identifier">race</span><span>(</span><span class="identifier">streams</span><span>.</span><span class="identifier">run</span><span>, </span><span class="identifier">refused</span><span>).</span><span class="identifier">void</span></code></pre>
-        <p>A broker configured with a topology description plugin asks the members of a
-        streams group for a description of their topology. xkafka members don&#39;t send
-        one, and keep their tasks without it.</p>
+        <p>Some brokers are configured to ask applications for a description of their
+        topology. xkafka members don&#39;t send one, and keep working without it.</p>
         
         <h2 id="stores-and-standbys" class="section"><a class="anchor-link left" href="#stores-and-standbys"><i class="icofont-laika link">&#xef71;</i></a>Stores and standbys</h2>
-        <p>Stores are held in memory. A member given a task refills the task&#39;s stores from
-        their changelogs before processing it.</p>
-        <p>When the group keeps standby replicas, which the broker&#39;s
-        <code>streams.num.standby.replicas</code> group setting asks for, a member also keeps
-        standby copies of other members&#39; stores, following their changelogs. When such a
-        task becomes the member&#39;s own, it restores only what its copy had not yet read.</p>
+        <p>Stores are kept in memory. A member given new work first refills its stores from
+        their changelogs.</p>
+        <p>If the broker&#39;s <code>streams.num.standby.replicas</code> setting asks for standby
+        replicas, members also keep up-to-date copies of other members&#39; stores. When
+        work moves to a member holding a copy, it only needs to catch up on what the
+        copy has not yet read.</p>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p>A copy the group takes away is kept for 10 minutes, as Java Kafka Streams keeps a
-          task&#39;s state directory, in case the task comes back.</p>
+          <p>A copy that is no longer needed is kept for 10 minutes, like Java Kafka
+          Streams&#39; state directories, in case the work comes back.</p>
         </div>
 
         
