@@ -24,8 +24,11 @@ package streams
 
 import java.nio.ByteBuffer
 
-import cats.ApplicativeThrow
+import scala.concurrent.duration.FiniteDuration
+
+import cats.{ApplicativeThrow, MonadThrow}
 import cats.arrow.FunctionK
+import cats.syntax.all.*
 import fs2.Chunk
 
 /** How a streams program writes and reads one type, since a streams application both writes and reads its topics. */
@@ -49,4 +52,27 @@ object Serde:
           case Some(read)                   => F
               .raiseError(new IllegalArgumentException(s"a long is 8 bytes, but a record of topic '${topic.value}' held ${read.size}"))
           case None => F.raiseError(new Deserializer.NullValueException(topic))
+    Serde(serializer, deserializer)
+
+  /** A windowed key as Java's `TimeWindowedSerializer` writes it: the key as `key` writes it, then its window's start as eight big-endian bytes.
+    * Reading it back takes the windows' `size`, from which the window's end follows, as Java's deserializer is told the size.
+    */
+  def timeWindowed[F[_], K](key: Serde[F, K], size: FiniteDuration)(using F: MonadThrow[F]): Serde[F, Windowed[K]] =
+    val serializer =
+      Serializer.instance[F, Windowed[K]]: (topic, headers, windowed) =>
+        key.serializer.serialize(topic, headers, windowed.key).flatMap:
+          case Some(written) => F.pure(Some(written ++ Chunk.array(ByteBuffer.allocate(8).putLong(windowed.window.start).array)))
+          case None => F.raiseError(new IllegalArgumentException(s"a windowed key for topic '${topic.value}' has a key its serializer wrote as none"))
+    val deserializer =
+      Deserializer.instance[F, Windowed[K]]: (topic, headers, bytes) =>
+        bytes match
+          case Some(read) if read.size >= 8 =>
+            val start = ByteBuffer.wrap(read.drop(read.size - 8).toArray).getLong
+            val end   = start + size.toMillis
+            // Java truncates an end past the largest timestamp to it.
+            key.deserializer.deserialize(topic, headers, Some(read.take(read.size - 8)))
+              .map(Windowed(_, Window(start, if end < 0 then Long.MaxValue else end)))
+          case Some(read) => F.raiseError(new IllegalArgumentException(s"a windowed key is at least 8 bytes, but a record of topic '${topic
+                .value}' held ${read.size}"))
+          case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no windowed key"))
     Serde(serializer, deserializer)

@@ -26,7 +26,7 @@ package streams
 import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.streams.{Chain, End, Origin, Segment, Step}
+import xkafka.streams.{Chain, End, Origin, Segment, Step, Windowed}
 
 /** A record as a topic holds it, read by a task. */
 private[xkafka] final case class TaskInput(key: Option[Chunk[Byte]], value: Option[Chunk[Byte]], timestamp: Long, headers: Headers)
@@ -44,8 +44,16 @@ private[xkafka] final case class TaskOutput(
 /** The latest value a store holds for a key, and its timestamp, as the bytes its changelog carries. */
 private[xkafka] final case class Stored(value: Chunk[Byte], timestamp: Long)
 
-/** What a task keeps between records: each store's contents by serialized key, and the partition time, the largest timestamp it has read. */
-private[xkafka] final case class TaskState(stores: Map[String, Map[Chunk[Byte], Stored]], partitionTime: Long):
+/** What a task keeps between records: each store's contents by serialized key, the partition time, the largest timestamp it has read, and for each
+  * window store, the stream time its windowing step has seen, which starts again on each member as Java's does, and the store's clock (see
+  * [[WindowStore]]), taken from its contents where the task has not yet kept it.
+  */
+private[xkafka] final case class TaskState(
+    stores: Map[String, Map[Chunk[Byte], Stored]],
+    partitionTime: Long,
+    streamTimes: Map[String, Long] = Map.empty,
+    clocks: Map[String, Long] = Map.empty
+):
   def store(name: String): Map[Chunk[Byte], Stored] = stores.getOrElse(name, Map.empty)
 
 private[xkafka] object TaskState:
@@ -107,7 +115,9 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
-      case Step.ToStream()                               => passing(Vector(record))
+      case Step.ToStream()                                    => passing(Vector(record))
+      case folding @ Step.WindowedAggregate(_, _, _, _, _, _) => windowed(folding, record, state)
+          .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
       case Step.Aggregate(store, key, value, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
             // Java skips a record whose key is null, which here is a key its serializer writes as none.
@@ -125,6 +135,46 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
                   val after    = state.copy(stores = state.stores.updated(store.name, contents))
                   val logged   = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
                   (after, Vector(Travelling(record.key, aggregate, timestamp, record.headers)), Vector(logged))
+
+  /** The windows `step` updates for `record`, as Java's windowed aggregation does: each window the record falls in that has not closed, by the step's
+    * stream time less its grace, is folded from its value, or started where the store has none, then kept unless expired by the store's clock, and
+    * written to the changelog either way. The store never holds an expired window, since it drops them as its clock moves and once restored, so one
+    * reads as absent, as Java's store reads it. A record whose key its serializer writes as none is skipped, as Java skips a null key.
+    */
+  private def windowed[K, V, A](
+      step: Step.WindowedAggregate[F, K, V, A],
+      record: Travelling[K, V],
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[Windowed[K], A]], Vector[TaskOutput])] =
+    import step.{add, key, start, store, value, windows}
+    val retention = windows.retentionMillis
+    topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
+        case None        => F.pure((state, Vector.empty, Vector.empty))
+        case Some(bytes) =>
+          val streamTime = math.max(state.streamTimes.getOrElse(store.name, WindowStore.NoTime), record.timestamp)
+          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.name, streamTime))
+          val open       = windows.windowsFor(record.timestamp).filter(_.end > streamTime - windows.graceMillis)
+          open.foldLeftM((timed, Vector.empty[Travelling[Windowed[K], A]], Vector.empty[TaskOutput])):
+            case ((now, forwarded, logged), window) =>
+              val entries  = now.store(store.name)
+              val clock    = now.clocks.getOrElse(store.name, WindowStore.clockOf(entries))
+              val windowed = WindowStore.key(bytes, window.start)
+              val updated  =
+                entries.get(windowed) match
+                  case None      => F.pure((start(record.key, record.value), record.timestamp))
+                  case Some(old) => value.deserializer.deserialize(changelog, Headers.empty, Some(old.value)).map: previous =>
+                      (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp))
+              updated.flatMap: (aggregate, timestamp) =>
+                value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
+                  val ticked = math.max(clock, window.start)
+                  val kept   =
+                    if WindowStore.expired(window.start, ticked, retention) then entries
+                    else written.fold(entries - windowed)(v => entries.updated(windowed, Stored(v, timestamp)))
+                  val contents = if ticked > clock then WindowStore.pruned(kept, ticked, retention) else kept
+                  val after    = now.copy(stores = now.stores.updated(store.name, contents), clocks = now.clocks.updated(store.name, ticked))
+                  val log      = TaskOutput(changelog, Some(partition), Some(windowed), written, timestamp, Headers.empty)
+                  (after, forwarded :+ Travelling(Windowed(record.key, window), aggregate, timestamp, record.headers), logged :+ log)
 
   private def leaving[K, V](exit: End[F, K, V], record: Travelling[K, V]): F[Vector[TaskOutput]] =
     val (topic, key, value, repartitioning) =

@@ -391,7 +391,13 @@ private[xkafka] object Engine:
                       positions = standby.positions.updated(partition, record.offset + 1)
                     )
                   )
-          val now = running.copy(standbys = after)
+          // Expired windows go once the batch is applied, as Java's restore drops them after each batch it reads.
+          val pruned =
+            if records.isEmpty then after
+            else
+              after
+                .map((id, standby) => id -> standby.copy(stores = WindowStore.prunedAll(standby.stores, segments(id.subtopology).chain.retentions)))
+          val now = running.copy(standbys = pruned)
           report(now).as(now)
 
     /** At least once: one batch, then a commit through the member once the interval has passed. Exactly once: once a poll brings records, a
@@ -508,7 +514,7 @@ private[xkafka] object Engine:
             inputs.traverse: (id, partition) =>
               val found = offsets.get((partition.topic.value, partition.partition.value))
               val time  = found.flatMap(_.metadata).flatMap(PartitionTime.decode).getOrElse(-1L)
-              val state = TaskState(stores.getOrElse(id, Map.empty), time)
+              val state = TaskState(WindowStore.prunedAll(stores.getOrElse(id, Map.empty), segments(id.subtopology).chain.retentions), time)
               val from  = found.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)
               val task  = new Task[F](application, segments(id.subtopology), id.partition)
               F.pure(id -> Live(task, state, partition, from, None))

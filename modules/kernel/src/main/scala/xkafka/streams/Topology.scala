@@ -49,6 +49,9 @@ enum TopologyError derives CanEqual:
   /** Records grouped by a key changed since they were read, which needs a repartitioning that `groupByKey` was given no name for. */
   case UnnamedRepartition
 
+  /** Windows a store's records cannot be windowed by, such as windows of no size. */
+  case InvalidWindows(store: String, reason: String)
+
   def message: String =
     this match
       case InvalidName(name, reason)  => s"'$name' cannot name a store or repartitioning: $reason"
@@ -56,6 +59,7 @@ enum TopologyError derives CanEqual:
       case DuplicateRepartition(name) => s"two repartitionings are named '$name'"
       case DuplicateSource(topic)     => s"two pipelines read topic '${topic.value}'"
       case UnnamedRepartition => "records whose key changed are grouped by key without a repartitioning name; pass a Repartition to groupByKey"
+      case InvalidWindows(store, reason) => s"the windows of store '$store' cannot be used: $reason"
 
 object TopologyError:
   given Show[TopologyError] = Show.show(_.message)
@@ -82,21 +86,32 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   case Aggregate[F[_], K, V, A](store: Store, key: Serde[F, K], value: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A)
       extends Step[F, K, V, K, A]
 
+  /** Folds each key's records into `store`, once for each of `windows` a record falls in, as for `Aggregate`. */
+  case WindowedAggregate[F[_], K, V, A](
+      store: Store,
+      windows: TimeWindows,
+      key: Serde[F, K],
+      value: Serde[F, A],
+      start: (K, V) => A,
+      add: (K, V, A) => A
+  ) extends Step[F, K, V, Windowed[K], A]
+
   /** Each change to the table, as a record. */
   case ToStream[F[_], K, V]() extends Step[F, K, V, K, V]
 
   def mapK[G[_]](fk: FunctionK[F, G]): Step[G, K, V, K2, V2] =
     this match
-      case Filter(keep)                             => Filter(keep)
-      case Map(change)                              => Map(change)
-      case MapValues(change)                        => MapValues(change)
-      case FlatMap(change)                          => FlatMap(change)
-      case Peek(effect)                             => Peek((key, value) => fk(effect(key, value)))
-      case EvalMapValues(change)                    => EvalMapValues(value => fk(change(value)))
-      case EvalFilter(keep)                         => EvalFilter((key, value) => fk(keep(key, value)))
-      case EvalMap(change)                          => EvalMap((key, value) => fk(change(key, value)))
-      case Aggregate(store, key, value, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
-      case ToStream()                               => ToStream()
+      case Filter(keep)                                              => Filter(keep)
+      case Map(change)                                               => Map(change)
+      case MapValues(change)                                         => MapValues(change)
+      case FlatMap(change)                                           => FlatMap(change)
+      case Peek(effect)                                              => Peek((key, value) => fk(effect(key, value)))
+      case EvalMapValues(change)                                     => EvalMapValues(value => fk(change(value)))
+      case EvalFilter(keep)                                          => EvalFilter((key, value) => fk(keep(key, value)))
+      case EvalMap(change)                                           => EvalMap((key, value) => fk(change(key, value)))
+      case Aggregate(store, key, value, start, add)                  => Aggregate(store, key.mapK(fk), value.mapK(fk), start, add)
+      case WindowedAggregate(store, windows, key, value, start, add) => WindowedAggregate(store, windows, key.mapK(fk), value.mapK(fk), start, add)
+      case ToStream()                                                => ToStream()
 
 /** The steps between a segment's origin, whose records are keyed `K` with values `V`, and its last step, which gives `K2` and `V2`. */
 private[xkafka] enum Chain[F[_], K, V, K2, V2]:
@@ -116,8 +131,18 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Start()          => Nil
       case Then(init, last) => init.stores ++
           (last match
-            case Step.Aggregate(store, _, _, _, _) => List(store)
-            case _                                 => Nil)
+            case Step.Aggregate(store, _, _, _, _)            => List(store)
+            case Step.WindowedAggregate(store, _, _, _, _, _) => List(store)
+            case _                                            => Nil)
+
+  /** How long each window store of its steps keeps a window, in milliseconds, by store name. */
+  def retentions: Map[String, Long] =
+    this match
+      case Start()          => Map.empty
+      case Then(init, last) => init.retentions ++
+          (last match
+            case Step.WindowedAggregate(store, windows, _, _, _, _) => Map(store.name -> windows.retentionMillis)
+            case _                                                  => Map.empty)
 
 /** Where a segment reads from: an input topic, or the repartition topic the segment before it writes. */
 private[xkafka] enum Origin[F[_], K, V]:
@@ -212,14 +237,19 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
     value: Serde[F, V]
 ):
   private def aggregated[A](store: Store, serde: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A): KTable[F, K, A] =
-    val fold = Step.Aggregate(store, key, serde, start, add)
-    if !stream.keyChanged then KTable(stream.step(fold, changesKey = false))
+    KTable(folded(Step.Aggregate(store, key, serde, start, add), Vector.empty))
+
+  /** The stream with `fold` as its last step, after a repartition topic if the key has changed. */
+  private[xkafka] def folded[K2, A](fold: Step[F, K, V, K2, A], found: Vector[TopologyError]): KStream[F, K2, A] =
+    if !stream.keyChanged then
+      val folding = stream.step(fold, changesKey = false)
+      new KStream(folding.closed, folding.open, false, folding.problems ++ found)
     else
       // The records go through a repartition topic first, so the store is in the segment that reads it.
       val named    = repartition.getOrElse(Repartition(""))
-      val problems = if repartition.isEmpty then stream.problems :+ TopologyError.UnnamedRepartition else stream.problems
+      val problems = (if repartition.isEmpty then stream.problems :+ TopologyError.UnnamedRepartition else stream.problems) ++ found
       val closed   = stream.closed :+ stream.open.close(End.Repartitioning(named, key, value))
-      KTable(new KStream(closed, Open(Origin.Repartitioned(named, key, value), Chain.Start[F, K, V]().andThen(fold)), false, problems))
+      new KStream(closed, Open(Origin.Repartitioned(named, key, value), Chain.Start[F, K, V]().andThen(fold)), false, problems)
 
   /** Counts each key's records in `store`. */
   def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, K, Long] = aggregated(store, Serde.long[F], (_, _) => 1L, (_, _, n) => n + 1)
@@ -229,6 +259,33 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
 
   /** Folds each key's values into `store`, starting from `initial`. */
   def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, K, A] =
+    aggregated(store, serde, (k, v) => add(k, v, initial), add)
+
+  /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
+  def windowedBy(windows: TimeWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, key, value)
+
+/** Records grouped by key and window, ready to be folded into a window store. Each update to a window goes downstream as it happens. A record later
+  * than its window's end by more than the windows' grace is dropped, and a window is kept for its size and grace after its start.
+  */
+final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
+    grouped: KGroupedStream[F, K, V],
+    windows: TimeWindows,
+    key: Serde[F, K],
+    value: Serde[F, V]
+):
+  private def aggregated[A](store: Store, serde: Serde[F, A], start: (K, V) => A, add: (K, V, A) => A): KTable[F, Windowed[K], A] =
+    val problems = windows.problem.map(TopologyError.InvalidWindows(store.name, _)).toVector
+    KTable(grouped.folded(Step.WindowedAggregate(store, windows, key, serde, start, add), problems))
+
+  /** Counts each key's records in each window in `store`. */
+  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long] =
+    aggregated(store, Serde.long[F], (_, _) => 1L, (_, _, n) => n + 1)
+
+  /** Combines each key's values in each window in `store`, starting from the window's first. */
+  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], V] = aggregated(store, value, (_, v) => v, (_, v, acc) => combine(acc, v))
+
+  /** Folds each key's values in each window into `store`, starting each window from `initial`. */
+  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, Windowed[K], A] =
     aggregated(store, serde, (k, v) => add(k, v, initial), add)
 
 /** The latest value of each key, kept in a store. */

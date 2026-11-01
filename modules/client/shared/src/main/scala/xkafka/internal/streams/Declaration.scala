@@ -41,6 +41,11 @@ private[xkafka] object Declaration:
   /** Java's `replication.factor` default, which leaves the choice to the broker. */
   val BrokerReplication: Short = -1
 
+  /** A store's changelog topic, configured as Java configures a key-value store's, or a window store's where the store keeps windows for `retention`.
+    */
+  private def changelog(application: String, store: String, retention: Option[Long], replicationFactor: Short): StreamsGroup.TopicInfo =
+    StreamsGroup.TopicInfo(s"$application-$store-changelog", 0, replicationFactor, retention.fold(ChangelogConfigs)(WindowStore.changelogConfigs))
+
   def apply[F[_]](application: String, topology: Topology[F], replicationFactor: Short = BrokerReplication): StreamsGroup.Topology =
     def repartitionTopic(name: String) = s"$application-$name-repartition"
     val segments                       = topology.pipelines.toList.flatMap(_.segments.toList)
@@ -54,8 +59,8 @@ private[xkafka] object Declaration:
               case _                         => Nil,
           sourceTopicRegex = Nil,
           stateChangelogTopics =
-            segment.chain.stores.map(store => s"$application-${store.name}-changelog").sorted
-              .map(StreamsGroup.TopicInfo(_, 0, replicationFactor, ChangelogConfigs)),
+            segment.chain.stores.map(store => changelog(application, store.name, segment.chain.retentions.get(store.name), replicationFactor))
+              .sortBy(_.name),
           repartitionSinkTopics =
             segment.end match
               case End.Repartitioning(named, _, _) => List(repartitionTopic(named.name))

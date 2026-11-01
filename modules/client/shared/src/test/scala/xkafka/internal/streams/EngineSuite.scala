@@ -36,7 +36,7 @@ import internal.driver.{KafkaDriver, PolledRecord, StartAt}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KafkaStreams, KStream, Repartition, Serde, Store, StreamsPhase, StreamsProblem, StreamsState, Topology}
+import xkafka.streams.{KafkaStreams, KStream, Repartition, Serde, Store, StreamsPhase, StreamsProblem, StreamsState, TimeWindows, Topology}
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
   * simulated time, on every platform.
@@ -446,6 +446,33 @@ final class EngineSuite extends CatsEffectSuite:
         val held = from.map(_._2("counts").values.map(stored => java.nio.ByteBuffer.wrap(stored.value.toArray).getLong).toList)
         assertEquals((from.map(_._1), held), (List(Map(changelog(1) -> 2L)), List(List(2L))))
 
+  test("a restored window store loses the windows its clock has expired, so a record for one starts it again"):
+    run(topology = windowing): world =>
+      for
+        _       <- world.restoredAlso.set(Map("windows" -> Map(window("k", 0L) -> counted(5L), window("other", 30000L) -> counted(1L))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 2000L))
+        _       <- IO.sleep(1.second)
+        written <- world.written.get
+      yield
+        val counts = written.filter(_.topic.value == "out").flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong)
+        assertEquals(counts, List(1L))
+
+  test("a standby window store loses the windows its clock has expired as it follows its changelog"):
+    def windowLogged(key: String, start: Long, offset: Long) =
+      PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), Some(counted(1L).value), Headers.empty)
+    run(topology = windowing): world =>
+      for
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(windowLogged("k", 0L, 0L), windowLogged("other", 30000L, 1L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield assertEquals(from.map(_._2("windows").keySet), List(Set(window("other", 30000L))))
+
   /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
   private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
     for
@@ -514,6 +541,17 @@ object EngineSuite:
       .of(KStream(Topic.from("in").orFail, text, text).evalMapValues(value => IO.sleep(1.second).as(value)).to(Topic.from("out").orFail, text, text))
       .orFail
 
+  /** Counts each key's records in tumbling windows of 10 s with 5 s of grace, in the window store `windows`. */
+  private val windowing: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Store("windows")).toStream.to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  private def counted(n: Long): Stored = Stored(Chunk.array(java.nio.ByteBuffer.allocate(8).putLong(n).array), 0L)
+
+  private def window(key: String, start: Long): Chunk[Byte] = WindowStore.key(Chunk.array(key.getBytes), start)
+
   private val counting: Topology[IO] =
     Topology.of(
       KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).count(Store("counts")).toStream
@@ -578,7 +616,8 @@ object EngineSuite:
       standingBy: Queue[IO, PolledRecord],
       ending: Ref[IO, Map[TopicPartition, Long]],
       val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]],
-      offsetsRead: Ref[IO, IO[TaskOffsets]]
+      offsetsRead: Ref[IO, IO[TaskOffsets]],
+      val restoredAlso: Ref[IO, Map[String, Map[Chunk[Byte], Stored]]]
   ):
     /** Changelog records for the standby tasks to follow. */
     def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
@@ -648,7 +687,8 @@ object EngineSuite:
             from: Map[TopicPartition, Long],
             held: Map[String, Map[Chunk[Byte], Stored]]
         ): IO[Map[String, Map[Chunk[Byte], Stored]]] =
-          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)).as(held)
+          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)) *>
+            restoredAlso.get.map(held ++ _)
         def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
         def followed: IO[List[PolledRecord]]          =
           standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
@@ -682,8 +722,9 @@ object EngineSuite:
         Queue.unbounded[IO, PolledRecord],
         IO.ref(Map.empty[TopicPartition, Long]),
         IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]),
-        IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets")))
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
+        IO.ref(Map.empty[String, Map[Chunk[Byte], Stored]])
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.

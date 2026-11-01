@@ -65,6 +65,52 @@ application both reads and writes its topics. `Serde.utf8`, `Serde.long` and
 `Serde.bytes` write the same bytes as Java's `Serdes.String()`, `Serdes.Long()`
 and `Serdes.ByteArray()`.
 
+## Windows
+
+Windows split each key's records by time, so you can count, reduce or aggregate
+them per minute, per hour, and so on. Group the records, then window them:
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def perMinute(input: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(input, text, text)
+    .groupByKey(text, text)
+    .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+    .count(Store("counts-per-minute"))
+    .toStream
+    .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+```
+
+This counts each key's records per minute, writing a new count each time one
+changes.
+
+`TimeWindows.tumbling` makes windows that follow one another without gaps or
+overlap, so each record counts in exactly one. `TimeWindows.hopping` starts a
+new window every `advance`, so windows overlap and a record counts in every
+window it falls in.
+
+Time here is the records' own timestamps, not the clock. Records often arrive
+out of order, so each window keeps accepting records for a `grace` period after
+it ends. Once a record timestamped at or after a window's end plus its grace has
+arrived, the window is closed and later records for it are dropped. Use
+`tumblingWithNoGrace` or `hoppingWithNoGrace` to close windows as soon as they
+end.
+
+The result is keyed by `Windowed[K]`: the original key and its `Window`, from
+`start` up to but not including `end`, in epoch milliseconds.
+
+To write windowed keys to a topic, use `Serde.timeWindowed(key, size)`. It
+writes the same bytes as Java's `WindowedSerdes.timeWindowedSerdeFrom`, so Java
+applications can read them. Only the window's start is written, which is why
+reading it back needs the window size.
+
 ## Guarantees
 
 With `ProcessingGuarantee.AtLeastOnce`, the default, a member commits its

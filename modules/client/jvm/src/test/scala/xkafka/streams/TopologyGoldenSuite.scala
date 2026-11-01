@@ -25,15 +25,18 @@ package streams
 import java.util.{Optional, Properties, UUID}
 import java.util.function.Supplier
 
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 import cats.effect.IO
 import munit.FunSuite
 import org.apache.kafka.clients.consumer.internals.StreamsRebalanceData
 import org.apache.kafka.common.serialization.Serdes
+import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, Topology as JavaTopology}
-import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced}
+import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, TimeWindows as JavaTimeWindows, WindowedSerdes}
 import org.apache.kafka.streams.processor.internals.{InternalTopologyBuilder, StreamThread, TopologyMetadata}
+import org.apache.kafka.streams.state.WindowStore
 import internal.protocol.StreamsGroup
 import internal.streams.Declaration
 
@@ -47,6 +50,26 @@ final class TopologyGoldenSuite extends FunSuite:
   private val count = Serde.long[IO]
 
   private def ours(first: Pipeline[IO], rest: Pipeline[IO]*): StreamsGroup.Topology = Declaration("app", Topology.of(first, rest*).orFail)
+
+  test("a windowed count declares its window store's changelog as Java does, kept for the windows' size, grace and a day"):
+    assertEquals(
+      ours(
+        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+          .count(Store("tumbling")).toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count),
+        KStream(topic("other"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v)
+          .windowedBy(TimeWindows.hoppingWithNoGrace(1.minute, advance = 20.seconds)).reduce(Store("hopping"))(_ + _).toStream
+          .to(topic("other-out"), Serde.timeWindowed(text, 1.minute), text)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("in").groupByKey
+          .windowedBy(JavaTimeWindows.ofSizeAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
+          .count(Materialized.as[String, java.lang.Long, WindowStore[Bytes, Array[Byte]]]("tumbling")).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long))
+        builder.stream[String, String]("other").groupBy((_, v) => v, Grouped.as("by-value"))
+          .windowedBy(JavaTimeWindows.ofSizeWithNoGrace(java.time.Duration.ofMinutes(1)).advanceBy(java.time.Duration.ofSeconds(20)))
+          .reduce((a, b) => a + b, Materialized.as[String, String, WindowStore[Bytes, Array[Byte]]]("hopping")).toStream
+          .to("other-out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 60000L), Serdes.String))
+    )
 
   test("a stateless pipeline is one sub-topology reading its input"):
     assertEquals(

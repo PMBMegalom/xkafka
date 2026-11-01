@@ -33,7 +33,9 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, Store, StreamsPhase, StreamsSettings, Topology}
+import xkafka.streams.{
+  ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, Store, StreamsPhase, StreamsSettings, TimeWindows, Topology
+}
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
 final class EngineBrokerSuite extends CatsEffectSuite:
@@ -59,6 +61,35 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def byLetter(input: Topic, output: Topic): Pipeline[IO] =
     KStream(input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts")).toStream
       .to(output, text, Serde.long[IO])
+
+  /** Counts by key in tumbling windows of a minute, taking records up to an hour late. */
+  private def byMinute(input: Topic, output: Topic): Pipeline[IO] =
+    KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 1.hour)).count(Store("counts")).toStream
+      .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+
+  /** Writes a record for each key at each timestamp, in order. */
+  private def produceAt(server: String, topic: Topic, records: List[(String, Long)]): IO[Unit] =
+    val made = records.map((key, at) => ProducerRecord(topic, key, s"$key-value", timestamp = Some(Timestamp.fromEpochMillis(at))))
+    PlatformKafkaClient().producer(ProducerSettings.from(client(server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
+      .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(made))).void
+
+  /** Reads `topic` from its start until the latest count of each key in each window, by the window's start, is `expected`. */
+  private def windowCounts(server: String, topic: Topic, expected: Map[(String, Long), Long])(using guarantee: ProcessingGuarantee): IO[Unit] =
+    Names.fresh:
+      val counts   = Deserializer.instance[IO, Long]((_, _, value) => IO(ByteBuffer.wrap(value.get.toArray).getLong))
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Serde.timeWindowed(text, 1.minute).deserializer,
+          counts,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.scan(Map.empty[(String, Long), Long]): (seen, record) =>
+          seen.updated((record.record.key.key, record.record.key.window.start), record.record.value)
+        .find(_ == expected).compile.lastOrError.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $expected"))).void
 
   private def counting(server: String, program: (Topic, Topic) => Pipeline[IO] = byKey)(test: Counting => IO[Unit]): IO[Unit] =
     Names.fresh:
@@ -225,6 +256,28 @@ final class EngineBrokerSuite extends CatsEffectSuite:
                   eventually("the second engine restoring its standby task from where it read to")(promoted) *> produce(server, app.input, third) *>
                   latest(server, app.output, total(first, second, third))
               stayer.run.race(steps).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure))
+
+    test(s"$release, $under: an engine counts in windows, its window changelog made as Java declares it, and one started later goes on from it"):
+      counting(server, byMinute): app =>
+        IO.realTime.flatMap: now =>
+          // Two whole minutes, a few minutes back, so every record falls where the test says.
+          val first  = (now.toMillis / 60000L - 5L) * 60000L
+          val second = first + 60000L
+          val before = List(("a", first), ("a", first + 1000L), ("b", first + 2000L), ("a", second), ("a", first + 3000L))
+          val kept   =
+            admin(server).use(_.describeTopicConfigurations(NonEmptySet.one(app.changelog))).map: described =>
+              val entries = described(app.changelog).flatMap(_.toOption).get
+              (entries.get("cleanup.policy").map(_.value), entries.get("retention.ms").map(_.value))
+          produceAt(server, app.input, before) *>
+            running(server, app)(windowCounts(server, app.output, Map(("a", first) -> 3L, ("b", first) -> 1L, ("a", second) -> 1L))) *>
+            kept.map(found =>
+              assertEquals(
+                found,
+                (Some(ConfigurationValue.Present("compact,delete")), Some(ConfigurationValue.Present((60000L + 3600000L + 86400000L).toString)))
+              )
+            ) *> produceAt(server, app.input, List(("a", first + 4000L), ("b", second))) *> running(server, app)(
+              windowCounts(server, app.output, Map(("a", first) -> 4L, ("b", first) -> 1L, ("a", second) -> 1L, ("b", second) -> 1L))
+            )
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

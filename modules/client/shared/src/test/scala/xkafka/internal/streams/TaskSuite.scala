@@ -23,10 +23,12 @@ package xkafka
 package internal
 package streams
 
+import scala.concurrent.duration.*
+
 import cats.effect.IO
 import fs2.Chunk
 import munit.CatsEffectSuite
-import xkafka.streams.{KStream, Pipeline, Serde, Store, Topology}
+import xkafka.streams.{KStream, Pipeline, Serde, Store, TimeWindows, Topology}
 
 /** What a task writes to its changelogs and keeps between records, on every platform. */
 final class TaskSuite extends CatsEffectSuite:
@@ -43,6 +45,27 @@ final class TaskSuite extends CatsEffectSuite:
     Task("app", Topology.of(pipeline).orFail.pipelines.head.segments.head, partition)
 
   private val counting = KStream(in, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(out, text, count)
+
+  // A member taking over a task restores the window store, and its clock with it, but its windowing step's stream time starts again, as Java's does.
+  // A record the last member found past the grace can then reach a window the store has expired: Java's in-memory store reads it as absent and does
+  // not keep the write, which its changelog still logs (InMemoryWindowStore.fetch and put, ChangeLoggingWindowBytesStore.put).
+  test("after a task moves, a record for a window its store has expired starts the window again, logged but not kept"):
+    val windowed =
+      KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Store("windows")).toStream
+        .to(out, Serde.timeWindowed(text, 10.seconds), count)
+    val old    = WindowStore.key(Chunk.array("k".getBytes), 0L)
+    val latest = WindowStore.key(Chunk.array("other".getBytes), 30000L)
+    // Restoring drops the windows the store's clock has expired, as the engine and Java's store do.
+    val restored =
+      TaskState(
+        WindowStore
+          .prunedAll(Map("windows" -> Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L))), Map("windows" -> 15000L)),
+        30000L
+      )
+    task(windowed, 0).process(restored, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty)).map: (state, written) =>
+      assertEquals(written.head, TaskOutput(Topic.from("app-windows-changelog").orFail, Some(0), Some(old), long(1), 2000L, Headers.empty))
+      assertEquals(written(1).value, long(1))
+      assertEquals(state.store("windows").keySet, Set(latest))
 
   test("each change to a store goes to its changelog on the task's own partition, without the record's headers"):
     task(counting, 3).process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, trace)).map: (_, written) =>
