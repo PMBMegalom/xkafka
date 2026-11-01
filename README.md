@@ -52,10 +52,10 @@ object ProduceExample extends IOApp.Simple:
 
 ## Streams
 
-xkafka also runs Kafka Streams programs, written with its own DSL, as members of
-a streams application beside Java Kafka Streams instances, on brokers of Kafka
-4.2 or newer. Members hand tasks to each other as they join and leave, at least
-once or exactly once:
+xkafka also runs Kafka Streams programs, written with its own DSL. An
+application can mix xkafka members with Java Kafka Streams instances, and
+processes each record at least once or exactly once. It needs brokers of Kafka
+4.2 or newer:
 
 ```scala
 val text = Serde.utf8[IO]

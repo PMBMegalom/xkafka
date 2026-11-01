@@ -1,11 +1,11 @@
 # Streams
 
-`KafkaClient.streams` runs a Kafka Streams program as one member of its
-application's group. The other members of the application may run xkafka or Java
-Kafka Streams: they declare the same topology, read and write the same topics,
-and hand tasks to each other as members join and leave.
+`KafkaClient.streams` runs a Kafka Streams program. Each running instance is one
+member of the application, and the application can mix xkafka members with Java
+Kafka Streams instances running the same program. Members share the work and
+take it over from each other as they start and stop.
 
-An application joins a streams group, which needs brokers of Kafka 4.2 or newer.
+Streams applications need brokers of Kafka 4.2 or newer.
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList
@@ -29,84 +29,84 @@ val program =
   yield ()
 ```
 
-Acquiring the resource joins the group and starts processing. `run` waits while
-the application runs, and fails with the error that stops it. Releasing the
-resource gives back the member's tasks, committing them, and leaves the group,
-waiting at most `closeTimeout`.
+Acquiring the resource joins the application and starts processing. `run` waits
+while the application runs, and fails with the error that stops it. Releasing
+the resource commits the member's work, hands it back to the application, and
+leaves, waiting at most `closeTimeout`.
 
 ## Programs
 
-A program is a `Topology` of pipelines, each from an input topic to an output
-topic. A pipeline is built from a `KStream`:
+A program is a `Topology` of pipelines, each reading an input topic and writing
+an output topic. A pipeline starts from a `KStream` and is built with:
 
-- `filter`, `map`, `mapValues`, `flatMap`, `selectKey` and `peek`, and
-  `evalFilter`, `evalMap` and `evalMapValues` for steps that run an effect;
-- `groupByKey` and `groupBy`, then `count`, `reduce` or `aggregate` into a named
-  `Store`, giving a `KTable` whose `toStream` is each change to it;
+- `filter`, `map`, `mapValues`, `flatMap`, `selectKey` and `peek`;
+- `evalFilter`, `evalMap` and `evalMapValues`, which run an effect;
+- `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
+  named `Store`. This gives a `KTable`, and its `toStream` is every change to it;
 - `to`, which ends the pipeline at its output topic.
 
-Records whose key may have changed before they are grouped, after `map`,
-`flatMap`, `selectKey` or `evalMap`, go through a repartition topic. `groupBy`
-names it with a `Repartition`, and so does `groupByKey` after such a step. A store keeps its contents in a
-changelog topic. The application's own topics are named after it:
-`<application id>-<store>-changelog` and `<application id>-<name>-repartition`.
-The broker creates them as the application first joins.
+Grouping records whose key may have changed, after `map`, `flatMap`, `selectKey`
+or `evalMap`, sends them through a repartition topic first. Name it with a
+`Repartition`: `groupBy` always takes one, and `groupByKey` needs one after such
+a step.
 
-`Topology.of` checks the names and reports every problem at once, such as two
-stores with one name or two pipelines reading one topic. `liftTo` raises the
-problems in `F` as one `InvalidTopology`, and refused settings as one
+The application's own topics are named after its id: a store's changelog is
+`<application id>-<store>-changelog`, and a repartition topic is
+`<application id>-<name>-repartition`. The broker creates them when the
+application first starts.
+
+`Topology.of` checks the program and reports every problem at once, such as two
+stores with the same name or two pipelines reading the same topic. `liftTo`
+raises them in `F` as an `InvalidTopology`, and refused settings as an
 `InvalidStreamsSettings`.
 
-A `Serde` pairs the serializer and deserializer of one type, since a streams
+A `Serde` holds the serializer and deserializer of one type, since a streams
 application both reads and writes its topics. `Serde.utf8`, `Serde.long` and
-`Serde.bytes` write what Java Kafka Streams' `Serdes.String()`, `Serdes.Long()`
-and `Serdes.ByteArray()` write.
+`Serde.bytes` write the same bytes as Java's `Serdes.String()`, `Serdes.Long()`
+and `Serdes.ByteArray()`.
 
 ## Guarantees
 
-`ProcessingGuarantee.AtLeastOnce`, the default, commits what each task read
-after writing what it wrote, every 30 seconds. A task that moves to another
-member reads again what it read since its last commit, and writes it again.
+With `ProcessingGuarantee.AtLeastOnce`, the default, a member commits its
+progress every 30 seconds. If its work moves to another member, the records read
+since the last commit are processed and written again.
 
-`ProcessingGuarantee.ExactlyOnce` writes what the tasks wrote and commits what
-they read in one transaction, every 100ms. A task that moves to another member
-finds what it wrote only together with where it read to, so each record counts
-once in the application's stores and outputs. It reads its input with
-`IsolationLevel.ReadCommitted`.
+With `ProcessingGuarantee.ExactlyOnce`, a member writes its output and commits
+its progress together in one transaction, every 100ms. Each record then counts
+exactly once in the application's stores and output topics, even when work
+moves between members. Input is read with `IsolationLevel.ReadCommitted`.
 
-These are the intervals Java Kafka Streams uses for each guarantee. Change them
-with `commitInterval`.
+These are the same intervals Java Kafka Streams uses. Change them with
+`commitInterval`.
 
 @:callout(warning)
-Under either guarantee, an effectful step runs again for a record read again,
-such as after a member stops without committing. Exactly once covers what the
-application writes to Kafka, not what its effects do elsewhere.
+Under either guarantee, an effectful step can run more than once for the same
+record, such as after a member stops without committing. Exactly once applies to
+what the application writes to Kafka, not to what its effects do elsewhere.
 @:@
 
 ## Concurrency
 
-A member processes one task at a time by default, as a single Java Kafka Streams
-thread does. With `concurrency` set above one, up to that many tasks process at
-once, each its own records in order. This helps where an effectful step waits on
-something outside Kafka.
+By default a member processes one task at a time, like a single Java Kafka
+Streams thread. Set `concurrency` higher to process up to that many tasks at
+once. Records within each task stay in order. This helps when an effectful step
+waits on something outside Kafka.
 
 ## State
 
-`state` gives the application's phase, first as it is and then each time it
-changes, with what the group coordinator reports wrong with the application:
+`state` streams the application's current phase, and then each change to it:
 
 | phase | meaning |
 | --- | --- |
-| `Joining` | waiting for the group to give it tasks |
-| `Restoring` | refilling the stores of the tasks it was given from their changelogs |
-| `Running` | processing its tasks |
-| `Lost` | its tasks were taken away without being given back, and it is joining again |
+| `Joining` | waiting to be given work |
+| `Restoring` | refilling its stores from their changelogs before processing |
+| `Running` | processing |
+| `Lost` | its work was taken away, and it is joining again |
 
-`problems` lists what the group coordinator reports, such as missing source
-topics, internal topics being created, or the application being refused its
-topics (`StreamsProblem.TopicAuthorizationFailed`). The member goes on as long as
-it can, as Java Kafka Streams does, so an application that should stop on a
-problem watches for it:
+Each state also lists the `problems` the broker reports, such as a missing
+input topic or the application not being allowed to use its topics
+(`StreamsProblem.TopicAuthorizationFailed`). Like Java Kafka Streams, a member
+keeps going for as long as it can. To stop on a problem, watch for it:
 
 ```scala mdoc:compile-only
 import cats.effect.IO
@@ -118,21 +118,20 @@ def runUntilRefused(streams: KafkaStreams[IO]): IO[Unit] =
   IO.race(streams.run, refused).void
 ```
 
-A broker configured with a topology description plugin asks the members of a
-streams group for a description of their topology. xkafka members don't send
-one, and keep their tasks without it.
+Some brokers are configured to ask applications for a description of their
+topology. xkafka members don't send one, and keep working without it.
 
 ## Stores and standbys
 
-Stores are held in memory. A member given a task refills the task's stores from
-their changelogs before processing it.
+Stores are kept in memory. A member given new work first refills its stores from
+their changelogs.
 
-When the group keeps standby replicas, which the broker's
-`streams.num.standby.replicas` group setting asks for, a member also keeps
-standby copies of other members' stores, following their changelogs. When such a
-task becomes the member's own, it restores only what its copy had not yet read.
+If the broker's `streams.num.standby.replicas` setting asks for standby
+replicas, members also keep up-to-date copies of other members' stores. When
+work moves to a member holding a copy, it only needs to catch up on what the
+copy has not yet read.
 
 @:callout(info)
-A copy the group takes away is kept for 10 minutes, as Java Kafka Streams keeps a
-task's state directory, in case the task comes back.
+A copy that is no longer needed is kept for 10 minutes, like Java Kafka
+Streams' state directories, in case the work comes back.
 @:@
