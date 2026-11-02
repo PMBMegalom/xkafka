@@ -36,7 +36,8 @@ import org.apache.kafka.common.serialization.{StringDeserializer, StringSerializ
 
 /** Java members of the fleet tests of one backend, each a process of its own running [[FleetMember]], started and stopped as the tests ask.
   *
-  * Commands, one per record of `xkafka-fleet-<backend>-control`: `start <id> <application> <guarantee>`, `stop <id>` (a SIGTERM, on which Java
+  * Commands, one per record of `xkafka-fleet-<backend>-control`: `start <id> <application> <guarantee> <program>`, where the program is one
+  * [[FleetMember]] runs, `stop <id>` (a SIGTERM, on which Java
   * Streams closes) and `kill <id>` (a SIGKILL). Each member's news goes to `xkafka-fleet-<backend>-status` as `<id> running` once it runs and
   * `<id> ended` once its process has ended.
   */
@@ -72,15 +73,15 @@ final class Fleet(broker: String, backend: String):
 
   private def carryOut(command: List[String]): Unit =
     command match
-      case List("start", id, application, guarantee) => start(id, application, guarantee)
-      case List("stop", id)                          => Option(members.get(id)).foreach(_.destroy())
-      case List("kill", id)                          => Option(members.get(id)).foreach(_.destroyForcibly())
-      case other                                     => System.err.println(s"fleet $backend: unknown command $other")
+      case List("start", id, application, guarantee, program) => start(id, application, guarantee, program)
+      case List("stop", id)                                   => Option(members.get(id)).foreach(_.destroy())
+      case List("kill", id)                                   => Option(members.get(id)).foreach(_.destroyForcibly())
+      case other                                              => System.err.println(s"fleet $backend: unknown command $other")
 
-  private def start(id: String, application: String, guarantee: String): Unit =
+  private def start(id: String, application: String, guarantee: String, program: String): Unit =
     val java    = ProcessHandle.current.info.command.orElse("java")
     val process =
-      ProcessBuilder(java, "-cp", System.getProperty("java.class.path"), "xkafka.fixture.FleetMember", broker, application, guarantee)
+      ProcessBuilder(java, "-cp", System.getProperty("java.class.path"), "xkafka.fixture.FleetMember", broker, application, guarantee, program)
         .redirectErrorStream(true).start()
     members.put(id, process)
     daemon:

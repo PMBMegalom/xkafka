@@ -22,25 +22,42 @@
 package xkafka.fixture
 
 import java.nio.file.Files
+import java.time.Duration
 import java.util.Properties
 
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, StreamsConfig}
-import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced}
+import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, SessionWindows, SlidingWindows, TimeWindows, WindowedSerdes}
 
-/** One Java Streams member of a mixed fleet, in a process of its own so that it can be killed outright: it counts the records of
-  * `<application>-input` by their value's first letter, through the repartition topic `<application>-by-letter-repartition`, into the store
-  * `counts`, writing each new count to `<application>-output`, as the fleet tests' xkafka members do. It prints `running` once Java Streams says it
-  * runs, and closes on a SIGTERM, within 30 seconds.
+/** One Java Streams member of a mixed fleet, in a process of its own so that it can be killed outright, running the program the fleet tests' xkafka
+  * members run. With `letters`, it counts the records of `<application>-input` by their value's first letter, through the repartition topic
+  * `<application>-by-letter-repartition`, into the store `counts`, writing each new count to `<application>-output`. With `windows`, it counts each
+  * key's records of `<application>-input-tumbling` in tumbling windows of 5 s into `tumbling`, of `<application>-input-sliding` in sliding windows of
+  * 2.5 s into `sliding`, and of `<application>-input-sessions` in sessions with a gap of 1.5 s into `sessions`, each with an hour of grace, writing
+  * each change to `<application>-output-<store>`. It prints `running` once Java Streams says it runs, and closes on a SIGTERM, within 30 seconds.
   *
-  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`.
+  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters` or `windows`.
   */
 object FleetMember:
   def main(arguments: Array[String]): Unit =
-    val Array(bootstrap, application, guarantee) = arguments
-    val builder                                   = StreamsBuilder()
-    builder.stream[String, String](s"$application-input").groupBy((_, value) => value.take(1), Grouped.as("by-letter"))
-      .count(Materialized.as("counts")).toStream.to(s"$application-output", Produced.`with`(Serdes.String, Serdes.Long))
+    val Array(bootstrap, application, guarantee, program) = arguments
+    val builder                                            = StreamsBuilder()
+    program match
+      case "letters" =>
+        builder.stream[String, String](s"$application-input").groupBy((_, value) => value.take(1), Grouped.as("by-letter"))
+          .count(Materialized.as("counts")).toStream.to(s"$application-output", Produced.`with`(Serdes.String, Serdes.Long))
+      case "windows" =>
+        val hour = Duration.ofHours(1)
+        builder.stream[String, String](s"$application-input-tumbling").groupByKey.windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofSeconds(5), hour))
+          .count(Materialized.as("tumbling")).toStream
+          .to(s"$application-output-tumbling", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.Long))
+        builder.stream[String, String](s"$application-input-sliding").groupByKey
+          .windowedBy(SlidingWindows.ofTimeDifferenceAndGrace(Duration.ofMillis(2500), hour)).count(Materialized.as("sliding")).toStream
+          .to(s"$application-output-sliding", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 2500L), Serdes.Long))
+        builder.stream[String, String](s"$application-input-sessions").groupByKey
+          .windowedBy(SessionWindows.ofInactivityGapAndGrace(Duration.ofMillis(1500), hour)).count(Materialized.as("sessions")).toStream
+          .to(s"$application-output-sessions", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long))
+      case other => throw IllegalArgumentException(s"no fleet program $other")
     val properties = Properties()
     properties.put(StreamsConfig.APPLICATION_ID_CONFIG, application)
     properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap)

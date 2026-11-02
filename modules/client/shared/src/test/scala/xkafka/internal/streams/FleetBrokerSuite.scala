@@ -33,11 +33,12 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KStream, ProcessingGuarantee, Repartition, Serde, Store, Topology}
+import xkafka.streams.{KStream, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology}
 
-/** Java Streams and xkafka members in one application, counting records by their value's first letter through a repartition topic while records keep
-  * coming, as members join, leave, restart and are killed. The Java members run in processes of their own, which the streams fixture starts, stops
-  * and kills as these tests ask (`xkafka.fixture.Fleet`), on the broker of the newest release.
+/** Java Streams and xkafka members in one application while records keep coming, as members join, leave, restart and are killed: counting records by
+  * their value's first letter through a repartition topic, or each key's records in tumbling windows, sliding windows and sessions. The Java members
+  * run in processes of their own, which the streams fixture starts, stops and kills as these tests ask (`xkafka.fixture.Fleet`), on the broker of the
+  * newest release.
   */
 final class FleetBrokerSuite extends CatsEffectSuite:
   override val munitIOTimeout: Duration = 6.minutes
@@ -54,16 +55,51 @@ final class FleetBrokerSuite extends CatsEffectSuite:
 
   private val letters = "abcde"
 
+  /** What the fleet's members run, by the name the fixture's members know it by. */
+  private enum Program(val name: String) derives CanEqual:
+    /** Counting records by their value's first letter, through a repartition topic. */
+    case Letters extends Program("letters")
+
+    /** Counting each key's records in tumbling windows of 5 s, sliding windows of 2.5 s and sessions with a gap of 1.5 s, each with an hour of grace.
+      */
+    case Windows extends Program("windows")
+
+  private val windowKinds = List("tumbling", "sliding", "sessions")
+
   /** An application of the fleet's own. */
-  private final case class Fleet(server: String, application: String, guarantee: ProcessingGuarantee, statuses: Ref[IO, List[String]]):
+  private final case class Fleet(
+      server: String,
+      application: String,
+      guarantee: ProcessingGuarantee,
+      program: Program,
+      statuses: Ref[IO, List[String]]
+  ):
     val input: Topic  = Topic.from(s"$application-input").orFail
     val output: Topic = Topic.from(s"$application-output").orFail
 
+    def inputOf(kind: String): Topic  = Topic.from(s"$application-input-$kind").orFail
+    def outputOf(kind: String): Topic = Topic.from(s"$application-output-$kind").orFail
+
+    /** The topics the program reads and writes. */
+    def topics: List[Topic] =
+      program match
+        case Program.Letters => List(input, output)
+        case Program.Windows => windowKinds.flatMap(kind => List(inputOf(kind), outputOf(kind)))
+
     val topology: Topology[IO] =
-      Topology.of(
-        KStream(input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts")).toStream
-          .to(output, text, Serde.long[IO])
-      ).orFail
+      program match
+        case Program.Letters => Topology.of(
+            KStream(input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts")).toStream
+              .to(output, text, Serde.long[IO])
+          ).orFail
+        case Program.Windows => Topology.of(
+            KStream(inputOf("tumbling"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(5.seconds, grace = 1.hour))
+              .count(Store("tumbling")).toStream.to(outputOf("tumbling"), Serde.timeWindowed(text, 5.seconds), Serde.long[IO]),
+            KStream(inputOf("sliding"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(2500.millis, grace = 1.hour))
+              .count(Store("sliding")).toStream.to(outputOf("sliding"), Serde.timeWindowed(text, 2500.millis), Serde.long[IO]),
+            KStream(inputOf("sessions"), text, text).groupByKey(text, text).windowedBy(SessionWindows(1500.millis, grace = 1.hour))
+              .count(Store("sessions")).toStream.to(outputOf("sessions"), Serde.sessionWindowed(text), Serde.long[IO].option)
+          ).orFail
 
     private def command(text: String): IO[Unit] =
       val control = Topic.from(s"xkafka-fleet-$backend-control").orFail
@@ -81,7 +117,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     /** A Java member, running once acquired, and stopped, with its process ended, once released. */
     def java(id: String): Resource[IO, String] =
       val guaranteed = if guarantee == ProcessingGuarantee.ExactlyOnce then "exactly_once_v2" else "at_least_once"
-      Resource.make(command(s"start $id $application $guaranteed") *> reported(s"$id running", 2.minutes).as(id)): _ =>
+      Resource.make(command(s"start $id $application $guaranteed ${program.name}") *> reported(s"$id running", 2.minutes).as(id)): _ =>
         command(s"stop $id") *> reported(s"$id ended", 2.minutes)
 
     /** Kills a Java member outright, waiting until its process has ended. */
@@ -104,12 +140,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       .void
 
   /** A fleet application with its topics, the fixture's news of its members read for as long as the test runs. */
-  private def fleet(broker: String, guarantee: ProcessingGuarantee)(test: Fleet => IO[Unit]): IO[Unit] =
+  private def fleet(broker: String, guarantee: ProcessingGuarantee, program: Program)(test: Fleet => IO[Unit]): IO[Unit] =
     Names.fresh:
       val application = summon[Names](s"xkafka-fleet-$backend")
       IO.ref(List.empty[String]).flatMap: statuses =>
-        val app  = Fleet(broker, application, guarantee, statuses)
-        val made = List(app.input, app.output).map(NewTopic.from(_, 2, 1).orFail)
+        val app  = Fleet(broker, application, guarantee, program, statuses)
+        val made = app.topics.map(NewTopic.from(_, 2, 1).orFail)
         val news =
           ConsumerSettings.from(
             client(broker),
@@ -163,6 +199,96 @@ final class FleetBrokerSuite extends CatsEffectSuite:
             .find(done).compile.lastOrError.void
             .timeoutTo(3.minutes, last.get.flatMap(seen => IO.raiseError(new AssertionError(s"the fleet's counts reached $seen, never $written"))))
 
+  /** Writes records while it lasts, keyed in turn over ten keys, each at a record time 100 ms after the one before, so each key's records are a
+    * second apart and in order, to each of the windows program's inputs. What it gives stops the writing and then gives each key's record times,
+    * every record written by then.
+    */
+  private def windowsLoad(fleet: Fleet): Resource[IO, IO[Map[String, Vector[Long]]]] =
+    val producer = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
+    for
+      written <- Resource.eval(IO.ref(Map.empty[String, Vector[Long]]))
+      // A whole ten seconds, so windows and sessions start where the checks expect.
+      base    <- Resource.eval(IO.realTime.map(now => now.toMillis / 10000L * 10000L))
+      writer  <- producer
+      writing <-
+        Resource.make(fs2.Stream.iterate(0L)(_ + 1).evalMap: n =>
+          val key     = s"k${n % 10}"
+          val at      = base + n * 100L
+          val records = windowKinds.map(kind => ProducerRecord(fleet.inputOf(kind), key, s"v$n", timestamp = Some(Timestamp.fromEpochMillis(at))))
+          (writer.produceAndAwait(NonEmptyList.fromListUnsafe(records)) *>
+            written.update(times => times.updated(key, times.getOrElse(key, Vector.empty) :+ at))).uncancelable *> IO.sleep(20.millis)
+        .compile.drain.start)(_.cancel)
+    yield writing.cancel *> written.get
+
+  /** Reads `topic` from its start, its keys read by `keys` and its values as counts or tombstones, until `done` holds of the latest count of each key
+    * and window, by the window's start and end, failing after three minutes.
+    */
+  private def latest(fleet: Fleet, topic: Topic, keys: Deserializer[IO, xkafka.streams.Windowed[String]])(
+      done: Map[(String, Long, Long), Option[Long]] => Boolean,
+      wrong: Map[(String, Long, Long), Option[Long]] => List[String]
+  ): IO[Unit] =
+    Names.fresh:
+      val counts   = Deserializer.instance[IO, Option[Long]]((_, _, value) => IO(value.map(bytes => ByteBuffer.wrap(bytes.toArray).getLong)))
+      val exactly  = fleet.guarantee == ProcessingGuarantee.ExactlyOnce
+      val settings =
+        ConsumerSettings.from(
+          client(fleet.server),
+          ConsumerGroup.from(summon[Names]("xkafka-fleet-reader")).orFail,
+          keys,
+          counts,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if exactly then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      IO.ref(Map.empty[(String, Long, Long), Option[Long]]).flatMap: last =>
+        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+          consumer.records.scan(Map.empty[(String, Long, Long), Option[Long]]): (seen, record) =>
+            val windowed = record.record.key
+            seen.updated((windowed.key, windowed.window.start, windowed.window.end), record.record.value)
+          .evalTap(last.set).find(done).compile.lastOrError.void.timeoutTo(
+            3.minutes,
+            last.get.flatMap(seen =>
+              IO.raiseError(new AssertionError(s"$topic never counted what its records give: ${wrong(seen).take(20).mkString("; ")}"))
+            )
+          )
+
+  /** Reads each windows program output until every window and session counts what each key's record times `written` give: exactly under exactly once,
+    * at least that under at least once. Each key's records, a second apart, make one session from the first to the last, every other session of the
+    * key ending as a tombstone.
+    */
+  private def windowsCounted(fleet: Fleet, written: Map[String, Vector[Long]]): IO[Unit] =
+    val exactly                                           = fleet.guarantee == ProcessingGuarantee.ExactlyOnce
+    def matches(found: Long, expected: Long)              = if exactly then found == expected else found >= expected
+    def within(times: Vector[Long], from: Long, to: Long) = times.count(at => at >= from && at <= to).toLong
+    val tumbling                                          =
+      written.toList.flatMap((key, times) => times.groupBy(_ / 5000L * 5000L).map((start, in) => (key, start, start + 5000L) -> in.size.toLong)).toMap
+    // In order, each record's window ends at it, and each record followed within the time difference starts a window just after it.
+    val sliding =
+      written.toList.flatMap: (key, times) =>
+        val left  = times.map(at => (key, at - 2500L, at) -> within(times, at - 2500L, at))
+        val right =
+          times.zip(times.drop(1)).collect:
+            case (at, next) if next <= at + 1 + 2500L => (key, at + 1, at + 1 + 2500L) -> within(times, at + 1, at + 1 + 2500L)
+        left ++ right
+      .toMap
+    val sessions = written.map((key, times) => (key, times.head, times.last) -> times.size.toLong)
+    def missed(expected: Map[(String, Long, Long), Long])(seen: Map[(String, Long, Long), Option[Long]]) =
+      expected.toList.sortBy(_._1).collect:
+        case (window, count) if !seen.get(window).flatten.exists(matches(_, count)) => s"$window counted ${seen.get(window).flatten}, not $count"
+    def stray(seen: Map[(String, Long, Long), Option[Long]]) =
+      seen.toList.sortBy(_._1).collect { case (session, Some(count)) if !sessions.contains(session) => s"$session counted $count, not a tombstone" }
+    latest(fleet, fleet.outputOf("tumbling"), Serde.timeWindowed(text, 5.seconds).deserializer)(missed(tumbling)(_).isEmpty, missed(tumbling)) *>
+      latest(fleet, fleet.outputOf("sliding"), Serde.timeWindowed(text, 2500.millis).deserializer)(missed(sliding)(_).isEmpty, missed(sliding)) *>
+      latest(fleet, fleet.outputOf("sessions"), Serde.sessionWindowed(text).deserializer)(
+        seen => missed(sessions)(seen).isEmpty && stray(seen).isEmpty,
+        seen => missed(sessions)(seen) ++ stray(seen)
+      )
+
+  /** The program's load, and the check that its outputs count everything the load wrote, for the scenarios to run whichever the program. */
+  private def loaded(fleet: Fleet): Resource[IO, IO[Unit]] =
+    fleet.program match
+      case Program.Letters => load(fleet).map(_.flatMap(counted(fleet, _)))
+      case Program.Windows => windowsLoad(fleet).map(_.flatMap(windowsCounted(fleet, _)))
+
   private def recording = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
 
   /** Waits up to a minute for `condition` to hold. */
@@ -179,39 +305,41 @@ final class FleetBrokerSuite extends CatsEffectSuite:
   for
     broker    <- server.toList
     guarantee <- ProcessingGuarantee.values.toList
+    program   <- Program.values.toList
+    named = s"${program.name}, $guarantee"
   do
-    test(s"$guarantee: tasks move between Java and xkafka members joining and leaving while records come, and every record is counted"):
-      fleet(broker, guarantee): app =>
+    test(s"$named: tasks move between Java and xkafka members joining and leaving while records come, and every record is counted"):
+      fleet(broker, guarantee, program): app =>
         recording.flatMap: (restores, follows) =>
           (app.xkafka(restores, follows).allocated, app.java(s"j1-${app.application}").allocated).tupled.flatMap: (x1, j1) =>
-            load(app).use: stop =>
+            loaded(app).use: stop =>
               IO.sleep(settle) *> app.xkafka(restores, follows).surround:
                 IO.sleep(settle) *> app.java(s"j2-${app.application}").surround:
                   // The first xkafka member and the first Java member leave, one after the other, while the second of each runs.
-                  IO.sleep(settle) *> x1._2 *> IO.sleep(settle) *> j1._2 *> IO.sleep(settle) *> stop.flatMap(counted(app, _))
+                  IO.sleep(settle) *> x1._2 *> IO.sleep(settle) *> j1._2 *> IO.sleep(settle) *> stop
 
-    test(s"$guarantee: an xkafka member restarted while records come gives back its tasks and takes them again, and every record is counted"):
-      fleet(broker, guarantee): app =>
+    test(s"$named: an xkafka member restarted while records come gives back its tasks and takes them again, and every record is counted"):
+      fleet(broker, guarantee, program): app =>
         recording.flatMap: (restores, follows) =>
           app.java(s"j1-${app.application}").surround:
-            load(app).use: stop =>
+            loaded(app).use: stop =>
               IO.sleep(settle) *> app.xkafka(restores, follows).surround(IO.sleep(settle)) *> app.xkafka(restores, follows)
-                .surround(IO.sleep(settle) *> stop.flatMap(counted(app, _)))
+                .surround(IO.sleep(settle) *> stop)
 
-    test(s"$guarantee: a Java member killed outright while records come leaves its tasks to an xkafka member, and every record is counted"):
-      fleet(broker, guarantee): app =>
+    test(s"$named: a Java member killed outright while records come leaves its tasks to an xkafka member, and every record is counted"):
+      fleet(broker, guarantee, program): app =>
         recording.flatMap: (restores, follows) =>
           app.xkafka(restores, follows).surround:
             app.java(s"j1-${app.application}").allocated.flatMap: (j1, _) =>
-              load(app).use(stop => IO.sleep(settle) *> app.kill(j1) *> IO.sleep(10.seconds) *> stop.flatMap(counted(app, _)))
+              loaded(app).use(stop => IO.sleep(settle) *> app.kill(j1) *> IO.sleep(10.seconds) *> stop)
 
-    test(s"$guarantee: an xkafka member standing by for a Java member restores only what it had not read once the Java member stops"):
-      fleet(broker, guarantee): app =>
+    test(s"$named: an xkafka member standing by for a Java member restores only what it had not read once the Java member stops"):
+      fleet(broker, guarantee, program): app =>
         recording.flatMap: (restores, follows) =>
           app.java(s"j1-${app.application}").allocated.flatMap: (_, stopJ1) =>
-            load(app).use: stop =>
+            loaded(app).use: stop =>
               IO.sleep(settle) *> app.xkafka(restores, follows).surround:
                 eventually("the xkafka member standing by for a task")(follows.get.map(_.exists(_.nonEmpty))) *> IO.sleep(settle) *> stopJ1 *>
                   eventually("the xkafka member restoring a task from where its standby read to")(
                     restores.get.map(_.exists(from => from.values.exists(_ > 0)))
-                  ) *> IO.sleep(settle) *> stop.flatMap(counted(app, _))
+                  ) *> IO.sleep(settle) *> stop
