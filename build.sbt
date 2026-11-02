@@ -8,7 +8,7 @@ import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
 ThisBuild / scalaVersion     := "3.3.8"
-ThisBuild / tlBaseVersion    := "0.6"
+ThisBuild / tlBaseVersion    := "0.7"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
 ThisBuild / homepage         := Some(url("https://github.com/PMBMegalom/xkafka"))
