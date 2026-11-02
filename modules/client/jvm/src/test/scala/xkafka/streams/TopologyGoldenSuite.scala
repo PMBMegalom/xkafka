@@ -35,10 +35,11 @@ import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, Topology as JavaTopology}
 import org.apache.kafka.streams.kstream.{
-  Grouped, Materialized, Produced, SlidingWindows as JavaSlidingWindows, TimeWindows as JavaTimeWindows, WindowedSerdes
+  Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, TimeWindows as JavaTimeWindows,
+  WindowedSerdes
 }
 import org.apache.kafka.streams.processor.internals.{InternalTopologyBuilder, StreamThread, TopologyMetadata}
-import org.apache.kafka.streams.state.WindowStore
+import org.apache.kafka.streams.state.{SessionStore, WindowStore}
 import internal.protocol.StreamsGroup
 import internal.streams.Declaration
 
@@ -98,6 +99,20 @@ final class TopologyGoldenSuite extends FunSuite:
           .windowedBy(JavaSlidingWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
           .count(Materialized.as[String, java.lang.Long, WindowStore[Bytes, Array[Byte]]]("sliding")).toStream
           .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long))
+      )
+    )
+
+  test("a session count declares its changelog kept for the inactivity gap, the grace and a day, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(SessionWindows(10.seconds, grace = 5.seconds)).count(Store("sessions"))
+          .toStream.to(topic("out"), Serde.sessionWindowed(text), count.option)
+      ),
+      declaredByJava(
+        _.stream[String, String]("in").groupByKey
+          .windowedBy(JavaSessionWindows.ofInactivityGapAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
+          .count(Materialized.as[String, java.lang.Long, SessionStore[Bytes, Array[Byte]]]("sessions")).toStream
+          .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long))
       )
     )
 

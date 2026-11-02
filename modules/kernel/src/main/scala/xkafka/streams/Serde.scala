@@ -35,6 +35,9 @@ import fs2.Chunk
 final case class Serde[F[_], A](serializer: Serializer[F, A], deserializer: Deserializer[F, A]):
   def mapK[G[_]](fk: FunctionK[F, G]): Serde[G, A] = Serde(serializer.mapK(fk), deserializer.mapK(fk))
 
+  /** Values that may be absent, written as no value at all, as a tombstone. */
+  def option(using F: cats.Applicative[F]): Serde[F, Option[A]] = Serde(serializer.option, deserializer.option)
+
 object Serde:
   /** Bytes as they are. */
   def bytes[F[_]: ApplicativeThrow]: Serde[F, Chunk[Byte]] = Serde(Serializer.bytes[F], Deserializer.bytes[F])
@@ -75,4 +78,26 @@ object Serde:
           case Some(read) => F.raiseError(new IllegalArgumentException(s"a windowed key is at least 8 bytes, but a record of topic '${topic
                 .value}' held ${read.size}"))
           case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no windowed key"))
+    Serde(serializer, deserializer)
+
+  /** A session's key as Java's `SessionWindowedSerializer` writes it: the key as `key` writes it, then the session's end and its start, each as eight
+    * big-endian bytes.
+    */
+  def sessionWindowed[F[_], K](key: Serde[F, K])(using F: MonadThrow[F]): Serde[F, Windowed[K]] =
+    val serializer =
+      Serializer.instance[F, Windowed[K]]: (topic, headers, windowed) =>
+        key.serializer.serialize(topic, headers, windowed.key).flatMap:
+          case Some(written) => F
+              .pure(Some(written ++ Chunk.array(ByteBuffer.allocate(16).putLong(windowed.window.end).putLong(windowed.window.start).array)))
+          case None => F.raiseError(new IllegalArgumentException(s"a session key for topic '${topic.value}' has a key its serializer wrote as none"))
+    val deserializer =
+      Deserializer.instance[F, Windowed[K]]: (topic, headers, bytes) =>
+        bytes match
+          case Some(read) if read.size >= 16 =>
+            val times = ByteBuffer.wrap(read.drop(read.size - 16).toArray)
+            val end   = times.getLong
+            key.deserializer.deserialize(topic, headers, Some(read.take(read.size - 16))).map(Windowed(_, Window(times.getLong, end)))
+          case Some(read) => F.raiseError(new IllegalArgumentException(s"a session key is at least 16 bytes, but a record of topic '${topic
+                .value}' held ${read.size}"))
+          case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no session key"))
     Serde(serializer, deserializer)

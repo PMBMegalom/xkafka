@@ -23,8 +23,8 @@ package xkafka.streams
 
 import scala.concurrent.duration.FiniteDuration
 
-/** A span of time in epoch milliseconds from `start`, included, to `end`: excluded for a time window, included for a sliding window, as in Java Kafka
-  * Streams.
+/** A span of time in epoch milliseconds from `start`, included, to `end`: excluded for a time window, included for a sliding window and a session, as
+  * in Java Kafka Streams.
   */
 final case class Window(start: Long, end: Long)
 
@@ -99,3 +99,29 @@ final case class SlidingWindows(timeDifference: FiniteDuration, grace: FiniteDur
 object SlidingWindows:
   /** Sliding windows taking no late record. */
   def withNoGrace(timeDifference: FiniteDuration): SlidingWindows = SlidingWindows(timeDifference, FiniteDuration(0, timeDifference.unit))
+
+/** Sessions of each key's activity, as Java Kafka Streams' session windows: a record starts a session, or joins those of its key that end at most
+  * `inactivityGap` before it or start at most that long after it, merging them into one. A record later than its session's end by more than the gap
+  * and `grace` no longer counts.
+  */
+final case class SessionWindows(inactivityGap: FiniteDuration, grace: FiniteDuration):
+  private[xkafka] def gapMillis: Long   = inactivityGap.toMillis
+  private[xkafka] def graceMillis: Long = grace.toMillis
+
+  /** How long a session is kept after its end by default, and at least: the inactivity gap and the grace. */
+  private[xkafka] def retentionMillis: Long = gapMillis + graceMillis
+
+  /** What the least retention is made of, for the reason a shorter one is refused. */
+  private[xkafka] def retentionRule: String = "the sessions' inactivity gap and grace"
+
+  /** Why these sessions cannot be used, if they cannot. */
+  private[xkafka] def problem: Option[String] =
+    def whole(duration: FiniteDuration) = duration.toNanos % 1000000L == 0L
+    if inactivityGap.length < 0 then Some(s"the inactivity gap must not be negative, was $inactivityGap")
+    else if grace.length < 0 then Some(s"the grace must not be negative, was $grace")
+    else if !whole(inactivityGap) || !whole(grace) then Some("the inactivity gap and grace must be whole milliseconds")
+    else None
+
+object SessionWindows:
+  /** Sessions taking no late record. */
+  def withNoGrace(inactivityGap: FiniteDuration): SessionWindows = SessionWindows(inactivityGap, FiniteDuration(0, inactivityGap.unit))

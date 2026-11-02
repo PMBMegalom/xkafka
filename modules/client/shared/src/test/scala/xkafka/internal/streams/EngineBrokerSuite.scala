@@ -34,8 +34,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, SlidingWindows, Store, StreamsPhase, StreamsSettings, TimeWindows,
-  Topology
+  ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase, StreamsSettings,
+  TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -92,6 +92,32 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def bySliding(input: Topic, output: Topic): Pipeline[IO] =
     KStream(input, text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.seconds, grace = 1.hour)).count(Store("counts")).toStream
       .to(output, Serde.timeWindowed(text, 5.seconds), Serde.long[IO])
+
+  /** Counts by key in sessions with an inactivity gap of five seconds, taking records up to an hour late. */
+  private def bySession(input: Topic, output: Topic): Pipeline[IO] =
+    KStream(input, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 1.hour)).count(Store("counts")).toStream
+      .to(output, Serde.sessionWindowed(text), Serde.long[IO].option)
+
+  /** Reads `topic` from its start until the latest count of each key in each session, by its start and end, or its tombstone, is `expected`. */
+  private def sessionCounts(server: String, topic: Topic, expected: Map[(String, Long, Long), Option[Long]])(using
+      guarantee: ProcessingGuarantee
+  ): IO[Unit] =
+    Names.fresh:
+      val counts   = Deserializer.instance[IO, Option[Long]]((_, _, value) => IO(value.map(bytes => ByteBuffer.wrap(bytes.toArray).getLong)))
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Serde.sessionWindowed(text).deserializer,
+          counts,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.scan(Map.empty[(String, Long, Long), Option[Long]]): (seen, record) =>
+          val windowed = record.record.key
+          seen.updated((windowed.key, windowed.window.start, windowed.window.end), record.record.value)
+        .find(_ == expected).compile.lastOrError.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $expected"))).void
 
   /** Writes a record for each key at each timestamp, in order. */
   private def produceAt(server: String, topic: Topic, records: List[(String, Long)]): IO[Unit] =
@@ -335,6 +361,17 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             // The first record's window, then the second's: the window starting just after the first, and its own, holding both.
             windowCounts(server, app.output, Map(("a", at - 5000L) -> 1L, ("a", at + 1L) -> 1L, ("a", at - 4000L) -> 2L, ("b", at - 3000L) -> 1L))
           *> kept.map(found => assertEquals(found, Some(ConfigurationValue.Present((2 * 5000L + 3600000L + 86400000L).toString))))
+
+    test(s"$release, $under: an engine counts in sessions, a session merged into another written as a tombstone"):
+      counting(server, bySession): app =>
+        IO.realTime.flatMap: now =>
+          val at = (now.toMillis / 60000L - 5L) * 60000L
+          produceAt(server, app.input, List(("a", at), ("b", at + 1000L), ("a", at + 2000L))) *> running(server, app):
+            sessionCounts(
+              server,
+              app.output,
+              Map(("a", at, at) -> None, ("b", at + 1000L, at + 1000L) -> Some(1L), ("a", at, at + 2000L) -> Some(2L))
+            )
 
     test(s"$release, $under: an engine emitting windows once they close writes each window's final count once"):
       counting(server, finalByMinute): app =>

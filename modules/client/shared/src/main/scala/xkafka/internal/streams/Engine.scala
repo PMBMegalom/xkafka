@@ -395,8 +395,11 @@ private[xkafka] object Engine:
           val pruned =
             if records.isEmpty then after
             else
-              after
-                .map((id, standby) => id -> standby.copy(stores = WindowStore.prunedAll(standby.stores, segments(id.subtopology).chain.retentions)))
+              after.map((id, standby) =>
+                id -> standby.copy(stores =
+                  WindowStore.prunedAll(standby.stores, segments(id.subtopology).chain.retentions, segments(id.subtopology).chain.sessionStores)
+                )
+              )
           val now = running.copy(standbys = pruned)
           report(now).as(now)
 
@@ -518,10 +521,12 @@ private[xkafka] object Engine:
               val found   = offsets.get((partition.topic.value, partition.partition.value))
               val time    = found.flatMap(_.metadata).flatMap(PartitionTime.decode).getOrElse(-1L)
               val emitted = found.flatMap(_.metadata).fold(Map.empty[String, Long])(PartitionTime.processors)
-              val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), segments(id.subtopology).chain.retentions)
-              val state   = TaskState(kept, time, lastEmitted = emitted)
-              val from    = found.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)
-              val task    = new Task[F](application, segments(id.subtopology), id.partition)
+              val kept    =
+                WindowStore
+                  .prunedAll(stores.getOrElse(id, Map.empty), segments(id.subtopology).chain.retentions, segments(id.subtopology).chain.sessionStores)
+              val state = TaskState(kept, time, lastEmitted = emitted)
+              val from  = found.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)
+              val task  = new Task[F](application, segments(id.subtopology), id.partition)
               F.pure(id -> Live(task, state, partition, from, None))
             .map(_.toMap)
 

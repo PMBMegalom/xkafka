@@ -37,11 +37,12 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, Str
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
 import org.apache.kafka.streams.kstream.{
-  EmitStrategy, Grouped, Materialized, Produced, SlidingWindows as JavaSlidingWindows, TimeWindows as JavaTimeWindows, WindowedSerdes
+  EmitStrategy, Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
+  TimeWindows as JavaTimeWindows, WindowedSerdes
 }
-import org.apache.kafka.streams.state.{Stores, WindowStore}
+import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{KStream, Pipeline, Repartition, Serde, SlidingWindows, Store, TimeWindows, Topology}
+import xkafka.streams.{KStream, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology}
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
   * for the same program and records, with Java's record cache off. Java runs each program twice: over an in-memory window store, which is what xkafka
@@ -87,8 +88,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       ("k2", "i", 26000L), // closes [10000, 20000)
       ("k1", "j", 14000L), // past the grace of [10000, 20000)
       ("k1", "k", 31000L),
+      ("k0", "n", 31000L), // at the time of another key's record, so closes together with it
       ("k2", "l", 38000L),
-      ("k1", "m", 47000L)
+      ("k1", "m", 47000L),
+      ("k2", "o", 60000L) // a second after the last look, so the sessions ending at 31000 are emitted, by key
     )
 
   /** The header each input carries, naming its place among the inputs. */
@@ -151,6 +154,20 @@ final class WindowGoldenSuite extends CatsEffectSuite:
         JavaTimeWindows.ofSizeWithNoGrace(Duration.ofMillis(size)).advanceBy(Duration.ofMillis(advance)).windowsFor(timestamp).asScala.toList
           .map((start, window) => start.toLong -> window.end)
       assertEquals(ours, javas, s"size $size, advance $advance, at $timestamp")
+
+  test("a session key is written and read as Java's session serde writes and reads it, and an absent value as Java's null"):
+    val java = WindowedSerdes.sessionWindowedSerdeFrom(classOf[String])
+    val key  = org.apache.kafka.streams.kstream.Windowed[String]("key", org.apache.kafka.streams.kstream.internals.SessionWindow(30000L, 45000L))
+    val ours = Serde.sessionWindowed(text)
+    for
+      written <- ours.serializer.serialize(in, Headers.empty, xkafka.streams.Windowed("key", xkafka.streams.Window(30000L, 45000L)))
+      read    <- ours.deserializer.deserialize(in, Headers.empty, Some(Chunk.array(java.serializer.serialize("in", key))))
+      absent  <- count.option.serializer.serialize(in, Headers.empty, None)
+      back    <- count.option.deserializer.deserialize(in, Headers.empty, None)
+    yield
+      assertEquals(written.map(_.toVector), Some(java.serializer.serialize("in", key).toVector))
+      assertEquals(read, xkafka.streams.Windowed("key", xkafka.streams.Window(30000L, 45000L)))
+      assertEquals((absent, back), (None, None))
 
   test("a windowed key is written and read as Java's windowed serde writes and reads it"):
     val java = WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L)
@@ -279,6 +296,97 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       count.deserializer,
       size = Duration.ofSeconds(5)
     )
+
+  // Sessions with a gap of 5 s and 5 s of grace: a record bridging two sessions, one at the time of a session of one record, and late records.
+  private val sessioned =
+    List(
+      ("k1", "a", 1000L),
+      ("k1", "b", 10000L),
+      ("k1", "c", 5500L), // bridges [1000] and [10000]
+      ("k2", "d", 3000L),
+      ("k2", "e", 3000L), // at the time of the session of one record
+      ("k2", "f", 20000L),
+      ("k1", "g", 13000L), // joins [1000, 10000]
+      ("k2", "h", 9000L),  // past the grace of [3000]
+      ("k2", "i", 16000L), // late, joining [20000] within its grace
+      ("k1", "j", 40000L),
+      ("k1", "k", 30000L), // past the grace of [1000, 13000], a session of its own within its own
+      ("k2", "l", 52000L),
+      ("k3", "p", 42000L), // ends at the close time, the clock a retention past it: logged, not kept
+      ("k3", "q", 42000L), // finds no session to join
+      ("k4", "r", 55000L),
+      ("k4", "s", 50000L) // a gap before [55000], so joins it
+    )
+
+  private val sessions = SessionWindows(5.seconds, grace = 5.seconds)
+
+  private def javaSessions = JavaSessionWindows.ofInactivityGapAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(5))
+
+  test("counting in sessions writes and logs what Java does, merged sessions going on as tombstones"):
+    sameSessions[java.lang.Long](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).count(Store("counts")).toStream
+        .to(out, Serde.sessionWindowed(text), count.option),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
+      "counts"
+    )
+
+  test("reducing in sessions merges them in Java's order, and writes and logs what Java does"):
+    sameSessions[String](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).reduce(Store("joined"))(_ + _).toStream
+        .to(out, Serde.sessionWindowed(text), text.option),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSessions)
+          .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.String)),
+      "joined"
+    )
+
+  test("aggregating in sessions of records grouped by a new key, with a merge of its own, writes and logs what Java does"):
+    sameSessions[String](
+      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(sessions)
+        .aggregate(Store("trail"), text)("<")((_, v, acc) => acc + v)((_, a, b) => s"($a|$b)").toStream
+        .to(out, Serde.sessionWindowed(text), text.option),
+      materialized =>
+        _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaSessions)
+          .aggregate(() => "<", (_, v, acc) => acc + v, (_, a, b) => s"($a|$b)", materialized("trail").withValueSerde(Serdes.String)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.String)),
+      "trail"
+    )
+
+  test("counting in sessions emitted once they close writes what Java does"):
+    sameSessions[java.lang.Long](
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).withRetention(1.minute).emitOnWindowClose.count(Store("counts")).toStream
+        .to(out, Serde.sessionWindowed(text), count.option),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).emitStrategy(EmitStrategy.onWindowClose)
+          .count(materialized("counts").withValueSerde(Serdes.Long)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
+      "counts",
+      closing,
+      Duration.ofMinutes(1)
+    )
+
+  /** Runs `inputs` through a session program ours and Java's ways, over Java's in-memory session store and its RocksDB one, and compares what each
+    * writes downstream and to the store's changelog, record for record and byte for byte.
+    */
+  private def sameSessions[V](
+      pipeline: Pipeline[IO],
+      java: (String => Materialized[String, V, SessionStore[Bytes, Array[Byte]]]) => StreamsBuilder => Unit,
+      store: String,
+      inputs: List[(String, String, Long)] = sessioned,
+      retention: Duration = Duration.ofSeconds(10)
+  ): IO[Unit] =
+    val changelog = s"app-$store-changelog"
+    ours(pipeline, inputs).map: (written, _) =>
+      val memory  = run(java(name => Materialized.as[String, V](Stores.inMemorySessionStore(name, retention))), None, inputs)
+      val rocksdb = run(java(name => Materialized.as[String, V, SessionStore[Bytes, Array[Byte]]](name).withRetention(retention)), None, inputs)
+      assert(memory.out.nonEmpty, "Java wrote nothing, so there is nothing to compare")
+      assertEquals(written.filter(_.topic == out).map(record), memory.out)
+      assertEquals(written.filter(_.topic.value == changelog).map(record), memory.topic(changelog))
+      assertEquals(written.filter(_.topic == out).map(record), rocksdb.out, "Java over RocksDB")
+      assertEquals(written.filter(_.topic.value == changelog).map(record), rocksdb.topic(changelog), "Java over RocksDB")
 
   /** Runs `inputs` through the program ours and Java's ways and compares what each writes downstream and to the store's changelog, record for record
     * and byte for byte, and what Java's in-memory store and ours keep.

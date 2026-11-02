@@ -105,7 +105,7 @@ end.
 
 The result is keyed by `Windowed[K]`: the original key and its `Window`, from
 `start` to `end` in epoch milliseconds. A time window does not include its end;
-a sliding window, below, does.
+sliding windows and sessions, below, do.
 
 ### Final results only
 
@@ -199,6 +199,55 @@ By default, windows are kept for twice the time difference plus the grace,
 because a new record can need windows that far back. That is also the shortest
 `withRetention` accepts. `emitOnWindowClose` works as for time windows.
 
+### Session windows
+
+Session windows group each key's records into bursts of activity, such as a
+user's visits: a session lasts as long as records keep arriving within an
+inactivity gap of each other, and ends once the gap passes with none.
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def visits(input: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(input, text, text)
+    .groupByKey(text, text)
+    .windowedBy(SessionWindows(5.minutes, grace = 1.minute))
+    .count(Store("records-per-visit"))
+    .toStream
+    .to(output, Serde.sessionWindowed(text), Serde.long[IO].option)
+```
+
+A new record can bridge sessions that were separate until then, merging them
+into one, so a session already sent downstream can be replaced. That is why
+session results are `Option` values: each replaced session goes downstream as
+`None`, then the merged session goes with its value. For example, with a five-minute gap, records of one key
+at 10:00 and 10:02 first give the session from 10:00 to 10:00 with a count of 1;
+the second record then gives `None` for that session and a count of 2 for the
+session from 10:00 to 10:02.
+
+Write session results with an `option` serde, such as `Serde.long[IO].option`:
+`None` is written as a record with no value, a tombstone, exactly as Java Kafka
+Streams writes a replaced session.
+
+`count` and `reduce` know how to merge sessions. `aggregate` takes a function
+for it as well, given the two sessions' values:
+
+```scala
+.aggregate(Store("visit-lengths"), Serde.long[IO])(0L)((_, value, total) => total + value.length)((_, first, second) => first + second)
+```
+
+A session closes once a record arrives timestamped later than its end plus the
+inactivity gap plus the grace, and later records no longer join it. By
+default, sessions are kept for the gap plus the grace after they end, which is
+also the shortest `withRetention` accepts. With `emitOnWindowClose`, only each
+session's final value goes downstream, and no `None` values are sent.
+
 ### Writing windowed keys
 
 To write windowed keys to a topic, use `Serde.timeWindowed(key, size)`, with the
@@ -206,6 +255,9 @@ window size for time windows and the time difference for sliding windows. It
 writes the same bytes as Java's `WindowedSerdes.timeWindowedSerdeFrom`, so Java
 applications can read them. Only the window's start is written, which is why
 reading it back needs the size.
+
+For sessions, use `Serde.sessionWindowed(key)`, which writes both the start and
+the end, as Java's `WindowedSerdes.sessionWindowedSerdeFrom` does.
 
 ## Guarantees
 

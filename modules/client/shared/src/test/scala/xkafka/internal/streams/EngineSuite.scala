@@ -36,7 +36,9 @@ import internal.driver.{KafkaDriver, PolledRecord, StartAt}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KafkaStreams, KStream, Repartition, Serde, Store, StreamsPhase, StreamsProblem, StreamsState, TimeWindows, Topology}
+import xkafka.streams.{
+  KafkaStreams, KStream, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState, TimeWindows, Topology
+}
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
   * simulated time, on every platform.
@@ -476,6 +478,35 @@ final class EngineSuite extends CatsEffectSuite:
         written <- world.written.get
       yield assertEquals(written.count(_.topic.value == "out"), 0)
 
+  test("a restored session store keeps the sessions its clock has not expired, which a record then joins"):
+    run(topology = sessioning): world =>
+      for
+        _ <-
+          world.restoredAlso.set(Map("sessions" -> Map(session("k", 1000L, 9000L) -> counted(5L), session("other", 12000L, 12000L) -> counted(1L))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 10000L))
+        _       <- IO.sleep(1.second)
+        written <- world.written.get
+      yield
+        val counts = written.filter(_.topic.value == "out").flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong)
+        assertEquals(counts, List(6L))
+
+  test("a standby session store loses the sessions its clock has expired as it follows its changelog"):
+    def sessionLogged(key: String, start: Long, end: Long, offset: Long) =
+      PolledRecord("app-sessions-changelog", 1, offset, Some(end), 1, -1, Some(session(key, start, end)), Some(counted(1L).value), Headers.empty)
+    run(topology = sessioning): world =>
+      for
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _ <- IO.sleep(500.millis)
+        // By its end, which a session store expires it by, [0, 25000] is not expired; read as a window's start, it would be.
+        _    <- world.changelogs(sessionLogged("k", 0L, 25000L, 0L), sessionLogged("gone", 0L, 5000L, 1L), sessionLogged("other", 30000L, 30000L, 2L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield assertEquals(from.map(_._2("sessions").keySet), List(Set(session("k", 0L, 25000L), session("other", 30000L, 30000L))))
+
   test("a restored window store loses the windows its clock has expired, so a record for one starts it again"):
     run(topology = windowing): world =>
       for
@@ -585,6 +616,15 @@ object EngineSuite:
         .withRetention(1.minute).emitOnWindowClose.count(Store("windows")).toStream
         .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
     ).orFail
+
+  /** Counts each key's records in sessions with a gap of 5 s and 5 s of grace, in the session store `sessions`. */
+  private val sessioning: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 5.seconds))
+        .count(Store("sessions")).toStream.to(Topic.from("out").orFail, Serde.sessionWindowed(text), Serde.long[IO].option)
+    ).orFail
+
+  private def session(key: String, start: Long, end: Long): Chunk[Byte] = SessionStore.key(Chunk.array(key.getBytes), start, end)
 
   private def counted(n: Long): Stored = Stored(Chunk.array(java.nio.ByteBuffer.allocate(8).putLong(n).array), 0L)
 

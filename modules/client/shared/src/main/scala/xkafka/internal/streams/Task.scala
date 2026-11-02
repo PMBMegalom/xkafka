@@ -126,9 +126,10 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
-      case Step.ToStream()                                          => passing(Vector(record))
-      case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _) => windowed(folding, record, state, now)
-      case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _)  => sliding(folding, record, state, now)
+      case Step.ToStream()                                               => passing(Vector(record))
+      case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _)      => windowed(folding, record, state, now)
+      case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _)       => sliding(folding, record, state, now)
+      case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
           .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
       case Step.Aggregate(store, key, value, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
@@ -275,6 +276,124 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
               reversed.flatMap: (after, _, logged) =>
                 closed(store.name, key, value, after, closeTime, difference, range, record, changelog, now)
                   .map((emitted, state) => (state, emitted, logged))
+
+  /** Writes `written` as the key's session from `start` to `end` in session store `store`, or removes it where there is nothing to write, as Java's
+    * in-memory session store does: the clock moves to the session's end if later, the session is kept unless the clock has expired it, expired
+    * sessions go as the clock moves, and the changelog gets the write, or a tombstone, either way, at the time of the record being processed.
+    */
+  private def sessionWrite(
+      state: TaskState,
+      store: String,
+      retention: Long,
+      changelog: Topic,
+      bytes: Chunk[Byte],
+      start: Long,
+      end: Long,
+      written: Option[Chunk[Byte]],
+      timestamp: Long
+  ): (TaskState, TaskOutput) =
+    val entries = state.store(store)
+    val clock   = state.clocks.getOrElse(store, SessionStore.clockOf(entries))
+    val session = SessionStore.key(bytes, start, end)
+    val ticked  = written.fold(clock)(_ => math.max(clock, end))
+    val kept    =
+      written match
+        case None                                                   => entries - session
+        case Some(_) if WindowStore.expired(end, ticked, retention) => entries
+        case Some(value)                                            => entries.updated(session, Stored(value, timestamp))
+    val contents = if ticked > clock then SessionStore.pruned(kept, ticked, retention) else kept
+    val after    = state.copy(stores = state.stores.updated(store, contents), clocks = state.clocks.updated(store, ticked))
+    (after, TaskOutput(changelog, Some(partition), Some(session), written, timestamp, Headers.empty))
+
+  /** The sessions `step` changes for `record`, as Java's session window aggregation does: the sessions of the record's key ending no earlier than the
+    * inactivity gap before it and starting no later than the gap after it, by end and then start, are merged with it into one session, unless that
+    * session ends before the step's stream time less the grace and the gap, when the record is dropped. Merged sessions are removed and go on as none
+    * at their end, and the new session goes on with its value at its end, both without headers, as Java passes them on as records of their own. A
+    * record whose key its serializer writes as none is skipped.
+    */
+  private def session[K, V, A](
+      step: Step.SessionAggregate[F, K, V, A],
+      record: Travelling[K, V],
+      state: TaskState,
+      now: Long
+  ): F[Windowing[K, Option[A]]] =
+    import step.{add, emitOnClose, initial, key, merge, retention, store, value, windows}
+    val gap       = windows.gapMillis
+    val timestamp = record.timestamp
+    topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
+        case None        => F.pure((state, Vector.empty, Vector.empty))
+        case Some(bytes) =>
+          val streamTime = math.max(state.streamTimes.getOrElse(store.name, WindowStore.NoTime), timestamp)
+          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.name, streamTime))
+          val closeTime  = streamTime - windows.graceMillis - gap
+          val entries    = timed.store(store.name)
+          val found      =
+            entries.toVector.collect:
+              case (held, stored) if held.size == bytes.size + 16 && held.take(bytes.size) == bytes =>
+                (SessionStore.startOf(held), SessionStore.endOf(held), stored)
+            .filter((start, end, _) => end >= timestamp - gap && start <= timestamp + gap).sortBy((start, end, _) => (end, start))
+          val changed =
+            found.traverse((_, _, stored) => value.deserializer.deserialize(changelog, Headers.empty, Some(stored.value))).flatMap: aggregates =>
+              val (from, to) = found.foldLeft((timestamp, timestamp))((window, held) => (math.min(window._1, held._1), math.max(window._2, held._2)))
+              val folded     = aggregates.foldLeft(initial)((merged, next) => Some(merged.fold(next)(merge(record.key, _, next))))
+              if to < closeTime then F.pure((timed, Vector.empty[Travelling[Windowed[K], Option[A]]], Vector.empty[TaskOutput]))
+              else
+                // A record that joins no other session makes its own, which removes nothing, even where one like it was already kept.
+                val merged  = if from == timestamp && to == timestamp then Vector.empty else found
+                val removed =
+                  merged.foldLeft((timed, Vector.empty[Travelling[Windowed[K], Option[A]]], Vector.empty[TaskOutput])):
+                    case ((current, forwarded, logged), (start, end, _)) =>
+                      val (after, log) = sessionWrite(current, store.name, retention, changelog, bytes, start, end, None, timestamp)
+                      (after, forwarded :+ Travelling(Windowed(record.key, Window(start, end)), None, end, Headers.empty), logged :+ log)
+                val aggregate = folded.fold(step.start(record.key, record.value))(add(record.key, record.value, _))
+                value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
+                  val (current, forwarded, logged) = removed
+                  val (after, log)                 = sessionWrite(current, store.name, retention, changelog, bytes, from, to, written, timestamp)
+                  (after, forwarded :+ Travelling(Windowed(record.key, Window(from, to)), Some(aggregate), to, Headers.empty), logged :+ log)
+          if !emitOnClose then changed
+          else
+            // Sessions end where they end, included, so an emission ends a millisecond before the close time, and the next starts where it ended.
+            def range(last: Long) =
+              val upper = closeTime - 1
+              val lower = math.max(0L, last)
+              Option.when(upper >= 0 && upper >= lower)((lower, upper))
+            changed.flatMap: (after, _, logged) =>
+              sessionsClosed(store.name, key, value, after, closeTime, range, record, changelog, now)
+                .map((emitted, state) => (state, emitted, logged))
+
+  /** The sessions of session store `store` that a step emitting them once they close emits, as Java's session window aggregation emits final results:
+    * at most once per emit interval of wall-clock time, every session ending in the range `range` gives from the close time last emitted for, by end,
+    * then key and then start, each with its value at its end and the headers of the record that closed it.
+    */
+  private def sessionsClosed[K, V, A](
+      store: String,
+      key: xkafka.streams.Serde[F, K],
+      value: xkafka.streams.Serde[F, A],
+      state: TaskState,
+      closeTime: Long,
+      range: Long => Option[(Long, Long)],
+      record: Travelling[K, V],
+      changelog: Topic,
+      now: Long
+  ): F[(Vector[Travelling[Windowed[K], Option[A]]], TaskState)] =
+    if now < state.nextEmit.getOrElse(store, 0L) then F.pure((Vector.empty, state))
+    else
+      val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
+      range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
+        case None                 => F.pure((Vector.empty, throttled))
+        case Some((lower, upper)) =>
+          val due =
+            throttled.store(store).toVector.map: (held, stored) =>
+              (SessionStore.endOf(held), held.take(held.size - 16), SessionStore.startOf(held), stored)
+            .filter((end, _, _, _) => end >= lower && end <= upper).sortWith: (a, b) =>
+              a._1 < b._1 || (a._1 == b._1 && (Task.unsigned.compare(a._2, b._2) < 0 || (a._2 == b._2 && a._3 < b._3)))
+          due.traverse: (end, serialized, start, stored) =>
+            (
+              key.deserializer.deserialize(changelog, Headers.empty, Some(serialized)),
+              value.deserializer.deserialize(changelog, Headers.empty, Some(stored.value))
+            ).mapN((k, v) => Travelling(Windowed(k, Window(start, end)), Option(v), end, record.headers))
+          .map(emitted => (emitted, throttled.copy(lastEmitted = throttled.lastEmitted.updated(store, closeTime))))
 
   /** What Java's sliding window aggregation finds among a key's windows as it reads them backwards. */
   private final case class Found[A](

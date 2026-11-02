@@ -114,6 +114,23 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       add: (K, V, A) => A
   ) extends Step[F, K, V, Windowed[K], A]
 
+  /** Folds each key's records into sessions in `store`, as Java's session window aggregation does: the sessions a record joins are folded from
+    * `initial`, or the first of them where there is none, with `merge`, then the record is added, or starts the value where nothing came before. A
+    * session merged away goes on as none.
+    */
+  case SessionAggregate[F[_], K, V, A](
+      store: Store,
+      windows: SessionWindows,
+      retention: Long,
+      emitOnClose: Boolean,
+      key: Serde[F, K],
+      value: Serde[F, A],
+      initial: Option[A],
+      start: (K, V) => A,
+      add: (K, V, A) => A,
+      merge: (K, A, A) => A
+  ) extends Step[F, K, V, Windowed[K], Option[A]]
+
   /** Each change to the table, as a record. */
   case ToStream[F[_], K, V]() extends Step[F, K, V, K, V]
 
@@ -132,6 +149,8 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
         WindowedAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), start, add)
       case SlidingAggregate(store, windows, retention, emitOnClose, key, value, start, add) =>
         SlidingAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), start, add)
+      case SessionAggregate(store, windows, retention, emitOnClose, key, value, initial, start, add, merge) =>
+        SessionAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), initial, start, add, merge)
       case ToStream() => ToStream()
 
 /** The steps between a segment's origin, whose records are keyed `K` with values `V`, and its last step, which gives `K2` and `V2`. */
@@ -152,10 +171,20 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Start()          => Nil
       case Then(init, last) => init.stores ++
           (last match
-            case Step.Aggregate(store, _, _, _, _)                  => List(store)
-            case Step.WindowedAggregate(store, _, _, _, _, _, _, _) => List(store)
-            case Step.SlidingAggregate(store, _, _, _, _, _, _, _)  => List(store)
-            case _                                                  => Nil)
+            case Step.Aggregate(store, _, _, _, _)                       => List(store)
+            case Step.WindowedAggregate(store, _, _, _, _, _, _, _)      => List(store)
+            case Step.SlidingAggregate(store, _, _, _, _, _, _, _)       => List(store)
+            case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => List(store)
+            case _                                                       => Nil)
+
+  /** The names of its steps' session stores. */
+  def sessionStores: Set[String] =
+    this match
+      case Start()          => Set.empty
+      case Then(init, last) => init.sessionStores ++
+          (last match
+            case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => Set(store.name)
+            case _                                                       => Set.empty)
 
   /** How long each window store of its steps keeps a window, in milliseconds, by store name. */
   def retentions: Map[String, Long] =
@@ -163,9 +192,10 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Start()          => Map.empty
       case Then(init, last) => init.retentions ++
           (last match
-            case Step.WindowedAggregate(store, _, retention, _, _, _, _, _) => Map(store.name -> retention)
-            case Step.SlidingAggregate(store, _, retention, _, _, _, _, _)  => Map(store.name -> retention)
-            case _                                                          => Map.empty)
+            case Step.WindowedAggregate(store, _, retention, _, _, _, _, _)      => Map(store.name -> retention)
+            case Step.SlidingAggregate(store, _, retention, _, _, _, _, _)       => Map(store.name -> retention)
+            case Step.SessionAggregate(store, _, retention, _, _, _, _, _, _, _) => Map(store.name -> retention)
+            case _                                                               => Map.empty)
 
 /** Where a segment reads from: an input topic, or the repartition topic the segment before it writes. */
 private[xkafka] enum Origin[F[_], K, V]:
@@ -287,6 +317,9 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
   /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
   def windowedBy(windows: TimeWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, None, false, key, value)
 
+  /** The records split by key into sessions of activity, ready to be folded into a session store. */
+  def windowedBy(windows: SessionWindows): SessionWindowedKStream[F, K, V] = SessionWindowedKStream(this, windows, None, false, key, value)
+
   /** The records split by key and by each sliding window they fall in, ready to be folded into a window store. */
   def windowedBy(windows: SlidingWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, None, false, key, value)
 
@@ -342,6 +375,48 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
   /** Folds each key's values in each window into `store`, starting each window from `initial`. */
   def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, Windowed[K], A] =
     aggregated(store, serde, (k, v) => add(k, v, initial), add)
+
+/** Records grouped by key into sessions, ready to be folded into a session store. Each session's value goes downstream as it changes, and a session
+  * merged into another goes on as none, as Java sends a session merged away as a tombstone. A record later than its session's end by more than the
+  * inactivity gap and grace is dropped, and a session is kept for the gap and grace after its end.
+  */
+final class SessionWindowedKStream[F[_], K, V] private[xkafka] (
+    grouped: KGroupedStream[F, K, V],
+    windows: SessionWindows,
+    retention: Option[FiniteDuration],
+    emitOnClose: Boolean,
+    key: Serde[F, K],
+    value: Serde[F, V]
+):
+  private def aggregated[A](store: Store, serde: Serde[F, A], initial: Option[A], start: (K, V) => A, add: (K, V, A) => A, merge: (K, A, A) => A) =
+    val least = windows.retentionMillis
+    val kept  =
+      windows.problem.orElse:
+        retention.flatMap: asked =>
+          if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
+          else Option.when(asked.toMillis < least)(s"the retention must be at least ${windows.retentionRule}, ${least} ms, was $asked")
+    val problems = kept.map(TopologyError.InvalidWindows(store.name, _)).toVector
+    val fold     = Step.SessionAggregate(store, windows, retention.fold(least)(_.toMillis), emitOnClose, key, serde, initial, start, add, merge)
+    KTable(grouped.folded(fold, problems))
+
+  /** Counts each key's records in each session in `store`. */
+  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Option[Long]] =
+    aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1, (_, a, b) => a + b)
+
+  /** Combines each key's values in each session in `store`, starting from the session's first, and merging sessions with `combine` too. */
+  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], Option[V]] =
+    aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v), (_, acc, session) => combine(acc, session))
+
+  /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them. */
+  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(merge: (K, A, A) => A): KTable[F, Windowed[K], Option[A]] =
+    aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add, merge)
+
+  /** Keeps each session in the store for `retention` after its end, which must be at least the inactivity gap and grace, their default. */
+  def withRetention(retention: FiniteDuration): SessionWindowedKStream[F, K, V] =
+    SessionWindowedKStream(grouped, windows, Some(retention), emitOnClose, key, value)
+
+  /** Passes on only each session's final value once it has closed, as for time windows. */
+  def emitOnWindowClose: SessionWindowedKStream[F, K, V] = SessionWindowedKStream(grouped, windows, retention, true, key, value)
 
 /** The latest value of each key, kept in a store. */
 final class KTable[F[_], K, V] private[xkafka] (stream: KStream[F, K, V]):

@@ -134,3 +134,30 @@ final class WindowsSuite extends CatsEffectSuite:
       )))
     )
     assertEquals(refused(SlidingWindows.withNoGrace(0.seconds)), None)
+
+  test("sessions with a negative gap, negative grace, parts of a millisecond, or kept too briefly are refused, and with no gap are not"):
+    def refused(windows: SessionWindows, retention: Option[FiniteDuration] = None) =
+      val windowed = KStream(topic, text, text).groupByKey(text, text).windowedBy(windows)
+      Topology
+        .of(retention.fold(windowed)(windowed.withRetention).count(Store("counts")).toStream.to(topic, Serde.sessionWindowed(text), count.option))
+        .left.toOption.map(_.toList)
+    assertEquals(
+      refused(SessionWindows.withNoGrace(-1.second)),
+      Some(List(TopologyError.InvalidWindows("counts", "the inactivity gap must not be negative, was -1 seconds")))
+    )
+    assertEquals(
+      refused(SessionWindows(1.second, grace = -1.second)),
+      Some(List(TopologyError.InvalidWindows("counts", "the grace must not be negative, was -1 seconds")))
+    )
+    assertEquals(
+      refused(SessionWindows(1.second, grace = 1.microsecond)),
+      Some(List(TopologyError.InvalidWindows("counts", "the inactivity gap and grace must be whole milliseconds")))
+    )
+    assertEquals(
+      refused(SessionWindows(10.seconds, grace = 5.seconds), Some(14999.millis)),
+      Some(List(
+        TopologyError
+          .InvalidWindows("counts", "the retention must be at least the sessions' inactivity gap and grace, 15000 ms, was 14999 milliseconds")
+      ))
+    )
+    assertEquals(refused(SessionWindows.withNoGrace(0.seconds)), None)

@@ -57,3 +57,17 @@ final class WindowStoreSuite extends FunSuite:
       List("cleanup.policy" -> "compact,delete", "message.timestamp.type" -> "CreateTime", "retention.ms" -> "86415000")
     )
     assertEquals(WindowStore.changelogConfigs(Long.MaxValue - 1).last, "retention.ms" -> Long.MaxValue.toString)
+
+  test("a session's key is the key, its end and its start, a store's clock is its latest session end, and sessions expire by their end"):
+    val key = SessionStore.key(Chunk.array("k".getBytes), 1000L, 10000L)
+    assertEquals(key.toVector, "k".getBytes.toVector ++ Vector[Byte](0, 0, 0, 0, 0, 0, 0x27, 0x10, 0, 0, 0, 0, 0, 0, 0x03, 0xe8.toByte))
+    assertEquals((SessionStore.startOf(key), SessionStore.endOf(key)), (1000L, 10000L))
+    val entries =
+      Map(
+        SessionStore.key(Chunk.array("a".getBytes), 0L, 5000L)      -> Stored(Chunk.empty, 1L),
+        key                                                         -> Stored(Chunk.empty, 2L),
+        SessionStore.key(Chunk.array("b".getBytes), 20000L, 20000L) -> Stored(Chunk.empty, 3L)
+      )
+    assertEquals(SessionStore.clockOf(entries), 20000L)
+    assertEquals(SessionStore.pruned(entries, 20000L, 10000L).values.map(_.timestamp).toSet, Set(3L))
+    assertEquals(WindowStore.prunedAll(Map("s" -> entries), Map("s" -> 10000L), Set("s"))("s").values.map(_.timestamp).toSet, Set(3L))
