@@ -37,7 +37,8 @@ leaves, waiting at most `closeTimeout`.
 ## Programs
 
 A program is a `Topology` of pipelines, each reading an input topic and writing
-an output topic. A pipeline starts from a `KStream` and is built with:
+an output topic. A pipeline starts from a `KStream`, or a `KTable` read from a
+topic (see [Tables](#tables)), and is built with:
 
 - `filter`, `map`, `mapValues`, `flatMap`, `selectKey` and `peek`;
 - `evalFilter`, `evalMap` and `evalMapValues`, which run an effect;
@@ -64,6 +65,38 @@ A `Serde` holds the serializer and deserializer of one type, since a streams
 application both reads and writes its topics. `Serde.utf8`, `Serde.long` and
 `Serde.bytes` write the same bytes as Java's `Serdes.String()`, `Serdes.Long()`
 and `Serdes.ByteArray()`.
+
+## Tables
+
+A `KTable` holds the latest value of each key. Besides the tables that `count`,
+`reduce` and `aggregate` make, a table can be read straight from a topic, as Java
+Kafka Streams' `StreamsBuilder.table` reads it:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def latestNames(users: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KTable(users, text, text, Store("users"))
+    .toStream
+    .to(output, text, text.option)
+```
+
+Each record's value replaces its key's, even a record timestamped earlier than
+the one it replaces. A record without a value (a tombstone) deletes its key, and
+a record without a key is skipped. The table is kept in the named store, logged
+to `<application id>-users-changelog`.
+
+A table read from a topic can delete keys, so its `toStream` gives `Option`
+values: `Some` for an update and `None` for a delete, which `Serde.option`
+writes as a tombstone, as Java writes its null. A table that only ever updates
+its keys, such as a `count`, gives its values as they are. The table's last type
+parameter says which: `KTable[F, K, V, Option]` can delete, and
+`KTable[F, K, V, KTable.Updated]` only updates. Writing a table that can delete
+without `.option` does not compile.
 
 ## Windows
 

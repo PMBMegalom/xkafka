@@ -138,6 +138,15 @@ final class TopologyGoldenSuite extends FunSuite:
           .to("other-out", Produced.`with`(Serdes.String, Serdes.Long))
     )
 
+  test("a table read from a topic declares its input and its store's changelog as Java does"):
+    assertEquals(
+      ours(KTable(topic("users"), text, text, Store("users")).toStream.to(topic("out"), text, text.option)),
+      declaredByJava(
+        _.table[String, String]("users", Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("users"))
+          .toStream.to("out", Produced.`with`(Serdes.String, Serdes.String))
+      )
+    )
+
   test("a stateless pipeline is one sub-topology reading its input"):
     assertEquals(
       ours(KStream(topic("in"), text, text).mapValues(_ + "!").to(topic("out"), text, text)),

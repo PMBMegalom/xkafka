@@ -43,7 +43,9 @@ import org.apache.kafka.streams.kstream.{
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{BufferLimit, KStream, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology}
+import xkafka.streams.{
+  BufferLimit, KStream, KTable, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology
+}
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
   * for the same program and records, with Java's record cache off. Java runs each program twice: over an in-memory window store, which is what xkafka
@@ -508,6 +510,38 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       updates
     )
 
+  // A table's records, null standing for a record without a key or without a value.
+  private val tabled =
+    List(
+      ("k1", "a", 1000L),
+      ("k2", "b", 2000L),
+      ("k1", "c", 3000L),
+      ("k1", null, 4000L), // deletes k1
+      ("k3", null, 5000L), // deletes a key the table never held
+      (null, "d", 6000L),  // skipped, having no key
+      ("k1", "e", 7000L),
+      ("k2", "f", 1500L), // older than what the table holds for k2, yet replaces it
+      ("k5", "g", 9000L),
+      ("k5", null, 9500L),
+      ("k5", "h", 10000L) // replaces nothing, its key deleted
+    )
+
+  test("a table read from a topic writes and logs what Java's does, a record without a value deleting its key"):
+    sameEverywhere(
+      KTable(in, text, text, Store("users")).toStream.to(out, text, text.option),
+      _.table[String, String]("in", Materialized.as("users")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.String)),
+      tabled
+    )
+
+  test("a table read from a topic, its changes held for a time limit, holds and logs its deletes as Java's buffer does"):
+    sameEverywhere(
+      KTable(in, text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).toStream.to(out, text, text.option),
+      _.table[String, String]("in", Materialized.as("users"))
+        .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")).toStream
+        .to("out", Produced.`with`(Serdes.String, Serdes.String)),
+      tabled :+ ("k9", "z", 60000L)
+    )
+
   test("a table of records grouped by a new key holds where each came from in the repartition topic, as Java's buffer does"):
     sameEverywhere(
       KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").count(Store("counts"))
@@ -622,7 +656,16 @@ final class WindowGoldenSuite extends CatsEffectSuite:
           case ((done, now, offsets), written) => IO.pure((done :+ written, now, offsets))
     inputs.zipWithIndex.foldLeftM[IO, Ran]((Vector.empty, Vector.fill(tasks.size)(TaskState.empty), Map.empty)):
       case ((done, states, offsets), ((key, value, timestamp), index)) =>
-        val input = TaskInput(Some(Chunk.array(key.getBytes)), Some(Chunk.array(value.getBytes)), timestamp, traced(index), "in", 0, index.toLong)
+        val input =
+          TaskInput(
+            Option(key).map(k => Chunk.array(k.getBytes)),
+            Option(value).map(v => Chunk.array(v.getBytes)),
+            timestamp,
+            traced(index),
+            "in",
+            0,
+            index.toLong
+          )
         go(0, input, states, offsets, wall(index)).flatMap: (more, after, moved) =>
           after.zipWithIndex.traverse((state, task) => tasks(task).flush(state)).map: flushed =>
             (done ++ more ++ flushed.flatMap(_._2), flushed.map(_._1), moved)

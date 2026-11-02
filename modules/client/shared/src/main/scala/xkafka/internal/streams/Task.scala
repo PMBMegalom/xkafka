@@ -168,6 +168,18 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
           .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
+      case Step.TableSource(store, key, value) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+          record.key.flatTraverse(k => key.serializer.serialize(changelog, Headers.empty, k).map(_.map(k -> _))).flatMap:
+            // Java skips a record whose key is null: one read without a key, or one its serializer writes as none.
+            case None             => F.pure((state, Vector.empty, Vector.empty))
+            case Some((k, bytes)) => state.store(store.name).get(bytes)
+                .traverse(held => value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))).flatMap: replaced =>
+                  record.value.flatTraverse(value.serializer.serialize(changelog, Headers.empty, _)).map: written =>
+                    val contents =
+                      written.fold(state.store(store.name) - bytes)(v => state.store(store.name).updated(bytes, Stored(v, record.timestamp)))
+                    val after  = state.copy(stores = state.stores.updated(store.name, contents))
+                    val logged = TaskOutput(changelog, Some(partition), Some(bytes), written, record.timestamp, Headers.empty)
+                    (after, Vector(Travelling(k, record.value, record.timestamp, record.headers, Some(replaced))), Vector(logged))
       case Step.Aggregate(store, key, value, initial, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
             // Java skips a record whose key is null, which here is a key its serializer writes as none.

@@ -34,8 +34,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase, StreamsSettings,
-  Suppressed, TimeWindows, Topology
+  ApplicationId, KStream, KTable, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase,
+  StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -77,6 +77,9 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def suppressedByMinute(input: Topic, output: Topic): Pipeline[IO] =
     KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds)).count(Store("counts"))
       .suppress(Suppressed.untilWindowCloses("final")).toStream.to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+
+  /** Reads the input as a table into the store `counts`, writing each change, a delete as a tombstone. */
+  private def asTable(input: Topic, output: Topic): Pipeline[IO] = KTable(input, text, text, Store("counts")).toStream.to(output, text, text.option)
 
   /** Waits up to two minutes until `topic` holds at least `count` records. */
   private def holding(server: String, topic: Topic, count: Int)(using guarantee: ProcessingGuarantee): IO[Unit] =
@@ -129,6 +132,28 @@ final class EngineBrokerSuite extends CatsEffectSuite:
     val made = records.map((key, at) => ProducerRecord(topic, key, s"$key-value", timestamp = Some(Timestamp.fromEpochMillis(at))))
     PlatformKafkaClient().producer(ProducerSettings.from(client(server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
       .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(made))).void
+
+  /** Writes each key's value, or a tombstone. */
+  private def produceValues(server: String, topic: Topic, records: List[(String, Option[String])]): IO[Unit] =
+    val made = records.map((key, value) => ProducerRecord(topic, key, value))
+    PlatformKafkaClient().producer(ProducerSettings.from(client(server), Serializer.utf8[IO], Serializer.utf8[IO].option).orFail)
+      .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(made))).void
+
+  /** Reads `topic` from its start until the latest value of each key, or its tombstone, is `expected`. */
+  private def latestValues(server: String, topic: Topic, expected: Map[String, Option[String]])(using guarantee: ProcessingGuarantee): IO[Unit] =
+    Names.fresh:
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Deserializer.utf8[IO],
+          Deserializer.utf8[IO].option,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.scan(Map.empty[String, Option[String]])((seen, record) => seen.updated(record.record.key, record.record.value))
+          .find(_ == expected).compile.lastOrError.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $expected"))).void
 
   /** Reads `topic` from its start until the latest count of each key in each window, by the window's start, is `expected`. */
   private def windowCounts(server: String, topic: Topic, expected: Map[(String, Long), Long])(using guarantee: ProcessingGuarantee): IO[Unit] =
@@ -402,6 +427,12 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           ) *> policy.map(found => assertEquals(found, Some(ConfigurationValue.Present("compact")))) *> running(server, app):
             produceAt(server, app.input, List(("a", first + 75000L))) *>
               windowRecords(server, app.output, Map(("a", first) -> 2L, ("b", first) -> 1L))
+
+    test(s"$release, $under: an engine reads a topic as a table, writing each change and logging it, a record without a value deleting its key"):
+      counting(server, asTable): app =>
+        produceValues(server, app.input, List("a" -> Some("1"), "b" -> Some("2"), "a" -> None, "c" -> None)) *> running(server, app):
+          val held = Map("a" -> None, "b" -> Some("2"), "c" -> None)
+          latestValues(server, app.output, held) *> latestValues(server, app.changelog, held)
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

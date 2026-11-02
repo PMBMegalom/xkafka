@@ -88,6 +88,11 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   case EvalFilter[F[_], K, V](keep: (K, V) => F[Boolean])                extends Step[F, K, V, K, V]
   case EvalMap[F[_], K, V, K2, V2](change: (K, V) => F[(K2, V2)])        extends Step[F, K, V, K2, V2]
 
+  /** Keeps each key's latest value in `store`, as Java's table read from a topic does: none deletes the key, and a record without a key is skipped.
+    * Each change goes on with the value it replaced.
+    */
+  case TableSource[F[_], K, V](store: Store, key: Serde[F, K], value: Serde[F, V]) extends Step[F, Option[K], Option[V], K, Option[V]]
+
   /** Folds each key's records into `store`: a key's first record becomes `start`, and each later one is added with `add`. Each update goes on with
     * the value before it, or `initial`, which is none for a reduction, as Java passes on the old value of a table's change.
     */
@@ -158,6 +163,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case EvalFilter(keep)                                  => EvalFilter((key, value) => fk(keep(key, value)))
       case EvalMap(change)                                   => EvalMap((key, value) => fk(change(key, value)))
       case Aggregate(store, key, value, initial, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), initial, start, add)
+      case TableSource(store, key, value)                    => TableSource(store, key.mapK(fk), value.mapK(fk))
       case WindowedAggregate(store, windows, retention, emitOnClose, key, value, initial, start, add) =>
         WindowedAggregate(store, windows, retention, emitOnClose, key.mapK(fk), value.mapK(fk), initial, start, add)
       case SlidingAggregate(store, windows, retention, emitOnClose, key, value, initial, start, add) =>
@@ -186,6 +192,7 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
       case Then(init, last) => init.stores ++
           (last match
             case Step.Aggregate(store, _, _, _, _, _)                    => List(store)
+            case Step.TableSource(store, _, _)                           => List(store)
             case Step.WindowedAggregate(store, _, _, _, _, _, _, _, _)   => List(store)
             case Step.SlidingAggregate(store, _, _, _, _, _, _, _, _)    => List(store)
             case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => List(store)
@@ -313,8 +320,14 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
     key: Serde[F, K],
     value: Serde[F, V]
 ):
-  private def aggregated[A](store: Store, serde: Serde[F, A], initial: Option[A], start: (K, V) => A, add: (K, V, A) => A): KTable[F, K, A] =
-    KTable(folded(Step.Aggregate(store, key, serde, initial, start, add), Vector.empty), TableKey.Plain(key), TableValue.Plain(serde), None)
+  private def aggregated[A](
+      store: Store,
+      serde: Serde[F, A],
+      initial: Option[A],
+      start: (K, V) => A,
+      add: (K, V, A) => A
+  ): KTable[F, K, A, KTable.Updated] =
+    KTable.updating(folded(Step.Aggregate(store, key, serde, initial, start, add), Vector.empty), TableKey.Plain(key), TableValue.Plain(serde), None)
 
   /** The stream with `fold` as its last step, after a repartition topic if the key has changed. */
   private[xkafka] def folded[K2, A](fold: Step[F, K, V, K2, A], found: Vector[TopologyError]): KStream[F, K2, A] =
@@ -329,14 +342,15 @@ final class KGroupedStream[F[_], K, V] private[xkafka] (
       new KStream(closed, Open(Origin.Repartitioned(named, key, value), Chain.Start[F, K, V]().andThen(fold)), false, problems)
 
   /** Counts each key's records in `store`. */
-  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, K, Long] =
+  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, K, Long, KTable.Updated] =
     aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
 
   /** Combines each key's values in `store`, starting from its first. */
-  def reduce(store: Store)(combine: (V, V) => V): KTable[F, K, V] = aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
+  def reduce(store: Store)(combine: (V, V) => V): KTable[F, K, V, KTable.Updated] =
+    aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
 
   /** Folds each key's values into `store`, starting from `initial`. */
-  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, K, A] =
+  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, K, A, KTable.Updated] =
     aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add)
 
   /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
@@ -365,7 +379,7 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
       initial: Option[A],
       start: (K, V) => A,
       add: (K, V, A) => A
-  ): KTable[F, Windowed[K], A] =
+  ): KTable[F, Windowed[K], A, KTable.Updated] =
     val (least, rule, problem) =
       windows match
         case time: TimeWindows       => (time.retentionMillis, time.retentionRule, time.problem)
@@ -385,7 +399,7 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
       windows match
         case time: TimeWindows       => (time.sizeMillis, time.graceMillis)
         case sliding: SlidingWindows => (sliding.differenceMillis, sliding.graceMillis)
-    KTable(grouped.folded(fold, problems), TableKey.TimeWindowed(key, size), TableValue.Plain(serde), Some(grace))
+    KTable.updating(grouped.folded(fold, problems), TableKey.TimeWindowed(key, size), TableValue.Plain(serde), Some(grace))
 
   /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
     * emits once it closes may expire before it is emitted when the retention is no longer than that, as in Java Kafka Streams, so keep it longer
@@ -401,15 +415,15 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
   def emitOnWindowClose: TimeWindowedKStream[F, K, V] = TimeWindowedKStream(grouped, windows, retention, true, key, value)
 
   /** Counts each key's records in each window in `store`. */
-  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long] =
+  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long, KTable.Updated] =
     aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
 
   /** Combines each key's values in each window in `store`, starting from the window's first. */
-  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], V] =
+  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], V, KTable.Updated] =
     aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
 
   /** Folds each key's values in each window into `store`, starting each window from `initial`. */
-  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, Windowed[K], A] =
+  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, Windowed[K], A, KTable.Updated] =
     aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add)
 
 /** Records grouped by key into sessions, ready to be folded into a session store. Each session's value goes downstream as it changes, and a session
@@ -433,18 +447,23 @@ final class SessionWindowedKStream[F[_], K, V] private[xkafka] (
           else Option.when(asked.toMillis < least)(s"the retention must be at least ${windows.retentionRule}, ${least} ms, was $asked")
     val problems = kept.map(TopologyError.InvalidWindows(store.name, _)).toVector
     val fold     = Step.SessionAggregate(store, windows, retention.fold(least)(_.toMillis), emitOnClose, key, serde, initial, start, add, merge)
-    KTable(grouped.folded(fold, problems), TableKey.SessionWindowed(key), TableValue.Optional(serde), Some(windows.graceMillis + windows.gapMillis))
+    KTable.deleting(
+      grouped.folded(fold, problems),
+      TableKey.SessionWindowed(key),
+      TableValue.Optional(serde),
+      Some(windows.graceMillis + windows.gapMillis)
+    )
 
   /** Counts each key's records in each session in `store`. */
-  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Option[Long]] =
+  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long, Option] =
     aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1, (_, a, b) => a + b)
 
   /** Combines each key's values in each session in `store`, starting from the session's first, and merging sessions with `combine` too. */
-  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], Option[V]] =
+  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], V, Option] =
     aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v), (_, acc, session) => combine(acc, session))
 
   /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them. */
-  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(merge: (K, A, A) => A): KTable[F, Windowed[K], Option[A]] =
+  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(merge: (K, A, A) => A): KTable[F, Windowed[K], A, Option] =
     aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add, merge)
 
   /** Keeps each session in the store for `retention` after its end, which must be at least the inactivity gap and grace, their default. */
@@ -480,23 +499,61 @@ private[xkafka] enum TableValue[F[_], V]:
       case Plain(value)    => Plain(value.mapK(fk))
       case Optional(value) => Optional(value.mapK(fk))
 
-/** The latest value of each key, kept in a store. */
-final class KTable[F[_], K, V] private[xkafka] (stream: KStream[F, K, V], key: TableKey[F, K], value: TableValue[F, V], grace: Option[Long]):
-  /** Each change to the table, as a record, keyed as the table is. */
-  def toStream: KStream[F, K, V] = new KStream(stream.closed, stream.open.andThen(Step.ToStream()), false, stream.problems)
+/** The latest value of each key, kept in a store. Each change to it is a `C[V]`: the new value, for a table that only ever updates its keys
+  * ([[KTable.Updated]]), or for a table that can also delete them, the new value or none for a delete (`Option`).
+  */
+final class KTable[F[_], K, V, C[_]] private[xkafka] (
+    stream: KStream[F, K, C[V]],
+    key: TableKey[F, K],
+    value: TableValue[F, C[V]],
+    grace: Option[Long]
+):
+  /** Each change to the table, as a record, keyed as the table is; for a table that can delete keys, a delete is none, which `Serde.option` writes as
+    * a tombstone, as Java writes its null.
+    */
+  def toStream: KStream[F, K, C[V]] = new KStream(stream.closed, stream.open.andThen(Step.ToStream()), false, stream.problems)
 
-  private def suppressed(suppressed: Suppressed, waited: Option[Long]): KTable[F, K, V] =
+  private def suppressed(suppressed: Suppressed, waited: Option[Long]): KTable[F, K, V, C] =
     val problems = stream.problems ++ suppressed.problem.map(TopologyError.InvalidSuppression(suppressed.name, _))
     val held     = stream.step(Step.Suppress(suppressed, key, value, waited), changesKey = false)
-    KTable(new KStream(held.closed, held.open, stream.keyChanged, problems), key, value, grace)
+    new KTable(new KStream(held.closed, held.open, stream.keyChanged, problems), key, value, grace)
 
   /** Holds back each key's changes until `timeToWait` has passed since the first held, by the records' own time, then passes on the latest. */
-  def suppress(until: Suppressed.UntilTimeLimit): KTable[F, K, V] = suppressed(until, None)
+  def suppress(until: Suppressed.UntilTimeLimit): KTable[F, K, V, C] = suppressed(until, None)
 
   /** Holds back each window's changes until the window has closed, its grace over, then passes on its final result; for sessions, a session merged
     * away goes on no more.
     */
-  def suppress(until: Suppressed.UntilWindowCloses)(using K <:< Windowed[?]): KTable[F, K, V] = suppressed(until, grace)
+  def suppress(until: Suppressed.UntilWindowCloses)(using K <:< Windowed[?]): KTable[F, K, V, C] = suppressed(until, grace)
+
+object KTable:
+  /** A change to a table that only ever updates its keys: the new value. */
+  type Updated[A] = A
+
+  /** The records of `topic` as a table, kept in `store`, as Java's `StreamsBuilder.table` reads it: each record's value replaces its key's, and a
+    * record without a value deletes the key. A record without a key is skipped.
+    */
+  def apply[F[_], K, V](topic: Topic, key: Serde[F, K], value: Serde[F, V], store: Store)(using F: cats.Applicative[F]): KTable[F, K, V, Option] =
+    deleting(
+      KStream(topic, key.option, value.option).step(Step.TableSource(store, key, value), changesKey = false),
+      TableKey.Plain(key),
+      TableValue.Optional(value),
+      None
+    )
+
+  private[xkafka] def updating[F[_], K, V](
+      stream: KStream[F, K, V],
+      key: TableKey[F, K],
+      value: TableValue[F, V],
+      grace: Option[Long]
+  ): KTable[F, K, V, Updated] = new KTable[F, K, V, Updated](stream, key, value, grace)
+
+  private[xkafka] def deleting[F[_], K, V](
+      stream: KStream[F, K, Option[V]],
+      key: TableKey[F, K],
+      value: TableValue[F, Option[V]],
+      grace: Option[Long]
+  ): KTable[F, K, V, Option] = new KTable[F, K, V, Option](stream, key, value, grace)
 
 /** A pipeline from an input topic to an output topic. */
 final class Pipeline[F[_]] private[xkafka] (
