@@ -259,6 +259,13 @@ reading it back needs the size.
 For sessions, use `Serde.sessionWindowed(key)`, which writes both the start and
 the end, as Java's `WindowedSerdes.sessionWindowedSerdeFrom` does.
 
+Like Java Kafka Streams, xkafka sends windowed results to the partition of their
+key alone, not of the key and window together. All of a key's windows are then
+in one partition, in order, and in the same partition as that key in topics
+that are not windowed. Since a plain Kafka producer would hash the whole
+windowed key instead, other producers writing to the same topic should do the
+same as Java Kafka Streams.
+
 ## Guarantees
 
 With `ProcessingGuarantee.AtLeastOnce`, the default, a member commits its

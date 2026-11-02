@@ -26,19 +26,22 @@ package streams
 import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.streams.{Chain, End, Origin, Segment, Step, Window, Windowed}
+import xkafka.streams.{BaseKeyed, Chain, End, Origin, Segment, Step, Window, Windowed}
 
 /** A record as a topic holds it, read by a task. */
 private[xkafka] final case class TaskInput(key: Option[Chunk[Byte]], value: Option[Chunk[Byte]], timestamp: Long, headers: Headers)
 
-/** A record a task writes: to `partition` where one is given, as a changelog is, and otherwise wherever the producer's partitioner puts its key. */
+/** A record a task writes: to `partition` where one is given, as a changelog is, to the partition the Java producer picks for `partitionBy` where
+  * that is given, as for a windowed key, which Java partitions by the key alone, and otherwise wherever the producer's partitioner puts its key.
+  */
 private[xkafka] final case class TaskOutput(
     topic: Topic,
     partition: Option[Int],
     key: Option[Chunk[Byte]],
     value: Option[Chunk[Byte]],
     timestamp: Long,
-    headers: Headers
+    headers: Headers,
+    partitionBy: Option[Chunk[Byte]] = None
 )
 
 /** The latest value a store holds for a key, and its timestamp, as the bytes its changelog carries. */
@@ -537,12 +540,19 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       exit match
         case End.Repartitioning(repartition, key, value) => (topicNamed(s"$application-${repartition.name}-repartition"), key, value, true)
         case End.Output(topic, key, value)               => (F.pure(topic), key, value, false)
+    // Java partitions a windowed key by the key alone, whichever topic it goes to.
+    def base(target: Topic): F[Option[Chunk[Byte]]] =
+      key.serializer match
+        case windowed: BaseKeyed[?, ?] => windowed.asInstanceOf[BaseKeyed[F, Any]]
+            .base(target, record.headers, record.key.asInstanceOf[xkafka.streams.Windowed[Any]])
+        case _ => F.pure(None)
     for
       target <- topic
       k      <- key.serializer.serialize(target, record.headers, record.key)
       v      <- value.serializer.serialize(target, record.headers, record.value)
+      by     <- base(target)
     // Java drops a record with a null key before its repartition topic, which here is a key its serializer writes as none.
-    yield if repartitioning && k.isEmpty then Vector.empty else Vector(TaskOutput(target, None, k, v, record.timestamp, record.headers))
+    yield if repartitioning && k.isEmpty then Vector.empty else Vector(TaskOutput(target, None, k, v, record.timestamp, record.headers, by))
 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 

@@ -326,7 +326,7 @@ final class EngineSuite extends CatsEffectSuite:
   private def watched(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout).use: streams =>
+        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use: streams =>
           streams.state.evalMap(state => world.states.update(_ :+ state)).compile.drain.start *> script(world, streams)
     TestControl.executeEmbed(program.timeout(1.minute))
 
@@ -375,9 +375,10 @@ final class EngineSuite extends CatsEffectSuite:
       World().flatMap: world =>
         val refused = world.report(_.copy(unauthorized = Some("denied"))).delayBy(2.seconds).start
         val stopped =
-          Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout).use: streams =>
-            val unauthorized = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
-            refused *> IO.race(streams.run, unauthorized)
+          Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use:
+            streams =>
+              val unauthorized = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
+              refused *> IO.race(streams.run, unauthorized)
         stopped *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (at, log) =>
       // Leaving waits for the standby reader to finish its poll.
@@ -478,6 +479,22 @@ final class EngineSuite extends CatsEffectSuite:
         written <- world.written.get
       yield assertEquals(written.count(_.topic.value == "out"), 0)
 
+  // Java partitions a windowed key by the key alone (WindowedStreamPartitioner), so every window of a key goes to one partition.
+  test("each window's result goes to the partition the Java producer picks for its key alone"):
+    run(topology = windowing): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 2000L), record(1, 1L, "k", 12000L), record(1, 2L, "other", 2000L))
+        _       <- IO.sleep(1.second)
+        written <- world.written.get
+      yield
+        val out = written.filter(_.topic.value == "out")
+        assertEquals(
+          out.map(record => record.key.map(key => new String(key.take(key.size - 8).toArray)) -> record.partition.map(_.value)),
+          List("k", "k", "other").map(key => Some(key) -> Some(Murmur2.partition(Chunk.array(key.getBytes), 4)))
+        )
+
   test("a restored session store keeps the sessions its clock has not expired, which a record then joins"):
     run(topology = sessioning): world =>
       for
@@ -576,7 +593,7 @@ final class EngineSuite extends CatsEffectSuite:
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout and one poll of its standby reader"):
     val run =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout)
+        Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4))
           .use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (released, log) =>
       assert(released >= CloseTimeout && released <= CloseTimeout + Engine.PollMillis.millis, s"released at $released")
@@ -819,6 +836,6 @@ object EngineSuite:
       World().flatMap: world =>
         val transactions = failing.map(world.transactions)
         val member       = world.member(committed, commit)
-        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout).use: running =>
-          running.run.attempt.flatMap(world.finished).start *> script(world)
+        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use:
+          running => running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(15.minutes))

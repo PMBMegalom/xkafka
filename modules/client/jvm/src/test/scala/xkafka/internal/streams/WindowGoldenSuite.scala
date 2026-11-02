@@ -155,6 +155,16 @@ final class WindowGoldenSuite extends CatsEffectSuite:
           .map((start, window) => start.toLong -> window.end)
       assertEquals(ours, javas, s"size $size, advance $advance, at $timestamp")
 
+  test("a key goes to the partition the Java producer picks for it"):
+    val keys = List("", "a", "ab", "abc", "abcd", "abcde", "k0", "k9", "key-with-more-bytes", "\u00e9\u00e8") ++ (0 until 200).map(n => s"key-$n")
+    for key <- keys; partitions <- List(1, 2, 3, 7, 12) do
+      val bytes = key.getBytes("UTF-8")
+      assertEquals(Murmur2.hash(Chunk.array(bytes)), org.apache.kafka.common.utils.Utils.murmur2(bytes), key)
+      assertEquals(
+        Murmur2.partition(Chunk.array(bytes), partitions),
+        org.apache.kafka.common.utils.Utils.toPositive(org.apache.kafka.common.utils.Utils.murmur2(bytes)) % partitions
+      )
+
   test("a session key is written and read as Java's session serde writes and reads it, and an absent value as Java's null"):
     val java = WindowedSerdes.sessionWindowedSerdeFrom(classOf[String])
     val key  = org.apache.kafka.streams.kstream.Windowed[String]("key", org.apache.kafka.streams.kstream.internals.SessionWindow(30000L, 45000L))

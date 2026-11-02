@@ -25,7 +25,7 @@ package streams
 
 import scala.concurrent.duration.*
 
-import cats.data.NonEmptyList
+import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Ref, Resource}
 import cats.effect.std.{Queue, UUIDGen}
 import cats.effect.syntax.all.*
@@ -125,6 +125,7 @@ private[xkafka] object Engine:
       admin    <- client.admin(settings)
       input    <- consumer(if guarantee == ProcessingGuarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)
       follower <- consumer("read_committed", reportEnds = false)
+      counts   <- Resource.eval(F.ref(Map.empty[Topic, Int]))
       bytes = Serializer.bytes[F].option
       producer <-
         ProducerSettings.from(settings, bytes, bytes, ClientProperties.producer).toEither.leftMap(new KafkaException.InvalidSettings(_))
@@ -155,9 +156,18 @@ private[xkafka] object Engine:
           def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
           def purge(before: Map[TopicPartition, Offset]): F[Unit]                                             =
             NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
+      // Asked once for each topic, which the engine writes to for as long as it runs.
+      partitions =
+        (topic: Topic) =>
+          counts.get.map(_.get(topic)).flatMap:
+            case Some(count) => F.pure(count)
+            case None        => admin.describeTopics(NonEmptySet.one(topic)).flatMap: described =>
+                described(topic)
+                  .fold(F.raiseError[TopicDescription](new IllegalStateException(s"topic ${topic.value} was not described")))(_.liftTo[F])
+                  .map(_.partitions.length.toInt).flatTap(count => counts.update(_.updated(topic, count)))
       running <-
         val interval = commitInterval.getOrElse(Engine.commitInterval(guarantee))
-        running(application, topology, member, watch(plane), transactions, interval, concurrency, purgeInterval, closeTimeout)
+        running(application, topology, member, watch(plane), transactions, interval, concurrency, purgeInterval, closeTimeout, partitions)
     yield running
 
   /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
@@ -217,7 +227,8 @@ private[xkafka] object Engine:
       commitInterval: FiniteDuration,
       concurrency: Int,
       purgeInterval: FiniteDuration,
-      closeTimeout: FiniteDuration
+      closeTimeout: FiniteDuration,
+      partitions: Topic => F[Int]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val segments = topology.pipelines.toList.flatMap(_.segments.toList).zipWithIndex.map((segment, id) => id.toString -> segment).toMap
     for
@@ -256,7 +267,8 @@ private[xkafka] object Engine:
           phase,
           standing,
           read,
-          following
+          following,
+          partitions
         )
       running <-
         Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
@@ -360,7 +372,8 @@ private[xkafka] object Engine:
       phase: SignallingRef[F, StreamsPhase],
       standing: Ref[F, Map[TaskId, Standby]],
       read: Queue[F, PolledRecord],
-      following: Ref[F, Boolean]
+      following: Ref[F, Boolean],
+      partitions: Topic => F[Int]
   )(using F: Async[F]):
     import MemberAction.*
 
@@ -593,7 +606,8 @@ private[xkafka] object Engine:
     private def inputOf(record: PolledRecord): TaskInput = TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers)
 
     private def recordOf(output: TaskOutput): F[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] =
-      output.partition.traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F]).map: partition =>
+      val chosen = output.partitionBy.fold(F.pure(output.partition))(by => partitions(output.topic).map(count => Some(Murmur2.partition(by, count))))
+      chosen.flatMap(_.traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F])).map: partition =>
         ProducerRecord(output.topic, output.key, output.value, partition, Some(Timestamp.fromEpochMillis(output.timestamp)), output.headers)
 
     /** The partition a task reads: its sub-topology's input topic, or its repartition topic, at the task's partition. */
