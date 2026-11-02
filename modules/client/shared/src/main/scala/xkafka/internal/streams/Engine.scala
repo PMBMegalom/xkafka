@@ -36,7 +36,7 @@ import driver.{KafkaDriver, PolledRecord, StartAt}
 import group.{Connections, PlatformCrypto, PlatformSockets}
 import protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KafkaStreams, Origin, ProcessingGuarantee, Segment, StreamsPhase, StreamsProblem, StreamsState, Topology}
+import xkafka.streams.{KafkaStreams, ProcessingGuarantee, Segment, Source, StreamsPhase, StreamsProblem, StreamsState, Topology}
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
   * one consumer and write through one producer. At least once, they commit what they read through the member; exactly once, in the transaction that
@@ -481,8 +481,8 @@ private[xkafka] object Engine:
 
     private def repartitioned(partition: TopicPartition): Boolean =
       segments.values.flatMap(_.origins).exists:
-        case Origin.Repartitioned(named, _, _) => partition.topic.value == s"$application-${named.name}-repartition"
-        case _                                 => false
+        case Source.Repartitioned(named) => partition.topic.value == s"$application-${named.name}-repartition"
+        case _                           => false
 
     /** The offset after the last record each task read since the last commit, with that record's leader epoch and the task's partition time. */
     private def offsetsOf(running: Running[F]): Map[TopicPartition, OffsetAndMetadata] =

@@ -26,8 +26,10 @@ import java.time.Duration
 import java.util.Properties
 
 import org.apache.kafka.common.serialization.Serdes
+import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, StreamsConfig}
 import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, SessionWindows, SlidingWindows, TimeWindows, WindowedSerdes}
+import org.apache.kafka.streams.state.KeyValueStore
 
 /** One Java Streams member of a mixed fleet, in a process of its own so that it can be killed outright, running the program the fleet tests' xkafka
   * members run. With `letters`, it counts the records of `<application>-input` by their value's first letter, through the repartition topic
@@ -35,10 +37,12 @@ import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, Sessio
   * key's records of `<application>-input-tumbling` in tumbling windows of 5 s into `tumbling`, of `<application>-input-sliding` in sliding windows of
   * 2.5 s into `sliding`, and of `<application>-input-sessions` in sessions with a gap of 1.5 s into `sessions`, each with an hour of grace, writing
   * each change to `<application>-output-<store>`. With `joins`, it joins each record of `<application>-input-orders` with its key's value in the
-  * table `users` read from `<application>-input-users`, writing `<order>:<user>` to `<application>-output`. It prints `running` once Java Streams says
+  * table `users` read from `<application>-input-users`, writing `<order>:<user>` to `<application>-output`. With `tables`, it left joins the table
+  * `plans` read from `<application>-input-plans` with the table `users`, into the store `accounts`, writing `<plan>:<user>`, or `<plan>:-` for a key
+  * without a user, to `<application>-output`. It prints `running` once Java Streams says
   * it runs, and closes on a SIGTERM, within 30 seconds.
   *
-  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters`, `windows` or `joins`.
+  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters`, `windows`, `joins` or `tables`.
   */
 object FleetMember:
   def main(arguments: Array[String]): Unit =
@@ -62,6 +66,12 @@ object FleetMember:
       case "joins" =>
         val users = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
         builder.stream[String, String](s"$application-input-orders").join(users, (order: String, user: String) => s"$order:$user")
+          .to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
+      case "tables" =>
+        val users    = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
+        val accounts = Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("accounts").withValueSerde(Serdes.String)
+        builder.table[String, String](s"$application-input-plans", Materialized.as("plans"))
+          .leftJoin(users, (plan: String, user: String) => s"$plan:${Option(user).getOrElse("-")}", accounts).toStream
           .to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
       case other => throw IllegalArgumentException(s"no fleet program $other")
     val properties = Properties()

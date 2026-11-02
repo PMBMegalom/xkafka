@@ -25,7 +25,7 @@ package streams
 
 import protocol.StreamsGroup
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{End, Origin, Topology}
+import xkafka.streams.{End, Source, Topology}
 
 /** The topology a member declares to the coordinator for a program, as Java Streams declares the same program: sub-topologies numbered in the order
   * their segments are made, and every list sorted as Java's client sorts it before sending.
@@ -58,8 +58,8 @@ private[xkafka] object Declaration:
     val segments                       = topology.pipelines.toList.flatMap(_.segments.toList)
     val subtopologies                  =
       segments.zipWithIndex.map: (segment, id) =>
-        val sources      = segment.origins.collect { case Origin.Input(topic, _, _) => topic.value }.sorted
-        val repartitions = segment.origins.collect { case Origin.Repartitioned(named, _, _) => repartitionTopic(named.name) }.sorted
+        val sources      = segment.origins.collect { case Source.Input(topic) => topic.value }.sorted
+        val repartitions = segment.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.name) }.sorted
         // A join puts the topics it reads in one copartition group, which Java keeps as a HashSet of their names, and sends as indices into the
         // sorted lists of the sub-topology's topics, in the order that set iterates.
         val copartitioned =

@@ -160,6 +160,51 @@ final class TopologyGoldenSuite extends FunSuite:
           .to("out", Produced.`with`(Serdes.String, Serdes.String))
     )
 
+  test("two tables joined read both in one sub-topology, copartitioned, with no store of their own, as Java declares them"):
+    assertEquals(
+      ours(
+        KTable(topic("left"), text, text, Store("lefts")).outerJoin(KTable(topic("right"), text, text, Store("rights")))(_.merge).toStream
+          .to(topic("out"), text, text.option)
+      ),
+      declaredByJava: builder =>
+        javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights"), (a: String, b: String) => a + b).toStream
+          .to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  test("two tables joined into a store declare its changelog, as Java declares a join given a store"):
+    assertEquals(
+      ours(
+        KTable(topic("left"), text, text, Store("lefts")).join(KTable(topic("right"), text, text, Store("rights")), Store("joined"), text)(_ + _)
+          .toStream.to(topic("out"), text, text.option)
+      ),
+      declaredByJava: builder =>
+        javaTable(builder, "left", "lefts").join(
+          javaTable(builder, "right", "rights"),
+          (a: String, b: String) => a + b,
+          Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("joined").withValueSerde(Serdes.String)
+        ).toStream.to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  test("a table joined with two tables joined, and with a counted stream, copartitions every topic they read, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("logins"), text, text).groupByKey(text, text).count(Store("logins-count")).leftJoin(
+          KTable(topic("third"), text, text, Store("thirds")).join(
+            KTable(topic("left"), text, text, Store("lefts")).leftJoin(KTable(topic("right"), text, text, Store("rights")))((a, b) => a + b)
+          )(_ + _)
+        )((n, abc) => s"$n${abc.getOrElse("")}").toStream.to(topic("out"), text, text.option)
+      ),
+      declaredByJava: builder =>
+        val lefts = javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), (a: String, b: String) => a + b)
+        builder.stream[String, String]("logins").groupByKey.count(
+          Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("logins-count")
+            .withValueSerde(Serdes.Long)
+        ).leftJoin(
+          javaTable(builder, "third", "thirds").join(lefts, (c: String, ab: String) => c + ab),
+          (n: java.lang.Long, abc: String) => s"$n$abc"
+        ).toStream.to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
   test("a join's copartition group lists its topics in the order Java's set of them iterates, not the order the program reads them"):
     // Java's set of "clicks" and "pages" iterates "pages" first.
     assertEquals(

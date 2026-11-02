@@ -29,6 +29,7 @@ import java.util.Properties
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+import cats.data.Ior
 import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
@@ -37,7 +38,7 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, Str
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
 import org.apache.kafka.streams.kstream.{
-  EmitStrategy, Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
+  EmitStrategy, Grouped, KTable as JavaTable, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
   Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
 }
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
@@ -53,6 +54,14 @@ import xkafka.streams.{
   */
 final class WindowGoldenSuite extends CatsEffectSuite:
   import WindowGoldenSuite.*
+
+  /** One of Java's joins of two tables into a store. */
+  private type JavaJoin =
+    (
+        JavaTable[String, String],
+        JavaTable[String, String],
+        Materialized[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]
+    ) => JavaTable[String, String]
 
   private val text  = Serde.utf8[IO]
   private val count = Serde.long[IO]
@@ -618,6 +627,151 @@ final class WindowGoldenSuite extends CatsEffectSuite:
           (o: String, u: String) => s"$o:${Option(u).getOrElse("-")}"
         ).to("out"),
       ordering
+    )
+
+  // Two tables changing in turn: keys both hold, one holds, neither holds, updates, deletes of held keys and of keys never held, and a late change.
+  private val tabling =
+    List(
+      ("left", "k1", "a1", 1000L),
+      ("right", "k1", "b1", 2000L), // k1 in both
+      ("left", "k2", "a2", 2500L),  // k2 in the left only
+      ("right", "k3", "b3", 3000L), // k3 in the right only
+      ("left", "k1", "a1+", 3500L), // an update while both hold k1
+      ("right", "k2", "b2", 1500L), // late, earlier than the left's value for k2
+      ("right", "k1", null, 4000L), // deletes k1 on the right while the left holds it
+      ("left", "k3", null, 4500L),  // deletes k3 on the left, which never held it, while the right does
+      ("left", "k4", null, 5000L),  // deletes k4, which neither holds
+      ("right", "k4", null, 5500L),
+      ("left", "k2", null, 6000L),   // deletes k2 on the left while the right holds it
+      ("right", "k2", "b2+", 6500L), // an update on the right after the left deleted k2
+      ("left", "k1", "a1++", 7000L),
+      ("right", "k1", "b1+", 20000L) // well after every other change
+    )
+
+  private def lefts  = KTable(Topic.from("left").orFail, text, text, Store("lefts"))
+  private def rights = KTable(Topic.from("right").orFail, text, text, Store("rights"))
+
+  private def javaTable(builder: StreamsBuilder, topic: String, store: String) =
+    builder.table[String, String](topic, Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](store))
+
+  private def javaStored(store: String) =
+    Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](store).withValueSerde(Serdes.String)
+
+  private def either(a: String, b: String) = s"${Option(a).getOrElse("-")}+${Option(b).getOrElse("-")}"
+
+  private def ior(both: Ior[String, String]) = either(both.left.orNull, both.right.orNull)
+
+  test("two tables joined write what Java's join of tables does, a delete on either side deleting the result"):
+    sameFrom(
+      lefts.join(rights)((a, b) => s"$a+$b").toStream.to(out, text, text.option),
+      builder =>
+        javaTable(builder, "left", "lefts").join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b").toStream.to("out"),
+      tabling
+    )
+
+  test("two tables left joined write what Java's left join of tables does, a right side's delete joining the left with none"):
+    sameFrom(
+      lefts.leftJoin(rights)((a, b) => either(a, b.orNull)).toStream.to(out, text, text.option),
+      builder => javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), either).toStream.to("out"),
+      tabling
+    )
+
+  test("two tables outer joined write what Java's outer join of tables does"):
+    sameFrom(
+      lefts.outerJoin(rights)(ior).toStream.to(out, text, text.option),
+      builder => javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights"), either).toStream.to("out"),
+      tabling
+    )
+
+  for (kind, ours, java) <-
+      List[(String, KTable[IO, String, String, Option] => KTable[IO, String, String, Option], JavaJoin)](
+        ("joined", _.join(rights, Store("joined"), text)((a, b) => s"$a+$b"), (l, r, m) => l.join(r, (a: String, b: String) => s"$a+$b", m)),
+        ("left joined", _.leftJoin(rights, Store("joined"), text)((a, b) => either(a, b.orNull)), (l, r, m) => l.leftJoin(r, either, m)),
+        ("outer joined", _.outerJoin(rights, Store("joined"), text)(ior), (l, r, m) => l.outerJoin(r, either, m))
+      )
+  do
+    test(s"two tables $kind into a store write its changelog as Java's join given a store does"):
+      sameFrom(
+        ours(lefts).toStream.to(out, text, text.option),
+        builder => java(javaTable(builder, "left", "lefts"), javaTable(builder, "right", "rights"), javaStored("joined")).toStream.to("out"),
+        tabling
+      )
+
+    test(s"two tables $kind into a store and suppressed hold the old values Java's join passes on to its suppression"):
+      sameFrom(
+        ours(lefts).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).toStream.to(out, text, text.option),
+        builder =>
+          java(javaTable(builder, "left", "lefts"), javaTable(builder, "right", "rights"), javaStored("joined"))
+            .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")).toStream.to("out"),
+        tabling
+      )
+
+  test("a table joined with two tables joined reads their result as Java's join value getter makes it"):
+    sameFrom(
+      KTable(Topic.from("third").orFail, text, text, Store("thirds")).leftJoin(lefts.outerJoin(rights)(ior))((c, ab) => either(c, ab.orNull)).toStream
+        .to(out, text, text.option),
+      builder =>
+        javaTable(builder, "third", "thirds")
+          .leftJoin(javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights"), either), either).toStream.to("out"),
+      tabling ++ List(("third", "k1", "c1", 21000L), ("third", "k2", "c2", 21500L), ("third", "k5", "c5", 22000L), ("left", "k2", "a2+", 22500L))
+    )
+
+  // Late changes to the third table, so the time the joined tables' view gives wins: k1's left value is older than its right one.
+  test("a table joined with two tables left joined reads their result and its time as Java's left join value getter gives them"):
+    sameFrom(
+      KTable(Topic.from("third").orFail, text, text, Store("thirds"))
+        .join(lefts.leftJoin(rights)((a, b) => either(a, b.orNull)))((c, ab) => s"$c:$ab").toStream.to(out, text, text.option),
+      builder =>
+        javaTable(builder, "third", "thirds")
+          .join(javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), either), (c: String, ab: String) => s"$c:$ab")
+          .toStream.to("out"),
+      tabling ++ List(("third", "k1", "c1", 100L), ("third", "k2", "c2", 200L), ("left", "k5", "a5", 300L), ("third", "k5", "c5", 100L))
+    )
+
+  test("two tables joined and left joined with a third pass on the old values Java's left join asks of their join"):
+    sameFrom(
+      lefts.join(rights)((a, b) => s"$a+$b")
+        .leftJoin(KTable(Topic.from("third").orFail, text, text, Store("thirds")))((ab, c) => either(ab, c.orNull)).toStream
+        .to(out, text, text.option),
+      builder =>
+        javaTable(builder, "left", "lefts").join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b")
+          .leftJoin(javaTable(builder, "third", "thirds"), either).toStream.to("out"),
+      List(("third", "k2", "c2", 500L)) ++ tabling
+    )
+
+  test("a stream joined with two tables joined reads their result as Java's join value getter makes it"):
+    sameFrom(
+      KStream(Topic.from("orders").orFail, text, text).join(lefts.leftJoin(rights)((a, b) => either(a, b.orNull)))((o, ab) => s"$o:$ab")
+        .to(out, text, text),
+      builder =>
+        builder.stream[String, String]("orders")
+          .join(javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), either), (o: String, ab: String) => s"$o:$ab")
+          .to("out"),
+      tabling ++ List(("orders", "k1", "o1", 21000L), ("orders", "k2", "o2", 21500L), ("orders", "k3", "o3", 22000L))
+    )
+
+  test("a counted table left joined with a table passes on its old counts as Java's does"):
+    sameFrom(
+      KStream(Topic.from("logins").orFail, text, text).groupByKey(text, text).count(Store("logins-count"))
+        .leftJoin(rights, Store("joined"), text)((n, b) => either(n.toString, b.orNull)).suppress(Suppressed.untilTimeLimit("calm", 2.seconds))
+        .toStream.to(out, text, text.option),
+      builder =>
+        builder.stream[String, String]("logins").groupByKey.count(counted("logins-count"))
+          .leftJoin(javaTable(builder, "right", "rights"), (n: java.lang.Long, b: String) => either(n.toString, b), javaStored("joined"))
+          .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")).toStream.to("out"),
+      tabling.map((topic, key, value, at) => if topic == "left" then ("logins", key, value, at) else (topic, key, value, at)).filter(_._3 != null)
+    )
+
+  test("a suppressed table joined with a table passes on the old values its suppression held, as Java's does"):
+    sameFrom(
+      lefts.suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).join(rights, Store("joined"), text)((a, b) => s"$a+$b").toStream
+        .to(out, text, text.option),
+      builder =>
+        javaTable(builder, "left", "lefts").suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm"))
+          .join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b", javaStored("joined")).toStream.to("out"),
+      // Then k5's first value goes on, its second is held, and a late change on the right joins the value from before it, of a time Java does
+      // not know, so the change's own time is the result's.
+      tabling ++ List(("left", "k5", "a5", 30000L), ("left", "k6", "a6", 33000L), ("left", "k5", "a5+", 33500L), ("right", "k5", "b5", 1000L))
     )
 
   test("a table of records grouped by a new key holds where each came from in the repartition topic, as Java's buffer does"):

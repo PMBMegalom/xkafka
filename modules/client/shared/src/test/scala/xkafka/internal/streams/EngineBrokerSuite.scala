@@ -343,6 +343,30 @@ final class EngineBrokerSuite extends CatsEffectSuite:
               produceValues(server, app.input, List("a" -> Some("o1"), "b" -> Some("o2"), "c" -> Some("o3"))) *>
               latestValues(server, app.output, Map("a" -> Some("o1:ann"), "b" -> Some("o2:bob")))
 
+    test(s"$release, $under: an engine outer joins two tables read from copartitioned topics, a change to either updating the result"):
+      counting(
+        server,
+        (plans, output) =>
+          KTable(plans, text, text, Store("plans"))
+            .outerJoin(KTable(Topic.from(s"${plans.value}-users").orFail, text, text, Store("users")), Store("accounts"), text)(_.fold(
+              plan => s"$plan:-",
+              user => s"-:$user",
+              (plan, user) => s"$plan:$user"
+            )).toStream.to(output, text, text.option)
+      ): app =>
+        val users = Topic.from(s"${app.input.value}-users").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 2, 1).orFail))) *> running(server, app):
+          produceValues(server, users, List("a" -> Some("ann"), "b" -> Some("bob"))) *>
+            latestValues(server, app.output, Map("a" -> Some("-:ann"), "b" -> Some("-:bob"))) *>
+            produceValues(server, app.input, List("a" -> Some("gold"), "c" -> Some("free"))) *>
+            latestValues(server, app.output, Map("a" -> Some("gold:ann"), "b" -> Some("-:bob"), "c" -> Some("free:-"))) *>
+            produceValues(server, users, List("b" -> None)) *>
+            latestValues(server, app.output, Map("a" -> Some("gold:ann"), "b" -> None, "c" -> Some("free:-"))) *> latestValues(
+              server,
+              Topic.from(s"${app.application}-accounts-changelog").orFail,
+              Map("a" -> Some("gold:ann"), "b" -> None, "c" -> Some("free:-"))
+            )
+
     test(s"$release, $under: a stream and the table it joins in topics of different partition counts are refused by the broker, as for Java"):
       counting(
         server,

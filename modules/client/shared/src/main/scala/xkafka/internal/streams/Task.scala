@@ -26,7 +26,10 @@ package streams
 import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.streams.{BaseKeyed, Chain, End, Origin, Segment, Step, Suppressed, TableKey, TableValue, TableView, Window, Windowed}
+import cats.data.Ior
+import xkafka.streams.{
+  BaseKeyed, Chain, End, Origin, Segment, Side, Source, Step, Suppressed, TableJoiner, TableKey, TableValue, TableView, Window, Windowed
+}
 
 /** A record as a topic holds it, read by a task. */
 private[xkafka] final case class TaskInput(
@@ -84,7 +87,6 @@ private[xkafka] object TaskState:
   * change to a store goes to its changelog and on downstream.
   */
 private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, ?, ?, ?, ?], partition: Int)(using F: MonadThrow[F]):
-  /** A record as it travels through the steps. */
   /** A record going from step to step; a table's change also carries the value it replaced, where Java passes one on, and a change a suppression
     * held, where it came from, which Java passes on with it.
     */
@@ -97,8 +99,9 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       origin: Option[HeldContext] = None
   )
 
-  /** The topic each of the sub-topology's segments reads, with the segment. */
-  private val readers: Map[String, Segment[F, ?, ?, ?, ?]] = segment.all.map(read => Task.topicOf(application, read.origin) -> read).toMap
+  /** The topics each of the sub-topology's segments reads, with the segment. */
+  private val readers: Map[String, Segment[F, ?, ?, ?, ?]] =
+    segment.all.flatMap(read => read.origin.sources.map(Task.topicOf(application, _) -> read)).toMap
 
   /** Runs `input` through the segment that reads its topic at wall-clock time `now`, in epoch milliseconds. */
   def process(state: TaskState, input: TaskInput, now: Long): F[(TaskState, Vector[TaskOutput])] =
@@ -125,18 +128,115 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       input: TaskInput,
       now: Long
   ): F[(TaskState, Vector[TaskOutput])] =
-    val (topic, key, value) =
-      segment.origin match
-        case Origin.Input(topic, key, value)               => (F.pure(topic), key, value)
-        case Origin.Repartitioned(repartition, key, value) => (topicNamed(s"$application-${repartition.name}-repartition"), key, value)
     for
-      source <- topic
-      k      <- key.deserializer.deserialize(source, input.headers, input.key)
-      v      <- value.deserializer.deserialize(source, input.headers, input.value)
-      ran    <- chain(segment.chain, Travelling(k, v, input.timestamp, input.headers), state, now)
-      (after, records, written) = ran
-      ended <- records.flatTraverse(leaving(segment.end, _))
-    yield (after, written ++ ended)
+      fedIn <- fed(segment.origin, input, state, now, Task.requests(segment.chain, false))
+      (read, records, logged) = fedIn
+      ran <- chained(segment.chain, records, read, now)
+      (after, out, written) = ran
+      ended <- out.flatTraverse(leaving(segment.end, _))
+    yield (after, logged ++ written ++ ended)
+
+  /** The records `origin` gives for `input`: the record read, or for tables joined, what the join makes of the change the record makes to one side.
+    * `requested` says whether what reads them asks for old values, as Java's processors after a table ask with `enableSendingOldValues`.
+    */
+  private def fed[K, V](
+      origin: Origin[F, K, V],
+      input: TaskInput,
+      state: TaskState,
+      now: Long,
+      requested: Boolean
+  ): F[(TaskState, Vector[Travelling[K, V]], Vector[TaskOutput])] =
+    def read(topic: F[Topic], key: xkafka.streams.Serde[F, K], value: xkafka.streams.Serde[F, V]) =
+      for
+        source <- topic
+        k      <- key.deserializer.deserialize(source, input.headers, input.key)
+        v      <- value.deserializer.deserialize(source, input.headers, input.value)
+      yield (state, Vector(Travelling(k, v, input.timestamp, input.headers)), Vector.empty[TaskOutput])
+    origin match
+      case Origin.Input(topic, key, value)               => read(F.pure(topic), key, value)
+      case Origin.Repartitioned(repartition, key, value) => read(topicNamed(s"$application-${repartition.name}-repartition"), key, value)
+      case Origin.Joined(left, right, joiner, store)     => joinedFed(left, right, joiner, store, input, state, now, requested)
+
+  /** Runs each of `records` through `steps`, in order. */
+  private def chained[K, V, K2, V2](
+      steps: Chain[F, K, V, K2, V2],
+      records: Vector[Travelling[K, V]],
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
+    records.foldLeftM((state, Vector.empty[Travelling[K2, V2]], Vector.empty[TaskOutput])):
+      case ((current, done, out), record) => chain(steps, record, current, now).map((after, more, logged) => (after, done ++ more, out ++ logged))
+
+  /** The changes one side of a join makes for `input`, read through its steps. Each keeps its old value: a join reads one only where Java's side
+    * passes it on, since it reads it only for a side its kind asks, or once what reads the join asks, which asks both sides.
+    */
+  private def sideFed[K, A, K0, V0, C](
+      side: Side[F, K, A, K0, V0, C],
+      input: TaskInput,
+      state: TaskState,
+      now: Long,
+      requested: Boolean
+  ): F[(TaskState, Vector[Task.Change[K, A]], Vector[TaskOutput])] =
+    for
+      fedIn <- fed(side.origin, input, state, now, Task.requests(side.chain, requested))
+      (read, records, logged) = fedIn
+      ran <- chained(side.chain, records, read, now)
+      (after, changes, written) = ran
+    yield (
+      after,
+      changes.map: change =>
+        Task.Change(change.key, side.present(change.value), change.old.flatMap(side.present), change.timestamp, change.headers),
+      logged ++ written
+    )
+
+  /** What two tables joined make of the change `input` makes to one side, as Java's join processors for that side make it, each looking up the other
+    * side's value through its view, then, as Java's merger does, kept in the join's store where it has one, and passed on with an old value where
+    * what reads the result asks for one.
+    */
+  private def joinedFed[K, A, B, R, K1, V1, C1, K2, V2, C2](
+      left: Side[F, K, A, K1, V1, C1],
+      right: Side[F, K, B, K2, V2, C2],
+      joiner: TableJoiner[A, B, R],
+      store: Option[(xkafka.streams.Store, xkafka.streams.Serde[F, K], xkafka.streams.Serde[F, R])],
+      input: TaskInput,
+      state: TaskState,
+      now: Long,
+      requested: Boolean
+  ): F[(TaskState, Vector[Travelling[K, Option[R]]], Vector[TaskOutput])] =
+    val (leftOld, rightOld) = joiner.forcesOld
+    val fromLeft            = left.origin.sources.exists(Task.topicOf(application, _) == input.topic)
+    // Each change goes on as the result's new value, its old one, and its time, keyed and with the headers of the change, or not at all.
+    val made: F[(TaskState, Vector[Travelling[K, Option[R]]], Vector[TaskOutput])] =
+      def result(key: K, headers: Headers)(value: Option[R], old: Option[R], timestamp: Long) =
+        Travelling[K, Option[R]](key, value, timestamp, headers, old.map(Some(_)))
+      if fromLeft then
+        sideFed(left, input, state, now, leftOld || requested).flatMap: (after, changes, written) =>
+          changes.flatTraverse: change =>
+            lookup(right.view, change.key, after)
+              .map(Task.joinLeft(joiner, change, _, requested).map(result(change.key, change.headers).tupled).toVector)
+          .map((after, _, written))
+      else
+        sideFed(right, input, state, now, rightOld || requested).flatMap: (after, changes, written) =>
+          changes.flatTraverse: change =>
+            lookup(left.view, change.key, after)
+              .map(Task.joinRight(joiner, change, _, requested).map(result(change.key, change.headers).tupled).toVector)
+          .map((after, _, written))
+    made.flatMap: (after, results, written) =>
+      results.foldLeftM((after, Vector.empty[Travelling[K, Option[R]]], written)):
+        case ((current, out, logged), result) => store match
+            case None                        => F.pure((current, out :+ result, logged))
+            case Some((named, keys, values)) => topicNamed(s"$application-${named.name}-changelog").flatMap: changelog =>
+                val timestamp = result.timestamp
+                (
+                  keys.serializer.serialize(changelog, Headers.empty, result.key),
+                  result.value.flatTraverse(values.serializer.serialize(changelog, Headers.empty, _))
+                ).tupled.map:
+                  case (None, _)              => (current, out :+ result, logged)
+                  case (Some(bytes), written) =>
+                    val held     = current.store(named.name)
+                    val contents = written.fold(held - bytes)(v => held.updated(bytes, Stored(v, timestamp)))
+                    val log      = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
+                    (current.copy(stores = current.stores.updated(named.name, contents)), out :+ result, logged :+ log)
 
   private def chain[K, V, K2, V2](
       steps: Chain[F, K, V, K2, V2],
@@ -149,6 +249,10 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case Chain.Then(init, last) => chain(init, record, state, now).flatMap: (before, records, written) =>
           records.foldLeftM((before, Vector.empty[Travelling[K2, V2]], written)):
             case ((current, done, out), next) => step(last, next, current, now).map((after, more, logged) => (after, done ++ more, out ++ logged))
+
+  /** The other side's value for `key` and its time, where its view finds one; a windowed table has no view, and its joins are refused. */
+  private def lookup[K, V](view: Option[TableView[F, K, V]], key: K, state: TaskState): F[Option[(V, Long)]] =
+    view.flatTraverse(valueOf(_, key, state))
 
   private def step[K, V, K2, V2](
       step: Step[F, K, V, K2, V2],
@@ -176,7 +280,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case Step.Join(view, join)                                         => valueOf(view, record.key, state)
-          .map(table => (state, join(record.value, table).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
+          .map(table => (state, join(record.value, table.map(_._1)).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
           .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
       case Step.TableSource(store, key, value) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           record.key.flatTraverse(k => key.serializer.serialize(changelog, Headers.empty, k).map(_.map(k -> _))).flatMap:
@@ -689,23 +793,42 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
             ).mapN((k, v) => Travelling(Windowed(k, Window(start, start + width)), v, held.timestamp, record.headers))
           .map(emitted => (emitted, throttled.copy(lastEmitted = throttled.lastEmitted.updated(store, closeTime))))
 
-  /** The value the table `view` reads holds for `key`, as Java's value getter reads it: a suppressed table's buffer first, where a key it holds gives
-    * the value from before the change it holds, none where there was none, and otherwise the store's value.
+  /** The value the table `view` reads holds for `key`, with its time, as Java's value getter reads it: a suppressed table's buffer first, where a key
+    * it holds gives the value from before the change it holds, at an unknown time, none where there was none, and otherwise the store's value; for
+    * tables joined without a store, what the joiner makes of their values, as Java's join value getters make it.
     */
-  private def valueOf[K, V](view: TableView[F, K, V], key: K, state: TaskState): F[Option[V]] =
+  private def valueOf[K, V](view: TableView[F, K, V], key: K, state: TaskState): F[Option[(V, Long)]] =
     view match
       case TableView.Stored(store, keys, values) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           keys.serializer.serialize(changelog, Headers.empty, key).flatMap:
-            _.flatMap(state.store(store.name).get).traverse(held => values.deserializer.deserialize(changelog, Headers.empty, Some(held.value)))
+            _.flatMap(state.store(store.name).get)
+              .traverse(held => values.deserializer.deserialize(changelog, Headers.empty, Some(held.value)).map(_ -> held.timestamp))
       case TableView.Held(buffer, parent) =>
-        val (keys, values) = Task.serdesOf(parent)
+        def unreadable = new IllegalStateException(s"the suppression buffer '$buffer' holds a change it cannot read")
         topicNamed(s"$application-$buffer-changelog").flatMap: changelog =>
-          keys.serializer.serialize(changelog, Headers.empty, key).flatMap: bytes =>
+          parent.keys.serializer.serialize(changelog, Headers.empty, key).flatMap: bytes =>
             bytes.flatMap(state.store(buffer).get) match
               case None         => valueOf(parent, key, state)
-              case Some(stored) => Held.decode(stored.value)
-                  .liftTo[F](new IllegalStateException(s"the suppression buffer '$buffer' holds a change it cannot read"))
-                  .flatMap(held => held.prior.traverse(prior => values.deserializer.deserialize(changelog, held.context.headers, Some(prior))))
+              case Some(stored) => (Held.decode(stored.value), Task.valuesOf(parent)).tupled.liftTo[F](unreadable).flatMap: (held, values) =>
+                  held.prior.traverse(prior => values.deserializer.deserialize(changelog, held.context.headers, Some(prior)).map(_ -> Task.Unknown))
+      case TableView.Joined(left, right, joiner) => joinedValueOf(left, right, joiner, key, state)
+
+  private def joinedValueOf[K, A, B, R](
+      left: TableView[F, K, A],
+      right: TableView[F, K, B],
+      joiner: TableJoiner[A, B, R],
+      key: K,
+      state: TaskState
+  ): F[Option[(R, Long)]] =
+    joiner match
+      case TableJoiner.Inner(join) => valueOf(left, key, state).flatMap:
+          case None          => F.pure(None)
+          case Some((a, at)) => valueOf(right, key, state).map(_.map((b, bt) => (join(a, b), math.max(at, bt))))
+      case TableJoiner.Left(join) => valueOf(left, key, state).flatMap:
+          case None          => F.pure(None)
+          case Some((a, at)) => valueOf(right, key, state).map(b => Some((join(a, b.map(_._1)), b.fold(at)(found => math.max(at, found._2)))))
+      case TableJoiner.Outer(join) => (valueOf(left, key, state), valueOf(right, key, state)).mapN: (a, b) =>
+          Ior.fromOptions(a.map(_._1), b.map(_._1)).map(both => (join(both), math.max(a.fold(Task.Unknown)(_._2), b.fold(Task.Unknown)(_._2))))
 
   private def leaving[K, V](exit: End[F, K, V], record: Travelling[K, V]): F[Vector[TaskOutput]] =
     exit match
@@ -738,17 +861,80 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
-  /** The topic `origin` names, as the application names its repartition topics. */
-  def topicOf[F[_]](application: String, origin: Origin[F, ?, ?]): String =
-    origin match
-      case Origin.Input(topic, _, _)         => topic.value
-      case Origin.Repartitioned(named, _, _) => s"$application-${named.name}-repartition"
+  /** The topic `source` names, as the application names its repartition topics. */
+  def topicOf(application: String, source: Source): String =
+    source match
+      case Source.Input(topic)         => topic.value
+      case Source.Repartitioned(named) => s"$application-${named.name}-repartition"
 
-  /** The serdes a table view writes its keys and values with. */
-  def serdesOf[F[_], K, V](view: TableView[F, K, V]): (xkafka.streams.Serde[F, K], xkafka.streams.Serde[F, V]) =
+  /** The serde a table view's values are written with, which the result of joining tables kept in no store does not have. */
+  def valuesOf[F[_], K, V](view: TableView[F, K, V]): Option[xkafka.streams.Serde[F, V]] =
     view match
-      case TableView.Stored(_, key, value) => (key, value)
-      case TableView.Held(_, parent)       => serdesOf(parent)
+      case TableView.Stored(_, _, value) => Some(value)
+      case TableView.Held(_, parent)     => valuesOf(parent)
+      case TableView.Joined(_, _, _)     => None
+
+  /** Whether the first table step of `chain` asks the table before it for old values, as Java's suppression does, or where it has no steps, whether
+    * what follows it asks.
+    */
+  def requests[F[_], K, V, K2, V2](chain: Chain[F, K, V, K2, V2], outer: Boolean): Boolean =
+    chain match
+      case Chain.Start()                                        => outer
+      case Chain.Then(Chain.Start(), Step.Suppress(_, _, _, _)) => true
+      case Chain.Then(Chain.Start(), _)                         => false
+      case Chain.Then(init, _)                                  => requests(init, outer)
+
+  /** What Java's join processor for the left side makes of `change` and the right side's value `other`, for each kind of join: the result's new
+    * value, its old value where `sendOld`, and its time, or nothing where Java forwards nothing.
+    */
+  def joinLeft[K, A, B, R](
+      joiner: TableJoiner[A, B, R],
+      change: Change[K, A],
+      other: Option[(B, Long)],
+      sendOld: Boolean
+  ): Option[(Option[R], Option[R], Long)] =
+    val b = other.map(_._1)
+    joiner match
+      case TableJoiner.Inner(join) => other.map: (b, bt) =>
+          (change.value.map(join(_, b)), change.old.filter(_ => sendOld).map(join(_, b)), math.max(change.timestamp, bt))
+      case TableJoiner.Left(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
+          (change.value.map(join(_, b)), change.old.filter(_ => sendOld).map(join(_, b)), math.max(change.timestamp, other.fold(Unknown)(_._2)))
+      case TableJoiner.Outer(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
+          (
+            Ior.fromOptions(change.value, b).map(join),
+            Option.when(sendOld)(Ior.fromOptions(change.old, b).map(join)).flatten,
+            other.fold(change.timestamp)(found => math.max(change.timestamp, found._2))
+          )
+
+  /** What Java's join processor for the right side makes of `change` and the left side's value `other`: an inner join's, a left join's right join,
+    * which joins even a delete, and an outer join's.
+    */
+  def joinRight[K, A, B, R](
+      joiner: TableJoiner[A, B, R],
+      change: Change[K, B],
+      other: Option[(A, Long)],
+      sendOld: Boolean
+  ): Option[(Option[R], Option[R], Long)] =
+    val a = other.map(_._1)
+    joiner match
+      case TableJoiner.Inner(join) => other.map: (a, at) =>
+          (change.value.map(join(a, _)), change.old.filter(_ => sendOld).map(join(a, _)), math.max(change.timestamp, at))
+      case TableJoiner.Left(join) => other.map: (a, at) =>
+          (Some(join(a, change.value)), Option.when(sendOld)(join(a, change.old)), math.max(change.timestamp, at))
+      case TableJoiner.Outer(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
+          (
+            Ior.fromOptions(a, change.value).map(join),
+            Option.when(sendOld)(Ior.fromOptions(a, change.old).map(join)).flatten,
+            other.fold(change.timestamp)(found => math.max(change.timestamp, found._2))
+          )
+
+  /** A change to one side of a table-table join, as Java's join processors see it: the new value, or none for a delete, and the old value, none where
+    * there was none.
+    */
+  final case class Change[K, A](key: K, value: Option[A], old: Option[A], timestamp: Long, headers: Headers)
+
+  /** A time Java does not know, as it gives the value a suppression held from before its change. */
+  val Unknown: Long = -1L
 
   /** The time of a record the broker or its producer stamps, as Java leaves a suppression buffer's changelog records unstamped. */
   val NoTimestamp: Long = -1L

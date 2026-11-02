@@ -29,7 +29,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
-import xkafka.streams.{KStream, Pipeline, Serde, Store, TimeWindows, Topology}
+import xkafka.streams.{KStream, KTable, Pipeline, Serde, Store, TimeWindows, Topology}
 
 /** What a task writes to its changelogs and keeps between records, on every platform. */
 final class TaskSuite extends CatsEffectSuite:
@@ -139,3 +139,27 @@ final class TaskSuite extends CatsEffectSuite:
     val counted = task(KStream(in, text, text).groupByKey(dashIsNone, text).count(Store("counts")).toStream.to(out, text, count), 0)
     counted.process(TaskState.empty, TaskInput(bytes("-"), bytes("v"), 1000L, Headers.empty), 0L).map: (state, written) =>
       assertEquals((state.store("counts"), written), (Map.empty, Vector.empty))
+
+  // The values and times Java's outer join of tables writes for these changes (WindowGoldenSuite runs Java's against ours): a delete on the left
+  // joins the right's value alone, at the later time, and the right's delete after it, finding neither side, deletes the result, since the outer
+  // join has the right side's old value.
+  test("two tables outer joined into a store write each change's result to the store's changelog and on, a delete where neither side holds the key"):
+    val joined =
+      KTable(Topic.from("left").orFail, text, text, Store("lefts"))
+        .outerJoin(KTable(Topic.from("right").orFail, text, text, Store("rights")), Store("joined"), text)(_.fold(
+          a => s"$a+-",
+          b => s"-+$b",
+          (a, b) => s"$a+$b"
+        )).toStream.to(out, text, text.option)
+    val running = task(joined, 0)
+    val changes = List(("left", "a1", 1000L), ("right", "b1", 2000L), ("left", null, 1500L), ("right", null, 3000L))
+    changes.foldLeftM((TaskState.empty, Vector.empty[TaskOutput])):
+      case ((state, written), (topic, value, timestamp)) => running
+          .process(state, TaskInput(bytes("k1"), Option(value).flatMap(bytes), timestamp, Headers.empty, topic), 0L)
+          .map((after, more) => (after, written ++ more))
+    .map: (state, written) =>
+      val results = written.filter(_.topic == out).map(record => (record.value.map(v => new String(v.toArray)), record.timestamp))
+      assertEquals(results, Vector((Some("a1+-"), 1000L), (Some("a1+b1"), 2000L), (Some("-+b1"), 2000L), (None, 3000L)))
+      val logged = written.filter(_.topic.value == "app-joined-changelog").map(record => (record.value.isDefined, record.timestamp))
+      assertEquals(logged, Vector((true, 1000L), (true, 2000L), (true, 2000L), (false, 3000L)))
+      assertEquals(state.store("joined"), Map.empty)

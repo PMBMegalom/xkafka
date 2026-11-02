@@ -67,6 +67,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     /** Joining each order with its user, from a table read from a topic. */
     case Joins extends Program("joins")
 
+    /** Joining a table of each key's plan with the table of users, into a store. */
+    case Tables extends Program("tables")
+
   private val windowKinds = List("tumbling", "sliding", "sessions")
 
   /** An application of the fleet's own. */
@@ -89,6 +92,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         case Program.Letters => List(input, output)
         case Program.Windows => windowKinds.flatMap(kind => List(inputOf(kind), outputOf(kind)))
         case Program.Joins   => List(inputOf("users"), inputOf("orders"), output)
+        case Program.Tables  => List(inputOf("users"), inputOf("plans"), output)
 
     val topology: Topology[IO] =
       program match
@@ -107,6 +111,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         case Program.Joins => Topology.of(
             KStream(inputOf("orders"), text, text).join(KTable(inputOf("users"), text, text, Store("users")))((order, user) => s"$order:$user")
               .to(output, text, text)
+          ).orFail
+        case Program.Tables => Topology.of(
+            KTable(inputOf("plans"), text, text, Store("plans"))
+              .leftJoin(KTable(inputOf("users"), text, text, Store("users")), Store("accounts"), text)((plan, user) =>
+                s"$plan:${user.getOrElse("-")}"
+              ).toStream.to(output, text, text.option)
           ).orFail
 
     private def command(text: String): IO[Unit] =
@@ -295,10 +305,10 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         seen => missed(sessions)(seen) ++ stray(seen)
       )
 
-  /** Writes a user for each of ten keys, waiting until the table's changelog holds them, then orders while it lasts, keyed in turn over the ten keys.
-    * What it gives stops the writing and then gives each order's key, every order written by then.
+  /** Writes a user for each of ten keys, waiting until the table's changelog holds them, then records to `topic` while it lasts, `o<n>`, keyed in
+    * turn over the ten keys. What it gives stops the writing and then gives each record's key, every record written by then.
     */
-  private def joinsLoad(fleet: Fleet): Resource[IO, IO[Map[String, String]]] =
+  private def joinsLoad(fleet: Fleet, topic: String): Resource[IO, IO[Map[String, String]]] =
     val producer  = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
     val users     = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
     val changelog =
@@ -321,13 +331,13 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       writing <-
         Resource.make(fs2.Stream.iterate(0L)(_ + 1).evalMap: n =>
           val key = s"k${n % 10}"
-          (writer.produceAndAwait(NonEmptyList.one(ProducerRecord(fleet.inputOf("orders"), key, s"o$n"))) *> written.update(_.updated(s"o$n", key)))
+          (writer.produceAndAwait(NonEmptyList.one(ProducerRecord(fleet.inputOf(topic), key, s"o$n"))) *> written.update(_.updated(s"o$n", key)))
             .uncancelable *> IO.sleep(20.millis)
         .compile.drain.start)(_.cancel)
     yield writing.cancel *> written.get
 
-  /** Reads the output from its start until every order written is there, joined with its user: once under exactly once, at least once under at least
-    * once, failing after three minutes.
+  /** Reads the output from its start until every record written is there, joined with its key's user, and nothing else: once under exactly once, at
+    * least once under at least once, failing after three minutes.
     */
   private def joined(fleet: Fleet, written: Map[String, String]): IO[Unit] =
     Names.fresh:
@@ -359,7 +369,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     fleet.program match
       case Program.Letters => load(fleet).map(_.flatMap(counted(fleet, _)))
       case Program.Windows => windowsLoad(fleet).map(_.flatMap(windowsCounted(fleet, _)))
-      case Program.Joins   => joinsLoad(fleet).map(_.flatMap(joined(fleet, _)))
+      case Program.Joins   => joinsLoad(fleet, "orders").map(_.flatMap(joined(fleet, _)))
+      // Each plan joins the user the table already holds for its key, so it comes out as an order joined with its user does.
+      case Program.Tables => joinsLoad(fleet, "plans").map(_.flatMap(joined(fleet, _)))
 
   private def recording = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
 

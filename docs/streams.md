@@ -153,6 +153,59 @@ orders
   .join(users, Repartition("orders-by-user"), text, order)((order, user) => s"$order for $user")
 ```
 
+### Joining tables
+
+Two tables with the same key join into a table, as Java Kafka Streams' table-table
+joins do. Every change to either table updates the result for its key:
+
+```scala mdoc:compile-only
+import cats.data.Ior
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def accounts(users: Topic, plans: Topic, output: Topic): Pipeline[IO] =
+  val text  = Serde.utf8[IO]
+  val named = KTable(users, text, text, Store("users"))
+  val paid  = KTable(plans, text, text, Store("plans"))
+  named
+    .outerJoin(paid) {
+      case Ior.Left(user)       => s"$user, no plan"
+      case Ior.Right(plan)      => s"unknown user on $plan"
+      case Ior.Both(user, plan) => s"$user on $plan"
+    }
+    .toStream
+    .to(output, text, text.option)
+```
+
+- `join` holds a value for each key both tables hold a value for.
+- `leftJoin` holds one for each key the left table holds, passing the right
+  table's value as an `Option`.
+- `outerJoin` holds one for each key either table holds, passing the values as
+  an `Ior`: the left, the right, or both.
+
+The result can delete keys, whichever tables were joined, so its changes are
+`Option` values, and `toStream` writes a delete as a tombstone. As in Java, a
+delete on either side of `join` deletes the key from the result, even a key the
+result never held. The joining function cannot delete a key itself. Each
+result takes the later timestamp of the two values it was made from.
+
+The result is computed when needed and kept in no store. To keep it in one, pass
+the store's name and a serde for its values; a table that holds the result back
+with `suppress` needs this:
+
+```scala
+users
+  .join(plans, Store("accounts"), text)((user, plan) => s"$user on $plan")
+  .suppress(Suppressed.untilTimeLimit("accounts-calm", 1.second))
+```
+
+Like a stream and a table, two joined tables are processed together, so their
+topics must have the same number of partitions. A table cannot be joined with
+itself, or with a table read from the same topic, and windowed tables cannot be
+joined yet; `Topology.of` refuses each with a `TopologyError`.
+
 ## Windows
 
 Windows split each key's records by time, so you can count, reduce or aggregate
