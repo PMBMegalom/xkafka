@@ -34,9 +34,11 @@ import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, Sessio
   * `<application>-by-letter-repartition`, into the store `counts`, writing each new count to `<application>-output`. With `windows`, it counts each
   * key's records of `<application>-input-tumbling` in tumbling windows of 5 s into `tumbling`, of `<application>-input-sliding` in sliding windows of
   * 2.5 s into `sliding`, and of `<application>-input-sessions` in sessions with a gap of 1.5 s into `sessions`, each with an hour of grace, writing
-  * each change to `<application>-output-<store>`. It prints `running` once Java Streams says it runs, and closes on a SIGTERM, within 30 seconds.
+  * each change to `<application>-output-<store>`. With `joins`, it joins each record of `<application>-input-orders` with its key's value in the
+  * table `users` read from `<application>-input-users`, writing `<order>:<user>` to `<application>-output`. It prints `running` once Java Streams says
+  * it runs, and closes on a SIGTERM, within 30 seconds.
   *
-  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters` or `windows`.
+  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters`, `windows` or `joins`.
   */
 object FleetMember:
   def main(arguments: Array[String]): Unit =
@@ -57,6 +59,10 @@ object FleetMember:
         builder.stream[String, String](s"$application-input-sessions").groupByKey
           .windowedBy(SessionWindows.ofInactivityGapAndGrace(Duration.ofMillis(1500), hour)).count(Materialized.as("sessions")).toStream
           .to(s"$application-output-sessions", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long))
+      case "joins" =>
+        val users = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
+        builder.stream[String, String](s"$application-input-orders").join(users, (order: String, user: String) => s"$order:$user")
+          .to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
       case other => throw IllegalArgumentException(s"no fleet program $other")
     val properties = Properties()
     properties.put(StreamsConfig.APPLICATION_ID_CONFIG, application)
@@ -69,10 +75,16 @@ object FleetMember:
     // Java's record cache would hold back changes the tests count; xkafka writes every change.
     properties.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, "0")
     val streams = KafkaStreams(builder.build(), properties)
-    streams.setStateListener: (now, _) =>
-      if now == KafkaStreams.State.RUNNING then
-        println("running")
-        System.out.flush()
+    streams.setStateListener: (now, before) =>
+      if now == KafkaStreams.State.RUNNING then println("running")
+      // Any other change is news for whoever reads a failed test's output, without which a member that never runs says nothing.
+      else println(s"state $before -> $now")
+      System.out.flush()
+    streams.setUncaughtExceptionHandler: error =>
+      println(s"failed: $error")
+      error.printStackTrace(System.out)
+      System.out.flush()
+      org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_CLIENT
     // Bounded, so a member that cannot close cleanly still ends.
     sys.addShutdownHook { val _ = streams.close(java.time.Duration.ofSeconds(30)) }
     streams.start()

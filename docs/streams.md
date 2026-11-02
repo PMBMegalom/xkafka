@@ -87,8 +87,9 @@ def latestNames(users: Topic, output: Topic): Pipeline[IO] =
 
 Each record's value replaces its key's, even a record timestamped earlier than
 the one it replaces. A record without a value (a tombstone) deletes its key, and
-a record without a key is skipped. The table is kept in the named store, logged
-to `<application id>-users-changelog`.
+a record without a key is skipped. The table is kept in the named store, whose
+changelog is `<application id>-<store>-changelog`, here
+`<application id>-users-changelog`.
 
 A table read from a topic can delete keys, so its `toStream` gives `Option`
 values: `Some` for an update and `None` for a delete, which `Serde.option`
@@ -97,6 +98,60 @@ its keys, such as a `count`, gives its values as they are. The table's last type
 parameter says which: `KTable[F, K, V, Option]` can delete, and
 `KTable[F, K, V, KTable.Updated]` only updates. Writing a table that can delete
 without `.option` does not compile.
+
+## Joins
+
+`join` pairs each record of a stream with its key's value in a table, as Java
+Kafka Streams' stream-table join does:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def ordersWithUsers(orders: Topic, users: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(orders, text, text)
+    .join(KTable(users, text, text, Store("users")))((order, user) => s"$order for $user")
+    .to(output, text, text)
+```
+
+Each record is joined with the value the table holds for its key when the record
+is processed; later changes to the table do not change records already joined.
+A record whose key the table holds no value for, never set or deleted, is
+dropped. `leftJoin` keeps it, passing `None` instead of the table's value. The
+result keeps each record's timestamp and headers.
+
+The table can be any table with a store: read from a topic, or made by `count`,
+`reduce` or `aggregate`. Joining a suppressed table sees, for a key the
+suppression holds, the value from before the change it holds, as Java does.
+Windowed tables cannot be joined yet.
+
+A stream and the table it joins are processed together, so their topics must
+have the same number of partitions, as in Java. If they do not, the broker
+refuses the application's topics, which shows up in `state` as
+`StreamsProblem.IncorrectlyPartitionedTopics`. A member processes the records
+it has read from both topics earliest timestamp first, as Java does.
+
+An application whose members all run xkafka can run any join. When some of its
+members run Java Kafka Streams, the broker requires every member to describe the
+application exactly as Java does. For a join this includes the order of the
+joined topics, which Java takes from a hash of their names, and for some pairs
+of names from internal names xkafka cannot know. For such a pair, the broker may
+refuse the Java members. xkafka tells you in advance: the application's `state`
+lists `StreamsProblem.JavaMembersMayBeRefused`, naming the topics. Joining
+topics with other names avoids it.
+
+If the stream's key changed since it was read, for example after `selectKey`,
+its records first go through a repartition topic, which `join` and `leftJoin`
+then need a name for:
+
+```scala
+orders
+  .selectKey((_, order) => userOf(order))
+  .join(users, Repartition("orders-by-user"), text, order)((order, user) => s"$order for $user")
+```
 
 ## Windows
 
@@ -257,12 +312,13 @@ def visits(input: Topic, output: Topic): Pipeline[IO] =
 ```
 
 A new record can bridge sessions that were separate until then, merging them
-into one, so a session already sent downstream can be replaced. That is why
-session results are `Option` values: each replaced session goes downstream as
-`None`, then the merged session goes with its value. For example, with a five-minute gap, records of one key
-at 10:00 and 10:02 first give the session from 10:00 to 10:00 with a count of 1;
-the second record then gives `None` for that session and a count of 2 for the
-session from 10:00 to 10:02.
+into one, so a session already sent downstream can be replaced. A table of
+sessions is therefore a table that can delete keys (see [Tables](#tables)): its
+`toStream` gives `None` for each replaced session, then the merged session with
+its value. For example, with a five-minute gap, records of one key at 10:00 and
+10:02 first give the session from 10:00 to 10:00 with a count of 1; the second
+record then gives `None` for that session and a count of 2 for the session from
+10:00 to 10:02.
 
 Write session results with an `option` serde, such as `Serde.long[IO].option`:
 `None` is written as a record with no value, a tombstone, exactly as Java Kafka

@@ -61,7 +61,7 @@ final class TaskSuite extends CatsEffectSuite:
       TaskState(
         WindowStore
           .prunedAll(Map("windows" -> Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L))), Map("windows" -> 15000L)),
-        30000L
+        Map("in" -> 30000L)
       )
     task(windowed, 0).process(restored, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L).map: (state, written) =>
       assertEquals(written.head, TaskOutput(Topic.from("app-windows-changelog").orFail, Some(0), Some(old), long(1), 2000L, Headers.empty))
@@ -113,10 +113,10 @@ final class TaskSuite extends CatsEffectSuite:
   test("the partition time is the largest timestamp read, kept between records"):
     val counted = task(counting, 0)
     for
-      first  <- counted.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 3000L, Headers.empty), 0L)
-      second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L)
+      first  <- counted.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 3000L, Headers.empty, "in"), 0L)
+      second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty, "in"), 0L)
     yield
-      assertEquals((first._1.partitionTime, second._1.partitionTime), (3000L, 3000L))
+      assertEquals((first._1.partitionTime("in"), second._1.partitionTime("in")), (3000L, 3000L))
       assertEquals(second._1.store("counts").get(Chunk.array("k".getBytes)), Some(Stored(long(2).get, 3000L)))
 
   test("a value its serializer writes as none removes the key from the store and writes a tombstone to the changelog"):

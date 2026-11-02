@@ -47,6 +47,11 @@ private[xkafka] object PartitionTime:
     val meta = if processors.isEmpty then ByteVector.empty else ByteVector.fromInt(processors.size) ++ entries.foldLeft(ByteVector.empty)(_ ++ _)
     (ByteVector(Version) ++ ByteVector.fromLong(time) ++ meta).toBase64
 
+  /** The processor metadata of a task's partitions, each committed with its own: the largest value of each name, as Java's `ProcessorMetadata.update`
+    * merges them.
+    */
+  def merged(metadata: List[String]): Map[String, Long] = metadata.flatMap(processors).groupMapReduce(_._1)(_._2)(math.max)
+
   /** The processor metadata in version 2 metadata, by name, or none where there is none or it cannot be read, as Java reads it then. */
   def processors(metadata: String): Map[String, Long] =
     ByteVector.fromBase64(metadata).filter(bytes => bytes.size > 9 && bytes(0) == Version).flatMap: bytes =>

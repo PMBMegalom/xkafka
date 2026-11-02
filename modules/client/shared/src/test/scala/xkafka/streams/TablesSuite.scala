@@ -49,3 +49,27 @@ final class TablesSuite extends FunSuite:
     )
     assertEquals(compileErrors("KStream(topic, text, text).groupByKey(text, text).count(Store(\"counts\")).toStream.to(topic, text, count)"), "")
     assertEquals(compileErrors("KTable(topic, text, text, Store(\"users\")).toStream.to(topic, text, text.option)"), "")
+
+  test("records joined after their key changed need a repartitioning name, and a windowed table cannot be joined yet"):
+    val users                           = KTable(Topic.from("users").orFail, text, text, Store("users"))
+    def refused(pipeline: Pipeline[IO]) = Topology.of(pipeline).left.toOption.map(_.toList)
+    assertEquals(
+      refused(KStream(topic, text, text).selectKey((_, v) => v).join(users)(_ + _).to(topic, text, text)),
+      Some(List(TopologyError.UnnamedJoinRepartition))
+    )
+    assertEquals(
+      refused(KStream(topic, text, text).selectKey((_, v) => v).join(users, Repartition("by-user"), text, text)(_ + _).to(topic, text, text)),
+      None
+    )
+    // A name given for records whose key did not change makes no repartition topic.
+    assertEquals(refused(KStream(topic, text, text).join(users, Repartition("by-user"), text, text)(_ + _).to(topic, text, text)), None)
+    val windowed =
+      KStream(Topic.from("visits").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds))
+        .count(Store("visits"))
+    assertEquals(
+      refused(
+        KStream(topic, Serde.timeWindowed(text, 1.second), text).join(windowed)((v, n) => s"$v$n").to(topic, Serde.timeWindowed(text, 1.second), text)
+      ),
+      Some(List(TopologyError.WindowedJoin))
+    )
+    assertEquals(TopologyError.UnnamedJoinRepartition.message.contains("pass a Repartition to join"), true)

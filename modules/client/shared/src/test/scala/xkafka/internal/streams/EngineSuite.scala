@@ -37,8 +37,8 @@ import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  BufferLimit, KafkaStreams, KStream, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState, Suppressed, TimeWindows,
-  Topology
+  BufferLimit, KafkaStreams, KStream, KTable, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState, Suppressed,
+  TimeWindows, Topology
 }
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
@@ -324,10 +324,12 @@ final class EngineSuite extends CatsEffectSuite:
         assert(took.forall(t => t >= 3000L && t < 3200L), s"written after $took ms")
 
   /** Runs the counting program's engine while `script` runs with it, recording the states it reports. */
-  private def watched(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
+  private def watched(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] = watchedOf(counting)(script)
+
+  private def watchedOf(topology: Topology[IO])(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use: streams =>
+        Engine.running("app", topology, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use: streams =>
           streams.state.evalMap(state => world.states.update(_ :+ state)).compile.drain.start *> script(world, streams)
     TestControl.executeEmbed(program.timeout(1.minute))
 
@@ -370,6 +372,22 @@ final class EngineSuite extends CatsEffectSuite:
           Nil
         )
       )
+
+  // Java's set of "orders" and "owners" puts them in one bucket, whose order it takes from names xkafka does not know; "orders" and "users" it does not.
+  test("an application joining topics it cannot list in Java's order says so in its state, and one joining topics it can does not"):
+    def joined(table: String) =
+      Topology.of(
+        KStream(Topic.from("orders").orFail, text, text).join(KTable(Topic.from(table).orFail, text, text, Store("t")))(_ + _)
+          .to(Topic.from("out").orFail, text, text)
+      ).orFail
+    assertEquals(Declaration.unordered("app", joined("owners")), List(List("orders", "owners")))
+    assertEquals(Declaration.unordered("app", joined("users")), Nil)
+    watchedOf(joined("owners")): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(StreamsProblem.JavaMembersMayBeRefused("Java Streams may list the joined topics orders, owners in another order")))
+        )
 
   test("an application can stop itself on a state it sees, giving back its tasks as it leaves"):
     val run =
@@ -575,6 +593,48 @@ final class EngineSuite extends CatsEffectSuite:
           List((Some(window("k", 0L)), Some(counted(5L).value), Some(4000L), context.headers))
         )
 
+  test("a task of a stream joined with a table reads its partition of each topic from where the group committed it, and commits each with its time"):
+    val fetched =
+      OffsetFetchRequest.Answer(
+        List(Fetched("orders", 1, 4L, -1, Some(PartitionTime.encode(1500L)), 0), Fetched("users", 1, 7L, -1, Some(PartitionTime.encode(900L)), 0)),
+        0
+      )
+    run(committed = _ => IO.pure(fetched), topology = joining): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 7L, "u", 300L, value = "ann", topic = "users"))
+        _       <- IO.sleep(1500.millis)
+        log     <- world.log.get
+        fetches <- world.fetches.get
+      yield
+        assertEquals(fetches, List(List(OffsetFetchRequest.Topic("orders", List(1)), OffsetFetchRequest.Topic("users", List(1)))))
+        assertEquals(
+          log.collect { case Event.Read(read) => read.toSet }.head,
+          Set(StartAt(partition("orders", 1), 4L, -1), StartAt(partition("users", 1), 7L, -1))
+        )
+        // Only the partition read since commits, keeping its own partition time, which an older record leaves as it was.
+        assertEquals(
+          log.collect { case Event.Committed(topics) => topics.map(t => t.name -> t.partitions.map(p => (p.index, p.offset, p.metadata))) },
+          List(List("users" -> List((1, 8L, Some(PartitionTime.encode(900L))))))
+        )
+
+  test("a task takes the records of its partitions earliest first, so an order joins the user record read with it but timestamped before it"):
+    run(topology = joining): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "u", 2000L, value = "o1", topic = "orders"), record(1, 0L, "u", 1000L, value = "ann", topic = "users"))
+        _       <- IO.sleep(1500.millis)
+        written <- world.written.get
+      yield assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => new String(v.toArray)), List("o1:ann"))
+
+  test("records of a task's partitions go earliest first, the earliest read of those at one time, each partition in the order read"):
+    def polled(topic: String, offset: Long, at: Long) = record(0, offset, "k", at, topic = topic)
+    val records                                       =
+      List("a" -> polled("a", 0, 5L), "a" -> polled("a", 1, 1L), "b" -> polled("b", 0, 3L), "b" -> polled("b", 1, 9L), "c" -> polled("c", 0, 5L))
+    assertEquals(Engine.byTime(records).map((p, r) => (p, r.offset)), List(("b", 0L), ("a", 0L), ("a", 1L), ("c", 0L), ("b", 1L)))
+
   test("a restored session store keeps the sessions its clock has not expired, which a record then joins"):
     run(topology = sessioning): world =>
       for
@@ -720,6 +780,13 @@ object EngineSuite:
       KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .count(Store("windows")).suppress(Suppressed.untilWindowCloses("final")).toStream
         .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  /** Joins each order with its user. */
+  private val joining: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("orders").orFail, text, text).join(KTable(Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+        .to(Topic.from("out").orFail, text, text)
     ).orFail
 
   /** Counts each key's records in sessions with a gap of 5 s and 5 s of grace, in the session store `sessions`. */

@@ -41,3 +41,9 @@ final class PartitionTimeSuite extends FunSuite:
 
   test("metadata that is empty, of an unknown version, not base64, too short, or holding the unknown time gives no time, as Java takes it"):
     assertEquals(List("", "AwAAAAAAAAAq", "not base64!", "AgAA", "Av//////////").map(PartitionTime.decode), List.fill(5)(None))
+
+  test("the processor metadata of a task's partitions merge to the largest value of each name, as Java merges them"):
+    val first  = PartitionTime.encode(10L, Map("a" -> 5L, "b" -> 9L))
+    val second = PartitionTime.encode(20L, Map("a" -> 7L, "c" -> 1L))
+    assertEquals(PartitionTime.merged(List(first, second)), Map("a" -> 7L, "b" -> 9L, "c" -> 1L))
+    assertEquals(PartitionTime.merged(List(second, first)), Map("a" -> 7L, "b" -> 9L, "c" -> 1L))

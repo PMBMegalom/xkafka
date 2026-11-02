@@ -542,6 +542,84 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       tabled :+ ("k9", "z", 60000L)
     )
 
+  // Users and orders by user: orders for users the table holds, has deleted, and never held, and updates between orders.
+  private val ordering =
+    List(
+      ("users", "u1", "ann", 1000L),
+      ("orders", "u1", "o1", 2000L),
+      ("orders", "u2", "o2", 2500L), // no such user yet
+      ("users", "u2", "bob", 3000L),
+      ("orders", "u2", "o3", 3500L),
+      ("users", "u1", "amy", 4000L), // a new name for u1
+      ("orders", "u1", "o4", 4500L),
+      ("users", "u2", null, 5000L), // deletes u2
+      ("orders", "u2", "o5", 5500L),
+      ("orders", "u3", "o6", 1500L), // late, for a user never held
+      ("users", "u3", "cy", 6000L),
+      ("orders", "u3", "o7", 6500L),
+      ("users", "u9", "zed", 20000L), // well after every other change
+      ("orders", "u1", "o8", 20500L)
+    )
+
+  private def javaUsers(builder: StreamsBuilder) =
+    builder.table[String, String]("users", Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("users"))
+
+  test("a stream joined with a table writes what Java's join does, each record with the value the table holds when it comes"):
+    sameFrom(
+      KStream(Topic.from("orders").orFail, text, text).join(KTable(Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+        .to(out, text, text),
+      builder => builder.stream[String, String]("orders").join(javaUsers(builder), (o: String, u: String) => s"$o:$u").to("out"),
+      ordering
+    )
+
+  test("a stream left joined with a table writes what Java's left join does, a record without a value in the table joined with none"):
+    sameFrom(
+      KStream(Topic.from("orders").orFail, text, text)
+        .leftJoin(KTable(Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:${u.getOrElse("-")}").to(out, text, text),
+      builder =>
+        builder.stream[String, String]("orders").leftJoin(javaUsers(builder), (o: String, u: String) => s"$o:${Option(u).getOrElse("-")}").to("out"),
+      ordering
+    )
+
+  test("a stream whose key changed is joined through its repartition topic as Java's is"):
+    sameFrom(
+      KStream(Topic.from("orders").orFail, text, text).selectKey((_, v) => if v < "o4" then "u1" else "u2")
+        .join(KTable(Topic.from("users").orFail, text, text, Store("users")), Repartition("by-user"), text, text)((o, u) => s"$o:$u")
+        .to(out, text, text),
+      builder =>
+        builder.stream[String, String]("orders").selectKey((_, v) => if v < "o4" then "u1" else "u2").join(
+          javaUsers(builder),
+          (o: String, u: String) => s"$o:$u",
+          org.apache.kafka.streams.kstream.Joined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("by-user")
+        ).to("out"),
+      ordering
+    )
+
+  test("a stream joined with a counted table writes what Java's join does, as the count changes"):
+    sameFrom(
+      KStream(Topic.from("orders").orFail, text, text)
+        .join(KStream(Topic.from("users").orFail, text, text).groupByKey(text, text).count(Store("logins")))((o, n) => s"$o:$n").to(out, text, text),
+      builder =>
+        val logins = builder.stream[String, String]("users").groupByKey.count(counted("logins"))
+        builder.stream[String, String]("orders").join(logins, (o: String, n: java.lang.Long) => s"$o:$n").to("out")
+      ,
+      ordering.filter(_._3 != null)
+    )
+
+  test("a stream joined with a suppressed table sees what Java's join sees, a key the buffer holds showing its value before the held change"):
+    sameFrom(
+      KStream(Topic.from("orders").orFail, text, text)
+        .leftJoin(KTable(Topic.from("users").orFail, text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)))((o, u) =>
+          s"$o:${u.getOrElse("-")}"
+        ).to(out, text, text),
+      builder =>
+        builder.stream[String, String]("orders").leftJoin(
+          javaUsers(builder).suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")),
+          (o: String, u: String) => s"$o:${Option(u).getOrElse("-")}"
+        ).to("out"),
+      ordering
+    )
+
   test("a table of records grouped by a new key holds where each came from in the repartition topic, as Java's buffer does"):
     sameEverywhere(
       KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").count(Store("counts"))
@@ -577,9 +655,17 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       java: StreamsBuilder => Unit,
       inputs: List[(String, String, Long)],
       wrote: Option[Boolean] = Some(true)
+  ): IO[Boolean] = sameFrom(pipeline, java, inputs.map(("in", _, _, _)), wrote)
+
+  /** As `sameEverywhere`, for records of several topics. */
+  private def sameFrom(
+      pipeline: Pipeline[IO],
+      java: StreamsBuilder => Unit,
+      inputs: List[(String, String, String, Long)],
+      wrote: Option[Boolean] = Some(true)
   ): IO[Boolean] =
-    ours(pipeline, inputs).map: (written, _) =>
-      val ran     = run(java, None, inputs)
+    oursFrom(pipeline, inputs).map: (written, _) =>
+      val ran     = runFrom(java, None, inputs)
       val topics  = ran.topics.keySet.filterNot(_.endsWith("-repartition"))
       val oursAll = written.groupBy(_.topic.value).view.mapValues(_.map(record)).toMap
       wrote.foreach(expected => assertEquals(ran.out.nonEmpty, expected, "whether Java wrote downstream"))
@@ -638,41 +724,45 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     * committing after each input, as Java's test driver runs them; with the last segment's state, which holds the window store.
     */
   private def ours(pipeline: Pipeline[IO], inputs: List[(String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
-    val tasks = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector.map(Task[IO]("app", _, 0))
+    oursFrom(pipeline, inputs.map(("in", _, _, _)))
+
+  /** As `ours`, for records of several topics, each going to the task whose sub-topology reads its topic, at the next offset of that topic. */
+  private def oursFrom(pipeline: Pipeline[IO], inputs: List[(String, String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
+    val segments              = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector
+    val tasks                 = segments.map(Task[IO]("app", _, 0))
+    def reader(topic: String) = segments.indexWhere(_.origins.exists(Task.topicOf("app", _) == topic))
     type Ran = (Vector[TaskOutput], Vector[TaskState], Map[String, Long])
-    def go(index: Int, input: TaskInput, states: Vector[TaskState], offsets: Map[String, Long], at: Long): IO[Ran] =
+    def go(topic: String, record: TaskOutput, states: Vector[TaskState], offsets: Map[String, Long], at: Long): IO[Ran] =
+      val index  = reader(topic)
+      val offset = offsets.getOrElse(topic, 0L)
+      val input  = TaskInput(record.key, record.value, record.timestamp, record.headers, topic, 0, offset)
       tasks(index).process(states(index), input, at).flatMap: (state, outputs) =>
-        outputs.foldLeftM[IO, Ran]((Vector.empty, states.updated(index, state), offsets)):
+        outputs.foldLeftM[IO, Ran]((Vector.empty, states.updated(index, state), offsets.updated(topic, offset + 1))):
           case ((done, now, offsets), written) if written.topic.value.endsWith("-repartition") =>
-            val topic  = written.topic.value
-            val offset = offsets.getOrElse(topic, 0L)
-            go(
-              index + 1,
-              TaskInput(written.key, written.value, written.timestamp, written.headers, topic, 0, offset),
-              now,
-              offsets.updated(topic, offset + 1),
-              at
-            ).map((more, after, moved) => (done ++ more, after, moved))
+            go(written.topic.value, written, now, offsets, at).map((more, after, moved) => (done ++ more, after, moved))
           case ((done, now, offsets), written) => IO.pure((done :+ written, now, offsets))
     inputs.zipWithIndex.foldLeftM[IO, Ran]((Vector.empty, Vector.fill(tasks.size)(TaskState.empty), Map.empty)):
-      case ((done, states, offsets), ((key, value, timestamp), index)) =>
-        val input =
-          TaskInput(
+      case ((done, states, offsets), ((topic, key, value, timestamp), index)) =>
+        val record =
+          TaskOutput(
+            Topic.from(topic).orFail,
+            None,
             Option(key).map(k => Chunk.array(k.getBytes)),
             Option(value).map(v => Chunk.array(v.getBytes)),
             timestamp,
-            traced(index),
-            "in",
-            0,
-            index.toLong
+            traced(index)
           )
-        go(0, input, states, offsets, wall(index)).flatMap: (more, after, moved) =>
+        go(topic, record, states, offsets, wall(index)).flatMap: (more, after, moved) =>
           after.zipWithIndex.traverse((state, task) => tasks(task).flush(state)).map: flushed =>
             (done ++ more ++ flushed.flatMap(_._2), flushed.map(_._1), moved)
     .map((written, states, _) => (written, states.last))
 
   /** What Java's test driver writes to each topic for `inputs`, and what the window store `kept` names holds after them. */
   private def run(build: StreamsBuilder => Unit, kept: Option[String], inputs: List[(String, String, Long)]): Ran =
+    runFrom(build, kept, inputs.map(("in", _, _, _)))
+
+  /** As `run`, for records of several topics. */
+  private def runFrom(build: StreamsBuilder => Unit, kept: Option[String], inputs: List[(String, String, String, Long)]): Ran =
     val properties = Properties()
     properties.put(StreamsConfig.APPLICATION_ID_CONFIG, "app")
     properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1")
@@ -686,14 +776,14 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     build(builder)
     val driver = TopologyTestDriver(builder.build(properties), properties, java.time.Instant.EPOCH)
     try
-      val input = driver.createInputTopic("in", StringSerializer(), StringSerializer())
+      val topics = inputs.map(_._1).distinct.map(name => name -> driver.createInputTopic(name, StringSerializer(), StringSerializer())).toMap
       inputs.zipWithIndex.foreach:
-        case ((key, value, timestamp), index) =>
+        case ((topic, key, value, timestamp), index) =>
           driver.advanceWallClockTime(Duration.ofMillis(wall(index) - (if index == 0 then 0L else wall(index - 1))))
           val headers = org.apache.kafka.common.header.internals.RecordHeaders()
           headers.add("trace", index.toString.getBytes)
-          input.pipeInput(TestRecord(key, value, headers, java.time.Instant.ofEpochMilli(timestamp)))
-      val topics =
+          topics(topic).pipeInput(TestRecord(key, value, headers, java.time.Instant.ofEpochMilli(timestamp)))
+      val written =
         driver.producedTopicNames.asScala.toList.map: name =>
           name -> driver.createOutputTopic(name, ByteArrayDeserializer(), ByteArrayDeserializer()).readRecordsToList.asScala.toVector.map: r =>
             Output(
@@ -707,7 +797,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
           driver.getTimestampedWindowStore[String, Any](name).all.asScala.toList.map: kv =>
             (kv.key.key, kv.key.window.start) -> (kv.value.value.toString, kv.value.timestamp)
           .toMap
-      Ran(topics.toMap, held)
+      Ran(written.toMap, held)
     finally driver.close()
 
   // The test driver reads the time of a record written without one as 0.

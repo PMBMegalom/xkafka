@@ -26,7 +26,7 @@ package streams
 import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.streams.{BaseKeyed, Chain, End, Origin, Segment, Step, Suppressed, TableKey, TableValue, Window, Windowed}
+import xkafka.streams.{BaseKeyed, Chain, End, Origin, Segment, Step, Suppressed, TableKey, TableValue, TableView, Window, Windowed}
 
 /** A record as a topic holds it, read by a task. */
 private[xkafka] final case class TaskInput(
@@ -62,7 +62,7 @@ private[xkafka] final case class Stored(value: Chunk[Byte], timestamp: Long)
   */
 private[xkafka] final case class TaskState(
     stores: Map[String, Map[Chunk[Byte], Stored]],
-    partitionTime: Long,
+    partitionTimes: Map[String, Long],
     streamTimes: Map[String, Long] = Map.empty,
     clocks: Map[String, Long] = Map.empty,
     lastEmitted: Map[String, Long] = Map.empty,
@@ -73,9 +73,12 @@ private[xkafka] final case class TaskState(
 ):
   def store(name: String): Map[Chunk[Byte], Stored] = stores.getOrElse(name, Map.empty)
 
+  /** The partition time of the task's partition of `topic`: the largest timestamp read from it, or -1 before any. */
+  def partitionTime(topic: String): Long = partitionTimes.getOrElse(topic, -1L)
+
 private[xkafka] object TaskState:
   /** No store holds anything yet, and no partition time is known. */
-  val empty: TaskState = TaskState(Map.empty, -1L)
+  val empty: TaskState = TaskState(Map.empty, Map.empty)
 
 /** One sub-topology on one partition: what it writes for each record it reads, as Java Streams writes it, without Java's record cache, so every
   * change to a store goes to its changelog and on downstream.
@@ -94,16 +97,21 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       origin: Option[HeldContext] = None
   )
 
-  /** Runs `input` through the segment at wall-clock time `now`, in epoch milliseconds. */
+  /** The topic each of the sub-topology's segments reads, with the segment. */
+  private val readers: Map[String, Segment[F, ?, ?, ?, ?]] = segment.all.map(read => Task.topicOf(application, read.origin) -> read).toMap
+
+  /** Runs `input` through the segment that reads its topic at wall-clock time `now`, in epoch milliseconds. */
   def process(state: TaskState, input: TaskInput, now: Long): F[(TaskState, Vector[TaskOutput])] =
-    val read = state.copy(partitionTime = math.max(state.partitionTime, input.timestamp), reading = Some(input))
-    segmentOf(segment, read, input, now)
+    val times = state.partitionTimes.updated(input.topic, math.max(state.partitionTime(input.topic), input.timestamp))
+    val read  = state.copy(partitionTimes = times, reading = Some(input))
+    // A record read outside the engine names no topic, and goes to the segment the sub-topology is named after.
+    segmentOf(readers.getOrElse(input.topic, segment), read, input, now)
 
   /** What the task's suppression buffers write to their changelogs at a commit, as Java's buffer logs on commit: each key changed since the last
     * commit, with what it holds and the header `v=3`, or a tombstone where it no longer holds the key. The changelog's broker gives each its time.
     */
   def flush(state: TaskState): F[(TaskState, Vector[TaskOutput])] =
-    segment.chain.buffers.toList.sorted.flatTraverse: store =>
+    segment.buffers.toList.sorted.flatTraverse: store =>
       topicNamed(s"$application-$store-changelog").map: changelog =>
         state.dirty.getOrElse(store, Dirty.empty).ordered.toList.map: key =>
           state.store(store).get(key) match
@@ -167,6 +175,8 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
+      case Step.Join(view, join)                                         => valueOf(view, record.key, state)
+          .map(table => (state, join(record.value, table).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
           .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
       case Step.TableSource(store, key, value) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           record.key.flatTraverse(k => key.serializer.serialize(changelog, Headers.empty, k).map(_.map(k -> _))).flatMap:
@@ -679,11 +689,38 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
             ).mapN((k, v) => Travelling(Windowed(k, Window(start, start + width)), v, held.timestamp, record.headers))
           .map(emitted => (emitted, throttled.copy(lastEmitted = throttled.lastEmitted.updated(store, closeTime))))
 
+  /** The value the table `view` reads holds for `key`, as Java's value getter reads it: a suppressed table's buffer first, where a key it holds gives
+    * the value from before the change it holds, none where there was none, and otherwise the store's value.
+    */
+  private def valueOf[K, V](view: TableView[F, K, V], key: K, state: TaskState): F[Option[V]] =
+    view match
+      case TableView.Stored(store, keys, values) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+          keys.serializer.serialize(changelog, Headers.empty, key).flatMap:
+            _.flatMap(state.store(store.name).get).traverse(held => values.deserializer.deserialize(changelog, Headers.empty, Some(held.value)))
+      case TableView.Held(buffer, parent) =>
+        val (keys, values) = Task.serdesOf(parent)
+        topicNamed(s"$application-$buffer-changelog").flatMap: changelog =>
+          keys.serializer.serialize(changelog, Headers.empty, key).flatMap: bytes =>
+            bytes.flatMap(state.store(buffer).get) match
+              case None         => valueOf(parent, key, state)
+              case Some(stored) => Held.decode(stored.value)
+                  .liftTo[F](new IllegalStateException(s"the suppression buffer '$buffer' holds a change it cannot read"))
+                  .flatMap(held => held.prior.traverse(prior => values.deserializer.deserialize(changelog, held.context.headers, Some(prior))))
+
   private def leaving[K, V](exit: End[F, K, V], record: Travelling[K, V]): F[Vector[TaskOutput]] =
-    val (topic, key, value, repartitioning) =
-      exit match
-        case End.Repartitioning(repartition, key, value) => (topicNamed(s"$application-${repartition.name}-repartition"), key, value, true)
-        case End.Output(topic, key, value)               => (F.pure(topic), key, value, false)
+    exit match
+      case End.Stored()                                => F.pure(Vector.empty)
+      case End.Repartitioning(repartition, key, value) =>
+        written(topicNamed(s"$application-${repartition.name}-repartition"), key, value, true, record)
+      case End.Output(topic, key, value) => written(F.pure(topic), key, value, false, record)
+
+  private def written[K, V](
+      topic: F[Topic],
+      key: xkafka.streams.Serde[F, K],
+      value: xkafka.streams.Serde[F, V],
+      repartitioning: Boolean,
+      record: Travelling[K, V]
+  ): F[Vector[TaskOutput]] =
     // Java partitions a windowed key by the key alone, whichever topic it goes to.
     def base(target: Topic): F[Option[Chunk[Byte]]] =
       key.serializer match
@@ -701,6 +738,18 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
+  /** The topic `origin` names, as the application names its repartition topics. */
+  def topicOf[F[_]](application: String, origin: Origin[F, ?, ?]): String =
+    origin match
+      case Origin.Input(topic, _, _)         => topic.value
+      case Origin.Repartitioned(named, _, _) => s"$application-${named.name}-repartition"
+
+  /** The serdes a table view writes its keys and values with. */
+  def serdesOf[F[_], K, V](view: TableView[F, K, V]): (xkafka.streams.Serde[F, K], xkafka.streams.Serde[F, V]) =
+    view match
+      case TableView.Stored(_, key, value) => (key, value)
+      case TableView.Held(_, parent)       => serdesOf(parent)
+
   /** The time of a record the broker or its producer stamps, as Java leaves a suppression buffer's changelog records unstamped. */
   val NoTimestamp: Long = -1L
 

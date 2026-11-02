@@ -33,7 +33,7 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KStream, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology}
+import xkafka.streams.{KStream, KTable, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology}
 
 /** Java Streams and xkafka members in one application while records keep coming, as members join, leave, restart and are killed: counting records by
   * their value's first letter through a repartition topic, or each key's records in tumbling windows, sliding windows and sessions. The Java members
@@ -64,6 +64,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       */
     case Windows extends Program("windows")
 
+    /** Joining each order with its user, from a table read from a topic. */
+    case Joins extends Program("joins")
+
   private val windowKinds = List("tumbling", "sliding", "sessions")
 
   /** An application of the fleet's own. */
@@ -85,6 +88,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       program match
         case Program.Letters => List(input, output)
         case Program.Windows => windowKinds.flatMap(kind => List(inputOf(kind), outputOf(kind)))
+        case Program.Joins   => List(inputOf("users"), inputOf("orders"), output)
 
     val topology: Topology[IO] =
       program match
@@ -99,6 +103,10 @@ final class FleetBrokerSuite extends CatsEffectSuite:
               .count(Store("sliding")).toStream.to(outputOf("sliding"), Serde.timeWindowed(text, 2500.millis), Serde.long[IO]),
             KStream(inputOf("sessions"), text, text).groupByKey(text, text).windowedBy(SessionWindows(1500.millis, grace = 1.hour))
               .count(Store("sessions")).toStream.to(outputOf("sessions"), Serde.sessionWindowed(text), Serde.long[IO].option)
+          ).orFail
+        case Program.Joins => Topology.of(
+            KStream(inputOf("orders"), text, text).join(KTable(inputOf("users"), text, text, Store("users")))((order, user) => s"$order:$user")
+              .to(output, text, text)
           ).orFail
 
     private def command(text: String): IO[Unit] =
@@ -142,9 +150,13 @@ final class FleetBrokerSuite extends CatsEffectSuite:
   /** A fleet application with its topics, the fixture's news of its members read for as long as the test runs. */
   private def fleet(broker: String, guarantee: ProcessingGuarantee, program: Program)(test: Fleet => IO[Unit]): IO[Unit] =
     Names.fresh:
-      val application = summon[Names](s"xkafka-fleet-$backend")
+      val named = summon[Names](s"xkafka-fleet-$backend")
       IO.ref(List.empty[String]).flatMap: statuses =>
-        val app  = Fleet(broker, application, guarantee, program, statuses)
+        // An id whose joined topics Java lists in an order xkafka knows, without which the broker may refuse the Java members (see
+        // StreamsProblem.JavaMembersMayBeRefused).
+        val app =
+          LazyList.from(0).map(n => Fleet(broker, s"$named-$n", guarantee, program, statuses))
+            .find(fleet => Declaration.unordered(fleet.application, fleet.topology).isEmpty).get
         val made = app.topics.map(NewTopic.from(_, 2, 1).orFail)
         val news =
           ConsumerSettings.from(
@@ -283,11 +295,71 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         seen => missed(sessions)(seen) ++ stray(seen)
       )
 
+  /** Writes a user for each of ten keys, waiting until the table's changelog holds them, then orders while it lasts, keyed in turn over the ten keys.
+    * What it gives stops the writing and then gives each order's key, every order written by then.
+    */
+  private def joinsLoad(fleet: Fleet): Resource[IO, IO[Map[String, String]]] =
+    val producer  = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
+    val users     = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
+    val changelog =
+      Names.fresh:
+        val settings =
+          ConsumerSettings.from(
+            client(fleet.server),
+            ConsumerGroup.from(summon[Names]("xkafka-fleet-reader")).orFail,
+            Deserializer.utf8[IO],
+            Deserializer.utf8[IO],
+            AutoOffsetReset.Earliest
+          ).orFail
+        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(Topic.from(s"${fleet.application}-users-changelog").orFail))).use:
+          _.records.map(_.record.key).scan(Set.empty[String])(_ + _).find(_.size == 10).compile.drain
+            .timeoutTo(2.minutes, IO.raiseError(new AssertionError("the users table never held every user")))
+    for
+      written <- Resource.eval(IO.ref(Map.empty[String, String]))
+      writer  <- producer
+      _       <- Resource.eval(writer.produceAndAwait(NonEmptyList.fromListUnsafe(users)) *> changelog)
+      writing <-
+        Resource.make(fs2.Stream.iterate(0L)(_ + 1).evalMap: n =>
+          val key = s"k${n % 10}"
+          (writer.produceAndAwait(NonEmptyList.one(ProducerRecord(fleet.inputOf("orders"), key, s"o$n"))) *> written.update(_.updated(s"o$n", key)))
+            .uncancelable *> IO.sleep(20.millis)
+        .compile.drain.start)(_.cancel)
+    yield writing.cancel *> written.get
+
+  /** Reads the output from its start until every order written is there, joined with its user: once under exactly once, at least once under at least
+    * once, failing after three minutes.
+    */
+  private def joined(fleet: Fleet, written: Map[String, String]): IO[Unit] =
+    Names.fresh:
+      val exactly  = fleet.guarantee == ProcessingGuarantee.ExactlyOnce
+      val settings =
+        ConsumerSettings.from(
+          client(fleet.server),
+          ConsumerGroup.from(summon[Names]("xkafka-fleet-reader")).orFail,
+          Deserializer.utf8[IO],
+          Deserializer.utf8[IO],
+          AutoOffsetReset.Earliest,
+          isolationLevel = if exactly then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      val expected                                = written.map((order, key) => s"$order:user${key.drop(1)}" -> key)
+      def wrong(seen: Map[String, (String, Int)]) =
+        expected.toList.sorted.collect { case (value, _) if !seen.get(value).exists((_, n) => if exactly then n == 1 else n >= 1) => value } ++
+          seen.toList.sorted.collect { case (value, (key, _)) if !expected.get(value).contains(key) => s"$value under $key" }
+      IO.ref(Map.empty[String, (String, Int)]).flatMap: last =>
+        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(fleet.output))).use: consumer =>
+          consumer.records.scan(Map.empty[String, (String, Int)]): (seen, record) =>
+            seen.updated(record.record.value, (record.record.key, seen.get(record.record.value).fold(0)(_._2) + 1))
+          .evalTap(last.set).find(wrong(_).isEmpty).compile.lastOrError.void.timeoutTo(
+            3.minutes,
+            last.get.flatMap(seen => IO.raiseError(new AssertionError(s"the joined orders were wrong: ${wrong(seen).take(20).mkString("; ")}")))
+          )
+
   /** The program's load, and the check that its outputs count everything the load wrote, for the scenarios to run whichever the program. */
   private def loaded(fleet: Fleet): Resource[IO, IO[Unit]] =
     fleet.program match
       case Program.Letters => load(fleet).map(_.flatMap(counted(fleet, _)))
       case Program.Windows => windowsLoad(fleet).map(_.flatMap(windowsCounted(fleet, _)))
+      case Program.Joins   => joinsLoad(fleet).map(_.flatMap(joined(fleet, _)))
 
   private def recording = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
 

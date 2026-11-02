@@ -35,7 +35,7 @@ import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
   ApplicationId, KStream, KTable, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase,
-  StreamsSettings, Suppressed, TimeWindows, Topology
+  StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -327,6 +327,37 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           streams.run.race(running *> latest(server, app.output, total(first))).flatMap:
             case Left(_)  => IO.raiseError(new AssertionError("the application stopped"))
             case Right(_) => IO.unit
+
+    test(s"$release, $under: an engine joins each record with its key's value in a table read from a topic copartitioned with the stream"):
+      counting(
+        server,
+        (orders, output) =>
+          KStream(orders, text, text).join(KTable(Topic.from(s"${orders.value}-users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+            .to(output, text, text)
+      ): app =>
+        val users = Topic.from(s"${app.input.value}-users").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 2, 1).orFail))) *>
+          produceValues(server, users, List("a" -> Some("ann"), "b" -> Some("bob"))) *> running(server, app):
+            // Written once the users are in the table, so each order finds its user.
+            latestValues(server, Topic.from(s"${app.application}-users-changelog").orFail, Map("a" -> Some("ann"), "b" -> Some("bob"))) *>
+              produceValues(server, app.input, List("a" -> Some("o1"), "b" -> Some("o2"), "c" -> Some("o3"))) *>
+              latestValues(server, app.output, Map("a" -> Some("o1:ann"), "b" -> Some("o2:bob")))
+
+    test(s"$release, $under: a stream and the table it joins in topics of different partition counts are refused by the broker, as for Java"):
+      counting(
+        server,
+        (orders, output) =>
+          KStream(orders, text, text).join(KTable(Topic.from(s"${orders.value}-users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+            .to(output, text, text)
+      ): app =>
+        val users    = Topic.from(s"${app.input.value}-users").orFail
+        val settings = StreamsSettings.from(client(server), ApplicationId.from(app.application).orFail, under).orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 3, 1).orFail))) *>
+          PlatformKafkaClient().streams(settings, app.topology).use: streams =>
+            val refused = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.IncorrectlyPartitionedTopics])).compile.lastOrError
+            streams.run.race(refused.timeout(2.minutes)).flatMap:
+              case Left(_)  => IO.raiseError(new AssertionError("the application stopped"))
+              case Right(_) => IO.unit
 
     test(s"$release, $under: an engine counts through a repartition topic, which it writes and reads back"):
       // Each key's records have values starting with each letter in turn, so the letters' counts mix records of every key and both partitions.

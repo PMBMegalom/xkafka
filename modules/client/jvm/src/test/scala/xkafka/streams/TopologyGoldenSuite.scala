@@ -147,6 +147,75 @@ final class TopologyGoldenSuite extends FunSuite:
       )
     )
 
+  private def javaTable(builder: StreamsBuilder, topic: String, store: String) =
+    builder.table[String, String](topic, Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](store))
+
+  test("a stream joined with a table read from a topic reads both in one sub-topology, copartitioned, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("orders"), text, text).join(KTable(topic("users"), text, text, Store("users")))((o, u) => o + u).to(topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").join(javaTable(builder, "users", "users"), (o: String, u: String) => o + u)
+          .to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  test("a join's copartition group lists its topics in the order Java's set of them iterates, not the order the program reads them"):
+    // Java's set of "clicks" and "pages" iterates "pages" first.
+    assertEquals(
+      ours(
+        KStream(topic("clicks"), text, text).join(KTable(topic("pages"), text, text, Store("pages")))((c, p) => c + p).to(topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("clicks").join(javaTable(builder, "pages", "pages"), (c: String, p: String) => c + p)
+          .to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  test("a stream joined after its key changed goes through the repartition topic named for the join, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("orders"), text, text).selectKey((_, v) => v)
+          .leftJoin(KTable(topic("users"), text, text, Store("users")), Repartition("by-user"), text, text)((o, u) => o + u.getOrElse("-"))
+          .to(topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").selectKey((_, v) => v).leftJoin(
+          javaTable(builder, "users", "users"),
+          (o: String, u: String) => o + Option(u).getOrElse("-"),
+          org.apache.kafka.streams.kstream.Joined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("by-user")
+        ).to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  test("a stream joined with a counted table runs in the sub-topology that counts, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("orders"), text, text).join(
+          KStream(topic("visits"), text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v).count(Store("visits"))
+        )((o, n) => s"$o:$n").to(topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        val counted =
+          builder.stream[String, String]("visits").groupBy((_, v) => v, Grouped.as("by-page"))
+            .count(Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("visits"))
+        builder.stream[String, String]("orders").join(counted, (o: String, n: java.lang.Long) => s"$o:$n")
+          .to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  test("a stream joined with a suppressed table declares the table's store and buffer beside it, as Java declares it"):
+    assertEquals(
+      ours(
+        KStream(topic("orders"), text, text)
+          .join(KTable(topic("users"), text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 1.second)))((o, u) => o + u)
+          .to(topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").join(
+          javaTable(builder, "users", "users")
+            .suppress(JavaSuppressed.untilTimeLimit(java.time.Duration.ofSeconds(1), BufferConfig.unbounded()).withName("calm")),
+          (o: String, u: String) => o + u
+        ).to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
   test("a stateless pipeline is one sub-topology reading its input"):
     assertEquals(
       ours(KStream(topic("in"), text, text).mapValues(_ + "!").to(topic("out"), text, text)),
@@ -299,6 +368,15 @@ object TopologyGoldenSuite:
           infos(subtopology.stateChangelogTopics, partitions = false),
           subtopology.repartitionSinkTopics.asScala.toList.sorted,
           infos(subtopology.repartitionSourceTopics, partitions = true),
-          if subtopology.copartitionGroups.isEmpty then Nil else sys.error("copartition groups are not compared yet")
+          // As Java's heartbeat sends them: each group's topics, in the order its set iterates, as indexes into the sorted topic lists.
+          subtopology.copartitionGroups.asScala.toList.map: group =>
+            val sources      = subtopology.sourceTopics.asScala.toList.sorted
+            val repartitions = subtopology.repartitionSourceTopics.asScala.keys.toList.sorted
+            val names        = group.asScala.toList
+            StreamsGroup.CopartitionGroup(
+              names.map(sources.indexOf).filter(_ >= 0).map(_.toShort),
+              Nil,
+              names.map(repartitions.indexOf).filter(_ >= 0).map(_.toShort)
+            )
         )
     StreamsGroup.Topology(0, subtopologies)
