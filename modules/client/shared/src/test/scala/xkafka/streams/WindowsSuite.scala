@@ -135,6 +135,51 @@ final class WindowsSuite extends CatsEffectSuite:
     )
     assertEquals(refused(SlidingWindows.withNoGrace(0.seconds)), None)
 
+  private def suppressed(held: Suppressed.UntilTimeLimit) =
+    KStream(topic, text, text).groupByKey(text, text).count(Store("counts")).suppress(held).toStream.to(topic, text, count)
+
+  test("a suppression waiting a negative time or parts of a millisecond, or with a negative limit, is refused, and one waiting no time is not"):
+    def refused(held: Suppressed.UntilTimeLimit) = Topology.of(suppressed(held)).left.toOption.map(_.toList)
+    assertEquals(
+      refused(Suppressed.untilTimeLimit("calm", -1.second)),
+      Some(List(TopologyError.InvalidSuppression("calm", "the time to wait must not be negative, was -1 seconds")))
+    )
+    assertEquals(
+      refused(Suppressed.untilTimeLimit("calm", 1500.micros)),
+      Some(List(TopologyError.InvalidSuppression("calm", "the time to wait must be whole milliseconds")))
+    )
+    assertEquals(
+      refused(Suppressed.untilTimeLimit("calm", 1.second, BufferLimit.records(-1))),
+      Some(List(TopologyError.InvalidSuppression("calm", "its buffer's limits must not be negative")))
+    )
+    assertEquals(
+      refused(Suppressed.untilTimeLimit("calm", 1.second, BufferLimit.bytes(-1).shutDownWhenFull)),
+      Some(List(TopologyError.InvalidSuppression("calm", "its buffer's limits must not be negative")))
+    )
+    assertEquals(refused(Suppressed.untilTimeLimit("calm", 0.seconds, BufferLimit.records(0))), None)
+    assertEquals(
+      TopologyError.InvalidSuppression("calm", "its buffer's limits must not be negative").message,
+      "the suppression 'calm' cannot be used: its buffer's limits must not be negative"
+    )
+
+  test("a suppression's buffer is a store, whose name no other store may take"):
+    val program =
+      KStream(topic, text, text).groupByKey(text, text).count(Store("calm-store")).suppress(Suppressed.untilTimeLimit("calm", 1.second)).toStream
+        .to(topic, text, count)
+    assertEquals(Topology.of(program).left.toOption.map(_.toList), Some(List(TopologyError.DuplicateStore("calm-store"))))
+
+  test("only a windowed table waits for its windows to close"):
+    assert(
+      compileErrors("""KStream(topic, text, text).groupByKey(text, text).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))""")
+        .nonEmpty
+    )
+    assertEquals(
+      compileErrors(
+        """KStream(topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))"""
+      ),
+      ""
+    )
+
   test("sessions with a negative gap, negative grace, parts of a millisecond, or kept too briefly are refused, and with no gap are not"):
     def refused(windows: SessionWindows, retention: Option[FiniteDuration] = None) =
       val windowed = KStream(topic, text, text).groupByKey(text, text).windowedBy(windows)

@@ -26,10 +26,18 @@ package streams
 import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.streams.{BaseKeyed, Chain, End, Origin, Segment, Step, Window, Windowed}
+import xkafka.streams.{BaseKeyed, Chain, End, Origin, Segment, Step, Suppressed, TableKey, TableValue, Window, Windowed}
 
 /** A record as a topic holds it, read by a task. */
-private[xkafka] final case class TaskInput(key: Option[Chunk[Byte]], value: Option[Chunk[Byte]], timestamp: Long, headers: Headers)
+private[xkafka] final case class TaskInput(
+    key: Option[Chunk[Byte]],
+    value: Option[Chunk[Byte]],
+    timestamp: Long,
+    headers: Headers,
+    topic: String = "",
+    partition: Int = -1,
+    offset: Long = -1L
+)
 
 /** A record a task writes: to `partition` where one is given, as a changelog is, to the partition the Java producer picks for `partitionBy` where
   * that is given, as for a windowed key, which Java partitions by the key alone, and otherwise wherever the producer's partitioner puts its key.
@@ -58,7 +66,10 @@ private[xkafka] final case class TaskState(
     streamTimes: Map[String, Long] = Map.empty,
     clocks: Map[String, Long] = Map.empty,
     lastEmitted: Map[String, Long] = Map.empty,
-    nextEmit: Map[String, Long] = Map.empty
+    nextEmit: Map[String, Long] = Map.empty,
+    dirty: Map[String, Dirty] = Map.empty,
+    buffers: Map[String, Buffered] = Map.empty,
+    reading: Option[TaskInput] = None
 ):
   def store(name: String): Map[Chunk[Byte], Stored] = stores.getOrElse(name, Map.empty)
 
@@ -71,12 +82,34 @@ private[xkafka] object TaskState:
   */
 private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, ?, ?, ?, ?], partition: Int)(using F: MonadThrow[F]):
   /** A record as it travels through the steps. */
-  private final case class Travelling[K, V](key: K, value: V, timestamp: Long, headers: Headers)
+  /** A record going from step to step; a table's change also carries the value it replaced, where Java passes one on, and a change a suppression
+    * held, where it came from, which Java passes on with it.
+    */
+  private final case class Travelling[K, V](
+      key: K,
+      value: V,
+      timestamp: Long,
+      headers: Headers,
+      old: Option[V] = None,
+      origin: Option[HeldContext] = None
+  )
 
   /** Runs `input` through the segment at wall-clock time `now`, in epoch milliseconds. */
   def process(state: TaskState, input: TaskInput, now: Long): F[(TaskState, Vector[TaskOutput])] =
-    val read = state.copy(partitionTime = math.max(state.partitionTime, input.timestamp))
+    val read = state.copy(partitionTime = math.max(state.partitionTime, input.timestamp), reading = Some(input))
     segmentOf(segment, read, input, now)
+
+  /** What the task's suppression buffers write to their changelogs at a commit, as Java's buffer logs on commit: each key changed since the last
+    * commit, with what it holds and the header `v=3`, or a tombstone where it no longer holds the key. The changelog's broker gives each its time.
+    */
+  def flush(state: TaskState): F[(TaskState, Vector[TaskOutput])] =
+    segment.chain.buffers.toList.sorted.flatTraverse: store =>
+      topicNamed(s"$application-$store-changelog").map: changelog =>
+        state.dirty.getOrElse(store, Dirty.empty).ordered.toList.map: key =>
+          state.store(store).get(key) match
+            case Some(held) => TaskOutput(changelog, Some(partition), Some(key), Some(held.value), Task.NoTimestamp, Held.Version)
+            case None       => TaskOutput(changelog, Some(partition), Some(key), None, Task.NoTimestamp, Headers.empty)
+    .map(written => (state.copy(dirty = state.dirty.view.mapValues(_.cleared).toMap), written.toVector))
 
   private def segmentOf[K, V, K2, V2](
       segment: Segment[F, K, V, K2, V2],
@@ -121,20 +154,21 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case Step.Map(change)  =>
         val (k, v) = change(record.key, record.value)
         passing(Vector(Travelling(k, v, record.timestamp, record.headers)))
-      case Step.MapValues(change) => passing(Vector(record.copy(value = change(record.value))))
+      case Step.MapValues(change) => passing(Vector(record.copy(value = change(record.value), old = None)))
       case Step.FlatMap(change)   =>
         passing(change(record.key, record.value).toVector.map((k, v) => Travelling(k, v, record.timestamp, record.headers)))
       case Step.Peek(effect)          => effect(record.key, record.value) *> passing(Vector(record))
-      case Step.EvalMapValues(change) => change(record.value).flatMap(v => passing(Vector(record.copy(value = v))))
+      case Step.EvalMapValues(change) => change(record.value).flatMap(v => passing(Vector(record.copy(value = v, old = None))))
       case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
       case Step.ToStream()                                               => passing(Vector(record))
-      case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _)      => windowed(folding, record, state, now)
-      case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _)       => sliding(folding, record, state, now)
+      case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _, _)   => windowed(folding, record, state, now)
+      case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
+      case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
           .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
-      case Step.Aggregate(store, key, value, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      case Step.Aggregate(store, key, value, initial, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
             // Java skips a record whose key is null, which here is a key its serializer writes as none.
             case None        => F.pure((state, Vector.empty, Vector.empty))
@@ -142,15 +176,15 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
               val held    = state.store(store.name).get(bytes)
               val updated =
                 held match
-                  case None      => F.pure((start(record.key, record.value), record.timestamp))
+                  case None      => F.pure((start(record.key, record.value), record.timestamp, initial))
                   case Some(old) => value.deserializer.deserialize(changelog, Headers.empty, Some(old.value)).map: previous =>
-                      (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp))
-              updated.flatMap: (aggregate, timestamp) =>
+                      (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp), Some(previous))
+              updated.flatMap: (aggregate, timestamp, replaced) =>
                 value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
                   val contents = written.fold(state.store(store.name) - bytes)(v => state.store(store.name).updated(bytes, Stored(v, timestamp)))
                   val after    = state.copy(stores = state.stores.updated(store.name, contents))
                   val logged   = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
-                  (after, Vector(Travelling(record.key, aggregate, timestamp, record.headers)), Vector(logged))
+                  (after, Vector(Travelling(record.key, aggregate, timestamp, record.headers, replaced)), Vector(logged))
 
   /** What a window step gives: the task's state, the records it passes on, and what it writes to its store's changelog. */
   private type Windowing[K, A] = (TaskState, Vector[Travelling[Windowed[K], A]], Vector[TaskOutput])
@@ -210,13 +244,13 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
               case ((current, forwarded, logged), window) =>
                 val folded =
                   current.store(store.name).get(WindowStore.key(bytes, window.start)) match
-                    case None      => F.pure((step.start(record.key, record.value), record.timestamp))
+                    case None      => F.pure((step.start(record.key, record.value), record.timestamp, step.initial))
                     case Some(old) => value.deserializer.deserialize(changelog, Headers.empty, Some(old.value)).map: previous =>
-                        (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp))
-                folded.flatMap: (aggregate, timestamp) =>
+                        (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp), Some(previous))
+                folded.flatMap: (aggregate, timestamp, replaced) =>
                   value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
                     val (after, log) = windowPut(current, store.name, retention, changelog, bytes, window.start, written, timestamp)
-                    (after, forwarded :+ Travelling(Windowed(record.key, window), aggregate, timestamp, record.headers), logged :+ log)
+                    (after, forwarded :+ Travelling(Windowed(record.key, window), aggregate, timestamp, record.headers, replaced), logged :+ log)
           if !emitOnClose then updated
           else
             val size = windows.sizeMillis
@@ -249,17 +283,20 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
           val closeTime                = streamTime - windows.graceMillis
           def read(held: Stored): F[A] = value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))
           // Puts a window and passes it on, as Java puts a window it makes from an aggregate it found.
-          def write(ran: Windowing[K, A], start: Long, aggregate: A, at: Long): F[Windowing[K, A]] =
+          def put(ran: Windowing[K, A], start: Long, aggregate: A, at: Long, replaced: Option[A]): F[Windowing[K, A]] =
             value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
               val (after, log) = windowPut(ran._1, store.name, retention, changelog, bytes, start, written, at)
-              (after, ran._2 :+ Travelling(Windowed(record.key, Window(start, start + difference)), aggregate, at, record.headers), ran._3 :+ log)
+              val window       = Windowed(record.key, Window(start, start + difference))
+              (after, ran._2 :+ Travelling(window, aggregate, at, record.headers, replaced), ran._3 :+ log)
+          // A window made from another's aggregate replaces nothing, as Java passes it on.
+          def write(ran: Windowing[K, A], start: Long, aggregate: A, at: Long): F[Windowing[K, A]] = put(ran, start, aggregate, at, None)
           // Java's updateWindowAndForward: folds the record into a window that has not closed, from what it held, or from nothing.
           def update(ran: Windowing[K, A], start: Long, held: Option[(A, Long)]): F[Windowing[K, A]] =
             if start + difference < closeTime then F.pure(ran)
             else
               held match
-                case None            => write(ran, start, step.start(record.key, record.value), timestamp)
-                case Some((old, at)) => write(ran, start, add(record.key, record.value, old), math.max(timestamp, at))
+                case None            => put(ran, start, step.start(record.key, record.value), timestamp, step.initial)
+                case Some((old, at)) => put(ran, start, add(record.key, record.value, old), math.max(timestamp, at), Some(old))
           val nothing: Windowing[K, A] = (timed, Vector.empty, Vector.empty)
           if timestamp + difference < closeTime then F.pure(nothing)
           else if timestamp < difference then
@@ -343,12 +380,13 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
               if to < closeTime then F.pure((timed, Vector.empty[Travelling[Windowed[K], Option[A]]], Vector.empty[TaskOutput]))
               else
                 // A record that joins no other session makes its own, which removes nothing, even where one like it was already kept.
-                val merged  = if from == timestamp && to == timestamp then Vector.empty else found
+                val merged  = if from == timestamp && to == timestamp then Vector.empty else found.zip(aggregates)
                 val removed =
                   merged.foldLeft((timed, Vector.empty[Travelling[Windowed[K], Option[A]]], Vector.empty[TaskOutput])):
-                    case ((current, forwarded, logged), (start, end, _)) =>
+                    case ((current, forwarded, logged), ((start, end, _), gone)) =>
                       val (after, log) = sessionWrite(current, store.name, retention, changelog, bytes, start, end, None, timestamp)
-                      (after, forwarded :+ Travelling(Windowed(record.key, Window(start, end)), None, end, Headers.empty), logged :+ log)
+                      val session      = Windowed(record.key, Window(start, end))
+                      (after, forwarded :+ Travelling(session, None, end, Headers.empty, Some(Some(gone))), logged :+ log)
                 val aggregate = folded.fold(step.start(record.key, record.value))(add(record.key, record.value, _))
                 value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
                   val (current, forwarded, logged) = removed
@@ -397,6 +435,100 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
               value.deserializer.deserialize(changelog, Headers.empty, Some(stored.value))
             ).mapN((k, v) => Travelling(Windowed(k, Window(start, end)), Option(v), end, record.headers))
           .map(emitted => (emitted, throttled.copy(lastEmitted = throttled.lastEmitted.updated(store, closeTime))))
+
+  /** The serde a suppression's buffer writes a table's keys with: Java's windowed serdes for windowed tables. */
+  private def bufferKey[K](key: TableKey[F, K]): xkafka.streams.Serde[F, K] =
+    key match
+      case TableKey.Plain(plain)              => plain
+      case TableKey.TimeWindowed(inner, size) => xkafka.streams.Serde.timeWindowed(inner, scala.concurrent.duration.FiniteDuration(size, "ms"))
+      case TableKey.SessionWindowed(inner)    => xkafka.streams.Serde.sessionWindowed(inner)
+
+  /** The serde a suppression's buffer writes a table's values with, none written as a tombstone. */
+  private def bufferValue[V](value: TableValue[F, V]): xkafka.streams.Serde[F, V] =
+    value match
+      case TableValue.Plain(plain)    => plain
+      case TableValue.Optional(inner) => inner.option
+
+  /** A table's change held back, as Java's `KTableSuppressProcessor` holds it: kept in the buffer under its key, in place of any change held before
+    * but held until the time the first was held until, which is the window's end or the record's time; then, by the step's stream time, every change
+    * whose time is the suppression's wait behind it goes on, earliest first and then by key, with the time and headers it was held with, a tombstone
+    * dropped where the windows close; then, while the buffer holds more than its limit, the earliest go on early, or the task stops.
+    */
+  private def suppress[K, V](
+      step: Step.Suppress[F, K, V],
+      record: Travelling[K, V],
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[K, V]], Vector[TaskOutput])] =
+    import step.{grace, suppressed}
+    val store                    = s"${suppressed.name}-store"
+    val keys                     = bufferKey(step.key)
+    val values                   = bufferValue(step.value)
+    val (until, wait, dropEmpty) =
+      suppressed match
+        case Suppressed.UntilWindowCloses(_, _)      => (record.key.asInstanceOf[Windowed[?]].window.end, grace.getOrElse(0L), true)
+        case Suppressed.UntilTimeLimit(_, waited, _) => (record.timestamp, waited.toMillis, false)
+    def unreadable = new IllegalStateException(s"the suppression '${suppressed.name}' buffer holds a change it cannot read")
+    topicNamed(s"$application-$store-changelog").flatMap: changelog =>
+      (
+        keys.serializer.serialize(changelog, record.headers, record.key),
+        record.old.flatTraverse(values.serializer.serialize(changelog, record.headers, _)),
+        values.serializer.serialize(changelog, record.headers, record.value)
+      ).tupled.flatMap:
+        case (None, _, _)            => F.pure((state, Vector.empty, Vector.empty))
+        case (Some(key), old, value) =>
+          val streamTime = math.max(state.streamTimes.getOrElse(store, WindowStore.NoTime), record.timestamp)
+          val source     = state.reading
+          val context    =
+            record.origin.fold(
+              HeldContext(record.timestamp, source.fold(-1L)(_.offset), source.fold("")(_.topic), source.fold(-1)(_.partition), record.headers)
+            )(_.copy(timestamp = record.timestamp, headers = record.headers))
+          val contents = state.store(store)
+          (state.buffers.get(store).orElse(Buffered.of(contents)), contents.get(key).traverse(stored => Held.decode(stored.value))).tupled
+            .liftTo[F](unreadable).flatMap: (index, before) =>
+              // The key's value before it was first held stays with it until it goes on, and so does the time it is held until.
+              val held     = Held(before.fold(until)(_.time), context, before.fold(old)(_.prior), old, value)
+              val indexed  = before.fold(index)(index.excluding(key, _)).including(key, held)
+              val buffered =
+                state.copy(
+                  streamTimes = state.streamTimes.updated(store, streamTime),
+                  stores = state.stores.updated(store, contents.updated(key, Stored(held.encode, record.timestamp))),
+                  dirty = state.dirty.updated(store, state.dirty.getOrElse(store, Dirty.empty) + key)
+                )
+              def emitted(key: Chunk[Byte], held: Held): F[Vector[Travelling[K, V]]] =
+                val headers = held.context.headers
+                if held.value.isEmpty && dropEmpty then F.pure(Vector.empty)
+                else
+                  (
+                    keys.deserializer.deserialize(changelog, headers, Some(key)),
+                    values.deserializer.deserialize(changelog, headers, held.value),
+                    held.old.traverse(old => values.deserializer.deserialize(changelog, headers, Some(old)))
+                  ).mapN((k, v, old) => Vector(Travelling(k, v, held.context.timestamp, headers, old, Some(held.context))))
+              // Passes on the earliest change while `due` holds of the buffer, and takes it out.
+              def evicting(
+                  now: TaskState,
+                  index: Buffered,
+                  out: Vector[Travelling[K, V]],
+                  due: Buffered => Boolean
+              ): F[(TaskState, Buffered, Vector[Travelling[K, V]])] =
+                index.order.headOption.filter(_ => due(index)) match
+                  case None           => F.pure((now, index, out))
+                  case Some((_, key)) => Held.decode(now.store(store)(key).value).liftTo[F](unreadable).flatMap: held =>
+                      val taken =
+                        now.copy(
+                          stores = now.stores.updated(store, now.store(store) - key),
+                          dirty = now.dirty.updated(store, now.dirty.getOrElse(store, Dirty.empty) + key)
+                        )
+                      emitted(key, held).flatMap(more => evicting(taken, index.excluding(key, held), out ++ more, due))
+              def over(index: Buffered) = index.order.size > suppressed.limit.maxRecords || index.bytes > suppressed.limit.maxBytes
+              val expiry                = streamTime - wait
+              evicting(buffered, indexed, Vector.empty, _.order.headOption.exists(_._1 <= expiry)).flatMap: (expired, left, sent) =>
+                val evicted =
+                  if !over(left) then F.pure((expired, left, sent))
+                  else if suppressed.limit.emitEarly then evicting(expired, left, sent, over)
+                  else
+                    F.raiseError(new IllegalStateException(s"the suppression '${suppressed.name}' buffer exceeded its limit: ${left.order
+                        .size}/${suppressed.limit.maxRecords} " + s"records and ${left.bytes}/${suppressed.limit.maxBytes} bytes"))
+                evicted.map((after, index, out) => (after.copy(buffers = after.buffers.updated(store, index)), out, Vector.empty))
 
   /** What Java's sliding window aggregation finds among a key's windows as it reads them backwards. */
   private final case class Found[A](
@@ -557,6 +689,9 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
+  /** The time of a record the broker or its producer stamps, as Java leaves a suppression buffer's changelog records unstamped. */
+  val NoTimestamp: Long = -1L
+
   /** How often a step that emits windows once they close looks for closed windows, in wall-clock milliseconds: Java's
     * `emit.interval.ms.kstreams.windowed.aggregation`, an internal setting of a second.
     */

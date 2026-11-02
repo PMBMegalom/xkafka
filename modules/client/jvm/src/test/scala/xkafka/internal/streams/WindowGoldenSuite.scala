@@ -38,11 +38,12 @@ import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
 import org.apache.kafka.streams.kstream.{
   EmitStrategy, Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
-  TimeWindows as JavaTimeWindows, WindowedSerdes
+  Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
 }
+import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{KStream, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology}
+import xkafka.streams.{BufferLimit, KStream, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology}
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
   * for the same program and records, with Java's record cache off. Java runs each program twice: over an in-memory window store, which is what xkafka
@@ -378,6 +379,180 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       Duration.ofMinutes(1)
     )
 
+  private def windowedSerde(size: Long) = WindowedSerdes.timeWindowedSerdeFrom(classOf[String], size)
+
+  private def counted(name: String) =
+    Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](name).withValueSerde(Serdes.Long)
+
+  test("a buffer logs its changed keys in the order Java's set of them iterates, as its table grows, is crowded and is cleared"):
+    val random = scala.util.Random(7)
+    def key()  = Chunk.array(Array.fill(1 + random.nextInt(6))(random.nextInt(256).toByte))
+    // Keys of one bucket of 16, nine of which crowd it while the table is small.
+    val crowd  = Iterator.continually(key()).filter(k => Dirty.hash(k) % 16 == 3).distinct.take(12).toList
+    val rounds = List(crowd, List.fill(40)(key()), List.fill(5)(key()), List.fill(300)(key()) ++ crowd)
+    val _      =
+      rounds.foldLeft((Dirty.empty, new java.util.HashSet[Bytes]())):
+        case ((ours, java), keys) =>
+          val added =
+            keys.foldLeft(ours): (dirty, key) =>
+              java.add(Bytes.wrap(key.toArray))
+              val next = dirty + key
+              assertEquals(next.ordered.map(_.toVector), java.asScala.toVector.map(_.get.toVector))
+              next
+          java.clear()
+          (added.cleared, java)
+
+  test("final results of tumbling windows go on as Java's do, once each window closes, and the buffer logs what Java's logs"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))
+        .toStream.to(out, Serde.timeWindowed(text, 10.seconds), count),
+      _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
+        .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
+        .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+        .to("out", Produced.`with`(windowedSerde(10000L), Serdes.Long)),
+      updates
+    )
+
+  test("final results of hopping windows go on as Java's do, earliest window first and then by key"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Store("joined"))(_ + _)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream.to(out, Serde.timeWindowed(text, 10.seconds), text),
+      _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L))
+        .reduce((a, b) => a + b, Materialized.as("joined").withKeySerde(Serdes.String).withValueSerde(Serdes.String))
+        .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+        .to("out", Produced.`with`(windowedSerde(10000L), Serdes.String)),
+      closing
+    )
+
+  test("final results of sliding windows go on as Java's do"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))
+        .toStream.to(out, Serde.timeWindowed(text, 5.seconds), count),
+      _.stream[String, String]("in").groupByKey.windowedBy(javaSliding)
+        .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
+        .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+        .to("out", Produced.`with`(windowedSerde(5000L), Serdes.Long)),
+      closing
+    )
+
+  test("final results of sessions go on as Java's do, once the grace and the gap have passed since each ends, sessions merged away dropped"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))
+        .toStream.to(out, Serde.sessionWindowed(text), count.option),
+      _.stream[String, String]("in").groupByKey.windowedBy(javaSessions)
+        .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
+        .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+        .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
+      sessioned
+    )
+
+  test("a table's changes held for a time limit go on as Java's do, each key's latest once the limit has passed since its first"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).count(Store("counts")).suppress(Suppressed.untilTimeLimit("calm", 3.seconds)).toStream
+        .to(out, text, count),
+      _.stream[String, String]("in").groupByKey.count(counted("counts"))
+        .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(3), BufferConfig.unbounded()).withName("calm")).toStream
+        .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
+      updates
+    )
+
+  test("a buffer of at most one change sends the earliest on early, as Java's does"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).reduce(Store("joined"))(_ + _)
+        .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(1).emitEarlyWhenFull)).toStream.to(out, text, text),
+      _.stream[String, String]("in").groupByKey.reduce((a, b) => a + b, Materialized.as("joined").withValueSerde(Serdes.String))
+        .suppress(JavaSuppressed.untilTimeLimit(Duration.ofMinutes(1), BufferConfig.maxRecords(1).emitEarlyWhenFull()).withName("calm")).toStream
+        .to("out", Produced.`with`(Serdes.String, Serdes.String)),
+      updates
+    )
+
+  test("a buffer limited in bytes counts them as Java's does, sending the earliest on early"):
+    // Each change holds 40 bytes or more, growing with its trail, its old value counted again once its key is held twice. Under the largest limits
+    // nothing goes on early, and so nothing goes on within the minute.
+    (40L to 200L by 8L).toList.traverse: limit =>
+      sameEverywhere(
+        KStream(in, text, text).groupByKey(text, text).aggregate(Store("trail"), text)("<")((_, v, acc) => acc + v)
+          .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.bytes(limit))).toStream.to(out, text, text),
+        _.stream[String, String]("in").groupByKey.aggregate(() => "<", (_, v, acc) => acc + v, Materialized.as("trail").withValueSerde(Serdes.String))
+          .suppress(JavaSuppressed.untilTimeLimit(Duration.ofMinutes(1), BufferConfig.maxBytes(limit).emitEarlyWhenFull()).withName("calm")).toStream
+          .to("out", Produced.`with`(Serdes.String, Serdes.String)),
+        updates,
+        wrote = None
+      )
+    .map(wrote => assert(wrote.contains(true) && wrote.contains(false), wrote))
+
+  test("a buffer limited in bytes counts an old value equal to the prior one again once its key is held again, as Java counts it"):
+    // Each key keeps its first value, so a key held again after it went on holds an old value equal to its prior one.
+    (40L to 200L).toList.traverse: limit =>
+      sameEverywhere(
+        KStream(in, text, text).groupByKey(text, text).aggregate(Store("first"), text)("<")((_, v, acc) => if acc == "<" then acc + v else acc)
+          .suppress(Suppressed.untilTimeLimit("calm", 3.seconds, BufferLimit.bytes(limit))).toStream.to(out, text, text),
+        _.stream[String, String]("in").groupByKey
+          .aggregate(() => "<", (_, v, acc) => if acc == "<" then acc + v else acc, Materialized.as("first").withValueSerde(Serdes.String))
+          .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(3), BufferConfig.maxBytes(limit).emitEarlyWhenFull()).withName("calm")).toStream
+          .to("out", Produced.`with`(Serdes.String, Serdes.String)),
+        updates
+      )
+    .void
+
+  test("a suppression after another holds what the first sends on, its old value included, as Java's does"):
+    sameEverywhere(
+      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts"))
+        .suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).suppress(Suppressed.untilWindowCloses("final")).toStream
+        .to(out, Serde.timeWindowed(text, 10.seconds), count),
+      _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
+        .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
+        .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm"))
+        .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+        .to("out", Produced.`with`(windowedSerde(10000L), Serdes.Long)),
+      updates
+    )
+
+  test("a table of records grouped by a new key holds where each came from in the repartition topic, as Java's buffer does"):
+    sameEverywhere(
+      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").count(Store("counts"))
+        .suppress(Suppressed.untilTimeLimit("calm", 5.seconds)).toStream.to(out, text, count),
+      _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).count(counted("counts"))
+        .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(5), BufferConfig.unbounded()).withName("calm")).toStream
+        .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
+      updates
+    )
+
+  test("a full buffer set to shut down stops the task at the record Java's stops at"):
+    val held     = Suppressed.untilWindowCloses("final", BufferLimit.records(2).shutDownWhenFull)
+    val pipeline =
+      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts")).suppress(held).toStream
+        .to(out, Serde.timeWindowed(text, 10.seconds), count)
+    val java: StreamsBuilder => Unit =
+      _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
+        .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
+        .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.maxRecords(2).shutDownWhenFull()).withName("final")).toStream
+        .to("out", Produced.`with`(windowedSerde(10000L), Serdes.Long))
+    val stopped = updates.indices.find(n => scala.util.Try(run(java, None, updates.take(n + 1))).isFailure)
+    assert(stopped.nonEmpty, "Java did not stop")
+    stopped.get.pure[IO].flatMap: n =>
+      ours(pipeline, updates.take(n)).attempt.map(ran => assert(ran.isRight)) *> ours(pipeline, updates.take(n + 1)).attempt.map: ran =>
+        assert(ran.left.exists(_.getMessage.contains("the suppression 'final' buffer exceeded its limit: 3/2 records")), ran)
+
+  /** Runs `inputs` through the program ours and Java's ways and compares what each writes to every topic but repartition topics, its stores'
+    * changelogs and its suppression buffers' included, record for record and byte for byte.
+    */
+  /** Also whether Java wrote anything downstream, which must be as `wrote` says where it says. */
+  private def sameEverywhere(
+      pipeline: Pipeline[IO],
+      java: StreamsBuilder => Unit,
+      inputs: List[(String, String, Long)],
+      wrote: Option[Boolean] = Some(true)
+  ): IO[Boolean] =
+    ours(pipeline, inputs).map: (written, _) =>
+      val ran     = run(java, None, inputs)
+      val topics  = ran.topics.keySet.filterNot(_.endsWith("-repartition"))
+      val oursAll = written.groupBy(_.topic.value).view.mapValues(_.map(record)).toMap
+      wrote.foreach(expected => assertEquals(ran.out.nonEmpty, expected, "whether Java wrote downstream"))
+      assertEquals(oursAll.keySet, topics)
+      topics.foreach(topic => assertEquals(oursAll(topic), ran.topic(topic), topic))
+      ran.out.nonEmpty
+
   /** Runs `inputs` through a session program ours and Java's ways, over Java's in-memory session store and its RocksDB one, and compares what each
     * writes downstream and to the store's changelog, record for record and byte for byte.
     */
@@ -425,23 +600,33 @@ final class WindowGoldenSuite extends CatsEffectSuite:
         assertEquals(written.filter(_.topic == out).map(record), rocksdb.out, "Java over RocksDB")
         assertEquals(written.filter(_.topic.value == changelog).map(record), rocksdb.topic(changelog), "Java over RocksDB")
 
-  /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, as Java's test driver runs it; with the last
-    * segment's state, which holds the window store.
+  /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, at the next offset of its topic, and each task
+    * committing after each input, as Java's test driver runs them; with the last segment's state, which holds the window store.
     */
   private def ours(pipeline: Pipeline[IO], inputs: List[(String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
     val tasks = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector.map(Task[IO]("app", _, 0))
-    def go(index: Int, input: TaskInput, states: Vector[TaskState], at: Long): IO[(Vector[TaskOutput], Vector[TaskState])] =
+    type Ran = (Vector[TaskOutput], Vector[TaskState], Map[String, Long])
+    def go(index: Int, input: TaskInput, states: Vector[TaskState], offsets: Map[String, Long], at: Long): IO[Ran] =
       tasks(index).process(states(index), input, at).flatMap: (state, outputs) =>
-        outputs.foldLeftM((Vector.empty[TaskOutput], states.updated(index, state))):
-          case ((done, now), written) if written.topic.value.endsWith("-repartition") =>
-            go(index + 1, TaskInput(written.key, written.value, written.timestamp, written.headers), now, at)
-              .map((more, after) => (done ++ more, after))
-          case ((done, now), written) => IO.pure((done :+ written, now))
-    inputs.zipWithIndex.foldLeftM((Vector.empty[TaskOutput], Vector.fill(tasks.size)(TaskState.empty))):
-      case ((done, states), ((key, value, timestamp), index)) =>
-        go(0, TaskInput(Some(Chunk.array(key.getBytes)), Some(Chunk.array(value.getBytes)), timestamp, traced(index)), states, wall(index))
-          .map((more, after) => (done ++ more, after))
-    .map((written, states) => (written, states.last))
+        outputs.foldLeftM[IO, Ran]((Vector.empty, states.updated(index, state), offsets)):
+          case ((done, now, offsets), written) if written.topic.value.endsWith("-repartition") =>
+            val topic  = written.topic.value
+            val offset = offsets.getOrElse(topic, 0L)
+            go(
+              index + 1,
+              TaskInput(written.key, written.value, written.timestamp, written.headers, topic, 0, offset),
+              now,
+              offsets.updated(topic, offset + 1),
+              at
+            ).map((more, after, moved) => (done ++ more, after, moved))
+          case ((done, now, offsets), written) => IO.pure((done :+ written, now, offsets))
+    inputs.zipWithIndex.foldLeftM[IO, Ran]((Vector.empty, Vector.fill(tasks.size)(TaskState.empty), Map.empty)):
+      case ((done, states, offsets), ((key, value, timestamp), index)) =>
+        val input = TaskInput(Some(Chunk.array(key.getBytes)), Some(Chunk.array(value.getBytes)), timestamp, traced(index), "in", 0, index.toLong)
+        go(0, input, states, offsets, wall(index)).flatMap: (more, after, moved) =>
+          after.zipWithIndex.traverse((state, task) => tasks(task).flush(state)).map: flushed =>
+            (done ++ more ++ flushed.flatMap(_._2), flushed.map(_._1), moved)
+    .map((written, states, _) => (written, states.last))
 
   /** What Java's test driver writes to each topic for `inputs`, and what the window store `kept` names holds after them. */
   private def run(build: StreamsBuilder => Unit, kept: Option[String], inputs: List[(String, String, Long)]): Ran =
@@ -482,11 +667,12 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       Ran(topics.toMap, held)
     finally driver.close()
 
+  // The test driver reads the time of a record written without one as 0.
   private def record(written: TaskOutput): Output =
     Output(
       written.key.map(_.toVector),
       written.value.map(_.toVector),
-      written.timestamp,
+      if written.timestamp == Task.NoTimestamp then 0L else written.timestamp,
       written.headers.values.map(h => h.key -> h.value.map(v => String(v.toArray)))
     )
 

@@ -432,8 +432,9 @@ private[xkafka] object Engine:
                 (F.monotonic, changes.size).tupled.flatMap: (now, waiting) =>
                   if now - after.committed >= commitInterval || waiting > 0 then F.pure(after)
                   else poll(after).flatMap(process(after, _, write)).flatMap(more(_, write))
-              transaction(write => process(running, polled, write).flatMap(more(_, write)).map(after => (after, offsetsOf(after))))
-                .flatMap(after => F.monotonic.map(now => after.copy(tasks = after.tasks.view.mapValues(_.settled).toMap, committed = now)))
+              transaction(write =>
+                process(running, polled, write).flatMap(more(_, write)).flatMap(flushed(_, write)).map(after => (after, offsetsOf(after)))
+              ).flatMap(after => F.monotonic.map(now => after.copy(tasks = after.tasks.view.mapValues(_.settled).toMap, committed = now)))
                 .recoverWith:
                   case refused: KafkaException.BackendFailure if refused.code.exists(Refused) => restart(running)
 
@@ -567,7 +568,18 @@ private[xkafka] object Engine:
     /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready. A member the group no
       * longer counts commits nothing: its tasks go to others, which read again from the group's last commit.
       */
-    private def commit(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
+    private def commit(running: Running[F], tasks: Set[TaskId]): F[Running[F]] = flushed(running, tasks, plane.write).flatMap(committed(_, tasks))
+
+    /** Writes what these tasks' suppression buffers log at a commit, before the commit, as Java's buffers log before the producer flushes. */
+    private def flushed(running: Running[F], tasks: Set[TaskId], write: Writer[F]): F[Running[F]] =
+      running.tasks.view.filterKeys(tasks).toList.filter(_._2.state.dirty.values.exists(_.keys.nonEmpty))
+        .traverse((id, live) => live.task.flush(live.state).map(id -> (live, _))).flatMap: done =>
+          done.flatMap(_._2._2._2).traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))
+            .as(running.copy(tasks = running.tasks ++ done.map((id, flushed) => id -> flushed._1.copy(state = flushed._2._1))))
+
+    private def flushed(running: Running[F], write: Writer[F]): F[Running[F]] = flushed(running, running.tasks.keySet, write)
+
+    private def committed(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
       val due    = running.tasks.view.filterKeys(tasks).toList.filter(_._2.read.nonEmpty)
       val topics =
         due.groupMap(_._2.input.topic.value): (_, live) =>
@@ -603,12 +615,20 @@ private[xkafka] object Engine:
         written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))
           .as(running.copy(tasks = running.tasks ++ done.map((id, ran) => id -> ran._1)))
 
-    private def inputOf(record: PolledRecord): TaskInput = TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers)
+    private def inputOf(record: PolledRecord): TaskInput =
+      TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers, record.topic, record.partition, record.offset)
 
     private def recordOf(output: TaskOutput): F[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] =
       val chosen = output.partitionBy.fold(F.pure(output.partition))(by => partitions(output.topic).map(count => Some(Murmur2.partition(by, count))))
       chosen.flatMap(_.traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F])).map: partition =>
-        ProducerRecord(output.topic, output.key, output.value, partition, Some(Timestamp.fromEpochMillis(output.timestamp)), output.headers)
+        ProducerRecord(
+          output.topic,
+          output.key,
+          output.value,
+          partition,
+          Option.when(output.timestamp != Task.NoTimestamp)(Timestamp.fromEpochMillis(output.timestamp)),
+          output.headers
+        )
 
     /** The partition a task reads: its sub-topology's input topic, or its repartition topic, at the task's partition. */
     private def sourceOf(id: TaskId): F[TopicPartition] =

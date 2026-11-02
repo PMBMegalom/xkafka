@@ -37,7 +37,8 @@ import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  KafkaStreams, KStream, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState, TimeWindows, Topology
+  BufferLimit, KafkaStreams, KStream, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState, Suppressed, TimeWindows,
+  Topology
 }
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
@@ -495,6 +496,85 @@ final class EngineSuite extends CatsEffectSuite:
           List("k", "k", "other").map(key => Some(key) -> Some(Murmur2.partition(Chunk.array(key.getBytes), 4)))
         )
 
+  test("at a commit, a suppression's buffer logs each key it changed since the last, what it holds or a tombstone once it holds it no more"):
+    run(topology = suppressing): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 1000L), record(1, 1L, "k", 2000L))
+        _       <- IO.sleep(1500.millis)
+        first   <- world.written.get
+        _       <- world.records(record(1, 2L, "k", 20000L))
+        _       <- IO.sleep(1500.millis)
+        written <- world.written.get
+      yield
+        val logged = written.filter(_.topic.value == "app-final-store-changelog")
+        assertEquals(first.count(_.topic.value == "app-final-store-changelog"), 1)
+        assertEquals(logged.map(_.partition.map(_.value)).distinct, List(Some(1)))
+        assertEquals(logged.map(_.timestamp), List(None, None, None))
+        val held = logged.head.value.flatMap(Held.decode)
+        assertEquals(held.map(h => (h.time, h.context.offset, h.context.topic, h.context.partition)), Some((10000L, 1L, "in", 1)))
+        assertEquals(logged.head.headers, Held.Version)
+        // The window [0, 10000) has gone on, and [20000, 30000) is held.
+        assertEquals(
+          logged.drop(1).map(r => (r.key.map(k => java.nio.ByteBuffer.wrap(k.toArray).getLong(k.size - 8)), r.value.isEmpty)).toSet,
+          Set((Some(0L), true), (Some(20000L), false))
+        )
+        assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => java.nio.ByteBuffer.wrap(v.toArray).getLong), List(2L))
+
+  test("a suppression's buffer logs what it changed before the offsets are committed"):
+    run(topology = suppressing, commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 1, 29)))): world =>
+      world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis) *> world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(1500.millis) *>
+        (world.ended, world.written.get).mapN: (ended, written) =>
+          assert(ended.exists(_.isLeft), ended)
+          assertEquals(written.count(_.topic.value == "app-final-store-changelog"), 1)
+
+  test("exactly once, what a suppression's buffer logs goes in the transaction with the offsets"):
+    run(topology = suppressing, failing = exactlyOnce): world =>
+      for
+        _   <- world.tell(assign(TaskId("0", 1)))
+        _   <- IO.sleep(100.millis)
+        _   <- world.records(record(1, 0L, "k", 1000L), record(1, 1L, "other", 1000L))
+        _   <- IO.sleep(2.seconds)
+        log <- world.log.get
+      // Two records to the window store's changelog, and two to the buffer's.
+      yield assertEquals(log.collect { case Event.Transaction(written, _) => written }, List(4))
+
+  test("a suppression's buffer set to shut down when full stops the engine with an error once it holds more"):
+    val full =
+      Topology.of(
+        KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+          .count(Store("windows")).suppress(Suppressed.untilWindowCloses("final", BufferLimit.records(1).shutDownWhenFull)).toStream
+          .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+      ).orFail
+    run(topology = full): world =>
+      world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis) *> world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(500.millis) *>
+        world.ended.flatMap: before =>
+          world.records(record(1, 1L, "other", 1000L)) *> IO.sleep(500.millis) *> world.ended.map: after =>
+            assertEquals(before, None)
+            assertEquals(
+              after.flatMap(_.left.toOption.map(_.getMessage)),
+              Some("the suppression 'final' buffer exceeded its limit: 2/1 records and 114/9223372036854775807 bytes")
+            )
+
+  test("a restored suppression's buffer sends on what it held once its window closes, with the time and headers it was held with"):
+    val context = HeldContext(4000L, 7L, "in", 1, Headers(Header("trace", Some(Chunk.array("held".getBytes)))))
+    val held    = Held(10000L, context, None, Some(counted(4L).value), Some(counted(5L).value))
+    run(topology = suppressing): world =>
+      for
+        _       <- world.restoredAlso.set(Map("final-store" -> Map(window("k", 0L) -> Stored(held.encode, 0L))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 8L, "other", 15000L))
+        _       <- IO.sleep(1500.millis)
+        written <- world.written.get
+      yield
+        val out = written.filter(_.topic.value == "out")
+        assertEquals(
+          out.map(r => (r.key, r.value, r.timestamp.map(_.epochMillis), r.headers)),
+          List((Some(window("k", 0L)), Some(counted(5L).value), Some(4000L), context.headers))
+        )
+
   test("a restored session store keeps the sessions its clock has not expired, which a record then joins"):
     run(topology = sessioning): world =>
       for
@@ -631,6 +711,14 @@ object EngineSuite:
     Topology.of(
       KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .withRetention(1.minute).emitOnWindowClose.count(Store("windows")).toStream
+        .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  /** Counts as `windowing` does, passing on each window's final result once it closes. */
+  private val suppressing: Topology[IO] =
+    Topology.of(
+      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Store("windows")).suppress(Suppressed.untilWindowCloses("final")).toStream
         .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
     ).orFail
 

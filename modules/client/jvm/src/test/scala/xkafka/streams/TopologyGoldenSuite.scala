@@ -35,9 +35,10 @@ import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, Topology as JavaTopology}
 import org.apache.kafka.streams.kstream.{
-  Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, TimeWindows as JavaTimeWindows,
-  WindowedSerdes
+  Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, Suppressed as JavaSuppressed,
+  TimeWindows as JavaTimeWindows, WindowedSerdes
 }
+import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.processor.internals.{InternalTopologyBuilder, StreamThread, TopologyMetadata}
 import org.apache.kafka.streams.state.{SessionStore, WindowStore}
 import internal.protocol.StreamsGroup
@@ -114,6 +115,27 @@ final class TopologyGoldenSuite extends FunSuite:
           .count(Materialized.as[String, java.lang.Long, SessionStore[Bytes, Array[Byte]]]("sessions")).toStream
           .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long))
       )
+    )
+
+  test("a suppression declares its buffer's changelog as Java does, compacted, beside its table's store"):
+    assertEquals(
+      ours(
+        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Store("counts"))
+          .suppress(Suppressed.untilWindowCloses("final")).toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count),
+        KStream(topic("other"), text, text).groupByKey(text, text).count(Store("totals"))
+          .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(10).emitEarlyWhenFull)).toStream
+          .to(topic("other-out"), text, count)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("in").groupByKey
+          .windowedBy(JavaTimeWindows.ofSizeAndGrace(java.time.Duration.ofSeconds(10), java.time.Duration.ofSeconds(5)))
+          .count(Materialized.as[String, java.lang.Long, WindowStore[Bytes, Array[Byte]]]("counts"))
+          .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+          .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long))
+        builder.stream[String, String]("other").groupByKey
+          .count(Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("totals"))
+          .suppress(JavaSuppressed.untilTimeLimit(java.time.Duration.ofMinutes(1), BufferConfig.maxRecords(10)).withName("calm")).toStream
+          .to("other-out", Produced.`with`(Serdes.String, Serdes.Long))
     )
 
   test("a stateless pipeline is one sub-topology reading its input"):

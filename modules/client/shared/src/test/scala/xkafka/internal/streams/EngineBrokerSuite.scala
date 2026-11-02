@@ -35,7 +35,7 @@ import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
   ApplicationId, KStream, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase, StreamsSettings,
-  TimeWindows, Topology
+  Suppressed, TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -72,6 +72,11 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def finalByMinute(input: Topic, output: Topic): Pipeline[IO] =
     KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds)).withRetention(1.hour)
       .emitOnWindowClose.count(Store("counts")).toStream.to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+
+  /** Counts as `finalByMinute` does, passing on each window's final count once it closes through the suppression `final`. */
+  private def suppressedByMinute(input: Topic, output: Topic): Pipeline[IO] =
+    KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds)).count(Store("counts"))
+      .suppress(Suppressed.untilWindowCloses("final")).toStream.to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
 
   /** Waits up to two minutes until `topic` holds at least `count` records. */
   private def holding(server: String, topic: Topic, count: Int)(using guarantee: ProcessingGuarantee): IO[Unit] =
@@ -382,6 +387,20 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             produceAt(server, app.input, List(("a", first), ("a", first + 1000L), ("b", first + 2000L))) *> holding(server, app.changelog, 3) *>
               // Past the second within which the engine looked for closed windows, a record that closes the first minute.
               IO.sleep(2.seconds) *> produceAt(server, app.input, List(("a", second + 15000L))) *>
+              windowRecords(server, app.output, Map(("a", first) -> 2L, ("b", first) -> 1L))
+
+    test(s"$release, $under: an engine passes on what a suppression held for another before it, once the window closes, its buffer compacted"):
+      counting(server, suppressedByMinute): app =>
+        IO.realTime.flatMap: now =>
+          val first  = (now.toMillis / 60000L - 5L) * 60000L
+          val buffer = Topic.from(s"${app.application}-final-store-changelog").orFail
+          val policy =
+            admin(server).use(_.describeTopicConfigurations(NonEmptySet.one(buffer))).map: described =>
+              described(buffer).flatMap(_.toOption).get.get("cleanup.policy").map(_.value)
+          running(server, app)(
+            produceAt(server, app.input, List(("a", first), ("a", first + 1000L), ("b", first + 2000L))) *> holding(server, buffer, 2)
+          ) *> policy.map(found => assertEquals(found, Some(ConfigurationValue.Present("compact")))) *> running(server, app):
+            produceAt(server, app.input, List(("a", first + 75000L))) *>
               windowRecords(server, app.output, Map(("a", first) -> 2L, ("b", first) -> 1L))
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
