@@ -155,6 +155,26 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         consumer.records.scan(Map.empty[String, Option[String]])((seen, record) => seen.updated(record.record.key, record.record.value))
           .find(_ == expected).compile.lastOrError.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $expected"))).void
 
+  /** Reads `topic` from its start until each key of `expected` has the latest value, or tombstone, that `expected` gives it, whatever other keys
+    * hold, failing after two minutes with what it read.
+    */
+  private def heldValues(server: String, topic: Topic, expected: Map[String, Option[String]])(using guarantee: ProcessingGuarantee): IO[Unit] =
+    Names.fresh:
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Deserializer.utf8[IO],
+          Deserializer.utf8[IO].option,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      IO.ref(Map.empty[String, Option[String]]).flatMap: last =>
+        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+          consumer.records.scan(Map.empty[String, Option[String]])((seen, record) => seen.updated(record.record.key, record.record.value))
+            .evalTap(last.set).find(seen => expected.forall((key, value) => seen.get(key).contains(value))).compile.lastOrError.void
+            .timeoutTo(2.minutes, last.get.flatMap(seen => IO.raiseError(new AssertionError(s"$topic never held $expected; it held $seen"))))
+
   /** Reads `topic` from its start until the latest count of each key in each window, by the window's start, is `expected`. */
   private def windowCounts(server: String, topic: Topic, expected: Map[(String, Long), Long])(using guarantee: ProcessingGuarantee): IO[Unit] =
     Names.fresh:
@@ -381,13 +401,15 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           )(_.fold(order => s"$order:-", payment => s"-:$payment", (order, payment) => s"$order:$payment")).to(output, text, text)
       ): app =>
         val payments = Topic.from(s"${app.input.value}-payments").orFail
-        val keys     = List("a", "b", "c")
+        // Java looks for held records whose windows have closed at most once a second by the wall clock, when a record comes at the stream time:
+        // records well after the windows, to keys on every partition, each second, until a look sends the held ones on.
+        val closing =
+          fs2.Stream.iterate(1L)(_ + 1).evalMap(n => produceAt(server, app.input, (0 until 10).toList.map(i => s"z$i" -> (60000L + n * 1000L))))
+            .metered(1.second).compile.drain
         admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(payments, 2, 1).orFail))) *> running(server, app):
           produceAt(server, app.input, List("a" -> 1000L, "b" -> 2000L)) *> produceAt(server, payments, List("a" -> 1500L, "c" -> 3000L)) *>
-            latestValues(server, app.output, Map("a" -> Some("a-value:a-value"))) *>
-            // A record well after the windows on each key's partition, more than a second of wall clock after the last look, closes them.
-            IO.sleep(2.seconds) *> produceAt(server, app.input, keys.map(_ -> 60000L)) *>
-            latestValues(server, app.output, Map("a" -> Some("a-value:a-value"), "b" -> Some("b-value:-"), "c" -> Some("-:c-value")))
+            heldValues(server, app.output, Map("a" -> Some("a-value:a-value"))) *> closing.background.surround:
+              heldValues(server, app.output, Map("a" -> Some("a-value:a-value"), "b" -> Some("b-value:-"), "c" -> Some("-:c-value")))
 
     test(s"$release, $under: a stream and the table it joins in topics of different partition counts are refused by the broker, as for Java"):
       counting(
