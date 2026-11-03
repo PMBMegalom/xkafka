@@ -95,11 +95,13 @@ final class GroupMemberSuite extends CatsEffectSuite:
     val run     =
       Coordinator(
         (_, request) => IO.pure(answer(request, active = Some(Set.empty))),
-        {
-          case (0, _)                      => IO.raiseError(failure)
-          case (_, _: OffsetCommitRequest) => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
-          case (_, _: OffsetFetchRequest)  => IO.pure(OffsetFetchRequest.Answer(Nil, 0))
-        }
+        [R] =>
+          (n: Int, request: Request[R]) =>
+            request match
+              case _ if n == 0            => IO.raiseError(failure)
+              case _: OffsetCommitRequest => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
+              case _: OffsetFetchRequest  => IO.pure(OffsetFetchRequest.Answer(Nil, 0))
+              case other                  => Coordinator.unexpected(other)
       ).flatMap: coordinator =>
         member(coordinator).use: member =>
           for
@@ -348,7 +350,7 @@ object GroupMemberSuite:
     */
   final class Coordinator(
       script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
-      others: PartialFunction[(Int, Request[?]), IO[Any]],
+      others: [R] => (Int, Request[R]) => IO[R],
       log: Ref[IO, Vector[(Long, StreamsGroupHeartbeatRequest)]],
       made: Ref[IO, Vector[Request[?]]],
       counts: Ref[IO, (Int, Int)]
@@ -365,14 +367,15 @@ object GroupMemberSuite:
             request match
               case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
                   .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
-                  .map(_.asInstanceOf[R])
-              case other => made.modify(before => (before :+ other, before.size)).flatMap: n =>
-                  others.applyOrElse((n, other), _ => IO.raiseError(new AssertionError(s"unexpected request $other"))).map(_.asInstanceOf[R])
+              case other => made.modify(before => (before :+ other, before.size)).flatMap(others(_, other))
 
   object Coordinator:
+    /** A request the coordinator has no answer for, which fails the test. */
+    def unexpected[R](request: Request[R]): IO[R] = IO.raiseError(new AssertionError(s"unexpected request $request"))
+
     def apply(
         script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
-        others: PartialFunction[(Int, Request[?]), IO[Any]] = PartialFunction.empty
+        others: [R] => (Int, Request[R]) => IO[R] = [R] => (_: Int, request: Request[R]) => unexpected(request)
     ): IO[Coordinator] =
       (IO.ref(Vector.empty[(Long, StreamsGroupHeartbeatRequest)]), IO.ref(Vector.empty[Request[?]]), IO.ref((0, 0)))
         .mapN(new Coordinator(script, others, _, _, _))

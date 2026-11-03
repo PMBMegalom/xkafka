@@ -121,7 +121,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   private def inMemory(name: String, retention: Duration, size: Duration) = Stores.inMemoryWindowStore(name, retention, size, false)
 
   test("counting in tumbling windows writes, logs and keeps what Java does, dropping records past the grace"):
-    same[java.lang.Long](
+    same[java.lang.Long, Long](
       KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts")).toStream
         .to(out, Serde.timeWindowed(text, 10.seconds), count),
       materialized =>
@@ -132,7 +132,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     )
 
   test("reducing in hopping windows writes, logs and keeps what Java does, each record in every window it falls in"):
-    same[String](
+    same[String, String](
       KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Store("joined"))(_ + _).toStream
         .to(out, Serde.timeWindowed(text, 10.seconds), text),
       materialized =>
@@ -144,7 +144,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     )
 
   test("aggregating windows of records grouped by a new key goes through the repartition topic as Java's does"):
-    same[java.lang.Long](
+    same[java.lang.Long, Long](
       KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(tumbling)
         .aggregate(Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream.to(out, Serde.timeWindowed(text, 10.seconds), count),
       materialized =>
@@ -203,7 +203,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       assertEquals(read, xkafka.streams.Windowed("key", xkafka.streams.Window(30000L, 40000L)))
 
   test("counting in tumbling windows emitted once they close writes what Java does, looking for closed windows at most once a second"):
-    same[java.lang.Long](
+    same[java.lang.Long, Long](
       KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).emitOnWindowClose.count(Store("counts")).toStream
         .to(out, Serde.timeWindowed(text, 10.seconds), count),
       materialized =>
@@ -220,7 +220,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test(
     "reducing in hopping windows kept a minute, emitted once they close, writes what Java does, every window closed since the last, by start and key"
   ):
-    same[String](
+    same[String, String](
       KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).withRetention(1.minute).emitOnWindowClose.reduce(Store("joined"))(_ + _)
         .toStream.to(out, Serde.timeWindowed(text, 10.seconds), text),
       materialized =>
@@ -238,7 +238,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   private def javaSliding = JavaSlidingWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(5))
 
   test("counting in sliding windows writes, logs and keeps what Java does, early records in the window from 0 and late ones dropped"):
-    same[java.lang.Long](
+    same[java.lang.Long, Long](
       KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).count(Store("counts")).toStream
         .to(out, Serde.timeWindowed(text, 5.seconds), count),
       materialized =>
@@ -276,7 +276,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     )
 
   test("reducing in sliding windows writes, logs and keeps what Java does, for records out of order, at equal times and early"):
-    same[String](
+    same[String, String](
       KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).reduce(Store("joined"))(_ + _).toStream
         .to(out, Serde.timeWindowed(text, 5.seconds), text),
       materialized =>
@@ -290,7 +290,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     )
 
   test("reducing in sliding windows emitted once they close writes what Java does"):
-    same[String](
+    same[String, String](
       KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).withRetention(1.minute).emitOnWindowClose.reduce(Store("joined"))(_ + _)
         .toStream.to(out, Serde.timeWindowed(text, 5.seconds), text),
       materialized =>
@@ -305,7 +305,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     )
 
   test("aggregating sliding windows of records grouped by a new key goes through the repartition topic as Java's does"):
-    same[java.lang.Long](
+    same[java.lang.Long, Long](
       KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(sliding)
         .aggregate(Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream.to(out, Serde.timeWindowed(text, 5.seconds), count),
       materialized =>
@@ -850,11 +850,11 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   /** Runs `inputs` through the program ours and Java's ways and compares what each writes downstream and to the store's changelog, record for record
     * and byte for byte, and what Java's in-memory store and ours keep.
     */
-  private def same[V](
+  private def same[V, A](
       pipeline: Pipeline[IO],
       java: (String => Materialized[String, V, WindowStore[Bytes, Array[Byte]]]) => StreamsBuilder => Unit,
       store: String,
-      values: Deserializer[IO, ?],
+      values: Deserializer[IO, A],
       inputs: List[(String, String, Long)] = updates,
       retention: Duration = Duration.ofSeconds(15),
       size: Duration = Duration.ofSeconds(10)

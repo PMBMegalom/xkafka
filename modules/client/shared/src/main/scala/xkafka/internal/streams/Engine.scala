@@ -380,7 +380,7 @@ private[xkafka] object Engine:
 
   private final class Loop[F[_]](
       application: String,
-      segments: Map[String, Segment[F, ?, ?, ?, ?]],
+      segments: Map[String, Segment[F]],
       member: GroupMember[F],
       plane: Plane[F],
       transactions: Option[Transactions[F]],

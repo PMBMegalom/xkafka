@@ -25,6 +25,7 @@ package streams
 
 import scala.concurrent.duration.*
 
+import cats.arrow.FunctionK
 import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
@@ -99,6 +100,15 @@ final class TaskSuite extends CatsEffectSuite:
     (emitted(None), emitted(Some(10.minutes))).mapN: (lost, sent) =>
       assertEquals(lost, Vector.empty)
       assertEquals(sent, Vector(0L))
+
+  // Java partitions a windowed key by the key alone (WindowedStreamPartitioner), whatever effect the program runs in.
+  test("a windowed key's records are partitioned by its key alone, and still are once the topology's effects are mapped"):
+    val windowed =
+      KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Store("windows")).toStream
+        .to(out, Serde.timeWindowed(text, 10.seconds), count)
+    val mapped = Task("app", Topology.of(windowed).orFail.mapK(FunctionK.id[IO]).pipelines.head.segments.head, 0)
+    List(task(windowed, 0), mapped).traverse(_.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L))
+      .map(found => assertEquals(found.map(_._2.filter(_.topic == out).map(_.partitionBy)), List(Vector(bytes("k")), Vector(bytes("k")))))
 
   test("each change to a store goes to its changelog on the task's own partition, without the record's headers"):
     task(counting, 3).process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, trace), 0L).map: (_, written) =>

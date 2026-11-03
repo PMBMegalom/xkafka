@@ -75,7 +75,7 @@ final class TaskGoldenSuite extends CatsEffectSuite:
     same(
       KStream(in, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(out, text, count),
       _.stream[String, String]("in").groupByKey.count(Materialized.as("counts")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long)),
-      List("counts" -> count.deserializer)
+      List("counts" -> shown(count.deserializer))
     )
 
   test("grouping by a new key writes and keeps what Java does, through the repartition topic"):
@@ -83,7 +83,7 @@ final class TaskGoldenSuite extends CatsEffectSuite:
       KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v).count(Store("counts")).toStream.to(out, text, count),
       _.stream[String, String]("in").groupBy((_, v) => v, Grouped.as("by-value")).count(Materialized.as("counts")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
-      List("counts" -> count.deserializer)
+      List("counts" -> shown(count.deserializer))
     )
 
   test("reducing and aggregating write and keep what Java does"):
@@ -95,7 +95,7 @@ final class TaskGoldenSuite extends CatsEffectSuite:
         (_, v, n) => java.lang.Long.valueOf(n + v.length),
         Materialized.as[String, java.lang.Long, KeyValueStore[Bytes, Array[Byte]]]("lengths").withValueSerde(Serdes.Long)
       ).toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long)),
-      List("joined" -> text.deserializer, "lengths" -> count.deserializer)
+      List("joined" -> shown(text.deserializer), "lengths" -> shown(count.deserializer))
     )
 
   test("a record grouped under no key is dropped before the repartition topic, as Java drops a null key"):
@@ -109,18 +109,21 @@ final class TaskGoldenSuite extends CatsEffectSuite:
         .to(out, text, count),
       _.stream[String, String]("in").groupBy((_, v) => if v == "y" then null else v, Grouped.as("by-value")).count(Materialized.as("counts")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
-      List("counts" -> count.deserializer)
+      List("counts" -> shown(count.deserializer))
     )
 
   /** Runs `inputs` through the program both ways and compares the output topic's records, and the contents of the stores `stores` names. */
-  private def same(pipeline: Pipeline[IO], java: StreamsBuilder => Unit, stores: List[(String, Deserializer[IO, ?])]): IO[Unit] =
+  /** Values as `values` reads them, written as text to compare with Java's. */
+  private def shown[A](values: Deserializer[IO, A]): Deserializer[IO, String] = values.map(_.toString)
+
+  private def same(pipeline: Pipeline[IO], java: StreamsBuilder => Unit, stores: List[(String, Deserializer[IO, String])]): IO[Unit] =
     for
       ran <- ours(pipeline)
       (written, states) = ran
       kept <-
         stores.traverse: (name, values) =>
           states.toList.flatMap(_.store(name).toList).traverse: (key, stored) =>
-            values.deserialize(in, Headers.empty, Some(stored.value)).map(v => String(key.toArray) -> (v.toString, stored.timestamp))
+            values.deserialize(in, Headers.empty, Some(stored.value)).map(v => String(key.toArray) -> (v, stored.timestamp))
           .map(name -> _.toMap)
     yield
       val (javaOut, javaStores) = declaredRun(java, stores.map(_._1))

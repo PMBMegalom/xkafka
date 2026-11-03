@@ -59,7 +59,7 @@ final class StreamsSettingsSuite extends FunSuite:
 
   test("a refused application id or settings are raised with every reason"):
     type Raised[A] = Either[Throwable, A]
-    def reasons(raised: Raised[?]) = raised.left.toOption.collect { case refused: InvalidStreamsSettings => refused.errors.toList }
+    def reasons[A](raised: Raised[A]) = raised.left.toOption.collect { case refused: InvalidStreamsSettings => refused.errors.toList }
     assertEquals(reasons(ApplicationId.from("").liftTo[Raised]), Some(List(StreamsSettingsError.EmptyApplicationId)))
     val refused = StreamsSettings.from(client, app, concurrency = 0, closeTimeout = Duration.Zero).liftTo[Raised]
     assertEquals(

@@ -27,9 +27,7 @@ import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
-import xkafka.streams.{
-  BaseKeyed, Chain, End, Origin, Segment, Side, Source, Step, Suppressed, TableJoiner, TableKey, TableValue, TableView, Window, Windowed
-}
+import xkafka.streams.{Chain, End, Origin, Release, Segment, Side, Source, Step, TableJoiner, TableKey, TableValue, TableView, Window, Windowed}
 
 /** A record as a topic holds it, read by a task. */
 private[xkafka] final case class TaskInput(
@@ -86,7 +84,7 @@ private[xkafka] object TaskState:
 /** One sub-topology on one partition: what it writes for each record it reads, as Java Streams writes it, without Java's record cache, so every
   * change to a store goes to its changelog and on downstream.
   */
-private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, ?, ?, ?, ?], partition: Int)(using F: MonadThrow[F]):
+private[xkafka] final class Task[F[_]](application: String, segment: Segment[F], partition: Int)(using F: MonadThrow[F]):
   /** A record going from step to step; a table's change also carries the value it replaced, where Java passes one on, and a change a suppression
     * held, where it came from, which Java passes on with it.
     */
@@ -100,8 +98,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
   )
 
   /** The topics each of the sub-topology's segments reads, with the segment. */
-  private val readers: Map[String, Segment[F, ?, ?, ?, ?]] =
-    segment.all.flatMap(read => read.origin.sources.map(Task.topicOf(application, _) -> read)).toMap
+  private val readers: Map[String, Segment[F]] = segment.all.flatMap(read => read.origin.sources.map(Task.topicOf(application, _) -> read)).toMap
 
   /** Runs `input` through the segment that reads its topic at wall-clock time `now`, in epoch milliseconds. */
   def process(state: TaskState, input: TaskInput, now: Long): F[(TaskState, Vector[TaskOutput])] =
@@ -122,12 +119,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
             case None       => TaskOutput(changelog, Some(partition), Some(key), None, Task.NoTimestamp, Headers.empty)
     .map(written => (state.copy(dirty = state.dirty.view.mapValues(_.cleared).toMap), written.toVector))
 
-  private def segmentOf[K, V, K2, V2](
-      segment: Segment[F, K, V, K2, V2],
-      state: TaskState,
-      input: TaskInput,
-      now: Long
-  ): F[(TaskState, Vector[TaskOutput])] =
+  private def segmentOf(segment: Segment[F], state: TaskState, input: TaskInput, now: Long): F[(TaskState, Vector[TaskOutput])] =
     for
       fedIn <- fed(segment.origin, input, state, now, Task.requests(segment.chain, false))
       (read, records, logged) = fedIn
@@ -250,6 +242,15 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
           records.foldLeftM((before, Vector.empty[Travelling[K2, V2]], written)):
             case ((current, done, out), next) => step(last, next, current, now).map((after, more, logged) => (after, done ++ more, out ++ logged))
 
+  /** The record with what `step` makes of it and its key's value in the table, as Java's stream-table join makes it when the record comes. */
+  private def joined[K, V, TV, R](
+      step: Step.Join[F, K, V, TV, R],
+      record: Travelling[K, V],
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+    valueOf(step.view, record.key, state)
+      .map(table => (state, step.join(record.value, table.map(_._1)).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
+
   /** The other side's value for `key` and its time, where its view finds one; a windowed table has no view, and its joins are refused. */
   private def lookup[K, V](view: Option[TableView[F, K, V]], key: K, state: TaskState): F[Option[(V, Long)]] =
     view.flatTraverse(valueOf(_, key, state))
@@ -279,10 +280,8 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
-      case Step.Join(view, join)                                         => valueOf(view, record.key, state)
-          .map(table => (state, join(record.value, table.map(_._1)).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
-          .asInstanceOf[F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])]]
-      case Step.TableSource(store, key, value) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
+      case Step.TableSource(store, key, value)                           => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
           record.key.flatTraverse(k => key.serializer.serialize(changelog, Headers.empty, k).map(_.map(k -> _))).flatMap:
             // Java skips a record whose key is null: one read without a key, or one its serializer writes as none.
             case None             => F.pure((state, Vector.empty, Vector.empty))
@@ -585,14 +584,14 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       record: Travelling[K, V],
       state: TaskState
   ): F[(TaskState, Vector[Travelling[K, V]], Vector[TaskOutput])] =
-    import step.{grace, suppressed}
+    import step.suppressed
     val store                    = s"${suppressed.name}-store"
     val keys                     = bufferKey(step.key)
     val values                   = bufferValue(step.value)
     val (until, wait, dropEmpty) =
-      suppressed match
-        case Suppressed.UntilWindowCloses(_, _)      => (record.key.asInstanceOf[Windowed[?]].window.end, grace.getOrElse(0L), true)
-        case Suppressed.UntilTimeLimit(_, waited, _) => (record.timestamp, waited.toMillis, false)
+      step.release match
+        case Release.WindowCloses(end, grace) => (end(record.key), grace, true)
+        case Release.TimeLimit(waited)        => (record.timestamp, waited, false)
     def unreadable = new IllegalStateException(s"the suppression '${suppressed.name}' buffer holds a change it cannot read")
     topicNamed(s"$application-$store-changelog").flatMap: changelog =>
       (
@@ -845,11 +844,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F, 
       record: Travelling[K, V]
   ): F[Vector[TaskOutput]] =
     // Java partitions a windowed key by the key alone, whichever topic it goes to.
-    def base(target: Topic): F[Option[Chunk[Byte]]] =
-      key.serializer match
-        case windowed: BaseKeyed[?, ?] => windowed.asInstanceOf[BaseKeyed[F, Any]]
-            .base(target, record.headers, record.key.asInstanceOf[xkafka.streams.Windowed[Any]])
-        case _ => F.pure(None)
+    def base(target: Topic): F[Option[Chunk[Byte]]] = key.serializer.partitionedBy(target, record.headers, record.key).sequence.map(_.flatten)
     for
       target <- topic
       k      <- key.serializer.serialize(target, record.headers, record.key)

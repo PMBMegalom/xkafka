@@ -62,7 +62,7 @@ object Serde:
     */
   def timeWindowed[F[_], K](key: Serde[F, K], size: FiniteDuration)(using F: MonadThrow[F]): Serde[F, Windowed[K]] =
     val serializer =
-      BaseKeyed.instance[F, K](key.serializer): (topic, headers, windowed) =>
+      windowedSerializer(key.serializer): (topic, headers, windowed) =>
         key.serializer.serialize(topic, headers, windowed.key).flatMap:
           case Some(written) => F.pure(Some(written ++ Chunk.array(ByteBuffer.allocate(8).putLong(windowed.window.start).array)))
           case None => F.raiseError(new IllegalArgumentException(s"a windowed key for topic '${topic.value}' has a key its serializer wrote as none"))
@@ -85,7 +85,7 @@ object Serde:
     */
   def sessionWindowed[F[_], K](key: Serde[F, K])(using F: MonadThrow[F]): Serde[F, Windowed[K]] =
     val serializer =
-      BaseKeyed.instance[F, K](key.serializer): (topic, headers, windowed) =>
+      windowedSerializer(key.serializer): (topic, headers, windowed) =>
         key.serializer.serialize(topic, headers, windowed.key).flatMap:
           case Some(written) => F
               .pure(Some(written ++ Chunk.array(ByteBuffer.allocate(16).putLong(windowed.window.end).putLong(windowed.window.start).array)))
@@ -102,15 +102,13 @@ object Serde:
           case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no session key"))
     Serde(serializer, deserializer)
 
-/** A windowed key's serializer that also writes the key alone, which Java partitions a windowed key by (`WindowedStreamPartitioner`), so that every
-  * window of a key goes to one partition.
-  */
-private[xkafka] trait BaseKeyed[F[_], K] extends Serializer[F, Windowed[K]]:
-  /** The key of `windowed` alone, as written. */
-  def base(topic: Topic, headers: Headers, windowed: Windowed[K]): F[Option[Chunk[Byte]]]
-
-private[xkafka] object BaseKeyed:
-  def instance[F[_], K](key: Serializer[F, K])(f: (Topic, Headers, Windowed[K]) => F[Option[Chunk[Byte]]]): BaseKeyed[F, K] =
-    new BaseKeyed[F, K]:
-      override def serialize(topic: Topic, headers: Headers, value: Windowed[K]): F[Option[Chunk[Byte]]] = f(topic, headers, value)
-      override def base(topic: Topic, headers: Headers, windowed: Windowed[K]): F[Option[Chunk[Byte]]]   = key.serialize(topic, headers, windowed.key)
+  /** A windowed key's serializer, writing it as `write` does, whose records are partitioned by the key alone as `key` writes it, as Java's
+    * `WindowedStreamPartitioner` partitions them, so that every window of a key goes to one partition.
+    */
+  private def windowedSerializer[F[_], K](
+      key: Serializer[F, K]
+  )(write: (Topic, Headers, Windowed[K]) => F[Option[Chunk[Byte]]]): Serializer[F, Windowed[K]] =
+    new Serializer[F, Windowed[K]]:
+      override def serialize(topic: Topic, headers: Headers, value: Windowed[K]): F[Option[Chunk[Byte]]] = write(topic, headers, value)
+      override private[xkafka] def partitionedBy(topic: Topic, headers: Headers, value: Windowed[K]): Option[F[Option[Chunk[Byte]]]] =
+        Some(key.serialize(topic, headers, value.key))
