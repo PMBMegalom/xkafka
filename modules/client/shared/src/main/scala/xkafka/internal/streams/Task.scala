@@ -27,7 +27,9 @@ import cats.MonadThrow
 import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
-import xkafka.streams.{Chain, End, Origin, Release, Segment, Side, Source, Step, TableJoiner, TableKey, TableValue, TableView, Window, Windowed}
+import xkafka.streams.{
+  Chain, End, Flow, Joiner, Origin, Release, Segment, Side, Source, Step, StreamJoin, TableKey, TableValue, TableView, Window, Windowed
+}
 
 /** A record as a topic holds it, read by a task. */
 private[xkafka] final case class TaskInput(
@@ -70,12 +72,27 @@ private[xkafka] final case class TaskState(
     nextEmit: Map[String, Long] = Map.empty,
     dirty: Map[String, Dirty] = Map.empty,
     buffers: Map[String, Buffered] = Map.empty,
+    sequences: Map[String, Int] = Map.empty,
+    joinTimes: Map[String, JoinTime] = Map.empty,
     reading: Option[TaskInput] = None
 ):
   def store(name: String): Map[Chunk[Byte], Stored] = stores.getOrElse(name, Map.empty)
 
   /** The partition time of the task's partition of `topic`: the largest timestamp read from it, or -1 before any. */
   def partitionTime(topic: String): Long = partitionTimes.getOrElse(topic, -1L)
+
+/** The times a left or outer stream-stream join keeps for a task, in memory only, as Java's join keeps them and starts again on each member: the
+  * latest record time either side has read, the earliest time of a record held as matching nothing since the join last looked for those whose windows
+  * have closed, and the wall-clock time before which it does not look again.
+  */
+private[xkafka] final case class JoinTime(streamTime: Long, minTime: Long, nextEmit: Long)
+
+private[xkafka] object JoinTime:
+  /** Java's times before any record: no stream time, no record held, and a look at the first chance. */
+  val initial: JoinTime = JoinTime(WindowStore.NoTime, Long.MaxValue, 0L)
+
+  /** How long Java waits between looks, by the wall clock, by default (`__emit.interval.ms.kstreams.outer.join.spurious.results.fix__`). */
+  val EmitInterval: Long = 1000L
 
 private[xkafka] object TaskState:
   /** No store holds anything yet, and no partition time is known. */
@@ -145,9 +162,10 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
         v      <- value.deserializer.deserialize(source, input.headers, input.value)
       yield (state, Vector(Travelling(k, v, input.timestamp, input.headers)), Vector.empty[TaskOutput])
     origin match
-      case Origin.Input(topic, key, value)               => read(F.pure(topic), key, value)
-      case Origin.Repartitioned(repartition, key, value) => read(topicNamed(s"$application-${repartition.name}-repartition"), key, value)
-      case Origin.Joined(left, right, joiner, store)     => joinedFed(left, right, joiner, store, input, state, now, requested)
+      case Origin.Input(topic, key, value)                        => read(F.pure(topic), key, value)
+      case Origin.Repartitioned(repartition, key, value)          => read(topicNamed(s"$application-${repartition.name}-repartition"), key, value)
+      case Origin.Joined(left, right, joiner, store)              => joinedFed(left, right, joiner, store, input, state, now, requested)
+      case joining @ Origin.StreamsJoined(_, _, _, _, _, _, _, _) => streamsJoined(joining, input, state, now)
 
   /** Runs each of `records` through `steps`, in order. */
   private def chained[K, V, K2, V2](
@@ -188,14 +206,14 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
   private def joinedFed[K, A, B, R, K1, V1, C1, K2, V2, C2](
       left: Side[F, K, A, K1, V1, C1],
       right: Side[F, K, B, K2, V2, C2],
-      joiner: TableJoiner[A, B, R],
+      joiner: Joiner[A, B, R],
       store: Option[(xkafka.streams.Store, xkafka.streams.Serde[F, K], xkafka.streams.Serde[F, R])],
       input: TaskInput,
       state: TaskState,
       now: Long,
       requested: Boolean
   ): F[(TaskState, Vector[Travelling[K, Option[R]]], Vector[TaskOutput])] =
-    val (leftOld, rightOld) = joiner.forcesOld
+    val (leftOld, rightOld) = joiner.outer
     val fromLeft            = left.origin.sources.exists(Task.topicOf(application, _) == input.topic)
     // Each change goes on as the result's new value, its old one, and its time, keyed and with the headers of the change, or not at all.
     val made: F[(TaskState, Vector[Travelling[K, Option[R]]], Vector[TaskOutput])] =
@@ -230,6 +248,276 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
                     val log      = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
                     (current.copy(stores = current.stores.updated(named.name, contents)), out :+ result, logged :+ log)
 
+  /** The records one side of a stream-stream join gives for `input`, read through its steps. */
+  private def flowed[K, A, K0, V0](
+      flow: Flow[F, K, A, K0, V0],
+      input: TaskInput,
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[Travelling[K, A]], Vector[TaskOutput])] =
+    for
+      fedIn <- fed(flow.origin, input, state, now, Task.requests(flow.chain, false))
+      (read, records, logged) = fedIn
+      ran <- chained(flow.chain, records, read, now)
+      (after, out, written) = ran
+    yield (after, out, logged ++ written)
+
+  /** One side of a stream-stream join as Java's processor for it sees it: its own window store and the other side's, the serdes of their values, how
+    * far before and after a record's time it looks in the other side's store, whether its records that match nothing go on, whether it is the left
+    * side, and what the joiner makes of a match and of a record that matches nothing.
+    */
+  private final case class JoinSide[X, Y, R](
+      own: String,
+      other: String,
+      values: xkafka.streams.Serde[F, X],
+      others: xkafka.streams.Serde[F, Y],
+      before: Long,
+      after: Long,
+      outer: Boolean,
+      left: Boolean,
+      both: (X, Y) => R,
+      alone: X => Option[R]
+  )
+
+  /** What two streams joined make of the records `input` gives one side, each as Java's join processor for that side makes it. */
+  private def streamsJoined[K, A, B, R, K1, V1, K2, V2](
+      join: Origin.StreamsJoined[F, K, A, B, R, K1, V1, K2, V2],
+      input: TaskInput,
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+    import join.{joiner, windows}
+    val names                   = StreamJoin.names(join.store, joiner)
+    val (leftOuter, rightOuter) = joiner.outer
+
+    def each[X, Y](side: JoinSide[X, Y, R])(read: (TaskState, Vector[Travelling[K, X]], Vector[TaskOutput])) =
+      val (after, records, written) = read
+      records.foldLeftM((after, Vector.empty[Travelling[K, R]], written)):
+        case ((current, out, logged), record) => joinedRecord(join, side, record, current, now)
+            .map((next, more, log) => (next, out ++ more, logged ++ log))
+    if join.left.origin.sources.exists(Task.topicOf(application, _) == input.topic) then
+      val side =
+        JoinSide(
+          names.left,
+          names.right,
+          join.value,
+          join.otherValue,
+          windows.beforeMillis,
+          windows.afterMillis,
+          leftOuter,
+          true,
+          joiner.both,
+          joiner.leftAlone
+        )
+      flowed(join.left, input, state, now).flatMap(each(side))
+    else
+      // Java's right processor looks the other way, so its before and after swap, and calls the joiner with its arguments reversed.
+      val side =
+        JoinSide[B, A, R](
+          names.right,
+          names.left,
+          join.otherValue,
+          join.value,
+          windows.afterMillis,
+          windows.beforeMillis,
+          rightOuter,
+          false,
+          (b, a) => joiner.both(a, b),
+          joiner.rightAlone
+        )
+      flowed(join.right, input, state, now).flatMap(each(side))
+
+  /** What `side`'s processor makes of `record`, as Java's does (`KStreamKStreamJoin`): the join's stream time moves to the record's; a record whose
+    * key is written as none goes on alone at once where the side's records that match nothing go on, and is otherwise dropped. A record at the stream
+    * time first sends on the held records whose windows have closed. The record then joins each of the other side's records with its key in its
+    * window, earliest first, each result at the later of their times, and each match no longer held as matching nothing; a record that matches
+    * nothing, on a side whose such records go on, goes on alone at once if its window has already closed, or is held until it closes. Last, the
+    * record goes in its side's window store, and to its changelog with its own time and headers.
+    */
+  private def joinedRecord[K, A, B, R, K1, V1, K2, V2, X, Y](
+      join: Origin.StreamsJoined[F, K, A, B, R, K1, V1, K2, V2],
+      side: JoinSide[X, Y, R],
+      record: Travelling[K, X],
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+    val shared    = StreamJoin.names(join.store, join.joiner).shared
+    val retention = join.windows.retentionMillis
+    val timestamp = record.timestamp
+    val ticked    =
+      shared.fold(state): name =>
+        val time = state.joinTimes.getOrElse(name, JoinTime.initial)
+        state.copy(joinTimes = state.joinTimes.updated(name, time.copy(streamTime = math.max(time.streamTime, timestamp))))
+    val streamTime                 = shared.flatMap(ticked.joinTimes.get).fold(WindowStore.NoTime)(_.streamTime)
+    def result(value: R, at: Long) = Travelling(record.key, value, at, record.headers)
+    def alone                      = side.alone(record.value).map(result(_, timestamp)).toVector
+    (
+      topicNamed(s"$application-${side.own}-changelog"),
+      topicNamed(s"$application-${side.other}-changelog"),
+      shared.traverse(name => topicNamed(s"$application-$name-changelog").map(name -> _))
+    ).tupled.flatMap: (own, other, sharing) =>
+      join.key.serializer.serialize(own, record.headers, record.key).flatMap:
+        case None        => F.pure((ticked, if side.outer then alone else Vector.empty, Vector.empty))
+        case Some(bytes) =>
+          val from    = math.max(0L, timestamp - side.before)
+          val to      = math.max(0L, timestamp + side.after)
+          val emitted =
+            sharing match
+              case Some((name, log)) if timestamp == streamTime => nonJoined(join, name, log, side.after, record.headers, timestamp, ticked, now)
+              case _                                            => F.pure((ticked, Vector.empty[Travelling[K, R]], Vector.empty[TaskOutput]))
+          emitted.flatMap: (afterEmitting, sent, flushed) =>
+            joinedOthers(afterEmitting, side.other, bytes, from, to)
+              .traverse((at, held) => side.others.deserializer.deserialize(other, Headers.empty, Some(held.value)).map(at -> _)).flatMap: matches =>
+                val unheld =
+                  sharing.fold((afterEmitting, Vector.empty[TaskOutput])): (name, log) =>
+                    matches.foldLeft((afterEmitting, Vector.empty[TaskOutput])):
+                      case ((current, logged), (at, _)) => unhold(current, name, log, SharedJoinStore.key(at, !side.left, bytes), timestamp) match
+                          case Some((after, tombstone)) => (after, logged :+ tombstone)
+                          case None                     => (current, logged)
+                val (afterMatching, unlogged) = unheld
+                val joined                    = matches.map((at, value) => result(side.both(record.value, value), math.max(timestamp, at)))
+                val unmatched: F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+                  if !side.outer || matches.nonEmpty then F.pure((afterMatching, Vector.empty, Vector.empty))
+                  else
+                    sharing match
+                      case Some((name, log)) if to >= streamTime => hold(afterMatching, name, log, side, bytes, record)
+                      case _                                     => F.pure((afterMatching, alone, Vector.empty))
+                unmatched.flatMap: (afterHolding, lone, holdLog) =>
+                  windowJoinPut(afterHolding, side, own, retention, bytes, record).map: (after, put) =>
+                    (after, sent ++ joined ++ lone, flushed ++ unlogged ++ holdLog :+ put)
+
+  /** The records of the key written as `bytes` in a join's window store `store` from time `from` to `to`, earliest first and then in the order they
+    * were put, as Java's window store fetches them; the store holds none its clock has expired, since it drops them as the clock moves and once
+    * restored.
+    */
+  private def joinedOthers(state: TaskState, store: String, bytes: Chunk[Byte], from: Long, to: Long): Vector[(Long, Stored)] =
+    state.store(store).toVector.collect:
+      case (held, stored) if held.size == bytes.size + 12 && held.take(bytes.size) == bytes =>
+        (WindowStore.startOf(held), JoinWindowStore.sequenceOf(held), stored)
+    .filter((at, _, _) => at >= from && at <= to).sortBy((at, sequence, _) => (at, sequence)).map((at, _, stored) => (at, stored))
+
+  /** The join's shared store without the records held at `key`, and the tombstone its changelog gets, where it holds any, as Java's
+    * `putIfAbsent(key, null)` removes them.
+    */
+  private def unhold(state: TaskState, shared: String, changelog: Topic, key: Chunk[Byte], timestamp: Long): Option[(TaskState, TaskOutput)] =
+    Option.when(state.store(shared).contains(key)):
+      (
+        state.copy(stores = state.stores.updated(shared, state.store(shared) - key)),
+        TaskOutput(changelog, Some(partition), Some(key), None, timestamp, Headers.empty)
+      )
+
+  /** `record`, which matches nothing, held in the join's shared store until its window closes: appended to the list of its time and key, as Java's
+    * list-valued store appends it, the whole list written to the store's changelog with the record's time, and the earliest time held moved to the
+    * record's where it is earlier.
+    */
+  private def hold[K, X, Y, R](
+      state: TaskState,
+      shared: String,
+      changelog: Topic,
+      side: JoinSide[X, Y, R],
+      bytes: Chunk[Byte],
+      record: Travelling[K, X]
+  ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+    val key = SharedJoinStore.key(record.timestamp, side.left, bytes)
+    for
+      written <- side.values.serializer.serialize(changelog, record.headers, record.value)
+      value   <- F.fromOption(written, new IllegalArgumentException(s"the join store '$shared' cannot hold a value its serializer writes as none"))
+      held    <- state.store(shared).get(key).traverse(stored => F.fromOption(SharedJoinStore.elements(stored.value), unreadableJoin(shared)))
+    yield
+      val list  = SharedJoinStore.list(held.getOrElse(Vector.empty) :+ SharedJoinStore.element(side.left, value))
+      val time  = state.joinTimes.getOrElse(shared, JoinTime.initial)
+      val after =
+        state.copy(
+          stores = state.stores.updated(shared, state.store(shared).updated(key, Stored(list, record.timestamp))),
+          joinTimes = state.joinTimes.updated(shared, time.copy(minTime = math.min(time.minTime, record.timestamp)))
+        )
+      (after, Vector.empty, Vector(TaskOutput(changelog, Some(partition), Some(key), Some(list), record.timestamp, Headers.empty)))
+
+  private def unreadableJoin(shared: String) = new IllegalStateException(s"the join store '$shared' holds a list it cannot read")
+
+  /** `record` put in its side's window store, as Java's window store for a join puts it: under the next sequence number, the store's clock moving to
+    * the record's time if later, kept unless the clock has expired it, expired records going as the clock moves; the changelog gets the record either
+    * way, with its time and headers.
+    */
+  private def windowJoinPut[K, X, Y, R](
+      state: TaskState,
+      side: JoinSide[X, Y, R],
+      changelog: Topic,
+      retention: Long,
+      bytes: Chunk[Byte],
+      record: Travelling[K, X]
+  ): F[(TaskState, TaskOutput)] =
+    side.values.serializer.serialize(changelog, record.headers, record.value).map: written =>
+      val entries  = state.store(side.own)
+      val sequence = JoinWindowStore.next(state.sequences.getOrElse(side.own, 0))
+      val clock    = state.clocks.getOrElse(side.own, WindowStore.clockOf(entries))
+      val ticked   = math.max(clock, record.timestamp)
+      val key      = JoinWindowStore.key(bytes, record.timestamp, sequence)
+      val kept     =
+        if WindowStore.expired(record.timestamp, ticked, retention) then entries
+        else written.fold(entries)(value => entries.updated(key, Stored(value, record.timestamp)))
+      val contents = if ticked > clock then WindowStore.pruned(kept, ticked, retention) else kept
+      val after    =
+        state.copy(
+          stores = state.stores.updated(side.own, contents),
+          clocks = state.clocks.updated(side.own, ticked),
+          sequences = state.sequences.updated(side.own, sequence)
+        )
+      (after, TaskOutput(changelog, Some(partition), Some(key), written, record.timestamp, record.headers))
+
+  /** The held records whose windows have closed, sent on alone and removed from the join's shared store, as Java's join sends them
+    * (`emitNonJoinedOuterRecords`): only once the earliest time held, with the processor's `after` and the grace, is behind the stream time, and no
+    * sooner by the wall clock than the interval after the last look. Java goes through the store in its order, the earliest time held moving to each
+    * record's; a record whose window is still open marks its side as open and is passed over, and once both sides are, the look ends. Each record
+    * sent goes on with its own time and key and the headers of the record that made the look; each key sent from is removed, its changelog getting a
+    * tombstone with that record's time.
+    */
+  private def nonJoined[K, A, B, R, K1, V1, K2, V2](
+      join: Origin.StreamsJoined[F, K, A, B, R, K1, V1, K2, V2],
+      shared: String,
+      changelog: Topic,
+      after: Long,
+      headers: Headers,
+      timestamp: Long,
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+    import join.windows
+    import SharedJoinStore.given
+    val time = state.joinTimes.getOrElse(shared, JoinTime.initial)
+    // Java adds these as longs, so an earliest time of none wraps below the stream time.
+    if time.minTime + after + windows.graceMillis >= time.streamTime || now < time.nextEmit then F.pure((state, Vector.empty, Vector.empty))
+    else
+      state.store(shared).toVector.sortBy(_._1).flatTraverse: (key, stored) =>
+        F.fromOption(SharedJoinStore.elements(stored.value), unreadableJoin(shared)).map(_.map(key -> _))
+      .flatMap: elements =>
+        val looked =
+          elements.foldLeft(Task.Look(Long.MaxValue, Set.empty, false, Vector.empty)):
+            case (look, _) if look.ended => look
+            case (look, (key, element))  =>
+              val at   = SharedJoinStore.timestampOf(key)
+              val left = SharedJoinStore.isLeft(key)
+              val open = at + (if left then windows.afterMillis else windows.beforeMillis) + windows.graceMillis >= time.streamTime
+              if look.open.size == 2 then look.copy(minTime = at, ended = true)
+              else if open then look.copy(minTime = at, open = look.open + left)
+              else look.copy(minTime = at, sent = look.sent :+ (key -> element))
+        val removed = looked.sent.map(_._1).distinct
+        looked.sent.flatTraverse: (key, element) =>
+          join.key.deserializer.deserialize(changelog, Headers.empty, Some(SharedJoinStore.keyOf(key))).flatMap: k =>
+            val value = element.drop(1)
+            val made  =
+              if element.head.contains(1.toByte) then
+                join.value.deserializer.deserialize(changelog, Headers.empty, Some(value)).map(join.joiner.leftAlone)
+              else join.otherValue.deserializer.deserialize(changelog, Headers.empty, Some(value)).map(join.joiner.rightAlone)
+            made.map(_.map(Travelling(k, _, SharedJoinStore.timestampOf(key), headers)).toVector)
+        .map: results =>
+          val kept  = state.store(shared) -- removed
+          val after =
+            state.copy(
+              stores = state.stores.updated(shared, kept),
+              joinTimes = state.joinTimes.updated(shared, time.copy(minTime = looked.minTime, nextEmit = now + JoinTime.EmitInterval))
+            )
+          (after, results, removed.map(key => TaskOutput(changelog, Some(partition), Some(key), None, timestamp, Headers.empty)))
   private def chain[K, V, K2, V2](
       steps: Chain[F, K, V, K2, V2],
       record: Travelling[K, V],
@@ -815,18 +1103,18 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
   private def joinedValueOf[K, A, B, R](
       left: TableView[F, K, A],
       right: TableView[F, K, B],
-      joiner: TableJoiner[A, B, R],
+      joiner: Joiner[A, B, R],
       key: K,
       state: TaskState
   ): F[Option[(R, Long)]] =
     joiner match
-      case TableJoiner.Inner(join) => valueOf(left, key, state).flatMap:
+      case Joiner.Inner(join) => valueOf(left, key, state).flatMap:
           case None          => F.pure(None)
           case Some((a, at)) => valueOf(right, key, state).map(_.map((b, bt) => (join(a, b), math.max(at, bt))))
-      case TableJoiner.Left(join) => valueOf(left, key, state).flatMap:
+      case Joiner.Left(join) => valueOf(left, key, state).flatMap:
           case None          => F.pure(None)
           case Some((a, at)) => valueOf(right, key, state).map(b => Some((join(a, b.map(_._1)), b.fold(at)(found => math.max(at, found._2)))))
-      case TableJoiner.Outer(join) => (valueOf(left, key, state), valueOf(right, key, state)).mapN: (a, b) =>
+      case Joiner.Outer(join) => (valueOf(left, key, state), valueOf(right, key, state)).mapN: (a, b) =>
           Ior.fromOptions(a.map(_._1), b.map(_._1)).map(both => (join(both), math.max(a.fold(Task.Unknown)(_._2), b.fold(Task.Unknown)(_._2))))
 
   private def leaving[K, V](exit: End[F, K, V], record: Travelling[K, V]): F[Vector[TaskOutput]] =
@@ -856,6 +1144,11 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
+  /** A look through a stream-stream join's held records: the earliest time it has reached, the sides, by whether they are the left, found with a
+    * record whose window is open, whether it has ended, and the held records it sends on, with their keys, in order.
+    */
+  private final case class Look(minTime: Long, open: Set[Boolean], ended: Boolean, sent: Vector[(Chunk[Byte], Chunk[Byte])])
+
   /** The topic `source` names, as the application names its repartition topics. */
   def topicOf(application: String, source: Source): String =
     source match
@@ -883,18 +1176,18 @@ private[xkafka] object Task:
     * value, its old value where `sendOld`, and its time, or nothing where Java forwards nothing.
     */
   def joinLeft[K, A, B, R](
-      joiner: TableJoiner[A, B, R],
+      joiner: Joiner[A, B, R],
       change: Change[K, A],
       other: Option[(B, Long)],
       sendOld: Boolean
   ): Option[(Option[R], Option[R], Long)] =
     val b = other.map(_._1)
     joiner match
-      case TableJoiner.Inner(join) => other.map: (b, bt) =>
+      case Joiner.Inner(join) => other.map: (b, bt) =>
           (change.value.map(join(_, b)), change.old.filter(_ => sendOld).map(join(_, b)), math.max(change.timestamp, bt))
-      case TableJoiner.Left(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
+      case Joiner.Left(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
           (change.value.map(join(_, b)), change.old.filter(_ => sendOld).map(join(_, b)), math.max(change.timestamp, other.fold(Unknown)(_._2)))
-      case TableJoiner.Outer(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
+      case Joiner.Outer(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
           (
             Ior.fromOptions(change.value, b).map(join),
             Option.when(sendOld)(Ior.fromOptions(change.old, b).map(join)).flatten,
@@ -905,18 +1198,18 @@ private[xkafka] object Task:
     * which joins even a delete, and an outer join's.
     */
   def joinRight[K, A, B, R](
-      joiner: TableJoiner[A, B, R],
+      joiner: Joiner[A, B, R],
       change: Change[K, B],
       other: Option[(A, Long)],
       sendOld: Boolean
   ): Option[(Option[R], Option[R], Long)] =
     val a = other.map(_._1)
     joiner match
-      case TableJoiner.Inner(join) => other.map: (a, at) =>
+      case Joiner.Inner(join) => other.map: (a, at) =>
           (change.value.map(join(a, _)), change.old.filter(_ => sendOld).map(join(a, _)), math.max(change.timestamp, at))
-      case TableJoiner.Left(join) => other.map: (a, at) =>
+      case Joiner.Left(join) => other.map: (a, at) =>
           (Some(join(a, change.value)), Option.when(sendOld)(join(a, change.old)), math.max(change.timestamp, at))
-      case TableJoiner.Outer(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
+      case Joiner.Outer(join) => Option.unless(other.isEmpty && change.value.isEmpty && change.old.isEmpty):
           (
             Ior.fromOptions(a, change.value).map(join),
             Option.when(sendOld)(Ior.fromOptions(a, change.old).map(join)).flatten,

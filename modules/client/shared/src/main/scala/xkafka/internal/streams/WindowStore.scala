@@ -25,6 +25,8 @@ package streams
 
 import java.nio.ByteBuffer
 
+import scala.annotation.tailrec
+
 import fs2.Chunk
 
 /** A window store as Java's in-memory window store keeps one. Its contents are keyed as its changelog is: the serialized key, the window's start as
@@ -94,3 +96,61 @@ private[xkafka] object SessionStore:
   /** The sessions of `entries` that have not expired by `clock`. */
   def pruned(entries: Map[Chunk[Byte], Stored], clock: Long, retention: Long): Map[Chunk[Byte], Stored] =
     entries.filter((key, _) => !WindowStore.expired(endOf(key), clock, retention))
+
+/** The window store of one side of a stream-stream join, as Java's keeps one, which keeps every record: keyed as its changelog is, by the serialized
+  * key, the record's time as eight big-endian bytes, and a sequence number of four, which tells records of one key and time apart.
+  */
+private[xkafka] object JoinWindowStore:
+  /** The key of the record of `serialized` at `timestamp` with sequence number `sequence`. */
+  def key(serialized: Chunk[Byte], timestamp: Long, sequence: Int): Chunk[Byte] =
+    serialized ++ Chunk.array(ByteBuffer.allocate(12).putLong(timestamp).putInt(sequence).array)
+
+  /** The sequence number a key carries. */
+  def sequenceOf(key: Chunk[Byte]): Int = ByteBuffer.wrap(key.drop(key.size - 4).toArray).getInt
+
+  /** The sequence number after `sequence`, as Java's store counts, from 1 and back to 0 past the largest int. */
+  def next(sequence: Int): Int = (sequence + 1) & 0x7fffffff
+
+/** The store of a left or outer stream-stream join's records that matched nothing yet, as Java's list-valued store keeps it: keyed by the record's
+  * time as eight big-endian bytes, its side as one byte, 1 for the left and 0 for the right, and the serialized key; each key holds a list of the
+  * values of the records with that time and key, written as Java's list serde writes a list of byte arrays, each its side's flag and the value.
+  */
+private[xkafka] object SharedJoinStore:
+  /** The key of a record of `serialized` at `timestamp` from the left side, or the right. */
+  def key(timestamp: Long, left: Boolean, serialized: Chunk[Byte]): Chunk[Byte] =
+    Chunk.array(ByteBuffer.allocate(9).putLong(timestamp).put((if left then 1 else 0).toByte).array) ++ serialized
+
+  /** The time a key names. */
+  def timestampOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.take(8).toArray).getLong
+
+  /** Whether a key names a record of the left side. */
+  def isLeft(key: Chunk[Byte]): Boolean = key(8) == 1
+
+  /** The serialized key a key names. */
+  def keyOf(key: Chunk[Byte]): Chunk[Byte] = key.drop(9)
+
+  /** A value as the list holds it: its side's flag, 1 where it is the left's, and the value. */
+  def element(left: Boolean, value: Chunk[Byte]): Chunk[Byte] = Chunk.singleton((if left then 1 else 0).toByte) ++ value
+
+  /** The list of `elements`, as Java's list serde writes one whose elements vary in size: the flag 1, the count, then each one's size and bytes. */
+  def list(elements: Vector[Chunk[Byte]]): Chunk[Byte] =
+    val sizes = ByteBuffer.allocate(5).put(1.toByte).putInt(elements.size).array
+    elements.foldLeft(Chunk.array(sizes))((written, element) => written ++ Chunk.array(ByteBuffer.allocate(4).putInt(element.size).array) ++ element)
+
+  /** The elements of a list as `list` writes it, or none for bytes that are not one. */
+  def elements(list: Chunk[Byte]): Option[Vector[Chunk[Byte]]] =
+    def int(at: Int) = Option.when(at + 4 <= list.size)(ByteBuffer.wrap(list.drop(at).take(4).toArray).getInt)
+    @tailrec
+    def read(at: Int, remaining: Int, done: Vector[Chunk[Byte]]): Option[Vector[Chunk[Byte]]] =
+      if remaining == 0 then Option.when(at == list.size)(done)
+      else
+        int(at) match
+          case Some(size) if size >= 0 && at + 4 + size <= list.size => read(at + 4 + size, remaining - 1, done :+ list.drop(at + 4).take(size))
+          case _                                                     => None
+    if list.isEmpty || list(0) != 1 then None else int(1).filter(_ >= 0).flatMap(read(5, _, Vector.empty))
+
+  /** Keys in the order Java's store iterates them: byte by byte, unsigned, so by time, then the right before the left, then key. */
+  given Ordering[Chunk[Byte]] =
+    (x, y) =>
+      x.zip(y).iterator.collectFirst { case (a, b) if a != b => java.lang.Integer.compare(a & 0xff, b & 0xff) }
+        .getOrElse(java.lang.Integer.compare(x.size, y.size))

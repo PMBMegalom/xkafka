@@ -35,8 +35,8 @@ import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, Topology as JavaTopology}
 import org.apache.kafka.streams.kstream.{
-  Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, Suppressed as JavaSuppressed,
-  TimeWindows as JavaTimeWindows, WindowedSerdes
+  Grouped, JoinWindows as JavaJoinWindows, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
+  StreamJoined, Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
 }
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.processor.internals.{InternalTopologyBuilder, StreamThread, TopologyMetadata}
@@ -205,6 +205,70 @@ final class TopologyGoldenSuite extends FunSuite:
         ).toStream.to("out", Produced.`with`(Serdes.String, Serdes.String))
     )
 
+  // Java numbers sub-topologies by the first node of each it writes, and writes them roughly in the order the program makes them, receiver first; a
+  // join's sub-topology holds the receiver's source, so it comes before the sub-topologies the other side made before it.
+  test("a join is numbered before the sub-topologies its other side made, where its receiver is not repartitioned, as Java numbers it"):
+    def counted = KStream(topic("words"), text, text).groupBy(Repartition("by-word"), text, text)((_, v) => v).count(Store("counts"))
+    def javaCounted(builder: StreamsBuilder) =
+      builder.stream[String, String]("words").groupBy((_, v) => v, Grouped.as("by-word"))
+        .count(Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("counts"))
+    val produced = Produced.`with`(Serdes.String, Serdes.String)
+    assertEquals(
+      ours(KStream(topic("orders"), text, text).join(counted)((o, n) => s"$o$n").to(topic("out"), text, text)),
+      declaredByJava(builder =>
+        builder.stream[String, String]("orders").join(javaCounted(builder), (o: String, n: java.lang.Long) => s"$o$n").to("out", produced)
+      )
+    )
+    assertEquals(
+      ours(KTable(topic("users"), text, text, Store("users")).join(counted)((u, n) => s"$u$n").toStream.to(topic("out"), text, text.option)),
+      declaredByJava(builder =>
+        javaTable(builder, "users", "users").join(javaCounted(builder), (u: String, n: java.lang.Long) => s"$u$n").toStream.to("out", produced)
+      )
+    )
+    val within     = JoinWindows(5.seconds, grace = 2.seconds)
+    val javaWithin = JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2))
+    def paired     = StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+    assertEquals(
+      ours(
+        KStream(topic("left"), text, text)
+          .join(KStream(topic("right"), text, text).selectKey((_, v) => v), within, Store("pairs"), text, text, text)(_ + _).selectKey((_, v) => v)
+          .groupByKey(Repartition("again"), text, text).count(Store("pair-counts")).toStream.to(topic("out"), text, Serde.long[IO])
+      ),
+      declaredByJava(builder =>
+        builder.stream[String, String]("left")
+          .join(builder.stream[String, String]("right").selectKey((_, v) => v), (a: String, b: String) => a + b, javaWithin, paired)
+          .selectKey((_, v) => v).groupByKey(Grouped.as("again"))
+          .count(Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("pair-counts")).toStream
+          .to("out", Produced.`with`(Serdes.String, Serdes.Long))
+      )
+    )
+
+  test("each kind of stream-stream join declares its stores' changelogs and its sides' repartition topics as Java declares them"):
+    val within                            = JoinWindows(5.seconds, grace = 2.seconds)
+    val javaWithin                        = JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2))
+    def paired                            = StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+    def left                              = KStream(topic("left"), text, text).selectKey((_, v) => v)
+    def right                             = KStream(topic("right"), text, text)
+    def javaLeft(builder: StreamsBuilder) = builder.stream[String, String]("left").selectKey((_, v) => v)
+    def javaRight(builder: StreamsBuilder) = builder.stream[String, String]("right")
+    val produced                           = Produced.`with`(Serdes.String, Serdes.String)
+    assertEquals(
+      ours(left.join(right, within, Store("pairs"), text, text, text)(_ + _).to(topic("out"), text, text)),
+      declaredByJava(builder => javaLeft(builder).join(javaRight(builder), (a: String, b: String) => a + b, javaWithin, paired).to("out", produced))
+    )
+    assertEquals(
+      ours(left.leftJoin(right, within, Store("pairs"), text, text, text)((a, b) => a + b.getOrElse("")).to(topic("out"), text, text)),
+      declaredByJava(builder =>
+        javaLeft(builder).leftJoin(javaRight(builder), (a: String, b: String) => a + b, javaWithin, paired).to("out", produced)
+      )
+    )
+    assertEquals(
+      ours(right.outerJoin(left, within, Store("pairs"), text, text, text)(_.merge).to(topic("out"), text, text)),
+      declaredByJava(builder =>
+        javaRight(builder).outerJoin(javaLeft(builder), (a: String, b: String) => a + b, javaWithin, paired).to("out", produced)
+      )
+    )
+
   test("a join's copartition group lists its topics in the order Java's set of them iterates, not the order the program reads them"):
     // Java's set of "clicks" and "pages" iterates "pages" first.
     assertEquals(
@@ -234,16 +298,18 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a stream joined with a counted table runs in the sub-topology that counts, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("orders"), text, text).join(
-          KStream(topic("visits"), text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v).count(Store("visits"))
-        )((o, n) => s"$o:$n").to(topic("out"), text, text)
+        KStream(topic("orders"), text, text)
+          .join(KStream(topic("visits"), text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v).count(Store("visits")))((o, n) =>
+            s"$o:$n"
+          ).to(topic("out"), text, text)
       ),
+      // Java numbers the join's sub-topology first only where the program builds the stream before the counted table, as xkafka takes it.
       declaredByJava: builder =>
+        val orders  = builder.stream[String, String]("orders")
         val counted =
           builder.stream[String, String]("visits").groupBy((_, v) => v, Grouped.as("by-page"))
             .count(Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("visits"))
-        builder.stream[String, String]("orders").join(counted, (o: String, n: java.lang.Long) => s"$o:$n")
-          .to("out", Produced.`with`(Serdes.String, Serdes.String))
+        orders.join(counted, (o: String, n: java.lang.Long) => s"$o:$n").to("out", Produced.`with`(Serdes.String, Serdes.String))
     )
 
   test("a stream joined with a suppressed table declares the table's store and buffer beside it, as Java declares it"):

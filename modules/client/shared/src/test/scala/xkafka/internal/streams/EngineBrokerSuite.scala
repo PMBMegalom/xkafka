@@ -34,7 +34,7 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, KStream, KTable, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase,
+  ApplicationId, JoinWindows, KStream, KTable, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase,
   StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
@@ -366,6 +366,28 @@ final class EngineBrokerSuite extends CatsEffectSuite:
               Topic.from(s"${app.application}-accounts-changelog").orFail,
               Map("a" -> Some("gold:ann"), "b" -> None, "c" -> Some("free:-"))
             )
+
+    test(s"$release, $under: an engine outer joins two streams in windows, sending a record that matched nothing once its window closes"):
+      counting(
+        server,
+        (orders, output) =>
+          KStream(orders, text, text).outerJoin(
+            KStream(Topic.from(s"${orders.value}-payments").orFail, text, text),
+            JoinWindows.withNoGrace(1.second),
+            Store("pairs"),
+            text,
+            text,
+            text
+          )(_.fold(order => s"$order:-", payment => s"-:$payment", (order, payment) => s"$order:$payment")).to(output, text, text)
+      ): app =>
+        val payments = Topic.from(s"${app.input.value}-payments").orFail
+        val keys     = List("a", "b", "c")
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(payments, 2, 1).orFail))) *> running(server, app):
+          produceAt(server, app.input, List("a" -> 1000L, "b" -> 2000L)) *> produceAt(server, payments, List("a" -> 1500L, "c" -> 3000L)) *>
+            latestValues(server, app.output, Map("a" -> Some("a-value:a-value"))) *>
+            // A record well after the windows on each key's partition, more than a second of wall clock after the last look, closes them.
+            IO.sleep(2.seconds) *> produceAt(server, app.input, keys.map(_ -> 60000L)) *>
+            latestValues(server, app.output, Map("a" -> Some("a-value:a-value"), "b" -> Some("b-value:-"), "c" -> Some("-:c-value")))
 
     test(s"$release, $under: a stream and the table it joins in topics of different partition counts are refused by the broker, as for Java"):
       counting(

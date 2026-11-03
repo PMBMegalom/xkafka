@@ -38,14 +38,14 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, Str
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
 import org.apache.kafka.streams.kstream.{
-  EmitStrategy, Grouped, KTable as JavaTable, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
-  Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
+  EmitStrategy, Grouped, JoinWindows as JavaJoinWindows, KTable as JavaTable, Materialized, Produced, SessionWindows as JavaSessionWindows,
+  SlidingWindows as JavaSlidingWindows, StreamJoined, Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
 }
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
 import xkafka.streams.{
-  BufferLimit, KStream, KTable, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology
+  BufferLimit, JoinWindows, KStream, KTable, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology
 }
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
@@ -800,6 +800,148 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       ours(pipeline, updates.take(n)).attempt.map(ran => assert(ran.isRight)) *> ours(pipeline, updates.take(n + 1)).attempt.map: ran =>
         assert(ran.left.exists(_.getMessage.contains("the suppression 'final' buffer exceeded its limit: 3/2 records")), ran)
 
+  // Two streams within five seconds of each other and two of grace: matches both ways, two records of one key and time, records matching nothing on
+  // either side, some held while their windows are open and sent once they close, some looks within a second of the last, a late record, and one
+  // past the grace.
+  private val streaming =
+    List(
+      ("left", "k1", "a1", 1000L),
+      ("right", "k1", "b1", 2000L),  // joins a1
+      ("left", "k2", "a2", 2500L),   // matches nothing yet
+      ("right", "k1", "b1*", 2000L), // a second record of k1 at 2000, joining a1
+      ("left", "k1", "a1*", 8000L),  // too late for b1 and b1*, so matches nothing
+      ("right", "k3", "b3", 9000L),  // matches nothing
+      ("right", "k2", "b2", 6000L),  // late, still joining a2
+      ("left", "k4", "a4", 12000L),  // the stream time passes the windows of a2, a1* and b3
+      ("left", "k1", "a1+", 1500L),  // late, joining b1 and b1*, though their windows have closed
+      ("right", "k4", "b4", 12000L), // joins a4 at its own time
+      ("left", "k5", "a5", 20000L),
+      ("right", "k6", "b6", 21000L),
+      ("left", "k1", "a1-", 3000L), // past the grace, the stores have dropped what it would join
+      ("left", "k7", "a7", 40000L), // well after every other record
+      ("right", "k7", "b7", 41000L)
+    )
+
+  private def leftStream  = KStream(Topic.from("left").orFail, text, text)
+  private def rightStream = KStream(Topic.from("right").orFail, text, text)
+  private val within      = JoinWindows(5.seconds, grace = 2.seconds)
+  private val javaWithin  = JavaJoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(2))
+
+  private def javaPaired = StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+
+  test("two streams joined write what Java's join of streams does, each pair in a window at the later of their times"):
+    sameFrom(
+      leftStream.join(rightStream, within, Store("pairs"), text, text, text)((a, b) => s"$a+$b").to(out, text, text),
+      builder =>
+        builder.stream[String, String]("left")
+          .join(builder.stream[String, String]("right"), (a: String, b: String) => s"$a+$b", javaWithin, javaPaired).to("out"),
+      streaming
+    )
+
+  test("two streams left joined write what Java's left join of streams does, a left record matching nothing sent alone once its window closes"):
+    sameFrom(
+      leftStream.leftJoin(rightStream, within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull)).to(out, text, text),
+      builder =>
+        builder.stream[String, String]("left")
+          .leftJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out"),
+      streaming
+    )
+
+  test("two streams outer joined write what Java's outer join of streams does, a record of either side matching nothing sent alone"):
+    sameFrom(
+      leftStream.outerJoin(rightStream, within, Store("pairs"), text, text, text)(ior).to(out, text, text),
+      builder =>
+        builder.stream[String, String]("left")
+          .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out"),
+      streaming
+    )
+
+  // Records matching nothing, held and then looked for, 600 ms apart by the wall clock, five seconds of window and two of grace: a look that ends
+  // once both sides hold a record whose window is open, a look the wall clock holds back as within a second of the last, a record whose window
+  // reaches the stream time exactly, which is held, and a last record that sends on what is left.
+  private val looking =
+    List(
+      ("left", "k1", "a1", 10000L),
+      ("right", "k2", "b2", 12000L),
+      ("left", "k3", "a3", 12500L),
+      ("right", "k4", "b4", 13000L),
+      ("left", "k5", "a5", 14000L),
+      ("right", "k9", "b9", 17500L),  // sends a1 on, ending at b4 once both sides are open
+      ("left", "k8", "a8", 20500L),   // held back, a second not having passed since the last look
+      ("left", "k10", "a10", 20600L), // looks again, from the earliest time the last look reached
+      ("left", "k11", "a11", 15600L), // its window reaches 20600, the stream time, so it is held
+      ("right", "k12", "b12", 30000L)
+    )
+
+  test("a join looks for held records whose windows have closed as Java's does, no sooner than a second after the last look"):
+    List(
+      (
+        leftStream.outerJoin(rightStream, within, Store("pairs"), text, text, text)(ior).to(out, text, text),
+        (builder: StreamsBuilder) =>
+          builder.stream[String, String]("left")
+            .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
+      ),
+      (
+        leftStream.leftJoin(rightStream, within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull)).to(out, text, text),
+        (builder: StreamsBuilder) =>
+          builder.stream[String, String]("left")
+            .leftJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
+      )
+    ).traverse_((pipeline, java) => sameFrom(pipeline, java, looking))
+
+  test("streams joined in windows reaching further one way than the other write what Java's do"):
+    List(
+      (within.withBefore(1.second).withAfter(6.seconds), javaWithin.before(Duration.ofSeconds(1)).after(Duration.ofSeconds(6))),
+      (within.withBefore(7.seconds).withAfter(-2.seconds), javaWithin.before(Duration.ofSeconds(7)).after(Duration.ofSeconds(-2)))
+    ).traverse_ : (windows, javaWindows) =>
+      sameFrom(
+        leftStream.outerJoin(rightStream, windows, Store("pairs"), text, text, text)(ior).to(out, text, text),
+        builder =>
+          builder.stream[String, String]("left")
+            .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWindows, javaPaired).to("out"),
+        streaming
+      )
+
+  test("a stream whose key changed is joined with a stream through the repartition topic its join names, as Java's is"):
+    sameFrom(
+      leftStream.selectKey((k, _) => s"$k!")
+        .leftJoin(rightStream.selectKey((k, _) => s"$k!"), within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull))
+        .to(out, text, text),
+      builder =>
+        builder.stream[String, String]("left").selectKey((k, _) => s"$k!").leftJoin(
+          builder.stream[String, String]("right").selectKey((k, _) => s"$k!"),
+          (a: String, b: String) => either(a, b),
+          javaWithin,
+          javaPaired
+        ).to("out"),
+      streaming
+    )
+
+  test("a record without a key goes on alone at once from a side whose records matching nothing go on, and is otherwise dropped, as in Java"):
+    val keyless               = streaming.take(4) ++ List(("left", null, "a-", 2600L), ("right", null, "b-", 2700L)) ++ streaming.drop(4)
+    def stream(topic: String) = KStream(Topic.from(topic).orFail, text.option, text)
+    List[(Pipeline[IO], StreamsBuilder => Unit)](
+      (
+        stream("left").join(stream("right"), within, Store("pairs"), text.option, text, text)((a, b) => s"$a+$b").to(out, text.option, text),
+        builder =>
+          builder.stream[String, String]("left")
+            .join(builder.stream[String, String]("right"), (a: String, b: String) => s"$a+$b", javaWithin, javaPaired).to("out")
+      ),
+      (
+        stream("left").leftJoin(stream("right"), within, Store("pairs"), text.option, text, text)((a, b) => either(a, b.orNull))
+          .to(out, text.option, text),
+        builder =>
+          builder.stream[String, String]("left")
+            .leftJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
+      ),
+      (
+        stream("left").outerJoin(stream("right"), within, Store("pairs"), text.option, text, text)(ior).to(out, text.option, text),
+        builder =>
+          builder.stream[String, String]("left")
+            .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
+      )
+    ).traverse_((pipeline, java) => sameFrom(pipeline, java, keyless))
+
   /** Runs `inputs` through the program ours and Java's ways and compares what each writes to every topic but repartition topics, its stores'
     * changelogs and its suppression buffers' included, record for record and byte for byte.
     */
@@ -923,8 +1065,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     properties.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String.getClass)
     properties.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String.getClass)
     properties.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, "0")
-    // The test driver looks for closed windows on every record unless told otherwise; an application looks at most once a second.
+    // The test driver looks for closed windows, and for a join's held records, on every record unless told otherwise; an application looks at most
+    // once a second.
     properties.put(StreamsConfig.InternalConfig.EMIT_INTERVAL_MS_KSTREAMS_WINDOWED_AGGREGATION, 1000L)
+    properties.put(StreamsConfig.InternalConfig.EMIT_INTERVAL_MS_KSTREAMS_OUTER_JOIN_SPURIOUS_RESULTS_FIX, 1000L)
     properties.put(StreamsConfig.STATE_DIR_CONFIG, java.nio.file.Files.createTempDirectory("xkafka-window-golden").toString)
     val builder = StreamsBuilder()
     build(builder)

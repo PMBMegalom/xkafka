@@ -143,6 +143,22 @@ refuse the Java members. xkafka tells you in advance: the application's `state`
 lists `StreamsProblem.JavaMembersMayBeRefused`, naming the topics. Joining
 topics with other names avoids it.
 
+The description also numbers the application's sub-topologies. When an input of
+a join has sub-topologies of its own, for example a table counted after a
+repartition, Java numbers them by which input the Java program builds first,
+which xkafka cannot see. xkafka numbers them as a program does that builds the
+join's receiver first, before anything of the other input, and lists
+`StreamsProblem.JavaMembersMayBeRefused` for each such join. To keep the Java
+members, build the receiver first in the Java program too:
+
+```java
+KStream<String, String> orders = builder.stream("orders");
+KTable<String, Long> visits = builder.<String, String>stream("visits")
+    .groupBy((key, page) -> page, Grouped.as("by-page"))
+    .count(Materialized.as("visits"));
+orders.join(visits, (order, count) -> order + count).to("out");
+```
+
 If the stream's key changed since it was read, for example after `selectKey`,
 its records first go through a repartition topic, which `join` and `leftJoin`
 then need a name for:
@@ -205,6 +221,75 @@ Like a stream and a table, two joined tables are processed together, so their
 topics must have the same number of partitions. A table cannot be joined with
 itself, or with a table read from the same topic, and windowed tables cannot be
 joined yet; `Topology.of` refuses each with a `TopologyError`.
+
+### Joining streams
+
+Two streams with the same key join within windows of time, as Java Kafka
+Streams' stream-stream joins do. Each record joins every record of the other
+stream with its key whose time is close enough to its own:
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.data.Ior
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def payments(orders: Topic, paid: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(orders, text, text)
+    .outerJoin(KStream(paid, text, text), JoinWindows(5.minutes, grace = 30.seconds), Store("payments"), text, text, text) {
+      case Ior.Left(order)          => s"$order, unpaid"
+      case Ior.Right(payment)       => s"$payment, no order"
+      case Ior.Both(order, payment) => s"$order paid by $payment"
+    }
+    .to(output, text, text)
+```
+
+`JoinWindows(5.minutes, grace = 30.seconds)` joins records at most five minutes
+apart, either way. `withBefore` and `withAfter` set how far back and how far
+ahead of a record the other stream's records may be, so the windows can reach
+further one way than the other. A record that arrives more than the grace after
+the latest time either stream has read may find that the other stream's records
+in its window have already been dropped.
+
+- `join` writes a result for each pair of records in a window.
+- `leftJoin` also writes each record of the left stream that matched nothing,
+  passing the right stream's value as `None`.
+- `outerJoin` also writes each record of either stream that matched nothing,
+  passing the values as an `Ior`.
+
+Each pair takes the later timestamp of its two records. A record that matched
+nothing is held until its window and grace have passed, in case a match
+arrives, and is then written alone with its own timestamp. As in Java, xkafka
+looks for such records when a record arrives, and at most once a second.
+
+Each stream's records are kept in a store for the windows' size and grace, and
+a left or outer join keeps the records that matched nothing in a third store.
+The stores are named from the name you pass, as Java names them:
+
+| Join        | Stores                                                                                                  |
+|-------------|---------------------------------------------------------------------------------------------------------|
+| `join`      | `<name>-this-join-store`, `<name>-other-join-store`                                                     |
+| `leftJoin`  | `<name>-this-join-store`, `<name>-outer-other-join-store`, `<name>-left-shared-join-store`              |
+| `outerJoin` | `<name>-outer-this-join-store`, `<name>-outer-other-join-store`, `<name>-outer-shared-join-store`       |
+
+The three serdes write the key and each stream's values to the stores. A
+stream whose key has changed is written first to the repartition topic
+`<name>-left` or `<name>-right` names, with the same serdes. A Java program
+names everything the same way with
+`StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(name).withStoreName(name)`.
+
+A record without a key, one whose key serde writes none, is written alone at
+once by a left join's left stream and by either stream of an outer join, and
+is otherwise dropped.
+
+The two streams are processed together, so their topics must have the same
+number of partitions. A stream cannot be joined with itself, or with a stream
+read from the same topic, yet; `Topology.of` refuses it with a
+`TopologyError`.
 
 ## Windows
 

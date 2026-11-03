@@ -389,6 +389,19 @@ final class EngineSuite extends CatsEffectSuite:
           List(List(StreamsProblem.JavaMembersMayBeRefused("Java Streams may list the joined topics orders, owners in another order")))
         )
 
+  test("an application joining an input that has sub-topologies of its own says in its state that Java numbers them by its program's build order"):
+    val counted = KStream(Topic.from("visits").orFail, text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v).count(Store("visits"))
+    val joined  =
+      Topology.of(KStream(Topic.from("orders").orFail, text, text).join(counted)((o, n) => s"$o$n").to(Topic.from("out").orFail, text, text)).orFail
+    watchedOf(joined): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(StreamsProblem.JavaMembersMayBeRefused(
+            "Java Streams numbers the sub-topologies of the join of orders, app-by-page-repartition otherwise unless it builds the receiver first"
+          )))
+        )
+
   test("an application can stop itself on a state it sees, giving back its tasks as it leaves"):
     val run =
       World().flatMap: world =>

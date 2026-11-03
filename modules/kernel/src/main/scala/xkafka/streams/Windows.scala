@@ -125,3 +125,39 @@ final case class SessionWindows(inactivityGap: FiniteDuration, grace: FiniteDura
 object SessionWindows:
   /** Sessions taking no late record. */
   def withNoGrace(inactivityGap: FiniteDuration): SessionWindows = SessionWindows(inactivityGap, FiniteDuration(0, inactivityGap.unit))
+
+/** The windows a stream-stream join matches records in, as Java Kafka Streams' join windows: a record joins each record of the other stream with the
+  * same key whose time is at most `before` earlier than its own or at most `after` later. A record later than the stream time by more than `grace`
+  * past its window no longer counts.
+  */
+final case class JoinWindows private (before: FiniteDuration, after: FiniteDuration, grace: FiniteDuration):
+  private[xkafka] def beforeMillis: Long = before.toMillis
+  private[xkafka] def afterMillis: Long  = after.toMillis
+  private[xkafka] def graceMillis: Long  = grace.toMillis
+
+  /** How far apart the earliest and latest records a record can join are, as Java's `size`. */
+  private[xkafka] def sizeMillis: Long = beforeMillis + afterMillis
+
+  /** How long a join's stores keep a record: the windows' size and their grace. */
+  private[xkafka] def retentionMillis: Long = sizeMillis + graceMillis
+
+  /** The same windows, joining records at most `before` earlier, as Java's `before`. */
+  def withBefore(before: FiniteDuration): JoinWindows = copy(before = before)
+
+  /** The same windows, joining records at most `after` later, as Java's `after`. */
+  def withAfter(after: FiniteDuration): JoinWindows = copy(after = after)
+
+  /** Why these windows cannot be used, if they cannot. */
+  private[xkafka] def problem: Option[String] =
+    def whole(duration: FiniteDuration) = duration.toNanos % 1000000L == 0L
+    if !whole(before) || !whole(after) || !whole(grace) then Some("the time differences and grace must be whole milliseconds")
+    else if sizeMillis < 0 then Some(s"the time before and after must not add up to less than nothing, were $before and $after")
+    else if grace.length < 0 then Some(s"the grace must not be negative, was $grace")
+    else None
+
+object JoinWindows:
+  /** Windows joining records at most `timeDifference` apart, either way, as Java's `ofTimeDifferenceAndGrace`. */
+  def apply(timeDifference: FiniteDuration, grace: FiniteDuration): JoinWindows = new JoinWindows(timeDifference, timeDifference, grace)
+
+  /** Windows joining records at most `timeDifference` apart, either way, taking no late record, as Java's `ofTimeDifferenceWithNoGrace`. */
+  def withNoGrace(timeDifference: FiniteDuration): JoinWindows = apply(timeDifference, FiniteDuration(0, timeDifference.unit))

@@ -28,7 +28,9 @@ import java.util.Properties
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, StreamsConfig}
-import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced, SessionWindows, SlidingWindows, TimeWindows, WindowedSerdes}
+import org.apache.kafka.streams.kstream.{
+  Grouped, JoinWindows, Materialized, Produced, SessionWindows, SlidingWindows, StreamJoined, TimeWindows, WindowedSerdes
+}
 import org.apache.kafka.streams.state.KeyValueStore
 
 /** One Java Streams member of a mixed fleet, in a process of its own so that it can be killed outright, running the program the fleet tests' xkafka
@@ -39,10 +41,12 @@ import org.apache.kafka.streams.state.KeyValueStore
   * each change to `<application>-output-<store>`. With `joins`, it joins each record of `<application>-input-orders` with its key's value in the
   * table `users` read from `<application>-input-users`, writing `<order>:<user>` to `<application>-output`. With `tables`, it left joins the table
   * `plans` read from `<application>-input-plans` with the table `users`, into the store `accounts`, writing `<plan>:<user>`, or `<plan>:-` for a key
-  * without a user, to `<application>-output`. It prints `running` once Java Streams says
+  * without a user, to `<application>-output`. With `pairs`, it joins each record of the stream `<application>-input-orders` with each record of the
+  * stream `<application>-input-users` with its key at most an hour apart, with an hour of grace, its stores named from `pairs`, writing
+  * `<order>:<user>` to `<application>-output`. It prints `running` once Java Streams says
   * it runs, and closes on a SIGTERM, within 30 seconds.
   *
-  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters`, `windows`, `joins` or `tables`.
+  * Arguments: bootstrap server, application id, `at_least_once` or `exactly_once_v2`, `letters`, `windows`, `joins`, `tables` or `pairs`.
   */
 object FleetMember:
   def main(arguments: Array[String]): Unit =
@@ -73,6 +77,15 @@ object FleetMember:
         builder.table[String, String](s"$application-input-plans", Materialized.as("plans"))
           .leftJoin(users, (plan: String, user: String) => s"$plan:${Option(user).getOrElse("-")}", accounts).toStream
           .to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
+      case "pairs" =>
+        val hour   = Duration.ofHours(1)
+        val joined = StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+        builder.stream[String, String](s"$application-input-orders").join(
+          builder.stream[String, String](s"$application-input-users"),
+          (order: String, user: String) => s"$order:$user",
+          JoinWindows.ofTimeDifferenceAndGrace(hour, hour),
+          joined
+        ).to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
       case other => throw IllegalArgumentException(s"no fleet program $other")
     val properties = Properties()
     properties.put(StreamsConfig.APPLICATION_ID_CONFIG, application)

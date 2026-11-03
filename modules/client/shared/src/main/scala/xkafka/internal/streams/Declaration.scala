@@ -41,10 +41,19 @@ private[xkafka] object Declaration:
   /** Java's `replication.factor` default, which leaves the choice to the broker. */
   val BrokerReplication: Short = -1
 
-  /** A store's changelog topic, configured as Java configures a key-value store's, or a window store's where the store keeps windows for `retention`.
+  /** A store's changelog topic, configured as Java configures a key-value store's, or a window store's where the store keeps windows for `retention`,
+    * and for a window store of a stream-stream join, which keeps every record, with only `cleanup.policy=delete`, as Java's join forces it.
     */
-  private def changelog(application: String, store: String, retention: Option[Long], replicationFactor: Short): StreamsGroup.TopicInfo =
-    StreamsGroup.TopicInfo(s"$application-$store-changelog", 0, replicationFactor, retention.fold(ChangelogConfigs)(WindowStore.changelogConfigs))
+  private def changelog(
+      application: String,
+      store: String,
+      retention: Option[Long],
+      duplicates: Boolean,
+      replicationFactor: Short
+  ): StreamsGroup.TopicInfo =
+    val configs = retention.fold(ChangelogConfigs)(WindowStore.changelogConfigs)
+    val kept    = if duplicates then configs.map((name, value) => name -> (if name == "cleanup.policy" then "delete" else value)) else configs
+    StreamsGroup.TopicInfo(s"$application-$store-changelog", 0, replicationFactor, kept)
 
   /** The topics of each copartition group whose order Java takes from its own names for the program's sources, which xkafka does not know: those of a
     * group in which two topic names share a bucket of Java's set.
@@ -75,7 +84,9 @@ private[xkafka] object Declaration:
           sourceTopics = sources,
           sourceTopicRegex = Nil,
           stateChangelogTopics =
-            segment.stores.map(store => changelog(application, store.name, segment.retentions.get(store.name), replicationFactor)).sortBy(_.name),
+            segment.stores
+              .map(store => changelog(application, store.name, segment.retentions.get(store.name), segment.duplicates(store.name), replicationFactor))
+              .sortBy(_.name),
           repartitionSinkTopics =
             segment.end match
               case End.Repartitioning(named, _, _) => List(repartitionTopic(named.name))

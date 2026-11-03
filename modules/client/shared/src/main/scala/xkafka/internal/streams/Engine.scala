@@ -234,6 +234,12 @@ private[xkafka] object Engine:
     val unordered =
       Declaration.unordered(application, topology).map: topics =>
         StreamsProblem.JavaMembersMayBeRefused(s"Java Streams may list the joined topics ${topics.mkString(", ")} in another order")
+    // Java numbers a join's sub-topologies by which of its inputs the program builds first, which xkafka takes to be the join's receiver.
+    val buildOrdered =
+      topology.pipelines.toList.flatMap(_.segments.toList).flatMap(_.all).flatMap(_.buildOrdered).distinct.map: sources =>
+        val topics = sources.map(Task.topicOf(application, _)).mkString(", ")
+        StreamsProblem
+          .JavaMembersMayBeRefused(s"Java Streams numbers the sub-topologies of the join of $topics otherwise unless it builds the receiver first")
     for
       changes  <- Resource.eval(Queue.unbounded[F, Either[Throwable, MemberAction]])
       _        <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
@@ -278,7 +284,7 @@ private[xkafka] object Engine:
     yield new KafkaStreams[F]:
       def run: F[Unit]                   = running.joinWithNever
       def state: Stream[F, StreamsState] =
-        (phase, member.reports).mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered)).discrete.changes
+        (phase, member.reports).mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered ++ buildOrdered)).discrete.changes
 
   /** A task's records, taken partition by partition in the order each was read, as Java's partition group takes them: next the record with the
     * smallest timestamp at the head of its partition, the earliest read of those with equal timestamps.

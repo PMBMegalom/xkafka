@@ -86,8 +86,9 @@ enum StreamsProblem derives CanEqual:
   /** The application may not read or write some of its topics. */
   case TopicAuthorizationFailed(detail: String)
 
-  /** The application joins topics whose order xkafka cannot match exactly to a Java Streams application's, so the broker may refuse Java members of
-    * the same application; members that all run xkafka are not affected. The detail names the topics.
+  /** The application joins topics whose order xkafka cannot match exactly to a Java Streams application's, or joins inputs whose sub-topologies Java
+    * numbers by which input its program builds first, which xkafka takes to be the join's receiver; so the broker may refuse Java members of the same
+    * application. Members that all run xkafka are not affected. The detail names the topics.
     */
   case JavaMembersMayBeRefused(detail: String)
 

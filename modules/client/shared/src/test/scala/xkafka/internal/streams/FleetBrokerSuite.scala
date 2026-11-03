@@ -33,7 +33,9 @@ import fs2.Chunk
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KStream, KTable, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology}
+import xkafka.streams.{
+  JoinWindows, KStream, KTable, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology
+}
 
 /** Java Streams and xkafka members in one application while records keep coming, as members join, leave, restart and are killed: counting records by
   * their value's first letter through a repartition topic, or each key's records in tumbling windows, sliding windows and sessions. The Java members
@@ -70,6 +72,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     /** Joining a table of each key's plan with the table of users, into a store. */
     case Tables extends Program("tables")
 
+    /** Joining each order with each user record of its key at most an hour apart, two streams in windows. */
+    case Pairs extends Program("pairs")
+
   private val windowKinds = List("tumbling", "sliding", "sessions")
 
   /** An application of the fleet's own. */
@@ -93,6 +98,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         case Program.Windows => windowKinds.flatMap(kind => List(inputOf(kind), outputOf(kind)))
         case Program.Joins   => List(inputOf("users"), inputOf("orders"), output)
         case Program.Tables  => List(inputOf("users"), inputOf("plans"), output)
+        case Program.Pairs   => List(inputOf("users"), inputOf("orders"), output)
 
     val topology: Topology[IO] =
       program match
@@ -117,6 +123,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
               .leftJoin(KTable(inputOf("users"), text, text, Store("users")), Store("accounts"), text)((plan, user) =>
                 s"$plan:${user.getOrElse("-")}"
               ).toStream.to(output, text, text.option)
+          ).orFail
+        case Program.Pairs => Topology.of(
+            KStream(inputOf("orders"), text, text)
+              .join(KStream(inputOf("users"), text, text), JoinWindows(1.hour, grace = 1.hour), Store("pairs"), text, text, text)((order, user) =>
+                s"$order:$user"
+              ).to(output, text, text)
           ).orFail
 
     private def command(text: String): IO[Unit] =
@@ -305,12 +317,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         seen => missed(sessions)(seen) ++ stray(seen)
       )
 
-  /** Writes a user for each of ten keys, waiting until the table's changelog holds them, then records to `topic` while it lasts, `o<n>`, keyed in
-    * turn over the ten keys. What it gives stops the writing and then gives each record's key, every record written by then.
+  /** Writes a user for each of ten keys, waiting until the changelog of the store `users` names holds them, then records to `topic` while it lasts,
+    * `o<n>`, keyed in turn over the ten keys. What it gives stops the writing and then gives each record's key, every record written by then.
     */
-  private def joinsLoad(fleet: Fleet, topic: String): Resource[IO, IO[Map[String, String]]] =
+  private def joinsLoad(fleet: Fleet, topic: String, users: String = "users"): Resource[IO, IO[Map[String, String]]] =
     val producer  = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
-    val users     = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
+    val records   = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
     val changelog =
       Names.fresh:
         val settings =
@@ -321,13 +333,13 @@ final class FleetBrokerSuite extends CatsEffectSuite:
             Deserializer.utf8[IO],
             AutoOffsetReset.Earliest
           ).orFail
-        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(Topic.from(s"${fleet.application}-users-changelog").orFail))).use:
+        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(Topic.from(s"${fleet.application}-$users-changelog").orFail))).use:
           _.records.map(_.record.key).scan(Set.empty[String])(_ + _).find(_.size == 10).compile.drain
-            .timeoutTo(2.minutes, IO.raiseError(new AssertionError("the users table never held every user")))
+            .timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"the store $users never held every user")))
     for
       written <- Resource.eval(IO.ref(Map.empty[String, String]))
       writer  <- producer
-      _       <- Resource.eval(writer.produceAndAwait(NonEmptyList.fromListUnsafe(users)) *> changelog)
+      _       <- Resource.eval(writer.produceAndAwait(NonEmptyList.fromListUnsafe(records)) *> changelog)
       writing <-
         Resource.make(fs2.Stream.iterate(0L)(_ + 1).evalMap: n =>
           val key = s"k${n % 10}"
@@ -372,6 +384,8 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       case Program.Joins   => joinsLoad(fleet, "orders").map(_.flatMap(joined(fleet, _)))
       // Each plan joins the user the table already holds for its key, so it comes out as an order joined with its user does.
       case Program.Tables => joinsLoad(fleet, "plans").map(_.flatMap(joined(fleet, _)))
+      // Each order joins the one user record of its key, which is at most an hour before it, as the table's user would be joined.
+      case Program.Pairs => joinsLoad(fleet, "orders", "pairs-other-join-store").map(_.flatMap(joined(fleet, _)))
 
   private def recording = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
 
