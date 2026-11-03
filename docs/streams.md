@@ -14,20 +14,30 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-val text = Serde.utf8[IO]
+val user  = Serde.utf8[IO]
+val page  = Serde.utf8[IO]
+val views = Serde.long[IO]
 
 val program =
   for
-    input    <- Topic.from("words").liftTo[IO]
-    output   <- Topic.from("word-counts").liftTo[IO]
-    pipeline  = KStream(input, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(output, text, Serde.long[IO])
+    input    <- Topic.from("page-views").liftTo[IO]
+    output   <- Topic.from("views-per-page").liftTo[IO]
+    pipeline  = KStream(Named("page-views"), input, user, page)
+                  .groupBy(Repartition("views-by-page"), page, page)((_, viewed) => viewed)
+                  .count(Named("count-views"), Store("views-per-page"))
+                  .toStream(Named("view-counts"))
+                  .to(Named("write-view-counts"), output, page, views)
     topology <- Topology.of(pipeline).liftTo[IO]
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
-    id       <- ApplicationId.from("word-counter").liftTo[IO]
+    id       <- ApplicationId.from("page-view-counter").liftTo[IO]
     settings <- StreamsSettings.from(client, id).liftTo[IO]
     _        <- KafkaClient[IO].streams(settings, topology).use(_.run)
   yield ()
 ```
+
+The input topic holds a record for each page a user views, keyed by the user.
+The program counts the views of each page, and writes every new count to
+`views-per-page`, keyed by the page.
 
 Acquiring the resource joins the application and starts processing. `run` waits
 while the application runs, and fails with the error that stops it. Releasing
@@ -46,10 +56,58 @@ topic (see [Tables](#tables)), and is built with:
   named `Store`. This gives a `KTable`, and its `toStream` is every change to it;
 - `to`, which ends the pipeline at its output topic.
 
+Every step has a name, given as a `Named`: a pipeline's source, each step, and
+its `to`. Names describe the program, and Java Kafka Streams names the nodes it
+makes for each step after them, as it does after its `Named`, `Consumed` and
+`Produced` names. A step that keeps a store also takes the store's name, as
+Java takes a `Named` and a `Materialized` name. Two steps cannot share a name.
+
 Grouping records whose key may have changed, after `map`, `flatMap`, `selectKey`
 or `evalMap`, sends them through a repartition topic first. Name it with a
-`Repartition`: `groupBy` always takes one, and `groupByKey` needs one after such
-a step.
+`Repartition`: `groupBy` always takes one, and `groupByKey` takes one after such
+a step. As with Java's `Grouped`, the step that gives `groupBy`'s records their
+new key takes the repartition's name.
+
+In the first example, `groupBy` keys each view by its page, so the views of a
+page, from every user, are counted together. They go through the repartition
+topic `<application id>-views-by-page-repartition`. Choosing the key first
+with `selectKey` gives the same counts, with `groupByKey` naming the
+repartition:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def viewsPerPage(input: Topic, output: Topic): Pipeline[IO] =
+  val user  = Serde.utf8[IO]
+  val page  = Serde.utf8[IO]
+  KStream(Named("page-views"), input, user, page)
+    .selectKey(Named("by-page"))((_, viewed) => viewed)
+    .groupByKey(Repartition("views-by-page"), page, page)
+    .count(Named("count-views"), Store("views-per-page"))
+    .toStream(Named("view-counts"))
+    .to(Named("write-view-counts"), output, page, Serde.long[IO])
+```
+
+Without the `Repartition`, this does not compile: the views of a page must
+reach one partition before they can be counted together. A stream's type says
+whether its records are keyed as they were read, so the compiler knows which
+`groupByKey` applies. `KStream(...)` and `filter`, `mapValues`, `peek`,
+`evalFilter` and `evalMapValues` after it keep the key as read, and
+`groupByKey(key, value)` groups the records where they are. After `map`,
+`flatMap`, `selectKey` or `evalMap`, only `groupByKey(repartition, key, value)`
+compiles. Each fails to compile where the other applies, with a message saying
+which to use.
+
+The stream's `Keying` type member carries this: `KeyState.AsRead` or
+`KeyState.Changed`. Types are inferred, so a program rarely names it. To
+annotate a stream without losing it, use `KStream.Of`, as in
+`KStream.Of[IO, String, String, KeyState.AsRead]`. A plain
+`KStream[IO, String, String]` does not say, and is taken to have changed its
+key: grouping it by key takes a `Repartition`, and if its key had not changed
+after all, `Topology.of` refuses the name with `TopologyError.UnusedRepartition`.
 
 The application's own topics are named after its id: a store's changelog is
 `<application id>-<store>-changelog`, and a repartition topic is
@@ -57,7 +115,7 @@ The application's own topics are named after its id: a store's changelog is
 application first starts.
 
 `Topology.of` checks the program and reports every problem at once, such as two
-stores with the same name or two pipelines reading the same topic. `liftTo`
+stores or steps with the same name, or two pipelines reading the same topic. `liftTo`
 raises them in `F` as an `InvalidTopology`, and refused settings as an
 `InvalidStreamsSettings`.
 
@@ -78,11 +136,12 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def latestNames(users: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KTable(users, text, text, Store("users"))
-    .toStream
-    .to(output, text, text.option)
+def userNames(users: Topic, output: Topic): Pipeline[IO] =
+  val user = Serde.utf8[IO]
+  val name = Serde.utf8[IO]
+  KTable(Named("users"), users, user, name, Store("users"))
+    .toStream(Named("user-changes"))
+    .to(Named("write-user-names"), output, user, name.option)
 ```
 
 Each record's value replaces its key's, even a record timestamped earlier than
@@ -94,15 +153,18 @@ changelog is `<application id>-<store>-changelog`, here
 A table read from a topic can delete keys, so its `toStream` gives `Option`
 values: `Some` for an update and `None` for a delete, which `Serde.option`
 writes as a tombstone, as Java writes its null. A table that only ever updates
-its keys, such as a `count`, gives its values as they are. The table's last type
-parameter says which: `KTable[F, K, V, Option]` can delete, and
-`KTable[F, K, V, KTable.Updated]` only updates. Writing a table that can delete
-without `.option` does not compile.
+its keys, such as a `count`, gives its values as they are. The table's `Change`
+type member says which, and `KTable.Of` names it in an annotation:
+`KTable.Of[F, K, V, Option]` can delete, and `KTable.Of[F, K, V, KTable.Updated]`
+only updates. Writing a table that can delete without `.option` does not
+compile. A plain `KTable[F, K, V]` does not say, so its `toStream` cannot be
+written with either serde.
 
 ## Joins
 
 `join` pairs each record of a stream with its key's value in a table, as Java
-Kafka Streams' stream-table join does:
+Kafka Streams' stream-table join does. Here each order, keyed by the user who
+placed it, is joined with that user's name:
 
 ```scala mdoc:compile-only
 import cats.effect.IO
@@ -110,11 +172,13 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def ordersWithUsers(orders: Topic, users: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(orders, text, text)
-    .join(KTable(users, text, text, Store("users")))((order, user) => s"$order for $user")
-    .to(output, text, text)
+def ordersWithNames(orders: Topic, users: Topic, output: Topic): Pipeline[IO] =
+  val user = Serde.utf8[IO]
+  val item = Serde.utf8[IO]
+  val name = Serde.utf8[IO]
+  KStream(Named("orders"), orders, user, item)
+    .join(Named("with-name"), KTable(Named("users"), users, user, name, Store("users")))((bought, buyer) => s"$bought for $buyer")
+    .to(Named("write-orders"), output, user, Serde.utf8[IO])
 ```
 
 Each record is joined with the value the table holds for its key when the record
@@ -159,15 +223,29 @@ KTable<String, Long> visits = builder.<String, String>stream("visits")
 orders.join(visits, (order, count) -> order + count).to("out");
 ```
 
-If the stream's key changed since it was read, for example after `selectKey`,
-its records first go through a repartition topic, which `join` and `leftJoin`
-then need a name for:
+If the stream's key may have changed since it was read, for example after
+`selectKey`, its records first go through a repartition topic, and `join` and
+`leftJoin` compile only with serdes to write it with, as `groupByKey` compiles
+only with a name. The topic is named after the join, `<name>-repartition`, as
+Java names it after its `Joined` name:
 
-```scala
-orders
-  .selectKey((_, order) => userOf(order))
-  .join(users, Repartition("orders-by-user"), text, order)((order, user) => s"$order for $user")
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def ordersByUser(orders: Topic, users: KTable.Of[IO, String, String, Option], output: Topic): Pipeline[IO] =
+  val id   = Serde.utf8[IO]
+  val item = Serde.utf8[IO]
+  KStream(Named("orders"), orders, id, item)
+    .selectKey(Named("by-user"))((order, _) => order.takeWhile(_ != '/'))
+    .join(Named("orders-by-user"), users, id, item)((bought, buyer) => s"$bought for $buyer")
+    .to(Named("write-orders"), output, id, Serde.utf8[IO])
 ```
+
+Here the orders are keyed by an order id such as `alice/1042`, and `selectKey`
+keys them by the user before the join.
 
 ### Joining tables
 
@@ -182,17 +260,19 @@ import xkafka.*
 import xkafka.streams.*
 
 def accounts(users: Topic, plans: Topic, output: Topic): Pipeline[IO] =
-  val text  = Serde.utf8[IO]
-  val named = KTable(users, text, text, Store("users"))
-  val paid  = KTable(plans, text, text, Store("plans"))
-  named
-    .outerJoin(paid) {
-      case Ior.Left(user)       => s"$user, no plan"
-      case Ior.Right(plan)      => s"unknown user on $plan"
-      case Ior.Both(user, plan) => s"$user on $plan"
+  val user  = Serde.utf8[IO]
+  val name  = Serde.utf8[IO]
+  val plan  = Serde.utf8[IO]
+  val names = KTable(Named("users"), users, user, name, Store("users"))
+  val paid  = KTable(Named("plans"), plans, user, plan, Store("plans"))
+  names
+    .outerJoin(Named("accounts"), paid) {
+      case Ior.Left(who)       => s"$who, no plan"
+      case Ior.Right(tier)     => s"unknown user on $tier"
+      case Ior.Both(who, tier) => s"$who on $tier"
     }
-    .toStream
-    .to(output, text, text.option)
+    .toStream(Named("account-changes"))
+    .to(Named("write-accounts"), output, user, Serde.utf8[IO].option)
 ```
 
 - `join` holds a value for each key both tables hold a value for.
@@ -212,8 +292,8 @@ the store's name and a serde for its values; a table that holds the result back
 with `suppress` needs this:
 
 ```scala
-users
-  .join(plans, Store("accounts"), text)((user, plan) => s"$user on $plan")
+names
+  .join(Named("accounts"), paid, Store("accounts"), Serde.utf8[IO])((who, tier) => s"$who on $tier")
   .suppress(Suppressed.untilTimeLimit("accounts-calm", 1.second))
 ```
 
@@ -226,7 +306,9 @@ joined yet; `Topology.of` refuses each with a `TopologyError`.
 
 Two streams with the same key join within windows of time, as Java Kafka
 Streams' stream-stream joins do. Each record joins every record of the other
-stream with its key whose time is close enough to its own:
+stream with its key whose time is close enough to its own. Here orders and
+payments are both keyed by the order, and each order should be paid within
+five minutes:
 
 ```scala mdoc:compile-only
 import scala.concurrent.duration.*
@@ -237,15 +319,25 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def payments(orders: Topic, paid: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(orders, text, text)
-    .outerJoin(KStream(paid, text, text), JoinWindows(5.minutes, grace = 30.seconds), Store("payments"), text, text, text) {
-      case Ior.Left(order)          => s"$order, unpaid"
-      case Ior.Right(payment)       => s"$payment, no order"
-      case Ior.Both(order, payment) => s"$order paid by $payment"
+def payments(orders: Topic, payments: Topic, output: Topic): Pipeline[IO] =
+  val order = Serde.utf8[IO]
+  val item  = Serde.utf8[IO]
+  val cents = Serde.long[IO]
+  KStream(Named("orders"), orders, order, item)
+    .outerJoin(
+      Named("pay"),
+      KStream(Named("payments"), payments, order, cents),
+      JoinWindows(5.minutes, grace = 30.seconds),
+      Store("payments"),
+      order,
+      item,
+      cents
+    ) {
+      case Ior.Left(bought)       => s"$bought, unpaid"
+      case Ior.Right(paid)        => s"$paid cents paid for no order"
+      case Ior.Both(bought, paid) => s"$bought, paid $paid cents"
     }
-    .to(output, text, text)
+    .to(Named("write-payments"), output, order, Serde.utf8[IO])
 ```
 
 `JoinWindows(5.minutes, grace = 30.seconds)` joins records at most five minutes
@@ -268,7 +360,7 @@ looks for such records when a record arrives, and at most once a second.
 
 Each stream's records are kept in a store for the windows' size and grace, and
 a left or outer join keeps the records that matched nothing in a third store.
-The stores are named from the name you pass, as Java names them:
+The stores are named from the store's name, as Java names them:
 
 | Join        | Stores                                                                                                  |
 |-------------|---------------------------------------------------------------------------------------------------------|
@@ -277,10 +369,10 @@ The stores are named from the name you pass, as Java names them:
 | `outerJoin` | `<name>-outer-this-join-store`, `<name>-outer-other-join-store`, `<name>-outer-shared-join-store`       |
 
 The three serdes write the key and each stream's values to the stores. A
-stream whose key has changed is written first to the repartition topic
-`<name>-left` or `<name>-right` names, with the same serdes. A Java program
-names everything the same way with
-`StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(name).withStoreName(name)`.
+stream whose key has changed is written first to a repartition topic named
+after the join, `<join>-left` or `<join>-right`, with the same serdes. A Java
+program names everything the same way with
+`StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(join).withStoreName(store)`.
 
 A record without a key, one whose key serde writes none, is written alone at
 once by a left join's left stream and by either stream of an outer join, and
@@ -304,18 +396,19 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def perMinute(input: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(input, text, text)
-    .groupByKey(text, text)
+def viewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
+  val user = Serde.utf8[IO]
+  val page = Serde.utf8[IO]
+  KStream(Named("page-views"), input, user, page)
+    .groupByKey(user, page)
     .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
-    .count(Store("counts-per-minute"))
-    .toStream
-    .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+    .count(Named("count-views"), Store("views-per-minute"))
+    .toStream(Named("view-counts"))
+    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
 ```
 
-This counts each key's records per minute, writing a new count each time one
-changes.
+This counts each user's page views per minute, writing a new count each time
+one changes.
 
 `TimeWindows.tumbling` makes windows that follow one another without gaps or
 overlap, so each record counts in exactly one. `TimeWindows.hopping` starts a
@@ -346,16 +439,17 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def finalPerMinute(input: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(input, text, text)
-    .groupByKey(text, text)
+def finalViewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
+  val user = Serde.utf8[IO]
+  val page = Serde.utf8[IO]
+  KStream(Named("page-views"), input, user, page)
+    .groupByKey(user, page)
     .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
     .withRetention(10.minutes)
     .emitOnWindowClose
-    .count(Store("final-counts-per-minute"))
-    .toStream
-    .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+    .count(Named("count-views"), Store("final-views-per-minute"))
+    .toStream(Named("view-counts"))
+    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
 ```
 
 A closed window's result is sent when the next record arrives, at most once a
@@ -385,8 +479,8 @@ has the same limit, and the same remedy.
 
 ### Sliding windows
 
-Sliding windows answer questions like "how many records arrived within five
-minutes of each other?". Each window covers records at most a time difference
+Sliding windows answer questions like "how many times did this user fail to
+log in within five minutes?". Each window covers records at most a time difference
 apart. Windows are made only where records are, so there are no empty
 windows:
 
@@ -398,14 +492,15 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def withinFiveMinutes(input: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(input, text, text)
-    .groupByKey(text, text)
+def failedLogins(input: Topic, output: Topic): Pipeline[IO] =
+  val user    = Serde.utf8[IO]
+  val address = Serde.utf8[IO]
+  KStream(Named("failed-logins"), input, user, address)
+    .groupByKey(user, address)
     .windowedBy(SlidingWindows(5.minutes, grace = 30.seconds))
-    .count(Store("counts-within-five-minutes"))
-    .toStream
-    .to(output, Serde.timeWindowed(text, 5.minutes), Serde.long[IO])
+    .count(Named("count-failures"), Store("failures-within-five-minutes"))
+    .toStream(Named("failure-counts"))
+    .to(Named("write-failure-counts"), output, Serde.timeWindowed(user, 5.minutes), Serde.long[IO])
 ```
 
 Each record ends a window, and a window also starts just after a record when
@@ -440,13 +535,14 @@ import xkafka.*
 import xkafka.streams.*
 
 def visits(input: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(input, text, text)
-    .groupByKey(text, text)
+  val user = Serde.utf8[IO]
+  val page = Serde.utf8[IO]
+  KStream(Named("page-views"), input, user, page)
+    .groupByKey(user, page)
     .windowedBy(SessionWindows(5.minutes, grace = 1.minute))
-    .count(Store("records-per-visit"))
-    .toStream
-    .to(output, Serde.sessionWindowed(text), Serde.long[IO].option)
+    .count(Named("count-views"), Store("views-per-visit"))
+    .toStream(Named("view-counts"))
+    .to(Named("write-view-counts"), output, Serde.sessionWindowed(user), Serde.long[IO].option)
 ```
 
 A new record can bridge sessions that were separate until then, merging them
@@ -463,10 +559,11 @@ Write session results with an `option` serde, such as `Serde.long[IO].option`:
 Streams writes a replaced session.
 
 `count` and `reduce` know how to merge sessions. `aggregate` takes a function
-for it as well, given the two sessions' values:
+for it as well, given the two sessions' values. Over a stream of purchases in
+cents, keyed by user, this adds up what each user spends per visit:
 
 ```scala
-.aggregate(Store("visit-lengths"), Serde.long[IO])(0L)((_, value, total) => total + value.length)((_, first, second) => first + second)
+.aggregate(Named("add-spending"), Store("spending-per-visit"), Serde.long[IO])(0L)((_, cents, total) => total + cents)((_, first, second) => first + second)
 ```
 
 A session closes once a record arrives timestamped later than its end plus the
@@ -510,15 +607,16 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def finalCounts(input: Topic, output: Topic): Pipeline[IO] =
-  val text = Serde.utf8[IO]
-  KStream(input, text, text)
-    .groupByKey(text, text)
+def finalViews(input: Topic, output: Topic): Pipeline[IO] =
+  val user = Serde.utf8[IO]
+  val page = Serde.utf8[IO]
+  KStream(Named("page-views"), input, user, page)
+    .groupByKey(user, page)
     .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
-    .count(Store("counts-per-minute"))
-    .suppress(Suppressed.untilWindowCloses("final-counts"))
-    .toStream
-    .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+    .count(Named("count-views"), Store("views-per-minute"))
+    .suppress(Suppressed.untilWindowCloses("final-views"))
+    .toStream(Named("view-counts"))
+    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
 ```
 
 A window's result goes on once a record arrives timestamped at or after the
@@ -530,8 +628,8 @@ To send each key's latest value at most once in a while, use
 `Suppressed.untilTimeLimit`, on any table:
 
 ```scala
-.count(Store("counts"))
-.suppress(Suppressed.untilTimeLimit("calm-counts", 1.minute))
+.count(Named("count-views"), Store("views-per-page"))
+.suppress(Suppressed.untilTimeLimit("calm-views", 1.minute))
 ```
 
 Once a key has an update, it is held. Later updates replace it. The latest goes
@@ -544,7 +642,7 @@ By default a suppression holds as much as it needs to. To limit it, pass a
 `BufferLimit`:
 
 ```scala
-Suppressed.untilTimeLimit("calm-counts", 1.minute, BufferLimit.records(10000))
+Suppressed.untilTimeLimit("calm-views", 1.minute, BufferLimit.records(10000))
 ```
 
 `BufferLimit.records(n)` holds at most `n` keys, and `BufferLimit.bytes(n)` at

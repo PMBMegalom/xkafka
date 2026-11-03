@@ -36,8 +36,8 @@ final class TopologySuite extends CatsEffectSuite:
   private val count = Serde.long[IO]
 
   private def counting(input: String, repartition: String, store: String): Pipeline[IO] =
-    KStream(topic(input), text, text).groupBy(Repartition(repartition), text, text)((_, v) => v).count(Store(store)).toStream
-      .to(topic(s"$input-out"), text, count)
+    KStream(Named(s"$input-read"), topic(input), text, text).groupBy(Repartition(repartition), text, text)((_, v) => v)
+      .count(Named(s"$input-count"), Store(store)).toStream(Named(s"$input-changes")).to(Named(s"$input-write"), topic(s"$input-out"), text, count)
 
   test("a grouped program declares its input, its repartition topic and its changelog, with the configs Java gives them"):
     val declared = Topology.of(counting("in", "by-value", "counts")).map(Declaration("app", _))
@@ -68,8 +68,9 @@ final class TopologySuite extends CatsEffectSuite:
     )
 
   test("sub-topologies are listed by their ids as text, as Java sorts them, so the eleventh comes before the third"):
-    val pipelines = (0 until 11).toList.map(n => KStream(topic(s"in-$n"), text, text).to(topic(s"out-$n"), text, text))
-    val declared  = Topology.of(pipelines.head, pipelines.tail*).map(Declaration("app", _).subtopologies.map(s => (s.id, s.sourceTopics)))
+    val pipelines = (0 until 11).toList
+      .map(n => KStream(Named(s"in-$n"), topic(s"in-$n"), text, text).to(Named(s"out-$n"), topic(s"out-$n"), text, text))
+    val declared = Topology.of(pipelines.head, pipelines.tail*).map(Declaration("app", _).subtopologies.map(s => (s.id, s.sourceTopics)))
     assertEquals(declared.map(_.take(3)), Right(List(("0", List("in-0")), ("1", List("in-1")), ("10", List("in-10")))))
 
   test("the replication factor declared for internal topics is the one asked for"):
@@ -79,7 +80,7 @@ final class TopologySuite extends CatsEffectSuite:
       Right(List[Short](3, 3))
     )
 
-  test("a program is refused with every reason at once: names reused, a topic read twice, and names no topic can carry"):
+  test("a program is refused with every reason at once: names reused, a topic read twice, and names no topic can carry or Java refuses"):
     val refused = Topology.of(counting("in", "same", "counts"), counting("in", "same", "counts"), counting("other", "bad name", ""))
     assertEquals(
       refused.left.map(_.toList.toSet),
@@ -88,9 +89,20 @@ final class TopologySuite extends CatsEffectSuite:
         TopologyError.InvalidName("", "it is empty"),
         TopologyError.DuplicateStore("counts"),
         TopologyError.DuplicateRepartition("same"),
-        TopologyError.DuplicateSource(topic("in"))
+        TopologyError.DuplicateSource(topic("in")),
+        // The step that gives the records their new key is named after the repartitioning, as Java's `Grouped` names both.
+        TopologyError.DuplicateName("same"),
+        TopologyError.DuplicateName("in-read"),
+        TopologyError.DuplicateName("in-count"),
+        TopologyError.DuplicateName("in-changes"),
+        TopologyError.DuplicateName("in-write")
       ))
     )
+    def named(step: String) = Topology.of(KStream(Named(step), topic("in"), text, text).to(Named("out"), topic("out"), text, text)).left.map(_.toList)
+    assertEquals(named("."), Left(List(TopologyError.InvalidName(".", "it may not be . or .."))))
+    assertEquals(named(".."), Left(List(TopologyError.InvalidName("..", "it may not be . or .."))))
+    assertEquals(named("out"), Left(List(TopologyError.DuplicateName("out"))))
+    assertEquals(named("in put"), Left(List(TopologyError.InvalidName("in put", "it may contain only [a-zA-Z0-9._-]"))))
 
   test("a name longer than Java allows is refused"):
     val long = "n" * (Topology.MaxNameLength + 1)
@@ -102,18 +114,19 @@ final class TopologySuite extends CatsEffectSuite:
 
   test("a name used twice that no topic can carry is reported once as invalid and once as reused"):
     val twice =
-      KStream(topic("in"), text, text).groupByKey(text, text).count(Store("bad name")).toStream.groupByKey(text, count)
-        .reduce(Store("bad name"))((_, n) => n)
+      KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).count(Named("count-2"), Store("bad name")).toStream(Named("to-stream-2"))
+        .groupByKey(text, count).reduce(Named("reduce-1"), Store("bad name"))((_, n) => n)
     assertEquals(
-      Topology.of(twice.toStream.to(topic("out"), text, count)).left.map(_.toList),
+      Topology.of(twice.toStream(Named("to-stream-3")).to(Named("write-3"), topic("out"), text, count)).left.map(_.toList),
       Left(List(TopologyError.InvalidName("bad name", "it may contain only [a-zA-Z0-9._-]"), TopologyError.DuplicateStore("bad name")))
     )
 
   test("a refused program is raised with every reason, and an accepted one is given"):
     type Raised[A] = Either[Throwable, A]
     val twice =
-      KStream(topic("in"), text, text).groupByKey(text, text).count(Store("bad name")).toStream.groupByKey(text, count)
-        .reduce(Store("bad name"))((_, n) => n).toStream.to(topic("out"), text, count)
+      KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).count(Named("count-3"), Store("bad name")).toStream(Named("to-stream-4"))
+        .groupByKey(text, count).reduce(Named("reduce-2"), Store("bad name"))((_, n) => n).toStream(Named("to-stream-5"))
+        .to(Named("write-4"), topic("out"), text, count)
     val raised = Topology.of(twice).liftTo[Raised]
     assertEquals(
       raised.left.toOption.collect { case refused: InvalidTopology => refused.errors.toList },
@@ -121,36 +134,76 @@ final class TopologySuite extends CatsEffectSuite:
     )
     assertEquals(
       raised.left.toOption.map(_.getMessage),
-      Some("'bad name' cannot name a store or repartitioning: it may contain only [a-zA-Z0-9._-]; two stores are named 'bad name'")
+      Some("'bad name' cannot name a store, repartitioning or step: it may contain only [a-zA-Z0-9._-]; two stores are named 'bad name'")
     )
     assert(Topology.of(counting("in", "fine", "fine")).liftTo[Raised].isRight)
 
-  test("records whose key changed cannot be grouped by key without a repartition name, and can with one"):
-    val rekeyed = KStream(topic("in"), text, text).selectKey((_, v) => v)
-    assertEquals(
-      Topology.of(rekeyed.groupByKey(text, text).count(Store("counts")).toStream.to(topic("out"), text, count)).left.map(_.toList),
-      Left(List(TopologyError.UnnamedRepartition))
-    )
-    assert(Topology.of(rekeyed.groupByKey(Repartition("rekeyed"), text, text).count(Store("counts")).toStream.to(topic("out"), text, count)).isRight)
+  private val unnamed  = "the records' key may have changed since they were read, so they go through a repartition topic first"
+  private val needless = "the records are keyed as they were read, so they need no repartition topic"
 
-  test("records an effect may have given a new key cannot be grouped by key without a repartition name"):
-    val remapped = KStream(topic("in"), text, text).evalMap((k, v) => IO.pure((v, k)))
+  test("records whose key may have changed are grouped by key only with a repartition name, and records keyed as read only without one"):
+    val read    = KStream(Named("in"), topic("in"), text, text).filter(Named("filter-1"))((_, v) => v.nonEmpty)
+    val rekeyed = read.selectKey(Named("select-key-1"))((_, v) => v)
+    assert(compileErrors("rekeyed.groupByKey(text, text)").contains(unnamed))
+    assert(compileErrors("read.groupByKey(Repartition(\"unused\"), text, text)").contains(needless))
+    List[KStream.Of[IO, String, String, KeyState.Changed]](
+      rekeyed,
+      read.map(Named("map-1"))((k, v) => (v, k)),
+      read.flatMap(Named("flat-map-1"))((k, v) => List(v -> k)),
+      read.evalMap(Named("eval-map-1"))((k, v) => IO.pure((v, k))),
+      rekeyed.filter(Named("filter-2"))((_, _) => true).mapValues(Named("map-values-1"))(identity)
+    ).foreach: changed =>
+      assert(compileErrors("changed.groupByKey(text, text)").contains(unnamed))
+      assert(
+        Topology.of(
+          changed.groupByKey(Repartition("rekeyed"), text, text).count(Named("count-5"), Store("counts")).toStream(Named("to-stream-7"))
+            .to(Named("write-6"), topic("out"), text, count)
+        ).isRight
+      )
+    List[KStream.Of[IO, String, String, KeyState.AsRead]](
+      read,
+      read.mapValues(Named("map-values-2"))(identity),
+      read.peek(Named("peek-1"))((_, _) => IO.unit),
+      read.evalFilter(Named("eval-filter-1"))((_, _) => IO.pure(true)),
+      read.evalMapValues(Named("eval-map-values-1"))(IO.pure)
+    ).foreach: kept =>
+      val grouped =
+        kept.groupByKey(text, text).count(Named("count-8"), Store("counts")).toStream(Named("to-stream-10"))
+          .to(Named("write-9"), topic("out"), text, count)
+      assertEquals(Topology.of(grouped).map(_.pipelines.head.segments.size), Right(1))
+      assert(compileErrors("kept.groupByKey(Repartition(\"unused\"), text, text)").contains(needless))
+
+  test("a stream whose type does not say how it is keyed needs a repartition name, which Topology.of refuses where its key has not changed"):
+    val widened: KStream[IO, String, String] = KStream(Named("in"), topic("in"), text, text)
+    assert(compileErrors("widened.groupByKey(text, text)").contains(unnamed))
     assertEquals(
-      Topology.of(remapped.groupByKey(text, text).count(Store("counts")).toStream.to(topic("out"), text, count)).left.map(_.toList),
-      Left(List(TopologyError.UnnamedRepartition))
+      Topology.of(
+        widened.groupByKey(Repartition("unused"), text, text).count(Named("count-6"), Store("counts")).toStream(Named("to-stream-8"))
+          .to(Named("write-7"), topic("out"), text, count)
+      ).left.map(_.toList),
+      Left(List(TopologyError.UnusedRepartition("unused")))
     )
+    val rekeyed: KStream[IO, String, String] = KStream(Named("in"), topic("in"), text, text).selectKey(Named("select-key-2"))((_, v) => v)
+    val grouped                              =
+      rekeyed.groupByKey(Repartition("rekeyed"), text, text).count(Named("count-7"), Store("counts")).toStream(Named("to-stream-9"))
+        .to(Named("write-8"), topic("out"), text, count)
+    assertEquals(Topology.of(grouped).map(_.pipelines.head.segments.size), Right(2))
 
   test("records grouped by the key they were read with need no repartition name"):
     val grouped =
-      KStream(topic("in"), text, text).filter((_, v) => v.nonEmpty).mapValues(_.trim).evalFilter((_, v) => IO.pure(v.nonEmpty)).groupByKey(text, text)
-        .count(Store("counts"))
-    assert(Topology.of(grouped.toStream.to(topic("out"), text, count)).isRight)
+      KStream(Named("in"), topic("in"), text, text).filter(Named("filter-1"))((_, v) => v.nonEmpty).mapValues(Named("map-values-1"))(_.trim)
+        .evalFilter(Named("eval-filter-1"))((_, v) => IO.pure(v.nonEmpty)).groupByKey(text, text).count(Named("count-7"), Store("counts"))
+    assert(Topology.of(grouped.toStream(Named("to-stream-9")).to(Named("write-8"), topic("out"), text, count)).isRight)
 
   test("a table's changes start with the key they were grouped by, so grouping them by key again needs no repartition"):
     val again =
-      KStream(topic("in"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v).count(Store("counts")).toStream
-        .groupByKey(text, count).reduce(Store("latest"))((_, n) => n)
-    assertEquals(Topology.of(again.toStream.to(topic("out"), text, count)).map(Declaration("app", _).subtopologies.size), Right(2))
+      KStream(Named("in"), topic("in"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v).count(Named("count-8"), Store("counts"))
+        .toStream(Named("to-stream-10")).groupByKey(text, count).reduce(Named("reduce-3"), Store("latest"))((_, n) => n)
+    assertEquals(
+      Topology.of(again.toStream(Named("to-stream-11")).to(Named("write-9"), topic("out"), text, count))
+        .map(Declaration("app", _).subtopologies.size),
+      Right(2)
+    )
 
   test("a long is written as eight big-endian bytes and read back, and other lengths or no value are refused"):
     val headers = Headers.empty

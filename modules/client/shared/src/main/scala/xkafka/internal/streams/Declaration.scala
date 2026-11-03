@@ -68,7 +68,7 @@ private[xkafka] object Declaration:
     val subtopologies                  =
       segments.zipWithIndex.map: (segment, id) =>
         val sources      = segment.origins.collect { case Source.Input(topic) => topic.value }.sorted
-        val repartitions = segment.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.name) }.sorted
+        val repartitions = segment.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.value) }.sorted
         // A join puts the topics it reads in one copartition group, which Java keeps as a HashSet of their names, and sends as indices into the
         // sorted lists of the sub-topology's topics, in the order that set iterates.
         val copartitioned =
@@ -84,12 +84,12 @@ private[xkafka] object Declaration:
           sourceTopics = sources,
           sourceTopicRegex = Nil,
           stateChangelogTopics =
-            segment.stores
-              .map(store => changelog(application, store.name, segment.retentions.get(store.name), segment.duplicates(store.name), replicationFactor))
-              .sortBy(_.name),
+            segment.stores.map(store =>
+              changelog(application, store.value, segment.retentions.get(store.value), segment.duplicates(store.value), replicationFactor)
+            ).sortBy(_.name),
           repartitionSinkTopics =
             segment.end match
-              case End.Repartitioning(named, _, _) => List(repartitionTopic(named.name))
+              case End.Repartitioning(named, _, _) => List(repartitionTopic(named.value))
               case _                               => Nil,
           repartitionSourceTopics = repartitions.map(StreamsGroup.TopicInfo(_, 0, replicationFactor, RepartitionConfigs)),
           copartitionGroups = copartitioned.toList

@@ -45,7 +45,8 @@ import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
 import xkafka.streams.{
-  BufferLimit, JoinWindows, KStream, KTable, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology
+  BufferLimit, JoinWindows, KStream, KTable, Named, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows,
+  Topology
 }
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
@@ -122,8 +123,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("counting in tumbling windows writes, logs and keeps what Java does, dropping records past the grace"):
     same[java.lang.Long, Long](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts")).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), count),
+      KStream(Named("read-1"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-1"), Store("counts"))
+        .toStream(Named("to-stream-1")).to(Named("write-1"), out, Serde.timeWindowed(text, 10.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L)).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long)),
@@ -133,8 +134,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("reducing in hopping windows writes, logs and keeps what Java does, each record in every window it falls in"):
     same[String, String](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Store("joined"))(_ + _).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), text),
+      KStream(Named("read-2"), in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Named("reduce-1"), Store("joined"))(_ + _)
+        .toStream(Named("to-stream-2")).to(Named("write-2"), out, Serde.timeWindowed(text, 10.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L))
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -145,8 +146,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("aggregating windows of records grouped by a new key goes through the repartition topic as Java's does"):
     same[java.lang.Long, Long](
-      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(tumbling)
-        .aggregate(Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream.to(out, Serde.timeWindowed(text, 10.seconds), count),
+      KStream(Named("read-3"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
+        .windowedBy(tumbling).aggregate(Named("aggregate-1"), Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream(Named("to-stream-3"))
+        .to(Named("write-3"), out, Serde.timeWindowed(text, 10.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaWindows(10000L))
           .aggregate(
@@ -204,8 +206,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("counting in tumbling windows emitted once they close writes what Java does, looking for closed windows at most once a second"):
     same[java.lang.Long, Long](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).emitOnWindowClose.count(Store("counts")).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), count),
+      KStream(Named("read-4"), in, text, text).groupByKey(text, text).windowedBy(tumbling).emitOnWindowClose.count(Named("count-2"), Store("counts"))
+        .toStream(Named("to-stream-4")).to(Named("write-4"), out, Serde.timeWindowed(text, 10.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L)).emitStrategy(EmitStrategy.onWindowClose)
           .count(materialized("counts").withValueSerde(Serdes.Long)).toStream
@@ -221,8 +223,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     "reducing in hopping windows kept a minute, emitted once they close, writes what Java does, every window closed since the last, by start and key"
   ):
     same[String, String](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).withRetention(1.minute).emitOnWindowClose.reduce(Store("joined"))(_ + _)
-        .toStream.to(out, Serde.timeWindowed(text, 10.seconds), text),
+      KStream(Named("read-5"), in, text, text).groupByKey(text, text).windowedBy(hopping).withRetention(1.minute).emitOnWindowClose
+        .reduce(Named("reduce-2"), Store("joined"))(_ + _).toStream(Named("to-stream-5"))
+        .to(Named("write-5"), out, Serde.timeWindowed(text, 10.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L)).emitStrategy(EmitStrategy.onWindowClose)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -239,8 +242,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("counting in sliding windows writes, logs and keeps what Java does, early records in the window from 0 and late ones dropped"):
     same[java.lang.Long, Long](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).count(Store("counts")).toStream
-        .to(out, Serde.timeWindowed(text, 5.seconds), count),
+      KStream(Named("read-6"), in, text, text).groupByKey(text, text).windowedBy(sliding).count(Named("count-3"), Store("counts"))
+        .toStream(Named("to-stream-6")).to(Named("write-6"), out, Serde.timeWindowed(text, 5.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSliding).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.Long)),
@@ -277,8 +280,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("reducing in sliding windows writes, logs and keeps what Java does, for records out of order, at equal times and early"):
     same[String, String](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).reduce(Store("joined"))(_ + _).toStream
-        .to(out, Serde.timeWindowed(text, 5.seconds), text),
+      KStream(Named("read-7"), in, text, text).groupByKey(text, text).windowedBy(sliding).reduce(Named("reduce-3"), Store("joined"))(_ + _)
+        .toStream(Named("to-stream-7")).to(Named("write-7"), out, Serde.timeWindowed(text, 5.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSliding)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -291,8 +294,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("reducing in sliding windows emitted once they close writes what Java does"):
     same[String, String](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).withRetention(1.minute).emitOnWindowClose.reduce(Store("joined"))(_ + _)
-        .toStream.to(out, Serde.timeWindowed(text, 5.seconds), text),
+      KStream(Named("read-8"), in, text, text).groupByKey(text, text).windowedBy(sliding).withRetention(1.minute).emitOnWindowClose
+        .reduce(Named("reduce-4"), Store("joined"))(_ + _).toStream(Named("to-stream-8"))
+        .to(Named("write-8"), out, Serde.timeWindowed(text, 5.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSliding).emitStrategy(EmitStrategy.onWindowClose)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -306,8 +310,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("aggregating sliding windows of records grouped by a new key goes through the repartition topic as Java's does"):
     same[java.lang.Long, Long](
-      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(sliding)
-        .aggregate(Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream.to(out, Serde.timeWindowed(text, 5.seconds), count),
+      KStream(Named("read-9"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
+        .windowedBy(sliding).aggregate(Named("aggregate-2"), Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream(Named("to-stream-9"))
+        .to(Named("write-9"), out, Serde.timeWindowed(text, 5.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaSliding).aggregate(
           () => java.lang.Long.valueOf(100L),
@@ -346,8 +351,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("counting in sessions writes and logs what Java does, merged sessions going on as tombstones"):
     sameSessions[java.lang.Long](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).count(Store("counts")).toStream
-        .to(out, Serde.sessionWindowed(text), count.option),
+      KStream(Named("read-10"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-4"), Store("counts"))
+        .toStream(Named("to-stream-10")).to(Named("write-10"), out, Serde.sessionWindowed(text), count.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
@@ -356,8 +361,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("reducing in sessions merges them in Java's order, and writes and logs what Java does"):
     sameSessions[String](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).reduce(Store("joined"))(_ + _).toStream
-        .to(out, Serde.sessionWindowed(text), text.option),
+      KStream(Named("read-11"), in, text, text).groupByKey(text, text).windowedBy(sessions).reduce(Named("reduce-5"), Store("joined"))(_ + _)
+        .toStream(Named("to-stream-11")).to(Named("write-11"), out, Serde.sessionWindowed(text), text.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -367,9 +372,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("aggregating in sessions of records grouped by a new key, with a merge of its own, writes and logs what Java does"):
     sameSessions[String](
-      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").windowedBy(sessions)
-        .aggregate(Store("trail"), text)("<")((_, v, acc) => acc + v)((_, a, b) => s"($a|$b)").toStream
-        .to(out, Serde.sessionWindowed(text), text.option),
+      KStream(Named("read-12"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
+        .windowedBy(sessions).aggregate(Named("aggregate-3"), Store("trail"), text)("<")((_, v, acc) => acc + v)((_, a, b) => s"($a|$b)")
+        .toStream(Named("to-stream-12")).to(Named("write-12"), out, Serde.sessionWindowed(text), text.option),
       materialized =>
         _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaSessions)
           .aggregate(() => "<", (_, v, acc) => acc + v, (_, a, b) => s"($a|$b)", materialized("trail").withValueSerde(Serdes.String)).toStream
@@ -379,8 +384,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("counting in sessions emitted once they close writes what Java does"):
     sameSessions[java.lang.Long](
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).withRetention(1.minute).emitOnWindowClose.count(Store("counts")).toStream
-        .to(out, Serde.sessionWindowed(text), count.option),
+      KStream(Named("read-13"), in, text, text).groupByKey(text, text).windowedBy(sessions).withRetention(1.minute).emitOnWindowClose
+        .count(Named("count-5"), Store("counts")).toStream(Named("to-stream-13"))
+        .to(Named("write-13"), out, Serde.sessionWindowed(text), count.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).emitStrategy(EmitStrategy.onWindowClose)
           .count(materialized("counts").withValueSerde(Serdes.Long)).toStream
@@ -415,8 +421,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("final results of tumbling windows go on as Java's do, once each window closes, and the buffer logs what Java's logs"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))
-        .toStream.to(out, Serde.timeWindowed(text, 10.seconds), count),
+      KStream(Named("read-14"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-6"), Store("counts"))
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-14"))
+        .to(Named("write-14"), out, Serde.timeWindowed(text, 10.seconds), count),
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -426,8 +433,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("final results of hopping windows go on as Java's do, earliest window first and then by key"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Store("joined"))(_ + _)
-        .suppress(Suppressed.untilWindowCloses("final")).toStream.to(out, Serde.timeWindowed(text, 10.seconds), text),
+      KStream(Named("read-15"), in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Named("reduce-6"), Store("joined"))(_ + _)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-15"))
+        .to(Named("write-15"), out, Serde.timeWindowed(text, 10.seconds), text),
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L))
         .reduce((a, b) => a + b, Materialized.as("joined").withKeySerde(Serdes.String).withValueSerde(Serdes.String))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -437,8 +445,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("final results of sliding windows go on as Java's do"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sliding).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))
-        .toStream.to(out, Serde.timeWindowed(text, 5.seconds), count),
+      KStream(Named("read-16"), in, text, text).groupByKey(text, text).windowedBy(sliding).count(Named("count-7"), Store("counts"))
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-16"))
+        .to(Named("write-16"), out, Serde.timeWindowed(text, 5.seconds), count),
       _.stream[String, String]("in").groupByKey.windowedBy(javaSliding)
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -448,8 +457,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("final results of sessions go on as Java's do, once the grace and the gap have passed since each ends, sessions merged away dropped"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).windowedBy(sessions).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))
-        .toStream.to(out, Serde.sessionWindowed(text), count.option),
+      KStream(Named("read-17"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-8"), Store("counts"))
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-17"))
+        .to(Named("write-17"), out, Serde.sessionWindowed(text), count.option),
       _.stream[String, String]("in").groupByKey.windowedBy(javaSessions)
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -459,8 +469,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a table's changes held for a time limit go on as Java's do, each key's latest once the limit has passed since its first"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).count(Store("counts")).suppress(Suppressed.untilTimeLimit("calm", 3.seconds)).toStream
-        .to(out, text, count),
+      KStream(Named("read-18"), in, text, text).groupByKey(text, text).count(Named("count-9"), Store("counts"))
+        .suppress(Suppressed.untilTimeLimit("calm", 3.seconds)).toStream(Named("to-stream-18")).to(Named("write-18"), out, text, count),
       _.stream[String, String]("in").groupByKey.count(counted("counts"))
         .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(3), BufferConfig.unbounded()).withName("calm")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
@@ -469,8 +479,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a buffer of at most one change sends the earliest on early, as Java's does"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).reduce(Store("joined"))(_ + _)
-        .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(1).emitEarlyWhenFull)).toStream.to(out, text, text),
+      KStream(Named("read-19"), in, text, text).groupByKey(text, text).reduce(Named("reduce-7"), Store("joined"))(_ + _)
+        .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(1).emitEarlyWhenFull)).toStream(Named("to-stream-19"))
+        .to(Named("write-19"), out, text, text),
       _.stream[String, String]("in").groupByKey.reduce((a, b) => a + b, Materialized.as("joined").withValueSerde(Serdes.String))
         .suppress(JavaSuppressed.untilTimeLimit(Duration.ofMinutes(1), BufferConfig.maxRecords(1).emitEarlyWhenFull()).withName("calm")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.String)),
@@ -482,8 +493,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     // nothing goes on early, and so nothing goes on within the minute.
     (40L to 200L by 8L).toList.traverse: limit =>
       sameEverywhere(
-        KStream(in, text, text).groupByKey(text, text).aggregate(Store("trail"), text)("<")((_, v, acc) => acc + v)
-          .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.bytes(limit))).toStream.to(out, text, text),
+        KStream(Named("read-20"), in, text, text).groupByKey(text, text)
+          .aggregate(Named("aggregate-4"), Store("trail"), text)("<")((_, v, acc) => acc + v)
+          .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.bytes(limit))).toStream(Named("to-stream-20"))
+          .to(Named("write-20"), out, text, text),
         _.stream[String, String]("in").groupByKey.aggregate(() => "<", (_, v, acc) => acc + v, Materialized.as("trail").withValueSerde(Serdes.String))
           .suppress(JavaSuppressed.untilTimeLimit(Duration.ofMinutes(1), BufferConfig.maxBytes(limit).emitEarlyWhenFull()).withName("calm")).toStream
           .to("out", Produced.`with`(Serdes.String, Serdes.String)),
@@ -496,8 +509,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     // Each key keeps its first value, so a key held again after it went on holds an old value equal to its prior one.
     (40L to 200L).toList.traverse: limit =>
       sameEverywhere(
-        KStream(in, text, text).groupByKey(text, text).aggregate(Store("first"), text)("<")((_, v, acc) => if acc == "<" then acc + v else acc)
-          .suppress(Suppressed.untilTimeLimit("calm", 3.seconds, BufferLimit.bytes(limit))).toStream.to(out, text, text),
+        KStream(Named("read-21"), in, text, text).groupByKey(text, text)
+          .aggregate(Named("aggregate-5"), Store("first"), text)("<")((_, v, acc) => if acc == "<" then acc + v else acc)
+          .suppress(Suppressed.untilTimeLimit("calm", 3.seconds, BufferLimit.bytes(limit))).toStream(Named("to-stream-21"))
+          .to(Named("write-21"), out, text, text),
         _.stream[String, String]("in").groupByKey
           .aggregate(() => "<", (_, v, acc) => if acc == "<" then acc + v else acc, Materialized.as("first").withValueSerde(Serdes.String))
           .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(3), BufferConfig.maxBytes(limit).emitEarlyWhenFull()).withName("calm")).toStream
@@ -508,9 +523,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a suppression after another holds what the first sends on, its old value included, as Java's does"):
     sameEverywhere(
-      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts"))
-        .suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).suppress(Suppressed.untilWindowCloses("final")).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), count),
+      KStream(Named("read-22"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-10"), Store("counts"))
+        .suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-22"))
+        .to(Named("write-22"), out, Serde.timeWindowed(text, 10.seconds), count),
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm"))
@@ -537,14 +552,15 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a table read from a topic writes and logs what Java's does, a record without a value deleting its key"):
     sameEverywhere(
-      KTable(in, text, text, Store("users")).toStream.to(out, text, text.option),
+      KTable(Named("k-table-1"), in, text, text, Store("users")).toStream(Named("to-stream-23")).to(Named("write-23"), out, text, text.option),
       _.table[String, String]("in", Materialized.as("users")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.String)),
       tabled
     )
 
   test("a table read from a topic, its changes held for a time limit, holds and logs its deletes as Java's buffer does"):
     sameEverywhere(
-      KTable(in, text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).toStream.to(out, text, text.option),
+      KTable(Named("k-table-2"), in, text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 2.seconds))
+        .toStream(Named("to-stream-24")).to(Named("write-24"), out, text, text.option),
       _.table[String, String]("in", Materialized.as("users"))
         .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.String)),
@@ -575,16 +591,19 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a stream joined with a table writes what Java's join does, each record with the value the table holds when it comes"):
     sameFrom(
-      KStream(Topic.from("orders").orFail, text, text).join(KTable(Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
-        .to(out, text, text),
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+        .join(Named("join-users"), KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+        .to(Named("write-25"), out, text, text),
       builder => builder.stream[String, String]("orders").join(javaUsers(builder), (o: String, u: String) => s"$o:$u").to("out"),
       ordering
     )
 
   test("a stream left joined with a table writes what Java's left join does, a record without a value in the table joined with none"):
     sameFrom(
-      KStream(Topic.from("orders").orFail, text, text)
-        .leftJoin(KTable(Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:${u.getOrElse("-")}").to(out, text, text),
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+        .leftJoin(Named("left-join-users"), KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users")))((o, u) =>
+          s"$o:${u.getOrElse("-")}"
+        ).to(Named("write-26"), out, text, text),
       builder =>
         builder.stream[String, String]("orders").leftJoin(javaUsers(builder), (o: String, u: String) => s"$o:${Option(u).getOrElse("-")}").to("out"),
       ordering
@@ -592,9 +611,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a stream whose key changed is joined through its repartition topic as Java's is"):
     sameFrom(
-      KStream(Topic.from("orders").orFail, text, text).selectKey((_, v) => if v < "o4" then "u1" else "u2")
-        .join(KTable(Topic.from("users").orFail, text, text, Store("users")), Repartition("by-user"), text, text)((o, u) => s"$o:$u")
-        .to(out, text, text),
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text).selectKey(Named("select-key-1"))((_, v) => if v < "o4" then "u1" else "u2")
+        .join(Named("by-user"), KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users")), text, text)((o, u) => s"$o:$u")
+        .to(Named("write-27"), out, text, text),
       builder =>
         builder.stream[String, String]("orders").selectKey((_, v) => if v < "o4" then "u1" else "u2").join(
           javaUsers(builder),
@@ -606,8 +625,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a stream joined with a counted table writes what Java's join does, as the count changes"):
     sameFrom(
-      KStream(Topic.from("orders").orFail, text, text)
-        .join(KStream(Topic.from("users").orFail, text, text).groupByKey(text, text).count(Store("logins")))((o, n) => s"$o:$n").to(out, text, text),
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text).join(
+        Named("logins"),
+        KStream(Named("users"), Topic.from("users").orFail, text, text).groupByKey(text, text).count(Named("count-11"), Store("logins"))
+      )((o, n) => s"$o:$n").to(Named("write-28"), out, text, text),
       builder =>
         val logins = builder.stream[String, String]("users").groupByKey.count(counted("logins"))
         builder.stream[String, String]("orders").join(logins, (o: String, n: java.lang.Long) => s"$o:$n").to("out")
@@ -617,10 +638,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a stream joined with a suppressed table sees what Java's join sees, a key the buffer holds showing its value before the held change"):
     sameFrom(
-      KStream(Topic.from("orders").orFail, text, text)
-        .leftJoin(KTable(Topic.from("users").orFail, text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)))((o, u) =>
-          s"$o:${u.getOrElse("-")}"
-        ).to(out, text, text),
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text).leftJoin(
+        Named("left-join-users"),
+        KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 2.seconds))
+      )((o, u) => s"$o:${u.getOrElse("-")}").to(Named("write-29"), out, text, text),
       builder =>
         builder.stream[String, String]("orders").leftJoin(
           javaUsers(builder).suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")),
@@ -648,8 +669,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       ("right", "k1", "b1+", 20000L) // well after every other change
     )
 
-  private def lefts  = KTable(Topic.from("left").orFail, text, text, Store("lefts"))
-  private def rights = KTable(Topic.from("right").orFail, text, text, Store("rights"))
+  private def lefts  = KTable(Named("lefts"), Topic.from("left").orFail, text, text, Store("lefts"))
+  private def rights = KTable(Named("rights"), Topic.from("right").orFail, text, text, Store("rights"))
 
   private def javaTable(builder: StreamsBuilder, topic: String, store: String) =
     builder.table[String, String](topic, Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](store))
@@ -663,7 +684,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("two tables joined write what Java's join of tables does, a delete on either side deleting the result"):
     sameFrom(
-      lefts.join(rights)((a, b) => s"$a+$b").toStream.to(out, text, text.option),
+      lefts.join(Named("join-1"), rights)((a, b) => s"$a+$b").toStream(Named("to-stream-25")).to(Named("write-30"), out, text, text.option),
       builder =>
         javaTable(builder, "left", "lefts").join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b").toStream.to("out"),
       tabling
@@ -671,35 +692,45 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("two tables left joined write what Java's left join of tables does, a right side's delete joining the left with none"):
     sameFrom(
-      lefts.leftJoin(rights)((a, b) => either(a, b.orNull)).toStream.to(out, text, text.option),
+      lefts.leftJoin(Named("left-join-1"), rights)((a, b) => either(a, b.orNull)).toStream(Named("to-stream-26"))
+        .to(Named("write-31"), out, text, text.option),
       builder => javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), either).toStream.to("out"),
       tabling
     )
 
   test("two tables outer joined write what Java's outer join of tables does"):
     sameFrom(
-      lefts.outerJoin(rights)(ior).toStream.to(out, text, text.option),
+      lefts.outerJoin(Named("outer-join-1"), rights)(ior).toStream(Named("to-stream-27")).to(Named("write-32"), out, text, text.option),
       builder => javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights"), either).toStream.to("out"),
       tabling
     )
 
   for (kind, ours, java) <-
-      List[(String, KTable[IO, String, String, Option] => KTable[IO, String, String, Option], JavaJoin)](
-        ("joined", _.join(rights, Store("joined"), text)((a, b) => s"$a+$b"), (l, r, m) => l.join(r, (a: String, b: String) => s"$a+$b", m)),
-        ("left joined", _.leftJoin(rights, Store("joined"), text)((a, b) => either(a, b.orNull)), (l, r, m) => l.leftJoin(r, either, m)),
-        ("outer joined", _.outerJoin(rights, Store("joined"), text)(ior), (l, r, m) => l.outerJoin(r, either, m))
+      List[(String, KTable.Of[IO, String, String, Option] => KTable.Of[IO, String, String, Option], JavaJoin)](
+        (
+          "joined",
+          _.join(Named("joined"), rights, Store("joined"), text)((a, b) => s"$a+$b"),
+          (l, r, m) => l.join(r, (a: String, b: String) => s"$a+$b", m)
+        ),
+        (
+          "left joined",
+          _.leftJoin(Named("joined"), rights, Store("joined"), text)((a, b) => either(a, b.orNull)),
+          (l, r, m) => l.leftJoin(r, either, m)
+        ),
+        ("outer joined", _.outerJoin(Named("joined"), rights, Store("joined"), text)(ior), (l, r, m) => l.outerJoin(r, either, m))
       )
   do
     test(s"two tables $kind into a store write its changelog as Java's join given a store does"):
       sameFrom(
-        ours(lefts).toStream.to(out, text, text.option),
+        ours(lefts).toStream(Named("to-stream-28")).to(Named("write-33"), out, text, text.option),
         builder => java(javaTable(builder, "left", "lefts"), javaTable(builder, "right", "rights"), javaStored("joined")).toStream.to("out"),
         tabling
       )
 
     test(s"two tables $kind into a store and suppressed hold the old values Java's join passes on to its suppression"):
       sameFrom(
-        ours(lefts).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).toStream.to(out, text, text.option),
+        ours(lefts).suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).toStream(Named("to-stream-29"))
+          .to(Named("write-34"), out, text, text.option),
         builder =>
           java(javaTable(builder, "left", "lefts"), javaTable(builder, "right", "rights"), javaStored("joined"))
             .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")).toStream.to("out"),
@@ -708,8 +739,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a table joined with two tables joined reads their result as Java's join value getter makes it"):
     sameFrom(
-      KTable(Topic.from("third").orFail, text, text, Store("thirds")).leftJoin(lefts.outerJoin(rights)(ior))((c, ab) => either(c, ab.orNull)).toStream
-        .to(out, text, text.option),
+      KTable(Named("thirds"), Topic.from("third").orFail, text, text, Store("thirds"))
+        .leftJoin(Named("left-join-2"), lefts.outerJoin(Named("outer-join-2"), rights)(ior))((c, ab) => either(c, ab.orNull))
+        .toStream(Named("to-stream-30")).to(Named("write-35"), out, text, text.option),
       builder =>
         javaTable(builder, "third", "thirds")
           .leftJoin(javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights"), either), either).toStream.to("out"),
@@ -719,8 +751,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   // Late changes to the third table, so the time the joined tables' view gives wins: k1's left value is older than its right one.
   test("a table joined with two tables left joined reads their result and its time as Java's left join value getter gives them"):
     sameFrom(
-      KTable(Topic.from("third").orFail, text, text, Store("thirds"))
-        .join(lefts.leftJoin(rights)((a, b) => either(a, b.orNull)))((c, ab) => s"$c:$ab").toStream.to(out, text, text.option),
+      KTable(Named("thirds"), Topic.from("third").orFail, text, text, Store("thirds"))
+        .join(Named("join-2"), lefts.leftJoin(Named("left-join-3"), rights)((a, b) => either(a, b.orNull)))((c, ab) => s"$c:$ab")
+        .toStream(Named("to-stream-31")).to(Named("write-36"), out, text, text.option),
       builder =>
         javaTable(builder, "third", "thirds")
           .join(javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), either), (c: String, ab: String) => s"$c:$ab")
@@ -730,9 +763,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("two tables joined and left joined with a third pass on the old values Java's left join asks of their join"):
     sameFrom(
-      lefts.join(rights)((a, b) => s"$a+$b")
-        .leftJoin(KTable(Topic.from("third").orFail, text, text, Store("thirds")))((ab, c) => either(ab, c.orNull)).toStream
-        .to(out, text, text.option),
+      lefts.join(Named("join-3"), rights)((a, b) => s"$a+$b")
+        .leftJoin(Named("left-join-thirds"), KTable(Named("thirds"), Topic.from("third").orFail, text, text, Store("thirds")))((ab, c) =>
+          either(ab, c.orNull)
+        ).toStream(Named("to-stream-32")).to(Named("write-37"), out, text, text.option),
       builder =>
         javaTable(builder, "left", "lefts").join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b")
           .leftJoin(javaTable(builder, "third", "thirds"), either).toStream.to("out"),
@@ -741,8 +775,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a stream joined with two tables joined reads their result as Java's join value getter makes it"):
     sameFrom(
-      KStream(Topic.from("orders").orFail, text, text).join(lefts.leftJoin(rights)((a, b) => either(a, b.orNull)))((o, ab) => s"$o:$ab")
-        .to(out, text, text),
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+        .join(Named("join-4"), lefts.leftJoin(Named("left-join-4"), rights)((a, b) => either(a, b.orNull)))((o, ab) => s"$o:$ab")
+        .to(Named("write-38"), out, text, text),
       builder =>
         builder.stream[String, String]("orders")
           .join(javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), either), (o: String, ab: String) => s"$o:$ab")
@@ -752,9 +787,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a counted table left joined with a table passes on its old counts as Java's does"):
     sameFrom(
-      KStream(Topic.from("logins").orFail, text, text).groupByKey(text, text).count(Store("logins-count"))
-        .leftJoin(rights, Store("joined"), text)((n, b) => either(n.toString, b.orNull)).suppress(Suppressed.untilTimeLimit("calm", 2.seconds))
-        .toStream.to(out, text, text.option),
+      KStream(Named("logins"), Topic.from("logins").orFail, text, text).groupByKey(text, text).count(Named("count-12"), Store("logins-count"))
+        .leftJoin(Named("joined"), rights, Store("joined"), text)((n, b) => either(n.toString, b.orNull))
+        .suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).toStream(Named("to-stream-33")).to(Named("write-39"), out, text, text.option),
       builder =>
         builder.stream[String, String]("logins").groupByKey.count(counted("logins-count"))
           .leftJoin(javaTable(builder, "right", "rights"), (n: java.lang.Long, b: String) => either(n.toString, b), javaStored("joined"))
@@ -764,8 +799,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a suppressed table joined with a table passes on the old values its suppression held, as Java's does"):
     sameFrom(
-      lefts.suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).join(rights, Store("joined"), text)((a, b) => s"$a+$b").toStream
-        .to(out, text, text.option),
+      lefts.suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).join(Named("joined"), rights, Store("joined"), text)((a, b) => s"$a+$b")
+        .toStream(Named("to-stream-34")).to(Named("write-40"), out, text, text.option),
       builder =>
         javaTable(builder, "left", "lefts").suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm"))
           .join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b", javaStored("joined")).toStream.to("out"),
@@ -776,8 +811,9 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a table of records grouped by a new key holds where each came from in the repartition topic, as Java's buffer does"):
     sameEverywhere(
-      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!").count(Store("counts"))
-        .suppress(Suppressed.untilTimeLimit("calm", 5.seconds)).toStream.to(out, text, count),
+      KStream(Named("read-23"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
+        .count(Named("count-13"), Store("counts")).suppress(Suppressed.untilTimeLimit("calm", 5.seconds)).toStream(Named("to-stream-35"))
+        .to(Named("write-41"), out, text, count),
       _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).count(counted("counts"))
         .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(5), BufferConfig.unbounded()).withName("calm")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
@@ -787,8 +823,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("a full buffer set to shut down stops the task at the record Java's stops at"):
     val held     = Suppressed.untilWindowCloses("final", BufferLimit.records(2).shutDownWhenFull)
     val pipeline =
-      KStream(in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Store("counts")).suppress(held).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), count)
+      KStream(Named("read-24"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-14"), Store("counts")).suppress(held)
+        .toStream(Named("to-stream-36")).to(Named("write-42"), out, Serde.timeWindowed(text, 10.seconds), count)
     val java: StreamsBuilder => Unit =
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
@@ -822,8 +858,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       ("right", "k7", "b7", 41000L)
     )
 
-  private def leftStream  = KStream(Topic.from("left").orFail, text, text)
-  private def rightStream = KStream(Topic.from("right").orFail, text, text)
+  private def leftStream  = KStream(Named("left"), Topic.from("left").orFail, text, text)
+  private def rightStream = KStream(Named("right"), Topic.from("right").orFail, text, text)
   private val within      = JoinWindows(5.seconds, grace = 2.seconds)
   private val javaWithin  = JavaJoinWindows.ofTimeDifferenceAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(2))
 
@@ -831,7 +867,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("two streams joined write what Java's join of streams does, each pair in a window at the later of their times"):
     sameFrom(
-      leftStream.join(rightStream, within, Store("pairs"), text, text, text)((a, b) => s"$a+$b").to(out, text, text),
+      leftStream.join(Named("pairs"), rightStream, within, Store("pairs"), text, text, text)((a, b) => s"$a+$b")
+        .to(Named("write-43"), out, text, text),
       builder =>
         builder.stream[String, String]("left")
           .join(builder.stream[String, String]("right"), (a: String, b: String) => s"$a+$b", javaWithin, javaPaired).to("out"),
@@ -840,7 +877,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("two streams left joined write what Java's left join of streams does, a left record matching nothing sent alone once its window closes"):
     sameFrom(
-      leftStream.leftJoin(rightStream, within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull)).to(out, text, text),
+      leftStream.leftJoin(Named("pairs"), rightStream, within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull))
+        .to(Named("write-44"), out, text, text),
       builder =>
         builder.stream[String, String]("left")
           .leftJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out"),
@@ -849,7 +887,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("two streams outer joined write what Java's outer join of streams does, a record of either side matching nothing sent alone"):
     sameFrom(
-      leftStream.outerJoin(rightStream, within, Store("pairs"), text, text, text)(ior).to(out, text, text),
+      leftStream.outerJoin(Named("outer-join-3"), rightStream, within, Store("pairs"), text, text, text)(ior).to(Named("write-45"), out, text, text),
       builder =>
         builder.stream[String, String]("left")
           .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out"),
@@ -876,13 +914,15 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("a join looks for held records whose windows have closed as Java's does, no sooner than a second after the last look"):
     List(
       (
-        leftStream.outerJoin(rightStream, within, Store("pairs"), text, text, text)(ior).to(out, text, text),
+        leftStream.outerJoin(Named("outer-join-4"), rightStream, within, Store("pairs"), text, text, text)(ior)
+          .to(Named("write-46"), out, text, text),
         (builder: StreamsBuilder) =>
           builder.stream[String, String]("left")
             .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
       ),
       (
-        leftStream.leftJoin(rightStream, within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull)).to(out, text, text),
+        leftStream.leftJoin(Named("pairs"), rightStream, within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull))
+          .to(Named("write-47"), out, text, text),
         (builder: StreamsBuilder) =>
           builder.stream[String, String]("left")
             .leftJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
@@ -895,7 +935,8 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       (within.withBefore(7.seconds).withAfter(-2.seconds), javaWithin.before(Duration.ofSeconds(7)).after(Duration.ofSeconds(-2)))
     ).traverse_ : (windows, javaWindows) =>
       sameFrom(
-        leftStream.outerJoin(rightStream, windows, Store("pairs"), text, text, text)(ior).to(out, text, text),
+        leftStream.outerJoin(Named("outer-join-5"), rightStream, windows, Store("pairs"), text, text, text)(ior)
+          .to(Named("write-48"), out, text, text),
         builder =>
           builder.stream[String, String]("left")
             .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWindows, javaPaired).to("out"),
@@ -904,9 +945,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a stream whose key changed is joined with a stream through the repartition topic its join names, as Java's is"):
     sameFrom(
-      leftStream.selectKey((k, _) => s"$k!")
-        .leftJoin(rightStream.selectKey((k, _) => s"$k!"), within, Store("pairs"), text, text, text)((a, b) => either(a, b.orNull))
-        .to(out, text, text),
+      leftStream.selectKey(Named("select-key-2"))((k, _) => s"$k!")
+        .leftJoin(Named("pairs"), rightStream.selectKey(Named("select-key-3"))((k, _) => s"$k!"), within, Store("pairs"), text, text, text)((a, b) =>
+          either(a, b.orNull)
+        ).to(Named("write-49"), out, text, text),
       builder =>
         builder.stream[String, String]("left").selectKey((k, _) => s"$k!").leftJoin(
           builder.stream[String, String]("right").selectKey((k, _) => s"$k!"),
@@ -919,23 +961,25 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   test("a record without a key goes on alone at once from a side whose records matching nothing go on, and is otherwise dropped, as in Java"):
     val keyless               = streaming.take(4) ++ List(("left", null, "a-", 2600L), ("right", null, "b-", 2700L)) ++ streaming.drop(4)
-    def stream(topic: String) = KStream(Topic.from(topic).orFail, text.option, text)
+    def stream(topic: String) = KStream(Named(topic), Topic.from(topic).orFail, text.option, text)
     List[(Pipeline[IO], StreamsBuilder => Unit)](
       (
-        stream("left").join(stream("right"), within, Store("pairs"), text.option, text, text)((a, b) => s"$a+$b").to(out, text.option, text),
+        stream("left").join(Named("pairs"), stream("right"), within, Store("pairs"), text.option, text, text)((a, b) => s"$a+$b")
+          .to(Named("write-50"), out, text.option, text),
         builder =>
           builder.stream[String, String]("left")
             .join(builder.stream[String, String]("right"), (a: String, b: String) => s"$a+$b", javaWithin, javaPaired).to("out")
       ),
       (
-        stream("left").leftJoin(stream("right"), within, Store("pairs"), text.option, text, text)((a, b) => either(a, b.orNull))
-          .to(out, text.option, text),
+        stream("left").leftJoin(Named("pairs"), stream("right"), within, Store("pairs"), text.option, text, text)((a, b) => either(a, b.orNull))
+          .to(Named("write-51"), out, text.option, text),
         builder =>
           builder.stream[String, String]("left")
             .leftJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
       ),
       (
-        stream("left").outerJoin(stream("right"), within, Store("pairs"), text.option, text, text)(ior).to(out, text.option, text),
+        stream("left").outerJoin(Named("outer-join-6"), stream("right"), within, Store("pairs"), text.option, text, text)(ior)
+          .to(Named("write-52"), out, text.option, text),
         builder =>
           builder.stream[String, String]("left")
             .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")

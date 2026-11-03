@@ -34,8 +34,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, JoinWindows, KStream, KTable, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, StreamsPhase,
-  StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
+  ApplicationId, JoinWindows, KStream, KTable, Named, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store,
+  StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -56,30 +56,35 @@ final class EngineBrokerSuite extends CatsEffectSuite:
 
   /** Counts by key. */
   private def byKey(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(output, text, Serde.long[IO])
+    KStream(Named("read-1"), input, text, text).groupByKey(text, text).count(Named("count-1"), Store("counts")).toStream(Named("to-stream-1"))
+      .to(Named("write-1"), output, text, Serde.long[IO])
 
   /** Counts by the value's first letter, through a repartition topic keyed by it. */
   private def byLetter(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts")).toStream
-      .to(output, text, Serde.long[IO])
+    KStream(Named("read-2"), input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1))
+      .count(Named("count-2"), Store("counts")).toStream(Named("to-stream-2")).to(Named("write-2"), output, text, Serde.long[IO])
 
   /** Counts by key in tumbling windows of a minute, taking records up to an hour late. */
   private def byMinute(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 1.hour)).count(Store("counts")).toStream
-      .to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+    KStream(Named("read-3"), input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 1.hour))
+      .count(Named("count-3"), Store("counts")).toStream(Named("to-stream-3"))
+      .to(Named("write-3"), output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
 
   /** Counts by key in tumbling windows of a minute, taking records up to ten seconds late, kept an hour, writing only each window's final count. */
   private def finalByMinute(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds)).withRetention(1.hour)
-      .emitOnWindowClose.count(Store("counts")).toStream.to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+    KStream(Named("read-4"), input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+      .withRetention(1.hour).emitOnWindowClose.count(Named("count-4"), Store("counts")).toStream(Named("to-stream-4"))
+      .to(Named("write-4"), output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
 
   /** Counts as `finalByMinute` does, passing on each window's final count once it closes through the suppression `final`. */
   private def suppressedByMinute(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds)).count(Store("counts"))
-      .suppress(Suppressed.untilWindowCloses("final")).toStream.to(output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+    KStream(Named("read-5"), input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+      .count(Named("count-5"), Store("counts")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-5"))
+      .to(Named("write-5"), output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
 
   /** Reads the input as a table into the store `counts`, writing each change, a delete as a tombstone. */
-  private def asTable(input: Topic, output: Topic): Pipeline[IO] = KTable(input, text, text, Store("counts")).toStream.to(output, text, text.option)
+  private def asTable(input: Topic, output: Topic): Pipeline[IO] =
+    KTable(Named("counts"), input, text, text, Store("counts")).toStream(Named("to-stream-6")).to(Named("write-6"), output, text, text.option)
 
   /** Waits up to two minutes until `topic` holds at least `count` records. */
   private def holding(server: String, topic: Topic, count: Int)(using guarantee: ProcessingGuarantee): IO[Unit] =
@@ -98,13 +103,15 @@ final class EngineBrokerSuite extends CatsEffectSuite:
 
   /** Counts by key in sliding windows of five seconds, taking records up to an hour late. */
   private def bySliding(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.seconds, grace = 1.hour)).count(Store("counts")).toStream
-      .to(output, Serde.timeWindowed(text, 5.seconds), Serde.long[IO])
+    KStream(Named("read-6"), input, text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.seconds, grace = 1.hour))
+      .count(Named("count-6"), Store("counts")).toStream(Named("to-stream-7"))
+      .to(Named("write-7"), output, Serde.timeWindowed(text, 5.seconds), Serde.long[IO])
 
   /** Counts by key in sessions with an inactivity gap of five seconds, taking records up to an hour late. */
   private def bySession(input: Topic, output: Topic): Pipeline[IO] =
-    KStream(input, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 1.hour)).count(Store("counts")).toStream
-      .to(output, Serde.sessionWindowed(text), Serde.long[IO].option)
+    KStream(Named("read-7"), input, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 1.hour))
+      .count(Named("count-7"), Store("counts")).toStream(Named("to-stream-8"))
+      .to(Named("write-8"), output, Serde.sessionWindowed(text), Serde.long[IO].option)
 
   /** Reads `topic` from its start until the latest count of each key in each session, by its start and end, or its tombstone, is `expected`. */
   private def sessionCounts(server: String, topic: Topic, expected: Map[(String, Long, Long), Option[Long]])(using
@@ -352,8 +359,10 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       counting(
         server,
         (orders, output) =>
-          KStream(orders, text, text).join(KTable(Topic.from(s"${orders.value}-users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
-            .to(output, text, text)
+          KStream(Named("read-8"), orders, text, text)
+            .join(Named("join-users"), KTable(Named("users"), Topic.from(s"${orders.value}-users").orFail, text, text, Store("users")))((o, u) =>
+              s"$o:$u"
+            ).to(Named("write-9"), output, text, text)
       ): app =>
         val users = Topic.from(s"${app.input.value}-users").orFail
         admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 2, 1).orFail))) *>
@@ -367,12 +376,13 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       counting(
         server,
         (plans, output) =>
-          KTable(plans, text, text, Store("plans"))
-            .outerJoin(KTable(Topic.from(s"${plans.value}-users").orFail, text, text, Store("users")), Store("accounts"), text)(_.fold(
-              plan => s"$plan:-",
-              user => s"-:$user",
-              (plan, user) => s"$plan:$user"
-            )).toStream.to(output, text, text.option)
+          KTable(Named("plans"), plans, text, text, Store("plans")).outerJoin(
+            Named("outer-join-users"),
+            KTable(Named("users"), Topic.from(s"${plans.value}-users").orFail, text, text, Store("users")),
+            Store("accounts"),
+            text
+          )(_.fold(plan => s"$plan:-", user => s"-:$user", (plan, user) => s"$plan:$user")).toStream(Named("to-stream-9"))
+            .to(Named("write-10"), output, text, text.option)
       ): app =>
         val users = Topic.from(s"${app.input.value}-users").orFail
         admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 2, 1).orFail))) *> running(server, app):
@@ -391,14 +401,15 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       counting(
         server,
         (orders, output) =>
-          KStream(orders, text, text).outerJoin(
-            KStream(Topic.from(s"${orders.value}-payments").orFail, text, text),
+          KStream(Named("read-9"), orders, text, text).outerJoin(
+            Named("pairs"),
+            KStream(Named("read-payments"), Topic.from(s"${orders.value}-payments").orFail, text, text),
             JoinWindows.withNoGrace(1.second),
             Store("pairs"),
             text,
             text,
             text
-          )(_.fold(order => s"$order:-", payment => s"-:$payment", (order, payment) => s"$order:$payment")).to(output, text, text)
+          )(_.fold(order => s"$order:-", payment => s"-:$payment", (order, payment) => s"$order:$payment")).to(Named("write-11"), output, text, text)
       ): app =>
         val payments = Topic.from(s"${app.input.value}-payments").orFail
         // Times five minutes back, as the other tests take them, so that no topic's retention removes the records.
@@ -420,8 +431,10 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       counting(
         server,
         (orders, output) =>
-          KStream(orders, text, text).join(KTable(Topic.from(s"${orders.value}-users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
-            .to(output, text, text)
+          KStream(Named("read-10"), orders, text, text)
+            .join(Named("join-users"), KTable(Named("users"), Topic.from(s"${orders.value}-users").orFail, text, text, Store("users")))((o, u) =>
+              s"$o:$u"
+            ).to(Named("write-12"), output, text, text)
       ): app =>
         val users    = Topic.from(s"${app.input.value}-users").orFail
         val settings = StreamsSettings.from(client(server), ApplicationId.from(app.application).orFail, under).orFail

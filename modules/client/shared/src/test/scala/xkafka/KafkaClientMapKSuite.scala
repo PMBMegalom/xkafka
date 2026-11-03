@@ -27,7 +27,7 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import munit.CatsEffectSuite
-import streams.{ApplicationId, KafkaStreams, KStream, Serde, StreamsPhase, StreamsSettings, StreamsState, Topology}
+import streams.{ApplicationId, KafkaStreams, KStream, Named, Serde, StreamsPhase, StreamsSettings, StreamsState, Topology}
 
 final class KafkaClientMapKSuite extends CatsEffectSuite:
   private type ErrorIO[A] = EitherT[IO, String, A]
@@ -88,9 +88,9 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
   private val refusing: List[(String, KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String])] =
     List(
-      "evalMapValues" -> (_.evalMapValues(_ => EitherT.leftT[IO, String]("refused"))),
-      "evalFilter"    -> (_.evalFilter((_, _) => EitherT.leftT[IO, Boolean]("refused"))),
-      "evalMap"       -> (_.evalMap((_, _) => EitherT.leftT[IO, (String, String)]("refused")))
+      "evalMapValues" -> (_.evalMapValues(Named("eval-map-values-1"))(_ => EitherT.leftT[IO, String]("refused"))),
+      "evalFilter"    -> (_.evalFilter(Named("eval-filter-1"))((_, _) => EitherT.leftT[IO, Boolean]("refused"))),
+      "evalMap"       -> (_.evalMap(Named("eval-map-1"))((_, _) => EitherT.leftT[IO, (String, String)]("refused")))
     )
 
   for (name, refuse) <- refusing do
@@ -100,7 +100,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
   private def streamsRefused(refuse: KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String]) =
     val text     = Serde.utf8[ErrorIO]
     val topic    = Topic.from("in").toOption.get
-    val program  = refuse(KStream(topic, text, text)).to(topic, text, text)
+    val program  = refuse(KStream(Named("read-1"), topic, text, text)).to(Named("write-1"), topic, text, text)
     val settings = StreamsSettings.from(ClientSettings.from(NonEmptyList.one("localhost:9092")).orFail, ApplicationId.from("app").orFail).orFail
     val running  = source.imapK(ioToErrorIO)(errorIOToIO).streams(settings, Topology.of(program).orFail)
     val observed =

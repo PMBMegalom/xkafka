@@ -162,10 +162,10 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
         v      <- value.deserializer.deserialize(source, input.headers, input.value)
       yield (state, Vector(Travelling(k, v, input.timestamp, input.headers)), Vector.empty[TaskOutput])
     origin match
-      case Origin.Input(topic, key, value)                        => read(F.pure(topic), key, value)
-      case Origin.Repartitioned(repartition, key, value)          => read(topicNamed(s"$application-${repartition.name}-repartition"), key, value)
-      case Origin.Joined(left, right, joiner, store)              => joinedFed(left, right, joiner, store, input, state, now, requested)
-      case joining @ Origin.StreamsJoined(_, _, _, _, _, _, _, _) => streamsJoined(joining, input, state, now)
+      case Origin.Input(_, topic, key, value)                        => read(F.pure(topic), key, value)
+      case Origin.Repartitioned(repartition, key, value)             => read(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
+      case Origin.Joined(_, left, right, joiner, store)              => joinedFed(left, right, joiner, store, input, state, now, requested)
+      case joining @ Origin.StreamsJoined(_, _, _, _, _, _, _, _, _) => streamsJoined(joining, input, state, now)
 
   /** Runs each of `records` through `steps`, in order. */
   private def chained[K, V, K2, V2](
@@ -235,7 +235,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       results.foldLeftM((after, Vector.empty[Travelling[K, Option[R]]], written)):
         case ((current, out, logged), result) => store match
             case None                        => F.pure((current, out :+ result, logged))
-            case Some((named, keys, values)) => topicNamed(s"$application-${named.name}-changelog").flatMap: changelog =>
+            case Some((named, keys, values)) => topicNamed(s"$application-${named.value}-changelog").flatMap: changelog =>
                 val timestamp = result.timestamp
                 (
                   keys.serializer.serialize(changelog, Headers.empty, result.key),
@@ -243,10 +243,10 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
                 ).tupled.map:
                   case (None, _)              => (current, out :+ result, logged)
                   case (Some(bytes), written) =>
-                    val held     = current.store(named.name)
+                    val held     = current.store(named.value)
                     val contents = written.fold(held - bytes)(v => held.updated(bytes, Stored(v, timestamp)))
                     val log      = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
-                    (current.copy(stores = current.stores.updated(named.name, contents)), out :+ result, logged :+ log)
+                    (current.copy(stores = current.stores.updated(named.value, contents)), out :+ result, logged :+ log)
 
   /** The records one side of a stream-stream join gives for `input`, read through its steps. */
   private def flowed[K, A, K0, V0](
@@ -525,8 +525,8 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       now: Long
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     steps match
-      case Chain.Start()          => F.pure((state, Vector(record), Vector.empty))
-      case Chain.Then(init, last) => chain(init, record, state, now).flatMap: (before, records, written) =>
+      case Chain.Start()             => F.pure((state, Vector(record), Vector.empty))
+      case Chain.Then(init, last, _) => chain(init, record, state, now).flatMap: (before, records, written) =>
           records.foldLeftM((before, Vector.empty[Travelling[K2, V2]], written)):
             case ((current, done, out), next) => step(last, next, current, now).map((after, more, logged) => (after, done ++ more, out ++ logged))
 
@@ -569,24 +569,24 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
-      case Step.TableSource(store, key, value)                           => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      case Step.TableSource(store, key, value)                           => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           record.key.flatTraverse(k => key.serializer.serialize(changelog, Headers.empty, k).map(_.map(k -> _))).flatMap:
             // Java skips a record whose key is null: one read without a key, or one its serializer writes as none.
             case None             => F.pure((state, Vector.empty, Vector.empty))
-            case Some((k, bytes)) => state.store(store.name).get(bytes)
+            case Some((k, bytes)) => state.store(store.value).get(bytes)
                 .traverse(held => value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))).flatMap: replaced =>
                   record.value.flatTraverse(value.serializer.serialize(changelog, Headers.empty, _)).map: written =>
                     val contents =
-                      written.fold(state.store(store.name) - bytes)(v => state.store(store.name).updated(bytes, Stored(v, record.timestamp)))
-                    val after  = state.copy(stores = state.stores.updated(store.name, contents))
+                      written.fold(state.store(store.value) - bytes)(v => state.store(store.value).updated(bytes, Stored(v, record.timestamp)))
+                    val after  = state.copy(stores = state.stores.updated(store.value, contents))
                     val logged = TaskOutput(changelog, Some(partition), Some(bytes), written, record.timestamp, Headers.empty)
                     (after, Vector(Travelling(k, record.value, record.timestamp, record.headers, Some(replaced))), Vector(logged))
-      case Step.Aggregate(store, key, value, initial, start, add) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      case Step.Aggregate(store, key, value, initial, start, add) => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
             // Java skips a record whose key is null, which here is a key its serializer writes as none.
             case None        => F.pure((state, Vector.empty, Vector.empty))
             case Some(bytes) =>
-              val held    = state.store(store.name).get(bytes)
+              val held    = state.store(store.value).get(bytes)
               val updated =
                 held match
                   case None      => F.pure((start(record.key, record.value), record.timestamp, initial))
@@ -594,8 +594,8 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
                       (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp), Some(previous))
               updated.flatMap: (aggregate, timestamp, replaced) =>
                 value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
-                  val contents = written.fold(state.store(store.name) - bytes)(v => state.store(store.name).updated(bytes, Stored(v, timestamp)))
-                  val after    = state.copy(stores = state.stores.updated(store.name, contents))
+                  val contents = written.fold(state.store(store.value) - bytes)(v => state.store(store.value).updated(bytes, Stored(v, timestamp)))
+                  val after    = state.copy(stores = state.stores.updated(store.value, contents))
                   val logged   = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
                   (after, Vector(Travelling(record.key, aggregate, timestamp, record.headers, replaced)), Vector(logged))
 
@@ -644,25 +644,25 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     */
   private def windowed[K, V, A](step: Step.WindowedAggregate[F, K, V, A], record: Travelling[K, V], state: TaskState, now: Long): F[Windowing[K, A]] =
     import step.{add, emitOnClose, key, retention, store, value, windows}
-    topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+    topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
       key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
         case None        => F.pure((state, Vector.empty, Vector.empty))
         case Some(bytes) =>
-          val streamTime = math.max(state.streamTimes.getOrElse(store.name, WindowStore.NoTime), record.timestamp)
-          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.name, streamTime))
+          val streamTime = math.max(state.streamTimes.getOrElse(store.value, WindowStore.NoTime), record.timestamp)
+          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.value, streamTime))
           val closeTime  = streamTime - windows.graceMillis
           val open       = windows.windowsFor(record.timestamp).filter(_.end > closeTime)
           val updated    =
             open.foldLeftM((timed, Vector.empty[Travelling[Windowed[K], A]], Vector.empty[TaskOutput])):
               case ((current, forwarded, logged), window) =>
                 val folded =
-                  current.store(store.name).get(WindowStore.key(bytes, window.start)) match
+                  current.store(store.value).get(WindowStore.key(bytes, window.start)) match
                     case None      => F.pure((step.start(record.key, record.value), record.timestamp, step.initial))
                     case Some(old) => value.deserializer.deserialize(changelog, Headers.empty, Some(old.value)).map: previous =>
                         (add(record.key, record.value, previous), math.max(old.timestamp, record.timestamp), Some(previous))
                 folded.flatMap: (aggregate, timestamp, replaced) =>
                   value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
-                    val (after, log) = windowPut(current, store.name, retention, changelog, bytes, window.start, written, timestamp)
+                    val (after, log) = windowPut(current, store.value, retention, changelog, bytes, window.start, written, timestamp)
                     (after, forwarded :+ Travelling(Windowed(record.key, window), aggregate, timestamp, record.headers, replaced), logged :+ log)
           if !emitOnClose then updated
           else
@@ -675,7 +675,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
               val moved = last == WindowStore.NoTime || windows.windowsFor(upper) != windows.windowsFor(lower - 1)
               Option.when(upper >= 0 && moved)((lower, upper))
             updated.flatMap: (after, _, logged) =>
-              closed(store.name, key, value, after, closeTime, size, range, record, changelog, now).map((emitted, state) => (state, emitted, logged))
+              closed(store.value, key, value, after, closeTime, size, range, record, changelog, now).map((emitted, state) => (state, emitted, logged))
 
   /** The sliding windows `step` updates or makes for `record`, as Java's sliding window aggregation does (`KStreamSlidingWindowAggregate`, over a
     * store it can read backwards): a record past its window's grace is dropped; one in the first time difference after 0 goes in the window from 0
@@ -687,18 +687,18 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     import step.{add, emitOnClose, key, retention, store, value, windows}
     val difference = windows.differenceMillis
     val timestamp  = record.timestamp
-    topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+    topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
       key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
         case None        => F.pure((state, Vector.empty, Vector.empty))
         case Some(bytes) =>
-          val streamTime               = math.max(state.streamTimes.getOrElse(store.name, WindowStore.NoTime), record.timestamp)
-          val timed                    = state.copy(streamTimes = state.streamTimes.updated(store.name, streamTime))
+          val streamTime               = math.max(state.streamTimes.getOrElse(store.value, WindowStore.NoTime), record.timestamp)
+          val timed                    = state.copy(streamTimes = state.streamTimes.updated(store.value, streamTime))
           val closeTime                = streamTime - windows.graceMillis
           def read(held: Stored): F[A] = value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))
           // Puts a window and passes it on, as Java puts a window it makes from an aggregate it found.
           def put(ran: Windowing[K, A], start: Long, aggregate: A, at: Long, replaced: Option[A]): F[Windowing[K, A]] =
             value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
-              val (after, log) = windowPut(ran._1, store.name, retention, changelog, bytes, start, written, at)
+              val (after, log) = windowPut(ran._1, store.value, retention, changelog, bytes, start, written, at)
               val window       = Windowed(record.key, Window(start, start + difference))
               (after, ran._2 :+ Travelling(window, aggregate, at, record.headers, replaced), ran._3 :+ log)
           // A window made from another's aggregate replaces nothing, as Java passes it on.
@@ -714,10 +714,10 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
           if timestamp + difference < closeTime then F.pure(nothing)
           else if timestamp < difference then
             // Emitting only once windows close, updates are not passed on, early ones included.
-            early(nothing, bytes, read, write, update, timestamp, retention, store.name)
+            early(nothing, bytes, read, write, update, timestamp, retention, store.value)
               .map((after, updates, logged) => (after, if emitOnClose then Vector.empty else updates, logged))
           else
-            val reversed = reverse(nothing, bytes, read, write, update, difference, timestamp, retention, store.name)
+            val reversed = reverse(nothing, bytes, read, write, update, difference, timestamp, retention, store.value)
             if !emitOnClose then reversed
             else
               // Sliding windows end where they start plus the time difference, both included, so an emission ends a millisecond earlier, and
@@ -727,7 +727,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
                 val lower = if last == WindowStore.NoTime then 0L else math.max(0L, last - difference)
                 Option.when(upper >= 0)((lower, upper))
               reversed.flatMap: (after, _, logged) =>
-                closed(store.name, key, value, after, closeTime, difference, range, record, changelog, now)
+                closed(store.value, key, value, after, closeTime, difference, range, record, changelog, now)
                   .map((emitted, state) => (state, emitted, logged))
 
   /** Writes `written` as the key's session from `start` to `end` in session store `store`, or removes it where there is nothing to write, as Java's
@@ -773,14 +773,14 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     import step.{add, emitOnClose, initial, key, merge, retention, store, value, windows}
     val gap       = windows.gapMillis
     val timestamp = record.timestamp
-    topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+    topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
       key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
         case None        => F.pure((state, Vector.empty, Vector.empty))
         case Some(bytes) =>
-          val streamTime = math.max(state.streamTimes.getOrElse(store.name, WindowStore.NoTime), timestamp)
-          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.name, streamTime))
+          val streamTime = math.max(state.streamTimes.getOrElse(store.value, WindowStore.NoTime), timestamp)
+          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.value, streamTime))
           val closeTime  = streamTime - windows.graceMillis - gap
-          val entries    = timed.store(store.name)
+          val entries    = timed.store(store.value)
           val found      =
             entries.toVector.collect:
               case (held, stored) if held.size == bytes.size + 16 && held.take(bytes.size) == bytes =>
@@ -797,13 +797,13 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
                 val removed =
                   merged.foldLeft((timed, Vector.empty[Travelling[Windowed[K], Option[A]]], Vector.empty[TaskOutput])):
                     case ((current, forwarded, logged), ((start, end, _), gone)) =>
-                      val (after, log) = sessionWrite(current, store.name, retention, changelog, bytes, start, end, None, timestamp)
+                      val (after, log) = sessionWrite(current, store.value, retention, changelog, bytes, start, end, None, timestamp)
                       val session      = Windowed(record.key, Window(start, end))
                       (after, forwarded :+ Travelling(session, None, end, Headers.empty, Some(Some(gone))), logged :+ log)
                 val aggregate = folded.fold(step.start(record.key, record.value))(add(record.key, record.value, _))
                 value.serializer.serialize(changelog, Headers.empty, aggregate).map: written =>
                   val (current, forwarded, logged) = removed
-                  val (after, log)                 = sessionWrite(current, store.name, retention, changelog, bytes, from, to, written, timestamp)
+                  val (after, log)                 = sessionWrite(current, store.value, retention, changelog, bytes, from, to, written, timestamp)
                   (after, forwarded :+ Travelling(Windowed(record.key, Window(from, to)), Some(aggregate), to, Headers.empty), logged :+ log)
           if !emitOnClose then changed
           else
@@ -813,7 +813,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
               val lower = math.max(0L, last)
               Option.when(upper >= 0 && upper >= lower)((lower, upper))
             changed.flatMap: (after, _, logged) =>
-              sessionsClosed(store.name, key, value, after, closeTime, range, record, changelog, now)
+              sessionsClosed(store.value, key, value, after, closeTime, range, record, changelog, now)
                 .map((emitted, state) => (state, emitted, logged))
 
   /** The sessions of session store `store` that a step emitting them once they close emits, as Java's session window aggregation emits final results:
@@ -1086,9 +1086,9 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     */
   private def valueOf[K, V](view: TableView[F, K, V], key: K, state: TaskState): F[Option[(V, Long)]] =
     view match
-      case TableView.Stored(store, keys, values) => topicNamed(s"$application-${store.name}-changelog").flatMap: changelog =>
+      case TableView.Stored(store, keys, values) => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           keys.serializer.serialize(changelog, Headers.empty, key).flatMap:
-            _.flatMap(state.store(store.name).get)
+            _.flatMap(state.store(store.value).get)
               .traverse(held => values.deserializer.deserialize(changelog, Headers.empty, Some(held.value)).map(_ -> held.timestamp))
       case TableView.Held(buffer, parent) =>
         def unreadable = new IllegalStateException(s"the suppression buffer '$buffer' holds a change it cannot read")
@@ -1121,8 +1121,8 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     exit match
       case End.Stored()                                => F.pure(Vector.empty)
       case End.Repartitioning(repartition, key, value) =>
-        written(topicNamed(s"$application-${repartition.name}-repartition"), key, value, true, record)
-      case End.Output(topic, key, value) => written(F.pure(topic), key, value, false, record)
+        written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record)
+      case End.Output(_, topic, key, value) => written(F.pure(topic), key, value, false, record)
 
   private def written[K, V](
       topic: F[Topic],
@@ -1153,7 +1153,7 @@ private[xkafka] object Task:
   def topicOf(application: String, source: Source): String =
     source match
       case Source.Input(topic)         => topic.value
-      case Source.Repartitioned(named) => s"$application-${named.name}-repartition"
+      case Source.Repartitioned(named) => s"$application-${named.value}-repartition"
 
   /** The serde a table view's values are written with, which the result of joining tables kept in no store does not have. */
   def valuesOf[F[_], K, V](view: TableView[F, K, V]): Option[xkafka.streams.Serde[F, V]] =
@@ -1167,10 +1167,10 @@ private[xkafka] object Task:
     */
   def requests[F[_], K, V, K2, V2](chain: Chain[F, K, V, K2, V2], outer: Boolean): Boolean =
     chain match
-      case Chain.Start()                                        => outer
-      case Chain.Then(Chain.Start(), Step.Suppress(_, _, _, _)) => true
-      case Chain.Then(Chain.Start(), _)                         => false
-      case Chain.Then(init, _)                                  => requests(init, outer)
+      case Chain.Start()                                           => outer
+      case Chain.Then(Chain.Start(), Step.Suppress(_, _, _, _), _) => true
+      case Chain.Then(Chain.Start(), _, _)                         => false
+      case Chain.Then(init, _, _)                                  => requests(init, outer)
 
   /** What Java's join processor for the left side makes of `change` and the right side's value `other`, for each kind of join: the result's new
     * value, its old value where `sendOld`, and its time, or nothing where Java forwards nothing.

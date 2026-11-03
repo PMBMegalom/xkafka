@@ -30,7 +30,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
-import xkafka.streams.{KStream, KTable, Pipeline, Serde, Store, TimeWindows, Topology}
+import xkafka.streams.{KStream, KTable, Named, Pipeline, Serde, Store, TimeWindows, Topology}
 
 /** What a task writes to its changelogs and keeps between records, on every platform. */
 final class TaskSuite extends CatsEffectSuite:
@@ -46,15 +46,18 @@ final class TaskSuite extends CatsEffectSuite:
   private def task(pipeline: Pipeline[IO], partition: Int): Task[IO] =
     Task("app", Topology.of(pipeline).orFail.pipelines.head.segments.head, partition)
 
-  private val counting = KStream(in, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(out, text, count)
+  private val counting =
+    KStream(Named("read-1"), in, text, text).groupByKey(text, text).count(Named("count-1"), Store("counts")).toStream(Named("to-stream-1"))
+      .to(Named("write-1"), out, text, count)
 
   // A member taking over a task restores the window store, and its clock with it, but its windowing step's stream time starts again, as Java's does.
   // A record the last member found past the grace can then reach a window the store has expired: Java's in-memory store reads it as absent and does
   // not keep the write, which its changelog still logs (InMemoryWindowStore.fetch and put, ChangeLoggingWindowBytesStore.put).
   test("after a task moves, a record for a window its store has expired starts the window again, logged but not kept"):
     val windowed =
-      KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Store("windows")).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), count)
+      KStream(Named("read-2"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-2"), Store("windows")).toStream(Named("to-stream-2"))
+        .to(Named("write-2"), out, Serde.timeWindowed(text, 10.seconds), count)
     val old    = WindowStore.key(Chunk.array("k".getBytes), 0L)
     val latest = WindowStore.key(Chunk.array("other".getBytes), 30000L)
     // Restoring drops the windows the store's clock has expired, as the engine and Java's store do.
@@ -73,8 +76,9 @@ final class TaskSuite extends CatsEffectSuite:
   // time less the size, the next starts just after it, and a look that would end at the same windows emits nothing and keeps the close time.
   test("windows emitted once they close come out once each, and a look that finds no new window keeps the close time last emitted for"):
     val emitting =
-      KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).withRetention(1.minute)
-        .emitOnWindowClose.count(Store("windows")).toStream.to(out, Serde.timeWindowed(text, 10.seconds), count)
+      KStream(Named("read-3"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .withRetention(1.minute).emitOnWindowClose.count(Named("count-3"), Store("windows")).toStream(Named("to-stream-3"))
+        .to(Named("write-3"), out, Serde.timeWindowed(text, 10.seconds), count)
     val counted = task(emitting, 0)
     val inputs  = List(1000L, 12000L, 25000L, 31000L, 36000L)
     inputs.zipWithIndex.foldLeftM((TaskState.empty, Vector.empty[Long], Vector.empty[Option[Long]])):
@@ -90,9 +94,14 @@ final class TaskSuite extends CatsEffectSuite:
   // The example in the docs: a record at 2:05 both closes the window from 0:00 and starts the one from 2:00, past the default retention of 70 s.
   test("a window kept only for its size and grace is removed before its result is sent when record time jumps, and kept longer it is sent"):
     def emitted(retention: Option[FiniteDuration]) =
-      val windowed = KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+      val windowed = KStream(Named("read-4"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
       val kept     = retention.fold(windowed)(windowed.withRetention)
-      val counted  = task(kept.emitOnWindowClose.count(Store("windows")).toStream.to(out, Serde.timeWindowed(text, 1.minute), count), 0)
+      val counted  =
+        task(
+          kept.emitOnWindowClose.count(Named("count-4"), Store("windows")).toStream(Named("to-stream-4"))
+            .to(Named("write-4"), out, Serde.timeWindowed(text, 1.minute), count),
+          0
+        )
       for
         first  <- counted.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 30000L, Headers.empty), 0L)
         second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 125000L, Headers.empty), 2000L)
@@ -104,8 +113,9 @@ final class TaskSuite extends CatsEffectSuite:
   // Java partitions a windowed key by the key alone (WindowedStreamPartitioner), whatever effect the program runs in.
   test("a windowed key's records are partitioned by its key alone, and still are once the topology's effects are mapped"):
     val windowed =
-      KStream(in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Store("windows")).toStream
-        .to(out, Serde.timeWindowed(text, 10.seconds), count)
+      KStream(Named("read-5"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-5"), Store("windows")).toStream(Named("to-stream-5"))
+        .to(Named("write-5"), out, Serde.timeWindowed(text, 10.seconds), count)
     val mapped = Task("app", Topology.of(windowed).orFail.mapK(FunctionK.id[IO]).pipelines.head.segments.head, 0)
     List(task(windowed, 0), mapped).traverse(_.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L))
       .map(found => assertEquals(found.map(_._2.filter(_.topic == out).map(_.partitionBy)), List(Vector(bytes("k")), Vector(bytes("k")))))
@@ -133,7 +143,9 @@ final class TaskSuite extends CatsEffectSuite:
     val emptyIsNone =
       Serde[IO, String](Serializer.instance((t, h, v) => if v.isEmpty then IO.pure(None) else text.serializer.serialize(t, h, v)), text.deserializer)
     val latest =
-      KStream(in, text, text).groupByKey(text, text).aggregate(Store("latest"), emptyIsNone)("")((_, v, _) => v).toStream.to(out, text, emptyIsNone)
+      KStream(Named("read-6"), in, text, text).groupByKey(text, text)
+        .aggregate(Named("aggregate-1"), Store("latest"), emptyIsNone)("")((_, v, _) => v).toStream(Named("to-stream-6"))
+        .to(Named("write-6"), out, text, emptyIsNone)
     val running = task(latest, 0)
     for
       first  <- running.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, Headers.empty), 0L)
@@ -146,7 +158,12 @@ final class TaskSuite extends CatsEffectSuite:
   test("a record whose key its serializer writes as none is not counted, as Java skips a record with a null key"):
     val dashIsNone =
       Serde[IO, String](Serializer.instance((t, h, k) => if k == "-" then IO.pure(None) else text.serializer.serialize(t, h, k)), text.deserializer)
-    val counted = task(KStream(in, text, text).groupByKey(dashIsNone, text).count(Store("counts")).toStream.to(out, text, count), 0)
+    val counted =
+      task(
+        KStream(Named("read-7"), in, text, text).groupByKey(dashIsNone, text).count(Named("count-6"), Store("counts")).toStream(Named("to-stream-7"))
+          .to(Named("write-7"), out, text, count),
+        0
+      )
     counted.process(TaskState.empty, TaskInput(bytes("-"), bytes("v"), 1000L, Headers.empty), 0L).map: (state, written) =>
       assertEquals((state.store("counts"), written), (Map.empty, Vector.empty))
 
@@ -155,12 +172,12 @@ final class TaskSuite extends CatsEffectSuite:
   // join has the right side's old value.
   test("two tables outer joined into a store write each change's result to the store's changelog and on, a delete where neither side holds the key"):
     val joined =
-      KTable(Topic.from("left").orFail, text, text, Store("lefts"))
-        .outerJoin(KTable(Topic.from("right").orFail, text, text, Store("rights")), Store("joined"), text)(_.fold(
-          a => s"$a+-",
-          b => s"-+$b",
-          (a, b) => s"$a+$b"
-        )).toStream.to(out, text, text.option)
+      KTable(Named("lefts"), Topic.from("left").orFail, text, text, Store("lefts")).outerJoin(
+        Named("outer-join-rights"),
+        KTable(Named("rights"), Topic.from("right").orFail, text, text, Store("rights")),
+        Store("joined"),
+        text
+      )(_.fold(a => s"$a+-", b => s"-+$b", (a, b) => s"$a+$b")).toStream(Named("to-stream-8")).to(Named("write-8"), out, text, text.option)
     val running = task(joined, 0)
     val changes = List(("left", "a1", 1000L), ("right", "b1", 2000L), ("left", null, 1500L), ("right", null, 3000L))
     changes.foldLeftM((TaskState.empty, Vector.empty[TaskOutput])):

@@ -28,16 +28,13 @@ import cats.{ApplicativeThrow, Show}
 import cats.arrow.FunctionK
 import cats.data.{Ior, NonEmptyList, NonEmptyVector}
 
-/** The name of a state store, from which its changelog topic `<application id>-<name>-changelog` is named. */
-final case class Store(name: String)
-
-/** The name of a repartitioning, from which its topic `<application id>-<name>-repartition` is named. */
-final case class Repartition(name: String)
-
 /** Why a topology could not be built. */
 enum TopologyError derives CanEqual:
-  /** A store or repartition name the topic it names could not carry. */
+  /** A store, repartition or step name that the topic it names could not carry, or that Java refuses as a name. */
   case InvalidName(name: String, reason: String)
+
+  /** Two steps with one name, which Java refuses too. */
+  case DuplicateName(name: String)
 
   /** Two stores with one name, whose changelogs would be one topic. */
   case DuplicateStore(name: String)
@@ -48,17 +45,16 @@ enum TopologyError derives CanEqual:
   /** Two pipelines reading one topic, which Java refuses too. */
   case DuplicateSource(topic: Topic)
 
-  /** Records grouped by a key changed since they were read, which needs a repartitioning that `groupByKey` was given no name for. */
-  case UnnamedRepartition
+  /** A repartition named, by `groupByKey` or by the join `name` given serdes, for records of a stream whose type does not say they are keyed as they
+    * were read but which are, and need none.
+    */
+  case UnusedRepartition(name: String)
 
   /** Windows a store's records cannot be windowed by, such as windows of no size. */
   case InvalidWindows(store: String, reason: String)
 
   /** A suppression that cannot be used, such as one with a negative time to wait. */
   case InvalidSuppression(name: String, reason: String)
-
-  /** Records joined with a table by a key changed since they were read, which needs a repartitioning that `join` was given no name for. */
-  case UnnamedJoinRepartition
 
   /** A windowed table joined with a stream or a table, which xkafka does not join yet. */
   case WindowedJoin
@@ -71,17 +67,18 @@ enum TopologyError derives CanEqual:
 
   def message: String =
     this match
-      case InvalidName(name, reason)  => s"'$name' cannot name a store or repartitioning: $reason"
+      case InvalidName(name, reason)  => s"'$name' cannot name a store, repartitioning or step: $reason"
+      case DuplicateName(name)        => s"two steps are named '$name'"
       case DuplicateStore(name)       => s"two stores are named '$name'"
       case DuplicateRepartition(name) => s"two repartitionings are named '$name'"
       case DuplicateSource(topic)     => s"two pipelines read topic '${topic.value}'"
-      case UnnamedRepartition => "records whose key changed are grouped by key without a repartitioning name; pass a Repartition to groupByKey"
+      case UnusedRepartition(name)    =>
+        s"the records repartitioned as '$name' are keyed as they were read and need no repartition; group them with groupByKey(key, value), or join them without serdes"
       case InvalidWindows(store, reason)    => s"the windows of store '$store' cannot be used: $reason"
       case InvalidSuppression(name, reason) => s"the suppression '$name' cannot be used: $reason"
-      case UnnamedJoinRepartition => "records whose key changed are joined with a table without a repartitioning name; pass a Repartition to join"
-      case WindowedJoin           => "a windowed table cannot be joined yet"
-      case JoinedWithItself       => "a table or stream is joined with itself, or with one read from the same topics"
-      case SuppressedUnstoredJoin(name) =>
+      case WindowedJoin                     => "a windowed table cannot be joined yet"
+      case JoinedWithItself                 => "a table or stream is joined with itself, or with one read from the same topics"
+      case SuppressedUnstoredJoin(name)     =>
         s"the suppression '$name' holds the result of joining tables, which needs a serde for its values; pass a Store and a Serde to the join"
 
 object TopologyError:
@@ -208,21 +205,27 @@ private[xkafka] enum Release[K]:
   case TimeLimit(waited: Long)
 
 private[xkafka] enum Chain[F[_], K, V, K2, V2]:
-  case Start[F[_], K, V]()                                                                           extends Chain[F, K, V, K, V]
-  case Then[F[_], K, V, K1, V1, K2, V2](init: Chain[F, K, V, K1, V1], last: Step[F, K1, V1, K2, V2]) extends Chain[F, K, V, K2, V2]
+  case Start[F[_], K, V]()                                                                                         extends Chain[F, K, V, K, V]
+  case Then[F[_], K, V, K1, V1, K2, V2](init: Chain[F, K, V, K1, V1], last: Step[F, K1, V1, K2, V2], named: Named) extends Chain[F, K, V, K2, V2]
 
-  def andThen[K3, V3](step: Step[F, K2, V2, K3, V3]): Chain[F, K, V, K3, V3] = Then(this, step)
+  def andThen[K3, V3](named: Named, step: Step[F, K2, V2, K3, V3]): Chain[F, K, V, K3, V3] = Then(this, step, named)
 
   def mapK[G[_]](fk: FunctionK[F, G]): Chain[G, K, V, K2, V2] =
     this match
-      case Start()          => Start()
-      case Then(init, last) => Then(init.mapK(fk), last.mapK(fk))
+      case Start()                 => Start()
+      case Then(init, last, named) => Then(init.mapK(fk), last.mapK(fk), named)
+
+  /** The names of its steps, in the order the steps come. */
+  def names: List[Named] =
+    this match
+      case Start()              => Nil
+      case Then(init, _, named) => init.names :+ named
 
   /** The stores of its steps, in the order the steps come. */
   def stores: List[Store] =
     this match
-      case Start()          => Nil
-      case Then(init, last) => init.stores ++
+      case Start()             => Nil
+      case Then(init, last, _) => init.stores ++
           (last match
             case Step.Aggregate(store, _, _, _, _, _)                    => List(store)
             case Step.TableSource(store, _, _)                           => List(store)
@@ -235,8 +238,8 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
   /** The names of its steps' suppression buffers. */
   def buffers: Set[String] =
     this match
-      case Start()          => Set.empty
-      case Then(init, last) => init.buffers ++
+      case Start()             => Set.empty
+      case Then(init, last, _) => init.buffers ++
           (last match
             case Step.Suppress(suppressed, _, _, _) => Set(s"${suppressed.name}-store")
             case _                                  => Set.empty)
@@ -244,21 +247,21 @@ private[xkafka] enum Chain[F[_], K, V, K2, V2]:
   /** The names of its steps' session stores. */
   def sessionStores: Set[String] =
     this match
-      case Start()          => Set.empty
-      case Then(init, last) => init.sessionStores ++
+      case Start()             => Set.empty
+      case Then(init, last, _) => init.sessionStores ++
           (last match
-            case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => Set(store.name)
+            case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => Set(store.value)
             case _                                                       => Set.empty)
 
   /** How long each window store of its steps keeps a window, in milliseconds, by store name. */
   def retentions: Map[String, Long] =
     this match
-      case Start()          => Map.empty
-      case Then(init, last) => init.retentions ++
+      case Start()             => Map.empty
+      case Then(init, last, _) => init.retentions ++
           (last match
-            case Step.WindowedAggregate(store, _, retention, _, _, _, _, _, _)   => Map(store.name -> retention)
-            case Step.SlidingAggregate(store, _, retention, _, _, _, _, _, _)    => Map(store.name -> retention)
-            case Step.SessionAggregate(store, _, retention, _, _, _, _, _, _, _) => Map(store.name -> retention)
+            case Step.WindowedAggregate(store, _, retention, _, _, _, _, _, _)   => Map(store.value -> retention)
+            case Step.SlidingAggregate(store, _, retention, _, _, _, _, _, _)    => Map(store.value -> retention)
+            case Step.SessionAggregate(store, _, retention, _, _, _, _, _, _, _) => Map(store.value -> retention)
             case _                                                               => Map.empty)
 
 /** A topic a segment reads, by name: an input topic, or the repartition topic `repartition` names. */
@@ -270,11 +273,12 @@ private[xkafka] enum Source derives CanEqual:
   * on as a change to their join, as Java's table-table join merges what its two sides make.
   */
 private[xkafka] enum Origin[F[_], K, V]:
-  case Input(topic: Topic, key: Serde[F, K], value: Serde[F, V])
+  case Input(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V])
   case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])
 
-  /** The tables `left` and `right` joined by `joiner`, the result kept in `store` where one is given, written with its serdes. */
+  /** The tables `left` and `right` joined by `joiner` in the step `named`, the result kept in `store` where one is given, written with its serdes. */
   case Joined[F[_], K, A, B, R, K1, V1, C1, K2, V2, C2](
+      named: Named,
       left: Side[F, K, A, K1, V1, C1],
       right: Side[F, K, B, K2, V2, C2],
       joiner: Joiner[A, B, R],
@@ -286,6 +290,7 @@ private[xkafka] enum Origin[F[_], K, V]:
     * `value` and `otherValue`.
     */
   case StreamsJoined[F[_], K, A, B, R, K1, V1, K2, V2](
+      named: Named,
       left: Flow[F, K, A, K1, V1],
       right: Flow[F, K, B, K2, V2],
       windows: JoinWindows,
@@ -298,26 +303,35 @@ private[xkafka] enum Origin[F[_], K, V]:
 
   def mapK[G[_]](fk: FunctionK[F, G]): Origin[G, K, V] =
     this match
-      case Input(topic, key, value)               => Input(topic, key.mapK(fk), value.mapK(fk))
-      case Repartitioned(repartition, key, value) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk))
-      case Joined(left, right, joiner, store)     =>
-        Joined(left.mapK(fk), right.mapK(fk), joiner, store.map((named, key, value) => (named, key.mapK(fk), value.mapK(fk))))
-      case StreamsJoined(left, right, windows, joiner, store, key, value, otherValue) =>
-        StreamsJoined(left.mapK(fk), right.mapK(fk), windows, joiner, store, key.mapK(fk), value.mapK(fk), otherValue.mapK(fk))
+      case Input(named, topic, key, value)           => Input(named, topic, key.mapK(fk), value.mapK(fk))
+      case Repartitioned(repartition, key, value)    => Repartitioned(repartition, key.mapK(fk), value.mapK(fk))
+      case Joined(named, left, right, joiner, store) =>
+        Joined(named, left.mapK(fk), right.mapK(fk), joiner, store.map((stored, key, value) => (stored, key.mapK(fk), value.mapK(fk))))
+      case StreamsJoined(named, left, right, windows, joiner, store, key, value, otherValue) =>
+        StreamsJoined(named, left.mapK(fk), right.mapK(fk), windows, joiner, store, key.mapK(fk), value.mapK(fk), otherValue.mapK(fk))
 
   /** The topics it reads, through the tables it joins. */
   def sources: List[Source] =
     this match
-      case Input(topic, _, _)                           => List(Source.Input(topic))
-      case Repartitioned(repartition, _, _)             => List(Source.Repartitioned(repartition))
-      case Joined(left, right, _, _)                    => left.origin.sources ++ right.origin.sources
-      case StreamsJoined(left, right, _, _, _, _, _, _) => left.origin.sources ++ right.origin.sources
+      case Input(_, topic, _, _)                           => List(Source.Input(topic))
+      case Repartitioned(repartition, _, _)                => List(Source.Repartitioned(repartition))
+      case Joined(_, left, right, _, _)                    => left.origin.sources ++ right.origin.sources
+      case StreamsJoined(_, left, right, _, _, _, _, _, _) => left.origin.sources ++ right.origin.sources
+
+  /** The names of its steps: the source's, or the join's and those of the steps that make its inputs. */
+  def names: List[Named] =
+    this match
+      case Input(named, _, _, _)            => List(named)
+      case Repartitioned(_, _, _)           => Nil
+      case Joined(named, left, right, _, _) => left.origin.names ++ left.chain.names ++ right.origin.names ++ right.chain.names :+ named
+      case StreamsJoined(named, left, right, _, _, _, _, _, _) => left.origin.names ++ left.chain.names ++ right.origin.names ++ right.chain.names :+
+          named
 
   /** The stores of the tables it joins, and those its joins keep their results in. */
   def stores: List[Store] =
     this match
-      case Joined(left, right, _, store) => left.origin.stores ++ left.chain.stores ++ right.origin.stores ++ right.chain.stores ++ store.map(_._1)
-      case StreamsJoined(left, right, _, joiner, store, _, _, _) =>
+      case Joined(_, left, right, _, store) => left.origin.stores ++ left.chain.stores ++ right.origin.stores ++ right.chain.stores ++ store.map(_._1)
+      case StreamsJoined(_, left, right, _, joiner, store, _, _, _) =>
         val named = StreamJoin.names(store, joiner)
         left.origin.stores ++ left.chain.stores ++ right.origin.stores ++ right.chain.stores ++ (List(named.left, named.right) ++ named.shared)
           .map(Store(_))
@@ -326,24 +340,24 @@ private[xkafka] enum Origin[F[_], K, V]:
   /** The names of the suppression buffers of the tables it joins. */
   def buffers: Set[String] =
     this match
-      case Joined(left, right, _, _)                    => left.origin.buffers ++ left.chain.buffers ++ right.origin.buffers ++ right.chain.buffers
-      case StreamsJoined(left, right, _, _, _, _, _, _) => left.origin.buffers ++ left.chain.buffers ++ right.origin.buffers ++ right.chain.buffers
-      case _                                            => Set.empty
+      case Joined(_, left, right, _, _)                    => left.origin.buffers ++ left.chain.buffers ++ right.origin.buffers ++ right.chain.buffers
+      case StreamsJoined(_, left, right, _, _, _, _, _, _) => left.origin.buffers ++ left.chain.buffers ++ right.origin.buffers ++ right.chain.buffers
+      case _                                               => Set.empty
 
   /** The names of the session stores of the tables it joins. */
   def sessionStores: Set[String] =
     this match
-      case Joined(left, right, _, _) => left.origin.sessionStores ++ left.chain.sessionStores ++ right.origin.sessionStores ++
+      case Joined(_, left, right, _, _) => left.origin.sessionStores ++ left.chain.sessionStores ++ right.origin.sessionStores ++
           right.chain.sessionStores
-      case StreamsJoined(left, right, _, _, _, _, _, _) => left.origin.sessionStores ++ left.chain.sessionStores ++ right.origin.sessionStores ++
+      case StreamsJoined(_, left, right, _, _, _, _, _, _) => left.origin.sessionStores ++ left.chain.sessionStores ++ right.origin.sessionStores ++
           right.chain.sessionStores
       case _ => Set.empty
 
   /** The window stores of its stream-stream joins, and of those it reads through, which keep every record. */
   def duplicates: Set[String] =
     this match
-      case Joined(left, right, _, _)                             => left.origin.duplicates ++ right.origin.duplicates
-      case StreamsJoined(left, right, _, joiner, store, _, _, _) =>
+      case Joined(_, left, right, _, _)                             => left.origin.duplicates ++ right.origin.duplicates
+      case StreamsJoined(_, left, right, _, joiner, store, _, _, _) =>
         val named = StreamJoin.names(store, joiner)
         left.origin.duplicates ++ right.origin.duplicates + named.left + named.right
       case _ => Set.empty
@@ -351,8 +365,8 @@ private[xkafka] enum Origin[F[_], K, V]:
   /** How long each window store of the tables it joins keeps a window, in milliseconds, by store name. */
   def retentions: Map[String, Long] =
     this match
-      case Joined(left, right, _, _) => left.origin.retentions ++ left.chain.retentions ++ right.origin.retentions ++ right.chain.retentions
-      case StreamsJoined(left, right, windows, joiner, store, _, _, _) =>
+      case Joined(_, left, right, _, _) => left.origin.retentions ++ left.chain.retentions ++ right.origin.retentions ++ right.chain.retentions
+      case StreamsJoined(_, left, right, windows, joiner, store, _, _, _) =>
         val named = StreamJoin.names(store, joiner)
         left.origin.retentions ++ left.chain.retentions ++ right.origin.retentions ++ right.chain.retentions ++
           Map(named.left -> windows.retentionMillis, named.right -> windows.retentionMillis)
@@ -385,9 +399,9 @@ private[xkafka] object StreamJoin:
   def names[A, B, R](store: Store, joiner: Joiner[A, B, R]): StreamJoin =
     val (leftOuter, rightOuter) = joiner.outer
     StreamJoin(
-      if rightOuter then s"${store.name}-outer-this-join-store" else s"${store.name}-this-join-store",
-      if leftOuter then s"${store.name}-outer-other-join-store" else s"${store.name}-other-join-store",
-      Option.when(leftOuter)(if rightOuter then s"${store.name}-outer-shared-join-store" else s"${store.name}-left-shared-join-store")
+      if rightOuter then s"${store.value}-outer-this-join-store" else s"${store.value}-this-join-store",
+      if leftOuter then s"${store.value}-outer-other-join-store" else s"${store.value}-other-join-store",
+      Option.when(leftOuter)(if rightOuter then s"${store.value}-outer-shared-join-store" else s"${store.value}-left-shared-join-store")
     )
 
 /** How a join makes its result from the values of its sides, as Java's inner, left and outer joins call their joiners: an inner join with both, a
@@ -430,7 +444,7 @@ private[xkafka] enum Joiner[A, B, R]:
 /** Where a segment writes to: the repartition topic the next segment reads, or the pipeline's output topic. */
 private[xkafka] enum End[F[_], K, V]:
   case Repartitioning(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])
-  case Output(topic: Topic, key: Serde[F, K], value: Serde[F, V])
+  case Output(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V])
 
   /** Nowhere: a segment that runs beside another, only to keep its stores, as a table read by a join is kept. */
   case Stored()
@@ -439,7 +453,13 @@ private[xkafka] enum End[F[_], K, V]:
     this match
       case Stored()                                => Stored()
       case Repartitioning(repartition, key, value) => Repartitioning(repartition, key.mapK(fk), value.mapK(fk))
-      case Output(topic, key, value)               => Output(topic, key.mapK(fk), value.mapK(fk))
+      case Output(named, topic, key, value)        => Output(named, topic, key.mapK(fk), value.mapK(fk))
+
+  /** The name of the step that writes it, where the program names one. */
+  def names: List[Named] =
+    this match
+      case Output(named, _, _, _) => List(named)
+      case _                      => Nil
 
 /** The records between two topics, which become one sub-topology, with the segments that run beside it in that sub-topology, each reading a topic of
   * its own and sharing its stores, as the table a join reads does, and the topics its joins copartition, as Java's join groups its sources.
@@ -526,8 +546,8 @@ private[xkafka] sealed trait Open[F[_], K2, V2]:
   /** The joins it holds, by the topics they read, whose sub-topologies Java numbers by which of their inputs its program builds first. */
   def buildOrdered: List[List[Source]]
 
-  def andThen[K3, V3](step: Step[F, K2, V2, K3, V3]): Open[F, K3, V3] =
-    Open(origin, chain.andThen(step), siblings, copartitioned, later, buildOrdered)
+  def andThen[K3, V3](named: Named, step: Step[F, K2, V2, K3, V3]): Open[F, K3, V3] =
+    Open(origin, chain.andThen(named, step), siblings, copartitioned, later, buildOrdered)
 
   /** It closed by `end`, and the segments numbered after it. */
   def close(end: End[F, K2, V2]): NonEmptyVector[Segment[F]] = NonEmptyVector(beside(end), later)
@@ -597,100 +617,136 @@ private[xkafka] object Joining:
     val unsure                                             = Option.unless(same(before, other) && same(after, behind))(sources).toList
     Ordered(before, after, (mine.buildOrdered ++ theirs.buildOrdered ++ unsure).distinct)
 
-final class KStream[F[_], K, V] private[xkafka] (
-    private[xkafka] val closed: Vector[Segment[F]],
-    private[xkafka] val open: Open[F, K, V],
-    private[xkafka] val keyChanged: Boolean,
-    private[xkafka] val problems: Vector[TopologyError]
-):
-  private[xkafka] def step[K2, V2](next: Step[F, K, V, K2, V2], changesKey: Boolean): KStream[F, K2, V2] =
-    new KStream(closed, open.andThen(next), keyChanged || changesKey, problems)
+/** Records read from a topic, changed step by step. Its [[Keying]] says whether the records are still keyed as they were read, which decides how they
+  * can be grouped or joined by key: records that may have a new key go through a repartition topic first, which `groupByKey` and `join` then take a
+  * name or serdes for. A stream whose type does not say is taken to have changed its key.
+  */
+sealed trait KStream[F[_], K, V]:
+  /** Whether the records are keyed as they were read ([[KeyState.AsRead]]) or may have a new key ([[KeyState.Changed]]). */
+  type Keying <: KeyState
 
-  def filter(keep: (K, V) => Boolean): KStream[F, K, V] = step(Step.Filter(keep), changesKey = false)
+  private[xkafka] def closed: Vector[Segment[F]]
+  private[xkafka] def open: Open[F, K, V]
+  private[xkafka] def keyChanged: Boolean
+  private[xkafka] def problems: Vector[TopologyError]
 
-  def map[K2, V2](change: (K, V) => (K2, V2)): KStream[F, K2, V2] = step(Step.Map(change), changesKey = true)
+  /** The stream with `next` as its last step, which leaves each record in the partition of its key, such as one that keeps the key, or windows it. */
+  private[xkafka] def kept[K2, V2](named: Named, next: Step[F, K, V, K2, V2]): KStream.Of[F, K2, V2, Keying] =
+    KStream.of(closed, open.andThen(named, next), keyChanged, problems)
 
-  def mapValues[V2](change: V => V2): KStream[F, K, V2] = step(Step.MapValues(change), changesKey = false)
+  /** The stream with `next` as its last step, which may give records a new key. */
+  private def rekeyed[K2, V2](named: Named, next: Step[F, K, V, K2, V2]): KStream.Of[F, K2, V2, KeyState.Changed] =
+    KStream.of(closed, open.andThen(named, next), true, problems)
 
-  def flatMap[K2, V2](change: (K, V) => Iterable[(K2, V2)]): KStream[F, K2, V2] = step(Step.FlatMap(change), changesKey = true)
+  /** Keeps the records `keep` gives true for. */
+  def filter(named: Named)(keep: (K, V) => Boolean): KStream.Of[F, K, V, Keying] = kept(named, Step.Filter(keep))
 
-  def selectKey[K2](change: (K, V) => K2): KStream[F, K2, V] = step(Step.Map((k, v) => (change(k, v), v)), changesKey = true)
+  /** Replaces each record with what `change` gives. */
+  def map[K2, V2](named: Named)(change: (K, V) => (K2, V2)): KStream.Of[F, K2, V2, KeyState.Changed] = rekeyed(named, Step.Map(change))
+
+  /** Replaces each value with what `change` gives. */
+  def mapValues[V2](named: Named)(change: V => V2): KStream.Of[F, K, V2, Keying] = kept(named, Step.MapValues(change))
+
+  /** Replaces each record with the records `change` gives, none or more. */
+  def flatMap[K2, V2](named: Named)(change: (K, V) => Iterable[(K2, V2)]): KStream.Of[F, K2, V2, KeyState.Changed] =
+    rekeyed(named, Step.FlatMap(change))
+
+  /** Gives each record the key `change` gives. */
+  def selectKey[K2](named: Named)(change: (K, V) => K2): KStream.Of[F, K2, V, KeyState.Changed] =
+    rekeyed(named, Step.Map((k, v) => (change(k, v), v)))
 
   /** Runs `effect` for each record and passes the record on. The effect runs again for records replayed after a crash or a fencing. */
-  def peek(effect: (K, V) => F[Unit]): KStream[F, K, V] = step(Step.Peek(effect), changesKey = false)
+  def peek(named: Named)(effect: (K, V) => F[Unit]): KStream.Of[F, K, V, Keying] = kept(named, Step.Peek(effect))
 
   /** Replaces each value with what `change` gives. Its output is written once under exactly-once processing, but the effect runs again for records
     * replayed after a crash or a fencing.
     */
-  def evalMapValues[V2](change: V => F[V2]): KStream[F, K, V2] = step(Step.EvalMapValues(change), changesKey = false)
+  def evalMapValues[V2](named: Named)(change: V => F[V2]): KStream.Of[F, K, V2, Keying] = kept(named, Step.EvalMapValues(change))
 
   /** Keeps the records `keep` gives true for. The effect runs again for records replayed after a crash or a fencing. */
-  def evalFilter(keep: (K, V) => F[Boolean]): KStream[F, K, V] = step(Step.EvalFilter(keep), changesKey = false)
+  def evalFilter(named: Named)(keep: (K, V) => F[Boolean]): KStream.Of[F, K, V, Keying] = kept(named, Step.EvalFilter(keep))
 
   /** Replaces each record with what `change` gives. Its output is written once under exactly-once processing, but the effect runs again for records
     * replayed after a crash or a fencing.
     */
-  def evalMap[K2, V2](change: (K, V) => F[(K2, V2)]): KStream[F, K2, V2] = step(Step.EvalMap(change), changesKey = true)
+  def evalMap[K2, V2](named: Named)(change: (K, V) => F[(K2, V2)]): KStream.Of[F, K2, V2, KeyState.Changed] = rekeyed(named, Step.EvalMap(change))
 
-  /** Groups records by a new key, through the repartition topic `repartition` names. */
+  /** Groups records by a new key, through the repartition topic `repartition` names, which also names the step that gives them the key, as Java's
+    * `Grouped` names both.
+    */
   def groupBy[K2](repartition: Repartition, key: Serde[F, K2], value: Serde[F, V])(change: (K, V) => K2): KGroupedStream[F, K2, V] =
-    KGroupedStream(selectKey(change), Some(repartition), key, value)
+    KGroupedStream(selectKey(Named(repartition.value))(change), Some(repartition), key, value)
 
-  /** Groups records by their key, as long as it has not changed since they were read. */
-  def groupByKey(key: Serde[F, K], value: Serde[F, V]): KGroupedStream[F, K, V] = KGroupedStream(this, None, key, value)
+  /** Groups records keyed as they were read by their key. */
+  def groupByKey(key: Serde[F, K], value: Serde[F, V])(using KeyState.Unchanged[Keying]): KGroupedStream[F, K, V] =
+    KGroupedStream(this, None, key, value)
 
-  /** Groups records by their key, through the repartition topic `repartition` names if the key has changed since they were read. */
-  def groupByKey(repartition: Repartition, key: Serde[F, K], value: Serde[F, V]): KGroupedStream[F, K, V] =
-    KGroupedStream(this, Some(repartition), key, value)
+  /** Groups records that may have a new key by it, through the repartition topic `repartition` names. A stream whose type does not say, and whose key
+    * has not changed, needs none, and `Topology.of` refuses the name.
+    */
+  def groupByKey(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])(using KeyState.MayHaveChanged[Keying]): KGroupedStream[F, K, V] =
+    if keyChanged then KGroupedStream(this, Some(repartition), key, value)
+    else KGroupedStream(KStream.of(closed, open, false, problems :+ TopologyError.UnusedRepartition(repartition.value)), None, key, value)
 
   /** Each record with what `join` makes of it and its key's value in `table`, or none, read as Java's stream-table join reads it when the record
-    * comes; the table runs in the same sub-topology, so its topic and the stream's are copartitioned. A key changed since the records were read goes
-    * through the repartition topic `repartition` names first.
+    * comes; the table runs in the same sub-topology, so its topic and the stream's are copartitioned. Records go through a repartition topic first
+    * where `through` gives the serdes to write them with, which Java names after the join, as its `Joined` name names both.
     */
-  private def joined[TV, C[_], R](
-      table: KTable[F, K, TV, C],
-      repartition: Option[(Repartition, Serde[F, K], Serde[F, V])],
+  private def joined[TV, R](
+      named: Named,
+      table: KTable[F, K, TV],
+      through: Option[(Serde[F, K], Serde[F, V])],
+      found: Vector[TopologyError],
       join: (V, Option[TV]) => Option[R]
-  ): KStream[F, K, R] =
+  ): KStream.Of[F, K, R, KeyState.AsRead] =
     val (rows, view, sources) = table.joined
-    val (base, mine, found)   =
-      if !keyChanged then (open, Joining.read(closed, open), Vector.empty)
-      else
-        repartition match
-          case Some((named, key, value)) => (
-              Open(Origin.Repartitioned(named, key, value), Chain.Start[F, K, V]()),
-              Joining.repartitioned(closed ++ open.close(End.Repartitioning(named, key, value)).toVector),
-              Vector.empty
-            )
-          case None => (open, Joining.read(closed, open), Vector(TopologyError.UnnamedJoinRepartition))
+    val (base, mine)          =
+      through match
+        case None               => (open, Joining.read(closed, open))
+        case Some((key, value)) => (
+            Open(Origin.Repartitioned(Repartition(named.value), key, value), Chain.Start[F, K, V]()),
+            Joining.repartitioned(closed ++ open.close(End.Repartitioning(Repartition(named.value), key, value)).toVector)
+          )
     val windowed = Option.when(view.isEmpty)(TopologyError.WindowedJoin).toVector
     // A windowed table has no view, and its join is refused, so the step that stands in for it never runs.
-    val stepped = base.andThen(view.fold[Step[F, K, V, K, R]](Step.FlatMap((_, _) => Nil))(Step.Join(_, join)))
+    val stepped = base.andThen(named, view.fold[Step[F, K, V, K, R]](Step.FlatMap((_, _) => Nil))(Step.Join(_, join)))
     val beside  = rows.open.beside(End.Stored())
     val grouped = (stepped.copartitioned ++ stepped.origins ++ sources).distinct
     val joined  = Joining.ordered(mine, Joining.read(rows.closed, rows.open), grouped)
-    new KStream(joined.before, stepped.joining(stepped.siblings :+ beside, grouped, joined), false, problems ++ rows.problems ++ found ++ windowed)
+    KStream.of(joined.before, stepped.joining(stepped.siblings :+ beside, grouped, joined), false, problems ++ rows.problems ++ found ++ windowed)
+
+  /** The serdes a join given `key` and `value` repartitions the records with, where their key has changed, or the refusal of a join `named` that
+    * names a repartition the records do not need.
+    */
+  private def joinThrough(named: Named, key: Serde[F, K], value: Serde[F, V]): (Option[(Serde[F, K], Serde[F, V])], Vector[TopologyError]) =
+    if keyChanged then (Some((key, value)), Vector.empty) else (None, Vector(TopologyError.UnusedRepartition(named.value)))
 
   /** Each record joined with its key's value in `table`, as Java's `join` of a stream with a table: a record whose key the table holds no value for
-    * is dropped. The records' key must not have changed since they were read, so that the table and they are partitioned alike.
+    * is dropped. The records are keyed as they were read, so that the table and they are partitioned alike.
     */
-  def join[TV, C[_], R](table: KTable[F, K, TV, C])(join: (V, TV) => R): KStream[F, K, R] = joined(table, None, (v, tv) => tv.map(join(v, _)))
+  def join[TV, R](named: Named, table: KTable[F, K, TV])(join: (V, TV) => R)(using KeyState.Unchanged[Keying]): KStream.Of[F, K, R, KeyState.AsRead] =
+    joined(named, table, None, Vector.empty, (v, tv) => tv.map(join(v, _)))
 
-  /** As `join`, after the repartition topic `repartition` names where the records' key has changed since they were read. */
-  def join[TV, C[_], R](table: KTable[F, K, TV, C], repartition: Repartition, key: Serde[F, K], value: Serde[F, V])(
-      join: (V, TV) => R
-  ): KStream[F, K, R] = joined(table, Some((repartition, key, value)), (v, tv) => tv.map(join(v, _)))
+  /** As `join`, for records that may have a new key, after the repartition topic `named` names, written with `key` and `value`. */
+  def join[TV, R](named: Named, table: KTable[F, K, TV], key: Serde[F, K], value: Serde[F, V])(join: (V, TV) => R)(using
+      KeyState.MayHaveChanged[Keying]
+  ): KStream.Of[F, K, R, KeyState.AsRead] =
+    val (through, found) = joinThrough(named, key, value)
+    joined(named, table, through, found, (v, tv) => tv.map(join(v, _)))
 
   /** Each record joined with its key's value in `table`, or none where the table holds no value for it, as Java's `leftJoin` of a stream with a
-    * table.
+    * table. The records are keyed as they were read.
     */
-  def leftJoin[TV, C[_], R](table: KTable[F, K, TV, C])(join: (V, Option[TV]) => R): KStream[F, K, R] =
-    joined(table, None, (v, tv) => Some(join(v, tv)))
+  def leftJoin[TV, R](named: Named, table: KTable[F, K, TV])(join: (V, Option[TV]) => R)(using
+      KeyState.Unchanged[Keying]
+  ): KStream.Of[F, K, R, KeyState.AsRead] = joined(named, table, None, Vector.empty, (v, tv) => Some(join(v, tv)))
 
-  /** As `leftJoin`, after the repartition topic `repartition` names where the records' key has changed since they were read. */
-  def leftJoin[TV, C[_], R](table: KTable[F, K, TV, C], repartition: Repartition, key: Serde[F, K], value: Serde[F, V])(
-      join: (V, Option[TV]) => R
-  ): KStream[F, K, R] = joined(table, Some((repartition, key, value)), (v, tv) => Some(join(v, tv)))
+  /** As `leftJoin`, for records that may have a new key, after the repartition topic `named` names, written with `key` and `value`. */
+  def leftJoin[TV, R](named: Named, table: KTable[F, K, TV], key: Serde[F, K], value: Serde[F, V])(join: (V, Option[TV]) => R)(using
+      KeyState.MayHaveChanged[Keying]
+  ): KStream.Of[F, K, R, KeyState.AsRead] =
+    val (through, found) = joinThrough(named, key, value)
+    joined(named, table, through, found, (v, tv) => Some(join(v, tv)))
 
   /** The topics the stream reads, through every segment that makes it. */
   private def read: Set[Source] = (closed.flatMap(_.origins) ++ open.origins).toSet
@@ -710,6 +766,7 @@ final class KStream[F[_], K, V] private[xkafka] (
     * copartitioned, each side repartitioned through `<store>-left` or `<store>-right` where its key has changed.
     */
   private def windowJoined[VO, R](
+      named: Named,
       other: KStream[F, K, VO],
       windows: JoinWindows,
       store: Store,
@@ -717,100 +774,139 @@ final class KStream[F[_], K, V] private[xkafka] (
       value: Serde[F, V],
       otherValue: Serde[F, VO],
       joiner: Joiner[V, VO, R]
-  ): KStream[F, K, R] =
-    val problems = this.problems ++ other.problems ++ windows.problem.map(TopologyError.InvalidWindows(store.name, _))
+  ): KStream.Of[F, K, R, KeyState.AsRead] =
+    val problems = this.problems ++ other.problems ++ windows.problem.map(TopologyError.InvalidWindows(store.value, _))
     if (read & other.read).nonEmpty then
       // The join is refused, so the step that stands in for it never runs.
-      val nothing = step(Step.FlatMap[F, K, V, K, R]((_, _) => Nil), changesKey = false)
-      new KStream(nothing.closed, nothing.open, false, problems :+ TopologyError.JoinedWithItself)
+      val nothing = kept(named, Step.FlatMap[F, K, V, K, R]((_, _) => Nil))
+      KStream.of(nothing.closed, nothing.open, false, problems :+ TopologyError.JoinedWithItself)
     else
-      val (mine, left)    = joinSide(Repartition(s"${store.name}-left"), key, value)
-      val (theirs, right) = other.joinSide(Repartition(s"${store.name}-right"), key, otherValue)
+      // Java names the repartition topics after the join, as `StreamJoined.withName` names both, and the stores after the store's name.
+      val (mine, left)    = joinSide(Repartition(s"${named.value}-left"), key, value)
+      val (theirs, right) = other.joinSide(Repartition(s"${named.value}-right"), key, otherValue)
       val origin          =
-        Origin.StreamsJoined(Flow(left.origin, left.chain), Flow(right.origin, right.chain), windows, joiner, store, key, value, otherValue)
+        Origin.StreamsJoined(named, Flow(left.origin, left.chain), Flow(right.origin, right.chain), windows, joiner, store, key, value, otherValue)
       val groups = (left.copartitioned ++ right.copartitioned ++ left.origins ++ right.origins).distinct
       val joined = Joining.ordered(mine, theirs, groups)
-      new KStream(joined.before, Open(origin, Chain.Start[F, K, R]()).joining(left.siblings ++ right.siblings, groups, joined), false, problems)
+      KStream.of(joined.before, Open(origin, Chain.Start[F, K, R]()).joining(left.siblings ++ right.siblings, groups, joined), false, problems)
 
   /** Each record joined with each record of `other` with the same key in its window, as Java's `join` of two streams: a record with no match in
     * `other` goes on no further. The stores `<store>-this-join-store` and `<store>-other-join-store` keep each side's records for the windows' size
-    * and grace, written with `key`, `value` and `otherValue`, which also write a side whose key has changed to the repartition topic `<store>-left`
-    * or `<store>-right` names. The result's time is the later of the two records'.
+    * and grace, written with `key`, `value` and `otherValue`, which also write a side whose key has changed to the repartition topic `<named>-left`
+    * or `<named>-right` names. The result's time is the later of the two records'.
     */
-  def join[VO, R](other: KStream[F, K, VO], windows: JoinWindows, store: Store, key: Serde[F, K], value: Serde[F, V], otherValue: Serde[F, VO])(
-      join: (V, VO) => R
-  ): KStream[F, K, R] = windowJoined(other, windows, store, key, value, otherValue, Joiner.Inner(join))
+  def join[VO, R](
+      named: Named,
+      other: KStream[F, K, VO],
+      windows: JoinWindows,
+      store: Store,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      otherValue: Serde[F, VO]
+  )(join: (V, VO) => R): KStream.Of[F, K, R, KeyState.AsRead] = windowJoined(named, other, windows, store, key, value, otherValue, Joiner.Inner(join))
 
   /** As `join`, but a record with no match in `other` also goes on, with none for it, once its window has closed, as Java's `leftJoin` of two streams
     * holds it in the store `<store>-left-shared-join-store` until then. The store of `other`'s records is `<store>-outer-other-join-store`.
     */
-  def leftJoin[VO, R](other: KStream[F, K, VO], windows: JoinWindows, store: Store, key: Serde[F, K], value: Serde[F, V], otherValue: Serde[F, VO])(
-      join: (V, Option[VO]) => R
-  ): KStream[F, K, R] = windowJoined(other, windows, store, key, value, otherValue, Joiner.Left(join))
+  def leftJoin[VO, R](
+      named: Named,
+      other: KStream[F, K, VO],
+      windows: JoinWindows,
+      store: Store,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      otherValue: Serde[F, VO]
+  )(join: (V, Option[VO]) => R): KStream.Of[F, K, R, KeyState.AsRead] =
+    windowJoined(named, other, windows, store, key, value, otherValue, Joiner.Left(join))
 
   /** As `join`, but a record of either stream with no match in the other also goes on alone once its window has closed, as Java's `outerJoin` of two
     * streams holds it in the store `<store>-outer-shared-join-store` until then. The sides' stores are `<store>-outer-this-join-store` and
     * `<store>-outer-other-join-store`.
     */
-  def outerJoin[VO, R](other: KStream[F, K, VO], windows: JoinWindows, store: Store, key: Serde[F, K], value: Serde[F, V], otherValue: Serde[F, VO])(
-      join: Ior[V, VO] => R
-  ): KStream[F, K, R] = windowJoined(other, windows, store, key, value, otherValue, Joiner.Outer(join))
+  def outerJoin[VO, R](
+      named: Named,
+      other: KStream[F, K, VO],
+      windows: JoinWindows,
+      store: Store,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      otherValue: Serde[F, VO]
+  )(join: Ior[V, VO] => R): KStream.Of[F, K, R, KeyState.AsRead] =
+    windowJoined(named, other, windows, store, key, value, otherValue, Joiner.Outer(join))
 
-  /** Writes every record to `topic`. */
-  def to(topic: Topic, key: Serde[F, K], value: Serde[F, V]): Pipeline[F] =
-    val written = open.close(End.Output(topic, key, value))
+  /** Writes every record to `topic`, in the step `named`. */
+  def to(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V]): Pipeline[F] =
+    val written = open.close(End.Output(named, topic, key, value))
     Pipeline(NonEmptyList(written.head, written.tail.toList).prependList(closed.toList), problems)
 
 object KStream:
-  /** The records of `topic`. */
-  def apply[F[_], K, V](topic: Topic, key: Serde[F, K], value: Serde[F, V]): KStream[F, K, V] =
-    new KStream(Vector.empty, Open(Origin.Input(topic, key, value), Chain.Start()), false, Vector.empty)
+  /** A stream whose [[KStream.Keying]] is `P`, for annotating one without losing it. */
+  type Of[F[_], K, V, P <: KeyState] = KStream[F, K, V] { type Keying = P }
+
+  /** The records of `topic`, read in the step `named`, as Java's `Consumed` names it. */
+  def apply[F[_], K, V](named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V]): Of[F, K, V, KeyState.AsRead] =
+    of(Vector.empty, Open(Origin.Input(named, topic, key, value), Chain.Start()), false, Vector.empty)
+
+  private[xkafka] def of[F[_], K, V, P <: KeyState](
+      closed: Vector[Segment[F]],
+      open: Open[F, K, V],
+      keyChanged: Boolean,
+      problems: Vector[TopologyError]
+  ): Of[F, K, V, P] = Built(closed, open, keyChanged, problems)
+
+  private final class Built[F[_], K, V, P <: KeyState](
+      private[xkafka] val closed: Vector[Segment[F]],
+      private[xkafka] val open: Open[F, K, V],
+      private[xkafka] val keyChanged: Boolean,
+      private[xkafka] val problems: Vector[TopologyError]
+  ) extends KStream[F, K, V]:
+    type Keying = P
 
 /** Records grouped by key, ready to be folded into a store. */
-final class KGroupedStream[F[_], K, V] private[xkafka] (
-    stream: KStream[F, K, V],
-    repartition: Option[Repartition],
-    key: Serde[F, K],
-    value: Serde[F, V]
-):
+final class KGroupedStream[F[_], K, V] private[xkafka] (stream: KStream[F, K, V], through: Option[Repartition], key: Serde[F, K], value: Serde[F, V]):
   private def aggregated[A](
+      named: Named,
       store: Store,
       serde: Serde[F, A],
       initial: Option[A],
       start: (K, V) => A,
       add: (K, V, A) => A
-  ): KTable[F, K, A, KTable.Updated] =
+  ): KTable.Of[F, K, A, KTable.Updated] =
     KTable.updating(
-      folded(Step.Aggregate(store, key, serde, initial, start, add), Vector.empty),
+      folded(named, Step.Aggregate(store, key, serde, initial, start, add), Vector.empty),
       TableKey.Plain(key),
       TableValue.Plain(serde),
       None,
       Some(TableView.Stored(store, key, serde))
     )
 
-  /** The stream with `fold` as its last step, after a repartition topic if the key has changed. */
-  private[xkafka] def folded[K2, A](fold: Step[F, K, V, K2, A], found: Vector[TopologyError]): KStream[F, K2, A] =
-    if !stream.keyChanged then
-      val folding = stream.step(fold, changesKey = false)
-      new KStream(folding.closed, folding.open, false, folding.problems ++ found)
-    else
-      // The records go through a repartition topic first, so the store is in the segment that reads it.
-      val named    = repartition.getOrElse(Repartition(""))
-      val problems = (if repartition.isEmpty then stream.problems :+ TopologyError.UnnamedRepartition else stream.problems) ++ found
-      val closed   = stream.closed ++ stream.open.close(End.Repartitioning(named, key, value)).toVector
-      new KStream(closed, Open(Origin.Repartitioned(named, key, value), Chain.Start[F, K, V]().andThen(fold)), false, problems)
+  /** The stream with `fold` as its last step, after the repartition topic `through` names, if any. */
+  private[xkafka] def folded[K2, A](named: Named, fold: Step[F, K, V, K2, A], found: Vector[TopologyError]): KStream[F, K2, A] =
+    through match
+      case None =>
+        val folding = stream.kept(named, fold)
+        KStream.of(folding.closed, folding.open, false, folding.problems ++ found)
+      case Some(repartition) =>
+        // The records go through a repartition topic first, so the store is in the segment that reads it.
+        val closed = stream.closed ++ stream.open.close(End.Repartitioning(repartition, key, value)).toVector
+        KStream.of(
+          closed,
+          Open(Origin.Repartitioned(repartition, key, value), Chain.Start[F, K, V]().andThen(named, fold)),
+          false,
+          stream.problems ++ found
+        )
 
-  /** Counts each key's records in `store`. */
-  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, K, Long, KTable.Updated] =
-    aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
+  /** Counts each key's records in `store`, in the step `named`. */
+  def count(named: Named, store: Store)(using F: ApplicativeThrow[F]): KTable.Of[F, K, Long, KTable.Updated] =
+    aggregated(named, store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
 
-  /** Combines each key's values in `store`, starting from its first. */
-  def reduce(store: Store)(combine: (V, V) => V): KTable[F, K, V, KTable.Updated] =
-    aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
+  /** Combines each key's values in `store`, starting from its first, in the step `named`. */
+  def reduce(named: Named, store: Store)(combine: (V, V) => V): KTable.Of[F, K, V, KTable.Updated] =
+    aggregated(named, store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
 
-  /** Folds each key's values into `store`, starting from `initial`. */
-  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, K, A, KTable.Updated] =
-    aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add)
+  /** Folds each key's values into `store`, starting from `initial`, in the step `named`. */
+  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable.Of[F, K, A, KTable.Updated] =
+    aggregated(named, store, serde, Some(initial), (k, v) => add(k, v, initial), add)
 
   /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
   def windowedBy(windows: TimeWindows): TimeWindowedKStream[F, K, V] = TimeWindowedKStream(this, windows, None, false, key, value)
@@ -833,12 +929,13 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
     value: Serde[F, V]
 ):
   private def aggregated[A](
+      named: Named,
       store: Store,
       serde: Serde[F, A],
       initial: Option[A],
       start: (K, V) => A,
       add: (K, V, A) => A
-  ): KTable[F, Windowed[K], A, KTable.Updated] =
+  ): KTable.Of[F, Windowed[K], A, KTable.Updated] =
     val (least, rule, problem) =
       windows match
         case time: TimeWindows       => (time.retentionMillis, time.retentionRule, time.problem)
@@ -848,7 +945,7 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
         retention.flatMap: asked =>
           if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
           else Option.when(asked.toMillis < least)(s"the retention must be at least $rule, ${least} ms, was $asked")
-    val problems = kept.map(TopologyError.InvalidWindows(store.name, _)).toVector
+    val problems = kept.map(TopologyError.InvalidWindows(store.value, _)).toVector
     val keep     = retention.fold(least)(_.toMillis)
     val fold     =
       windows match
@@ -858,7 +955,7 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
       windows match
         case time: TimeWindows       => (time.sizeMillis, time.graceMillis)
         case sliding: SlidingWindows => (sliding.differenceMillis, sliding.graceMillis)
-    KTable.updating(grouped.folded(fold, problems), TableKey.TimeWindowed(key, size), TableValue.Plain(serde), Some(grace))
+    KTable.updating(grouped.folded(named, fold, problems), TableKey.TimeWindowed(key, size), TableValue.Plain(serde), Some(grace))
 
   /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
     * emits once it closes may expire before it is emitted when the retention is no longer than that, as in Java Kafka Streams, so keep it longer
@@ -873,17 +970,17 @@ final class TimeWindowedKStream[F[_], K, V] private[xkafka] (
     */
   def emitOnWindowClose: TimeWindowedKStream[F, K, V] = TimeWindowedKStream(grouped, windows, retention, true, key, value)
 
-  /** Counts each key's records in each window in `store`. */
-  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long, KTable.Updated] =
-    aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
+  /** Counts each key's records in each window in `store`, in the step `named`. */
+  def count(named: Named, store: Store)(using F: ApplicativeThrow[F]): KTable.Of[F, Windowed[K], Long, KTable.Updated] =
+    aggregated(named, store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
 
-  /** Combines each key's values in each window in `store`, starting from the window's first. */
-  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], V, KTable.Updated] =
-    aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
+  /** Combines each key's values in each window in `store`, starting from the window's first, in the step `named`. */
+  def reduce(named: Named, store: Store)(combine: (V, V) => V): KTable.Of[F, Windowed[K], V, KTable.Updated] =
+    aggregated(named, store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
 
-  /** Folds each key's values in each window into `store`, starting each window from `initial`. */
-  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable[F, Windowed[K], A, KTable.Updated] =
-    aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add)
+  /** Folds each key's values in each window into `store`, starting each window from `initial`, in the step `named`. */
+  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A): KTable.Of[F, Windowed[K], A, KTable.Updated] =
+    aggregated(named, store, serde, Some(initial), (k, v) => add(k, v, initial), add)
 
 /** Records grouped by key into sessions, ready to be folded into a session store. Each session's value goes downstream as it changes, and a session
   * merged into another goes on as none, as Java sends a session merged away as a tombstone. A record later than its session's end by more than the
@@ -897,33 +994,46 @@ final class SessionWindowedKStream[F[_], K, V] private[xkafka] (
     key: Serde[F, K],
     value: Serde[F, V]
 ):
-  private def aggregated[A](store: Store, serde: Serde[F, A], initial: Option[A], start: (K, V) => A, add: (K, V, A) => A, merge: (K, A, A) => A) =
+  private def aggregated[A](
+      named: Named,
+      store: Store,
+      serde: Serde[F, A],
+      initial: Option[A],
+      start: (K, V) => A,
+      add: (K, V, A) => A,
+      merge: (K, A, A) => A
+  ) =
     val least = windows.retentionMillis
     val kept  =
       windows.problem.orElse:
         retention.flatMap: asked =>
           if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
           else Option.when(asked.toMillis < least)(s"the retention must be at least ${windows.retentionRule}, ${least} ms, was $asked")
-    val problems = kept.map(TopologyError.InvalidWindows(store.name, _)).toVector
+    val problems = kept.map(TopologyError.InvalidWindows(store.value, _)).toVector
     val fold     = Step.SessionAggregate(store, windows, retention.fold(least)(_.toMillis), emitOnClose, key, serde, initial, start, add, merge)
     KTable.deleting(
-      grouped.folded(fold, problems),
+      grouped.folded(named, fold, problems),
       TableKey.SessionWindowed(key),
       TableValue.Optional(serde),
       Some(windows.graceMillis + windows.gapMillis)
     )
 
-  /** Counts each key's records in each session in `store`. */
-  def count(store: Store)(using F: ApplicativeThrow[F]): KTable[F, Windowed[K], Long, Option] =
-    aggregated(store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1, (_, a, b) => a + b)
+  /** Counts each key's records in each session in `store`, in the step `named`. */
+  def count(named: Named, store: Store)(using F: ApplicativeThrow[F]): KTable.Of[F, Windowed[K], Long, Option] =
+    aggregated(named, store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1, (_, a, b) => a + b)
 
-  /** Combines each key's values in each session in `store`, starting from the session's first, and merging sessions with `combine` too. */
-  def reduce(store: Store)(combine: (V, V) => V): KTable[F, Windowed[K], V, Option] =
-    aggregated(store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v), (_, acc, session) => combine(acc, session))
+  /** Combines each key's values in each session in `store`, starting from the session's first, and merging sessions with `combine` too, in the step
+    * `named`.
+    */
+  def reduce(named: Named, store: Store)(combine: (V, V) => V): KTable.Of[F, Windowed[K], V, Option] =
+    aggregated(named, store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v), (_, acc, session) => combine(acc, session))
 
-  /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them. */
-  def aggregate[A](store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(merge: (K, A, A) => A): KTable[F, Windowed[K], A, Option] =
-    aggregated(store, serde, Some(initial), (k, v) => add(k, v, initial), add, merge)
+  /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them, in the
+    * step `named`.
+    */
+  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(
+      merge: (K, A, A) => A
+  ): KTable.Of[F, Windowed[K], A, Option] = aggregated(named, store, serde, Some(initial), (k, v) => add(k, v, initial), add, merge)
 
   /** Keeps each session in the store for `retention` after its end, which must be at least the inactivity gap and grace, their default. */
   def withRetention(retention: FiniteDuration): SessionWindowedKStream[F, K, V] =
@@ -980,39 +1090,44 @@ private[xkafka] enum TableView[F[_], K, V]:
       case Held(_, parent)    => parent.keys
       case Joined(left, _, _) => left.keys
 
-/** The latest value of each key, kept in a store. Each change to it is a `C[V]`: the new value, for a table that only ever updates its keys
-  * ([[KTable.Updated]]), or for a table that can also delete them, the new value or none for a delete (`Option`).
-  */
-final class KTable[F[_], K, V, C[_]] private[xkafka] (
-    stream: KStream[F, K, C[V]],
-    key: TableKey[F, K],
-    value: Option[TableValue[F, C[V]]],
-    grace: Option[Long],
-    view: Option[TableView[F, K, V]],
-    present: C[V] => Option[V],
-    sourcedFrom: Option[List[Source]] = None
-):
+/** The latest value of each key, kept in a store. Each change to it is a [[Change]] of its value. */
+sealed trait KTable[F[_], K, V]:
+  /** What a change to the table is: the new value, for a table that only ever updates its keys ([[KTable.Updated]]), or for a table that can also
+    * delete them, the new value or none for a delete (`Option`).
+    */
+  type Change[A]
+
+  private[xkafka] def stream: KStream[F, K, Change[V]]
+  private[xkafka] def key: TableKey[F, K]
+  private[xkafka] def value: Option[TableValue[F, Change[V]]]
+  private[xkafka] def grace: Option[Long]
+  private[xkafka] def view: Option[TableView[F, K, V]]
+  private[xkafka] def present: Change[V] => Option[V]
+  private[xkafka] def sourcedFrom: Option[List[Source]]
+
   /** The topics a join copartitions for the table: those it reads, or for a suppressed table none, as Java takes its sources to be the suppression,
     * which reads no topic, and for the result of joining tables those its sides give.
     */
   private def sources: List[Source] = sourcedFrom.getOrElse(stream.open.origins)
 
   /** The table's records, where a join reads its values, or none for a windowed table, and the topics a join copartitions for it. */
-  private[xkafka] def joined: (KStream[F, K, C[V]], Option[TableView[F, K, V]], List[Source]) = (stream, view, sources)
+  private[xkafka] def joined: (KStream[F, K, Change[V]], Option[TableView[F, K, V]], List[Source]) = (stream, view, sources)
 
   /** Each change to the table, as a record, keyed as the table is; for a table that can delete keys, a delete is none, which `Serde.option` writes as
     * a tombstone, as Java writes its null.
     */
-  def toStream: KStream[F, K, C[V]] = new KStream(stream.closed, stream.open.andThen(Step.ToStream()), false, stream.problems)
+  def toStream(named: Named): KStream.Of[F, K, Change[V], KeyState.AsRead] =
+    KStream.of(stream.closed, stream.open.andThen(named, Step.ToStream()), false, stream.problems)
 
-  private def suppressed(suppressed: Suppressed, release: Release[K]): KTable[F, K, V, C] =
+  private def suppressed(suppressed: Suppressed, release: Release[K]): KTable.Of[F, K, V, Change] =
     val unstored = Option.when(value.isEmpty)(TopologyError.SuppressedUnstoredJoin(suppressed.name))
     val problems = stream.problems ++ suppressed.problem.map(TopologyError.InvalidSuppression(suppressed.name, _)) ++ unstored
     // A join's result kept in no store has no serde to hold its values with, and its suppression is refused, so the step that stands in never runs.
-    val holding = value.fold[Step[F, K, C[V], K, C[V]]](Step.FlatMap((_, _) => Nil))(Step.Suppress(suppressed, key, _, release))
-    val held    = stream.step(holding, changesKey = false)
-    new KTable(
-      new KStream(held.closed, held.open, stream.keyChanged, problems),
+    val holding = value.fold[Step[F, K, Change[V], K, Change[V]]](Step.FlatMap((_, _) => Nil))(Step.Suppress(suppressed, key, _, release))
+    // Java names the suppression's processor as its `Suppressed` names it.
+    val held = stream.kept(Named(suppressed.name), holding)
+    KTable.of[F, K, V, Change](
+      KStream.of(held.closed, held.open, stream.keyChanged, problems),
       key,
       value,
       grace,
@@ -1022,16 +1137,16 @@ final class KTable[F[_], K, V, C[_]] private[xkafka] (
     )
 
   /** Holds back each key's changes until `timeToWait` has passed since the first held, by the records' own time, then passes on the latest. */
-  def suppress(until: Suppressed.UntilTimeLimit): KTable[F, K, V, C] = suppressed(until, Release.TimeLimit(until.timeToWait.toMillis))
+  def suppress(until: Suppressed.UntilTimeLimit): KTable.Of[F, K, V, Change] = suppressed(until, Release.TimeLimit(until.timeToWait.toMillis))
 
   /** Holds back each window's changes until the window has closed, its grace over, then passes on its final result; for sessions, a session merged
     * away goes on no more.
     */
-  def suppress[W](until: Suppressed.UntilWindowCloses)(using windowed: K <:< Windowed[W]): KTable[F, K, V, C] =
+  def suppress[W](until: Suppressed.UntilWindowCloses)(using windowed: K <:< Windowed[W]): KTable.Of[F, K, V, Change] =
     suppressed(until, Release.WindowCloses(windowed(_).window.end, grace.getOrElse(0L)))
 
   /** The table as one side of a join. */
-  private def side(open: Open[F, K, C[V]]): Side[F, K, V, open.K, open.V, C[V]] = Side(open.origin, open.chain, present, view)
+  private def side(open: Open[F, K, Change[V]]): Side[F, K, V, open.K, open.V, Change[V]] = Side(open.origin, open.chain, present, view)
 
   /** The topics the table reads, through every segment that makes it. */
   private def read: Set[Source] = (stream.closed.flatMap(_.origins) ++ stream.open.origins).toSet
@@ -1039,23 +1154,25 @@ final class KTable[F[_], K, V, C[_]] private[xkafka] (
   /** The table joined with `other` by `joiner`, as Java's table-table joins join them: in one sub-topology, their topics copartitioned, and each
     * change to either joined with the other's value for its key. The result is kept in the store `store` names where one is given.
     */
-  private def joinedWith[VO, C2[_], R](
-      other: KTable[F, K, VO, C2],
+  private def joinedWith[VO, R](
+      named: Named,
+      other: KTable[F, K, VO],
       joiner: Joiner[V, VO, R],
       store: Option[(Store, Serde[F, R])]
-  ): KTable[F, K, R, Option] =
+  ): KTable.Of[F, K, R, Option] =
     val (theirs, otherView, otherSources) = other.joined
     val problems                          = stream.problems ++ theirs.problems
     (view, otherView) match
       case (Some(mine), Some(their)) if (read & other.read).isEmpty =>
-        val origin = Origin.Joined(side(stream.open), other.side(theirs.open), joiner, store.map((named, serde) => (named, mine.keys, serde)))
-        val groups = (stream.open.copartitioned ++ theirs.open.copartitioned ++ sources ++ otherSources).distinct
-        val joined = Joining.ordered(Joining.read(stream.closed, stream.open), Joining.read(theirs.closed, theirs.open), groups)
-        val open   = Open(origin, Chain.Start[F, K, Option[R]]()).joining(stream.open.siblings ++ theirs.open.siblings, groups, joined)
-        val values =
-          store.fold[TableView[F, K, R]](TableView.Joined(mine, their, joiner))((named, serde) => TableView.Stored(named, mine.keys, serde))
-        new KTable[F, K, R, Option](
-          new KStream(joined.before, open, false, problems),
+        val (left, right) = (stream.open, theirs.open)
+        val origin        = Origin.Joined(named, side(left), other.side(right), joiner, store.map((stored, serde) => (stored, mine.keys, serde)))
+        val groups        = (stream.open.copartitioned ++ theirs.open.copartitioned ++ sources ++ otherSources).distinct
+        val joined        = Joining.ordered(Joining.read(stream.closed, stream.open), Joining.read(theirs.closed, theirs.open), groups)
+        val open          = Open(origin, Chain.Start[F, K, Option[R]]()).joining(stream.open.siblings ++ theirs.open.siblings, groups, joined)
+        val values        =
+          store.fold[TableView[F, K, R]](TableView.Joined(mine, their, joiner))((stored, serde) => TableView.Stored(stored, mine.keys, serde))
+        KTable.of[F, K, R, Option](
+          KStream.of(joined.before, open, false, problems),
           key,
           store.map((_, serde) => TableValue.Optional(serde)),
           None,
@@ -1066,49 +1183,57 @@ final class KTable[F[_], K, V, C[_]] private[xkafka] (
       case _ =>
         val refused = if view.isEmpty || otherView.isEmpty then TopologyError.WindowedJoin else TopologyError.JoinedWithItself
         // The join is refused, so the step that stands in for it never runs.
-        val nothing = stream.step(Step.FlatMap[F, K, C[V], K, Option[R]]((_, _) => Nil), changesKey = false)
-        new KTable[F, K, R, Option](new KStream(nothing.closed, nothing.open, false, problems :+ refused), key, None, None, None, identity)
+        val nothing = stream.kept(named, Step.FlatMap[F, K, Change[V], K, Option[R]]((_, _) => Nil))
+        KTable.of[F, K, R, Option](KStream.of(nothing.closed, nothing.open, false, problems :+ refused), key, None, None, None, identity)
 
   /** The table joined with `other`, as Java's `join` of two tables: each key both hold a value for has what `join` makes of the two, and a change to
     * either side changes it. A delete on either side deletes the key from the result, as Java passes on a delete even for a key the result never
     * held. The result is kept in no store; the result of a join that is suppressed needs one, given with the other `join`.
     */
-  def join[VO, C2[_], R](other: KTable[F, K, VO, C2])(join: (V, VO) => R): KTable[F, K, R, Option] = joinedWith(other, Joiner.Inner(join), None)
+  def join[VO, R](named: Named, other: KTable[F, K, VO])(join: (V, VO) => R): KTable.Of[F, K, R, Option] =
+    joinedWith(named, other, Joiner.Inner(join), None)
 
   /** As `join`, the result kept in `store`, its values written with `serde`, as Java's join given a `Materialized` store. */
-  def join[VO, C2[_], R](other: KTable[F, K, VO, C2], store: Store, serde: Serde[F, R])(join: (V, VO) => R): KTable[F, K, R, Option] =
-    joinedWith(other, Joiner.Inner(join), Some((store, serde)))
+  def join[VO, R](named: Named, other: KTable[F, K, VO], store: Store, serde: Serde[F, R])(join: (V, VO) => R): KTable.Of[F, K, R, Option] =
+    joinedWith(named, other, Joiner.Inner(join), Some((store, serde)))
 
   /** The table joined with `other`, as Java's `leftJoin` of two tables: each key this table holds a value for has what `join` makes of it and
     * `other`'s value for the key, if any.
     */
-  def leftJoin[VO, C2[_], R](other: KTable[F, K, VO, C2])(join: (V, Option[VO]) => R): KTable[F, K, R, Option] =
-    joinedWith(other, Joiner.Left(join), None)
+  def leftJoin[VO, R](named: Named, other: KTable[F, K, VO])(join: (V, Option[VO]) => R): KTable.Of[F, K, R, Option] =
+    joinedWith(named, other, Joiner.Left(join), None)
 
   /** As `leftJoin`, the result kept in `store`, its values written with `serde`. */
-  def leftJoin[VO, C2[_], R](other: KTable[F, K, VO, C2], store: Store, serde: Serde[F, R])(join: (V, Option[VO]) => R): KTable[F, K, R, Option] =
-    joinedWith(other, Joiner.Left(join), Some((store, serde)))
+  def leftJoin[VO, R](named: Named, other: KTable[F, K, VO], store: Store, serde: Serde[F, R])(
+      join: (V, Option[VO]) => R
+  ): KTable.Of[F, K, R, Option] = joinedWith(named, other, Joiner.Left(join), Some((store, serde)))
 
   /** The table joined with `other`, as Java's `outerJoin` of two tables: each key either table holds a value for has what `join` makes of this
     * table's value, `other`'s, or both.
     */
-  def outerJoin[VO, C2[_], R](other: KTable[F, K, VO, C2])(join: Ior[V, VO] => R): KTable[F, K, R, Option] =
-    joinedWith(other, Joiner.Outer(join), None)
+  def outerJoin[VO, R](named: Named, other: KTable[F, K, VO])(join: Ior[V, VO] => R): KTable.Of[F, K, R, Option] =
+    joinedWith(named, other, Joiner.Outer(join), None)
 
   /** As `outerJoin`, the result kept in `store`, its values written with `serde`. */
-  def outerJoin[VO, C2[_], R](other: KTable[F, K, VO, C2], store: Store, serde: Serde[F, R])(join: Ior[V, VO] => R): KTable[F, K, R, Option] =
-    joinedWith(other, Joiner.Outer(join), Some((store, serde)))
+  def outerJoin[VO, R](named: Named, other: KTable[F, K, VO], store: Store, serde: Serde[F, R])(join: Ior[V, VO] => R): KTable.Of[F, K, R, Option] =
+    joinedWith(named, other, Joiner.Outer(join), Some((store, serde)))
 
 object KTable:
   /** A change to a table that only ever updates its keys: the new value. */
   type Updated[A] = A
 
+  /** A table whose [[KTable.Change]] is `C`, for annotating one without losing it. */
+  type Of[F[_], K, V, C[_]] = KTable[F, K, V] { type Change[A] = C[A] }
+
   /** The records of `topic` as a table, kept in `store`, as Java's `StreamsBuilder.table` reads it: each record's value replaces its key's, and a
-    * record without a value deletes the key. A record without a key is skipped.
+    * record without a value deletes the key. A record without a key is skipped. Java names the table's source `<named>-source` and the step that
+    * keeps it `named`, as its `Consumed` name names both.
     */
-  def apply[F[_], K, V](topic: Topic, key: Serde[F, K], value: Serde[F, V], store: Store)(using F: cats.Applicative[F]): KTable[F, K, V, Option] =
+  def apply[F[_], K, V](named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V], store: Store)(using
+      F: cats.Applicative[F]
+  ): Of[F, K, V, Option] =
     deleting(
-      KStream(topic, key.option, value.option).step(Step.TableSource(store, key, value), changesKey = false),
+      KStream(Named(s"${named.value}-source"), topic, key.option, value.option).kept(named, Step.TableSource(store, key, value)),
       TableKey.Plain(key),
       TableValue.Optional(value),
       None,
@@ -1121,7 +1246,7 @@ object KTable:
       value: TableValue[F, V],
       grace: Option[Long],
       view: Option[TableView[F, K, V]] = None
-  ): KTable[F, K, V, Updated] = new KTable[F, K, V, Updated](stream, key, Some(value), grace, view, Some(_))
+  ): Of[F, K, V, Updated] = of[F, K, V, Updated](stream, key, Some(value), grace, view, Some(_))
 
   private[xkafka] def deleting[F[_], K, V](
       stream: KStream[F, K, Option[V]],
@@ -1129,7 +1254,28 @@ object KTable:
       value: TableValue[F, Option[V]],
       grace: Option[Long],
       view: Option[TableView[F, K, V]] = None
-  ): KTable[F, K, V, Option] = new KTable[F, K, V, Option](stream, key, Some(value), grace, view, identity)
+  ): Of[F, K, V, Option] = of[F, K, V, Option](stream, key, Some(value), grace, view, identity)
+
+  private[xkafka] def of[F[_], K, V, C[_]](
+      stream: KStream[F, K, C[V]],
+      key: TableKey[F, K],
+      value: Option[TableValue[F, C[V]]],
+      grace: Option[Long],
+      view: Option[TableView[F, K, V]],
+      present: C[V] => Option[V],
+      sourcedFrom: Option[List[Source]] = None
+  ): Of[F, K, V, C] = Built(stream, key, value, grace, view, present, sourcedFrom)
+
+  private final class Built[F[_], K, V, C[_]](
+      private[xkafka] val stream: KStream[F, K, C[V]],
+      private[xkafka] val key: TableKey[F, K],
+      private[xkafka] val value: Option[TableValue[F, C[V]]],
+      private[xkafka] val grace: Option[Long],
+      private[xkafka] val view: Option[TableView[F, K, V]],
+      private[xkafka] val present: C[V] => Option[V],
+      private[xkafka] val sourcedFrom: Option[List[Source]]
+  ) extends KTable[F, K, V]:
+    type Change[A] = C[A]
 
 /** A pipeline from an input topic to an output topic. */
 final class Pipeline[F[_]] private[xkafka] (
@@ -1150,14 +1296,15 @@ object Topology:
   def of[F[_]](first: Pipeline[F], rest: Pipeline[F]*): Either[NonEmptyList[TopologyError], Topology[F]] =
     val pipelines    = NonEmptyList(first, rest.toList)
     val segments     = pipelines.toList.flatMap(_.segments.toList).flatMap(_.all)
-    val stores       = segments.flatMap(segment => segment.origin.stores ++ segment.chain.stores).map(_.name)
-    val repartitions = segments.flatMap(_.origin.sources).collect { case Source.Repartitioned(named) if named.name.nonEmpty => named.name }
+    val stores       = segments.flatMap(segment => segment.origin.stores ++ segment.chain.stores).map(_.value)
+    val steps        = segments.flatMap(segment => segment.origin.names ++ segment.chain.names ++ segment.end.names).map(_.value)
+    val repartitions = segments.flatMap(_.origin.sources).collect { case Source.Repartitioned(named) if named.value.nonEmpty => named.value }
     val inputs       = segments.flatMap(_.origin.sources).collect { case Source.Input(topic) => topic }
     def twice[A](values: List[A]) = values.groupBy(identity).collect { case (value, all) if all.size > 1 => value }.toList
     val problems                  =
-      pipelines.toList.flatMap(_.problems) ++ (stores ++ repartitions).flatMap(invalid) ++
-        twice(stores).sorted.map(TopologyError.DuplicateStore(_)) ++ twice(repartitions).sorted.map(TopologyError.DuplicateRepartition(_)) ++
-        twice(inputs).sortBy(_.value).map(TopologyError.DuplicateSource(_))
+      pipelines.toList.flatMap(_.problems) ++ (stores ++ repartitions ++ steps).flatMap(invalid) ++
+        twice(steps).sorted.map(TopologyError.DuplicateName(_)) ++ twice(stores).sorted.map(TopologyError.DuplicateStore(_)) ++ twice(repartitions)
+          .sorted.map(TopologyError.DuplicateRepartition(_)) ++ twice(inputs).sortBy(_.value).map(TopologyError.DuplicateSource(_))
     NonEmptyList.fromList(problems.distinct).toLeft(new Topology(pipelines))
 
   private def invalid(name: String): Option[TopologyError] =
@@ -1166,6 +1313,7 @@ object Topology:
         (c >= 'A' && c <= 'Z') ||
         (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'
     if name.isEmpty then Some(TopologyError.InvalidName(name, "it is empty"))
+    else if name == "." || name == ".." then Some(TopologyError.InvalidName(name, "it may not be . or .."))
     else if name.length > MaxNameLength then Some(TopologyError.InvalidName(name, s"it is longer than $MaxNameLength characters"))
     else if !name.forall(legal) then Some(TopologyError.InvalidName(name, "it may contain only [a-zA-Z0-9._-]"))
     else None

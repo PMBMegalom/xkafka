@@ -38,7 +38,7 @@ import org.apache.kafka.streams.{KeyValue, StreamsBuilder, StreamsConfig, Topolo
 import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced}
 import org.apache.kafka.streams.state.KeyValueStore
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{KStream, Pipeline, Repartition, Serde, Store, Topology}
+import xkafka.streams.{KStream, Named, Pipeline, Repartition, Serde, Store, Topology}
 
 /** What a task writes and keeps for a program, against what Java Streams' `TopologyTestDriver` writes and keeps for the same program and records,
   * with Java's record cache off so that it, too, passes on every change.
@@ -62,9 +62,11 @@ final class TaskGoldenSuite extends CatsEffectSuite:
 
   test("stateless steps write what Java writes, with each record's timestamp and headers"):
     same(
-      KStream(in, text, text).filter((_, v) => v.nonEmpty).peek((_, _) => IO.unit).map((k, v) => (v, k)).mapValues(_.toUpperCase)
-        .flatMap((k, v) => List(k -> v, s"$k!" -> v)).selectKey((k, v) => k + v).evalMapValues(v => IO.pure(v + v))
-        .evalFilter((k, _) => IO.pure(!k.contains("!"))).evalMap((k, v) => IO.pure((v, s"$k:$v"))).to(out, text, text),
+      KStream(Named("read-1"), in, text, text).filter(Named("filter-1"))((_, v) => v.nonEmpty).peek(Named("peek-1"))((_, _) => IO.unit)
+        .map(Named("map-1"))((k, v) => (v, k)).mapValues(Named("map-values-1"))(_.toUpperCase)
+        .flatMap(Named("flat-map-1"))((k, v) => List(k -> v, s"$k!" -> v)).selectKey(Named("select-key-1"))((k, v) => k + v)
+        .evalMapValues(Named("eval-map-values-1"))(v => IO.pure(v + v)).evalFilter(Named("eval-filter-1"))((k, _) => IO.pure(!k.contains("!")))
+        .evalMap(Named("eval-map-1"))((k, v) => IO.pure((v, s"$k:$v"))).to(Named("write-1"), out, text, text),
       _.stream[String, String]("in").filter((_, v) => v.nonEmpty).peek((_, _) => ()).map((k, v) => KeyValue(v, k)).mapValues(_.toUpperCase)
         .flatMap((k, v) => java.util.List.of(KeyValue(k, v), KeyValue(s"$k!", v))).selectKey((k, v) => k + v).mapValues(v => v + v)
         .filter((k, _) => !k.contains("!")).map((k, v) => KeyValue(v, s"$k:$v")).to("out"),
@@ -73,14 +75,16 @@ final class TaskGoldenSuite extends CatsEffectSuite:
 
   test("counting by key writes and keeps what Java does, a key's timestamp never going back"):
     same(
-      KStream(in, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(out, text, count),
+      KStream(Named("read-2"), in, text, text).groupByKey(text, text).count(Named("count-1"), Store("counts")).toStream(Named("to-stream-1"))
+        .to(Named("write-2"), out, text, count),
       _.stream[String, String]("in").groupByKey.count(Materialized.as("counts")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long)),
       List("counts" -> shown(count.deserializer))
     )
 
   test("grouping by a new key writes and keeps what Java does, through the repartition topic"):
     same(
-      KStream(in, text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v).count(Store("counts")).toStream.to(out, text, count),
+      KStream(Named("read-3"), in, text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v).count(Named("count-2"), Store("counts"))
+        .toStream(Named("to-stream-2")).to(Named("write-3"), out, text, count),
       _.stream[String, String]("in").groupBy((_, v) => v, Grouped.as("by-value")).count(Materialized.as("counts")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
       List("counts" -> shown(count.deserializer))
@@ -88,8 +92,9 @@ final class TaskGoldenSuite extends CatsEffectSuite:
 
   test("reducing and aggregating write and keep what Java does"):
     same(
-      KStream(in, text, text).groupByKey(text, text).reduce(Store("joined"))(_ + _).toStream.groupByKey(text, text)
-        .aggregate(Store("lengths"), count)(10L)((_, v, n) => n + v.length).toStream.to(out, text, count),
+      KStream(Named("read-4"), in, text, text).groupByKey(text, text).reduce(Named("reduce-1"), Store("joined"))(_ + _).toStream(Named("to-stream-3"))
+        .groupByKey(text, text).aggregate(Named("aggregate-1"), Store("lengths"), count)(10L)((_, v, n) => n + v.length)
+        .toStream(Named("to-stream-4")).to(Named("write-4"), out, text, count),
       _.stream[String, String]("in").groupByKey.reduce((x, y) => x + y, Materialized.as("joined")).toStream.groupByKey.aggregate(
         () => java.lang.Long.valueOf(10L),
         (_, v, n) => java.lang.Long.valueOf(n + v.length),
@@ -105,8 +110,8 @@ final class TaskGoldenSuite extends CatsEffectSuite:
         text.deserializer
       )
     same(
-      KStream(in, text, text).groupBy(Repartition("by-value"), keyOrNone, text)((_, v) => if v == "y" then "-" else v).count(Store("counts")).toStream
-        .to(out, text, count),
+      KStream(Named("read-5"), in, text, text).groupBy(Repartition("by-value"), keyOrNone, text)((_, v) => if v == "y" then "-" else v)
+        .count(Named("count-3"), Store("counts")).toStream(Named("to-stream-5")).to(Named("write-5"), out, text, count),
       _.stream[String, String]("in").groupBy((_, v) => if v == "y" then null else v, Grouped.as("by-value")).count(Materialized.as("counts")).toStream
         .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
       List("counts" -> shown(count.deserializer))

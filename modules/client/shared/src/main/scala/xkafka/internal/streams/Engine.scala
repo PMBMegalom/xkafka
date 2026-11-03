@@ -487,7 +487,7 @@ private[xkafka] object Engine:
 
     private def repartitioned(partition: TopicPartition): Boolean =
       segments.values.flatMap(_.origins).exists:
-        case Source.Repartitioned(named) => partition.topic.value == s"$application-${named.name}-repartition"
+        case Source.Repartitioned(named) => partition.topic.value == s"$application-${named.value}-repartition"
         case _                           => false
 
     /** The offset after the last record each task read since the last commit, with that record's leader epoch and the task's partition time. */
@@ -551,7 +551,7 @@ private[xkafka] object Engine:
 
     /** The changelog partitions of a task's stores, with the store each backs. */
     private def changelogsOf(id: TaskId): F[Map[TopicPartition, String]] =
-      segments(id.subtopology).stores.traverse(store => partitionOf(s"$application-${store.name}-changelog", id.partition).map(_ -> store.name))
+      segments(id.subtopology).stores.traverse(store => partitionOf(s"$application-${store.value}-changelog", id.partition).map(_ -> store.value))
         .map(_.toMap)
 
     /** Reads each partition its task holds from where that task is. */

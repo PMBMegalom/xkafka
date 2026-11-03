@@ -47,8 +47,8 @@ final class WindowsSuite extends CatsEffectSuite:
     assertEquals(windows.windowsFor(-1L), Nil)
 
   private def windowed(windows: TimeWindows) =
-    KStream(topic, text, text).groupByKey(text, text).windowedBy(windows).count(Store("counts")).toStream
-      .to(topic, Serde.timeWindowed(text, 1.second), count)
+    KStream(Named("read-1"), topic, text, text).groupByKey(text, text).windowedBy(windows).count(Named("count-1"), Store("counts"))
+      .toStream(Named("to-stream-1")).to(Named("write-1"), topic, Serde.timeWindowed(text, 1.second), count)
 
   test("windows of no size, no advance, an advance past their size, negative grace, or parts of a millisecond are refused"):
     def refused(windows: TimeWindows) = Topology.of(windowed(windows)).left.toOption.map(_.toList)
@@ -96,8 +96,9 @@ final class WindowsSuite extends CatsEffectSuite:
   test("a window store kept for less than its windows' size and grace, or for part of a millisecond, is refused"):
     def kept(retention: FiniteDuration) =
       Topology.of(
-        KStream(topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).withRetention(retention)
-          .count(Store("counts")).toStream.to(topic, Serde.timeWindowed(text, 10.seconds), count)
+        KStream(Named("read-2"), topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+          .withRetention(retention).count(Named("count-2"), Store("counts")).toStream(Named("to-stream-2"))
+          .to(Named("write-2"), topic, Serde.timeWindowed(text, 10.seconds), count)
       ).left.toOption.map(_.toList)
     assertEquals(
       kept(14999.millis),
@@ -110,10 +111,11 @@ final class WindowsSuite extends CatsEffectSuite:
 
   test("sliding windows of a negative time difference, negative grace, parts of a millisecond, or kept too briefly are refused, and of none are not"):
     def refused(windows: SlidingWindows, retention: Option[FiniteDuration] = None) =
-      val windowed = KStream(topic, text, text).groupByKey(text, text).windowedBy(windows)
-      Topology
-        .of(retention.fold(windowed)(windowed.withRetention).count(Store("counts")).toStream.to(topic, Serde.timeWindowed(text, 1.second), count))
-        .left.toOption.map(_.toList)
+      val windowed = KStream(Named("read-3"), topic, text, text).groupByKey(text, text).windowedBy(windows)
+      Topology.of(
+        retention.fold(windowed)(windowed.withRetention).count(Named("count-3"), Store("counts")).toStream(Named("to-stream-3"))
+          .to(Named("write-3"), topic, Serde.timeWindowed(text, 1.second), count)
+      ).left.toOption.map(_.toList)
     assertEquals(
       refused(SlidingWindows.withNoGrace(-1.second)),
       Some(List(TopologyError.InvalidWindows("counts", "the time difference must not be negative, was -1 seconds")))
@@ -136,7 +138,8 @@ final class WindowsSuite extends CatsEffectSuite:
     assertEquals(refused(SlidingWindows.withNoGrace(0.seconds)), None)
 
   private def suppressed(held: Suppressed.UntilTimeLimit) =
-    KStream(topic, text, text).groupByKey(text, text).count(Store("counts")).suppress(held).toStream.to(topic, text, count)
+    KStream(Named("read-4"), topic, text, text).groupByKey(text, text).count(Named("count-4"), Store("counts")).suppress(held)
+      .toStream(Named("to-stream-4")).to(Named("write-4"), topic, text, count)
 
   test("a suppression waiting a negative time or parts of a millisecond, or with a negative limit, is refused, and one waiting no time is not"):
     def refused(held: Suppressed.UntilTimeLimit) = Topology.of(suppressed(held)).left.toOption.map(_.toList)
@@ -164,28 +167,30 @@ final class WindowsSuite extends CatsEffectSuite:
 
   test("a suppression's buffer is a store, whose name no other store may take"):
     val program =
-      KStream(topic, text, text).groupByKey(text, text).count(Store("calm-store")).suppress(Suppressed.untilTimeLimit("calm", 1.second)).toStream
-        .to(topic, text, count)
+      KStream(Named("read-5"), topic, text, text).groupByKey(text, text).count(Named("count-5"), Store("calm-store"))
+        .suppress(Suppressed.untilTimeLimit("calm", 1.second)).toStream(Named("to-stream-5")).to(Named("write-5"), topic, text, count)
     assertEquals(Topology.of(program).left.toOption.map(_.toList), Some(List(TopologyError.DuplicateStore("calm-store"))))
 
   test("only a windowed table waits for its windows to close"):
     assert(
-      compileErrors("""KStream(topic, text, text).groupByKey(text, text).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))""")
-        .nonEmpty
+      compileErrors(
+        """KStream(Named("in"), topic, text, text).groupByKey(text, text).count(Named("count"), Store("counts")).suppress(Suppressed.untilWindowCloses("final"))"""
+      ).nonEmpty
     )
     assertEquals(
       compileErrors(
-        """KStream(topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Store("counts")).suppress(Suppressed.untilWindowCloses("final"))"""
+        """KStream(Named("in"), topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Named("count"), Store("counts")).suppress(Suppressed.untilWindowCloses("final"))"""
       ),
       ""
     )
 
   test("sessions with a negative gap, negative grace, parts of a millisecond, or kept too briefly are refused, and with no gap are not"):
     def refused(windows: SessionWindows, retention: Option[FiniteDuration] = None) =
-      val windowed = KStream(topic, text, text).groupByKey(text, text).windowedBy(windows)
-      Topology
-        .of(retention.fold(windowed)(windowed.withRetention).count(Store("counts")).toStream.to(topic, Serde.sessionWindowed(text), count.option))
-        .left.toOption.map(_.toList)
+      val windowed = KStream(Named("read-6"), topic, text, text).groupByKey(text, text).windowedBy(windows)
+      Topology.of(
+        retention.fold(windowed)(windowed.withRetention).count(Named("count-6"), Store("counts")).toStream(Named("to-stream-6"))
+          .to(Named("write-6"), topic, Serde.sessionWindowed(text), count.option)
+      ).left.toOption.map(_.toList)
     assertEquals(
       refused(SessionWindows.withNoGrace(-1.second)),
       Some(List(TopologyError.InvalidWindows("counts", "the inactivity gap must not be negative, was -1 seconds")))

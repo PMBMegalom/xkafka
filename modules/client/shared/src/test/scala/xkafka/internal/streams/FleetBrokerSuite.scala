@@ -34,7 +34,7 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  JoinWindows, KStream, KTable, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology
+  JoinWindows, KStream, KTable, Named, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology
 }
 
 /** Java Streams and xkafka members in one application while records keep coming, as members join, leave, restart and are killed: counting records by
@@ -103,32 +103,41 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     val topology: Topology[IO] =
       program match
         case Program.Letters => Topology.of(
-            KStream(input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts")).toStream
-              .to(output, text, Serde.long[IO])
+            KStream(Named("read-1"), input, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1))
+              .count(Named("count-1"), Store("counts")).toStream(Named("to-stream-1")).to(Named("write-1"), output, text, Serde.long[IO])
           ).orFail
         case Program.Windows => Topology.of(
-            KStream(inputOf("tumbling"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(5.seconds, grace = 1.hour))
-              .count(Store("tumbling")).toStream.to(outputOf("tumbling"), Serde.timeWindowed(text, 5.seconds), Serde.long[IO]),
-            KStream(inputOf("sliding"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(2500.millis, grace = 1.hour))
-              .count(Store("sliding")).toStream.to(outputOf("sliding"), Serde.timeWindowed(text, 2500.millis), Serde.long[IO]),
-            KStream(inputOf("sessions"), text, text).groupByKey(text, text).windowedBy(SessionWindows(1500.millis, grace = 1.hour))
-              .count(Store("sessions")).toStream.to(outputOf("sessions"), Serde.sessionWindowed(text), Serde.long[IO].option)
+            KStream(Named("tumbling"), inputOf("tumbling"), text, text).groupByKey(text, text)
+              .windowedBy(TimeWindows.tumbling(5.seconds, grace = 1.hour)).count(Named("count-2"), Store("tumbling")).toStream(Named("to-stream-2"))
+              .to(Named("write-2"), outputOf("tumbling"), Serde.timeWindowed(text, 5.seconds), Serde.long[IO]),
+            KStream(Named("sliding"), inputOf("sliding"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(2500.millis, grace = 1.hour))
+              .count(Named("count-3"), Store("sliding")).toStream(Named("to-stream-3"))
+              .to(Named("write-3"), outputOf("sliding"), Serde.timeWindowed(text, 2500.millis), Serde.long[IO]),
+            KStream(Named("sessions"), inputOf("sessions"), text, text).groupByKey(text, text).windowedBy(SessionWindows(1500.millis, grace = 1.hour))
+              .count(Named("count-4"), Store("sessions")).toStream(Named("to-stream-4"))
+              .to(Named("write-4"), outputOf("sessions"), Serde.sessionWindowed(text), Serde.long[IO].option)
           ).orFail
         case Program.Joins => Topology.of(
-            KStream(inputOf("orders"), text, text).join(KTable(inputOf("users"), text, text, Store("users")))((order, user) => s"$order:$user")
-              .to(output, text, text)
+            KStream(Named("orders"), inputOf("orders"), text, text)
+              .join(Named("join-users"), KTable(Named("users"), inputOf("users"), text, text, Store("users")))((order, user) => s"$order:$user")
+              .to(Named("write-5"), output, text, text)
           ).orFail
         case Program.Tables => Topology.of(
-            KTable(inputOf("plans"), text, text, Store("plans"))
-              .leftJoin(KTable(inputOf("users"), text, text, Store("users")), Store("accounts"), text)((plan, user) =>
-                s"$plan:${user.getOrElse("-")}"
-              ).toStream.to(output, text, text.option)
+            KTable(Named("plans"), inputOf("plans"), text, text, Store("plans"))
+              .leftJoin(Named("left-join-users"), KTable(Named("users"), inputOf("users"), text, text, Store("users")), Store("accounts"), text)(
+                (plan, user) => s"$plan:${user.getOrElse("-")}"
+              ).toStream(Named("to-stream-5")).to(Named("write-6"), output, text, text.option)
           ).orFail
         case Program.Pairs => Topology.of(
-            KStream(inputOf("orders"), text, text)
-              .join(KStream(inputOf("users"), text, text), JoinWindows(1.hour, grace = 1.hour), Store("pairs"), text, text, text)((order, user) =>
-                s"$order:$user"
-              ).to(output, text, text)
+            KStream(Named("orders"), inputOf("orders"), text, text).join(
+              Named("pairs"),
+              KStream(Named("users"), inputOf("users"), text, text),
+              JoinWindows(1.hour, grace = 1.hour),
+              Store("pairs"),
+              text,
+              text,
+              text
+            )((order, user) => s"$order:$user").to(Named("write-7"), output, text, text)
           ).orFail
 
     private def command(text: String): IO[Unit] =

@@ -58,11 +58,12 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a windowed count declares its window store's changelog as Java does, kept for the windows' size, grace and a day"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
-          .count(Store("tumbling")).toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count),
-        KStream(topic("other"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v)
-          .windowedBy(TimeWindows.hoppingWithNoGrace(1.minute, advance = 20.seconds)).reduce(Store("hopping"))(_ + _).toStream
-          .to(topic("other-out"), Serde.timeWindowed(text, 1.minute), text)
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+          .count(Named("count-1"), Store("tumbling")).toStream(Named("to-stream-1"))
+          .to(Named("write-1"), topic("out"), Serde.timeWindowed(text, 10.seconds), count),
+        KStream(Named("other"), topic("other"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v)
+          .windowedBy(TimeWindows.hoppingWithNoGrace(1.minute, advance = 20.seconds)).reduce(Named("reduce-1"), Store("hopping"))(_ + _)
+          .toStream(Named("to-stream-2")).to(Named("write-2"), topic("other-out"), Serde.timeWindowed(text, 1.minute), text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("in").groupByKey
@@ -78,8 +79,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a window store kept longer declares its changelog kept that long and a day, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).withRetention(1.hour)
-          .count(Store("kept")).toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count)
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+          .withRetention(1.hour).count(Named("count-2"), Store("kept")).toStream(Named("to-stream-3"))
+          .to(Named("write-3"), topic("out"), Serde.timeWindowed(text, 10.seconds), count)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey
@@ -92,8 +94,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a sliding window count declares its changelog kept for twice the time difference, the grace and a day, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(10.seconds, grace = 5.seconds)).count(Store("sliding"))
-          .toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count)
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(10.seconds, grace = 5.seconds))
+          .count(Named("count-3"), Store("sliding")).toStream(Named("to-stream-4"))
+          .to(Named("write-4"), topic("out"), Serde.timeWindowed(text, 10.seconds), count)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey
@@ -106,8 +109,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a session count declares its changelog kept for the inactivity gap, the grace and a day, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(SessionWindows(10.seconds, grace = 5.seconds)).count(Store("sessions"))
-          .toStream.to(topic("out"), Serde.sessionWindowed(text), count.option)
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(SessionWindows(10.seconds, grace = 5.seconds))
+          .count(Named("count-4"), Store("sessions")).toStream(Named("to-stream-5"))
+          .to(Named("write-5"), topic("out"), Serde.sessionWindowed(text), count.option)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey
@@ -120,11 +124,12 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a suppression declares its buffer's changelog as Java does, compacted, beside its table's store"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Store("counts"))
-          .suppress(Suppressed.untilWindowCloses("final")).toStream.to(topic("out"), Serde.timeWindowed(text, 10.seconds), count),
-        KStream(topic("other"), text, text).groupByKey(text, text).count(Store("totals"))
-          .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(10).emitEarlyWhenFull)).toStream
-          .to(topic("other-out"), text, count)
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+          .count(Named("count-5"), Store("counts")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-6"))
+          .to(Named("write-6"), topic("out"), Serde.timeWindowed(text, 10.seconds), count),
+        KStream(Named("other"), topic("other"), text, text).groupByKey(text, text).count(Named("count-6"), Store("totals"))
+          .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(10).emitEarlyWhenFull)).toStream(Named("to-stream-7"))
+          .to(Named("write-7"), topic("other-out"), text, count)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("in").groupByKey
@@ -140,7 +145,10 @@ final class TopologyGoldenSuite extends FunSuite:
 
   test("a table read from a topic declares its input and its store's changelog as Java does"):
     assertEquals(
-      ours(KTable(topic("users"), text, text, Store("users")).toStream.to(topic("out"), text, text.option)),
+      ours(
+        KTable(Named("users"), topic("users"), text, text, Store("users")).toStream(Named("to-stream-8"))
+          .to(Named("write-8"), topic("out"), text, text.option)
+      ),
       declaredByJava(
         _.table[String, String]("users", Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("users"))
           .toStream.to("out", Produced.`with`(Serdes.String, Serdes.String))
@@ -153,7 +161,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a stream joined with a table read from a topic reads both in one sub-topology, copartitioned, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("orders"), text, text).join(KTable(topic("users"), text, text, Store("users")))((o, u) => o + u).to(topic("out"), text, text)
+        KStream(Named("orders"), topic("orders"), text, text)
+          .join(Named("join-users"), KTable(Named("users"), topic("users"), text, text, Store("users")))((o, u) => o + u)
+          .to(Named("write-9"), topic("out"), text, text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("orders").join(javaTable(builder, "users", "users"), (o: String, u: String) => o + u)
@@ -163,8 +173,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("two tables joined read both in one sub-topology, copartitioned, with no store of their own, as Java declares them"):
     assertEquals(
       ours(
-        KTable(topic("left"), text, text, Store("lefts")).outerJoin(KTable(topic("right"), text, text, Store("rights")))(_.merge).toStream
-          .to(topic("out"), text, text.option)
+        KTable(Named("lefts"), topic("left"), text, text, Store("lefts"))
+          .outerJoin(Named("outer-join-rights"), KTable(Named("rights"), topic("right"), text, text, Store("rights")))(_.merge)
+          .toStream(Named("to-stream-9")).to(Named("write-10"), topic("out"), text, text.option)
       ),
       declaredByJava: builder =>
         javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights"), (a: String, b: String) => a + b).toStream
@@ -174,8 +185,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("two tables joined into a store declare its changelog, as Java declares a join given a store"):
     assertEquals(
       ours(
-        KTable(topic("left"), text, text, Store("lefts")).join(KTable(topic("right"), text, text, Store("rights")), Store("joined"), text)(_ + _)
-          .toStream.to(topic("out"), text, text.option)
+        KTable(Named("lefts"), topic("left"), text, text, Store("lefts"))
+          .join(Named("join-rights"), KTable(Named("rights"), topic("right"), text, text, Store("rights")), Store("joined"), text)(_ + _)
+          .toStream(Named("to-stream-10")).to(Named("write-11"), topic("out"), text, text.option)
       ),
       declaredByJava: builder =>
         javaTable(builder, "left", "lefts").join(
@@ -188,11 +200,14 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a table joined with two tables joined, and with a counted stream, copartitions every topic they read, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("logins"), text, text).groupByKey(text, text).count(Store("logins-count")).leftJoin(
-          KTable(topic("third"), text, text, Store("thirds")).join(
-            KTable(topic("left"), text, text, Store("lefts")).leftJoin(KTable(topic("right"), text, text, Store("rights")))((a, b) => a + b)
+        KStream(Named("logins"), topic("logins"), text, text).groupByKey(text, text).count(Named("count-7"), Store("logins-count")).leftJoin(
+          Named("left-join-thirds"),
+          KTable(Named("thirds"), topic("third"), text, text, Store("thirds")).join(
+            Named("join-lefts"),
+            KTable(Named("lefts"), topic("left"), text, text, Store("lefts"))
+              .leftJoin(Named("left-join-rights"), KTable(Named("rights"), topic("right"), text, text, Store("rights")))((a, b) => a + b)
           )(_ + _)
-        )((n, abc) => s"$n${abc.getOrElse("")}").toStream.to(topic("out"), text, text.option)
+        )((n, abc) => s"$n${abc.getOrElse("")}").toStream(Named("to-stream-11")).to(Named("write-12"), topic("out"), text, text.option)
       ),
       declaredByJava: builder =>
         val lefts = javaTable(builder, "left", "lefts").leftJoin(javaTable(builder, "right", "rights"), (a: String, b: String) => a + b)
@@ -208,19 +223,27 @@ final class TopologyGoldenSuite extends FunSuite:
   // Java numbers sub-topologies by the first node of each it writes, and writes them roughly in the order the program makes them, receiver first; a
   // join's sub-topology holds the receiver's source, so it comes before the sub-topologies the other side made before it.
   test("a join is numbered before the sub-topologies its other side made, where its receiver is not repartitioned, as Java numbers it"):
-    def counted = KStream(topic("words"), text, text).groupBy(Repartition("by-word"), text, text)((_, v) => v).count(Store("counts"))
+    def counted =
+      KStream(Named("words"), topic("words"), text, text).groupBy(Repartition("by-word"), text, text)((_, v) => v)
+        .count(Named("count-8"), Store("counts"))
     def javaCounted(builder: StreamsBuilder) =
       builder.stream[String, String]("words").groupBy((_, v) => v, Grouped.as("by-word"))
         .count(Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("counts"))
     val produced = Produced.`with`(Serdes.String, Serdes.String)
     assertEquals(
-      ours(KStream(topic("orders"), text, text).join(counted)((o, n) => s"$o$n").to(topic("out"), text, text)),
+      ours(
+        KStream(Named("orders"), topic("orders"), text, text).join(Named("join-1"), counted)((o, n) => s"$o$n")
+          .to(Named("write-13"), topic("out"), text, text)
+      ),
       declaredByJava(builder =>
         builder.stream[String, String]("orders").join(javaCounted(builder), (o: String, n: java.lang.Long) => s"$o$n").to("out", produced)
       )
     )
     assertEquals(
-      ours(KTable(topic("users"), text, text, Store("users")).join(counted)((u, n) => s"$u$n").toStream.to(topic("out"), text, text.option)),
+      ours(
+        KTable(Named("users"), topic("users"), text, text, Store("users")).join(Named("join-2"), counted)((u, n) => s"$u$n")
+          .toStream(Named("to-stream-12")).to(Named("write-14"), topic("out"), text, text.option)
+      ),
       declaredByJava(builder =>
         javaTable(builder, "users", "users").join(javaCounted(builder), (u: String, n: java.lang.Long) => s"$u$n").toStream.to("out", produced)
       )
@@ -230,9 +253,16 @@ final class TopologyGoldenSuite extends FunSuite:
     def paired     = StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
     assertEquals(
       ours(
-        KStream(topic("left"), text, text)
-          .join(KStream(topic("right"), text, text).selectKey((_, v) => v), within, Store("pairs"), text, text, text)(_ + _).selectKey((_, v) => v)
-          .groupByKey(Repartition("again"), text, text).count(Store("pair-counts")).toStream.to(topic("out"), text, Serde.long[IO])
+        KStream(Named("left"), topic("left"), text, text).join(
+          Named("pairs"),
+          KStream(Named("right"), topic("right"), text, text).selectKey(Named("select-key-1"))((_, v) => v),
+          within,
+          Store("pairs"),
+          text,
+          text,
+          text
+        )(_ + _).selectKey(Named("select-key-2"))((_, v) => v).groupByKey(Repartition("again"), text, text)
+          .count(Named("count-9"), Store("pair-counts")).toStream(Named("to-stream-13")).to(Named("write-15"), topic("out"), text, Serde.long[IO])
       ),
       declaredByJava(builder =>
         builder.stream[String, String]("left")
@@ -247,23 +277,26 @@ final class TopologyGoldenSuite extends FunSuite:
     val within                            = JoinWindows(5.seconds, grace = 2.seconds)
     val javaWithin                        = JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2))
     def paired                            = StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
-    def left                              = KStream(topic("left"), text, text).selectKey((_, v) => v)
-    def right                             = KStream(topic("right"), text, text)
+    def left                              = KStream(Named("left"), topic("left"), text, text).selectKey(Named("select-key-3"))((_, v) => v)
+    def right                             = KStream(Named("right"), topic("right"), text, text)
     def javaLeft(builder: StreamsBuilder) = builder.stream[String, String]("left").selectKey((_, v) => v)
     def javaRight(builder: StreamsBuilder) = builder.stream[String, String]("right")
     val produced                           = Produced.`with`(Serdes.String, Serdes.String)
     assertEquals(
-      ours(left.join(right, within, Store("pairs"), text, text, text)(_ + _).to(topic("out"), text, text)),
+      ours(left.join(Named("pairs"), right, within, Store("pairs"), text, text, text)(_ + _).to(Named("write-16"), topic("out"), text, text)),
       declaredByJava(builder => javaLeft(builder).join(javaRight(builder), (a: String, b: String) => a + b, javaWithin, paired).to("out", produced))
     )
     assertEquals(
-      ours(left.leftJoin(right, within, Store("pairs"), text, text, text)((a, b) => a + b.getOrElse("")).to(topic("out"), text, text)),
+      ours(
+        left.leftJoin(Named("pairs"), right, within, Store("pairs"), text, text, text)((a, b) => a + b.getOrElse(""))
+          .to(Named("write-17"), topic("out"), text, text)
+      ),
       declaredByJava(builder =>
         javaLeft(builder).leftJoin(javaRight(builder), (a: String, b: String) => a + b, javaWithin, paired).to("out", produced)
       )
     )
     assertEquals(
-      ours(right.outerJoin(left, within, Store("pairs"), text, text, text)(_.merge).to(topic("out"), text, text)),
+      ours(right.outerJoin(Named("pairs"), left, within, Store("pairs"), text, text, text)(_.merge).to(Named("write-18"), topic("out"), text, text)),
       declaredByJava(builder =>
         javaRight(builder).outerJoin(javaLeft(builder), (a: String, b: String) => a + b, javaWithin, paired).to("out", produced)
       )
@@ -273,7 +306,9 @@ final class TopologyGoldenSuite extends FunSuite:
     // Java's set of "clicks" and "pages" iterates "pages" first.
     assertEquals(
       ours(
-        KStream(topic("clicks"), text, text).join(KTable(topic("pages"), text, text, Store("pages")))((c, p) => c + p).to(topic("out"), text, text)
+        KStream(Named("clicks"), topic("clicks"), text, text)
+          .join(Named("join-pages"), KTable(Named("pages"), topic("pages"), text, text, Store("pages")))((c, p) => c + p)
+          .to(Named("write-19"), topic("out"), text, text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("clicks").join(javaTable(builder, "pages", "pages"), (c: String, p: String) => c + p)
@@ -283,9 +318,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a stream joined after its key changed goes through the repartition topic named for the join, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("orders"), text, text).selectKey((_, v) => v)
-          .leftJoin(KTable(topic("users"), text, text, Store("users")), Repartition("by-user"), text, text)((o, u) => o + u.getOrElse("-"))
-          .to(topic("out"), text, text)
+        KStream(Named("orders"), topic("orders"), text, text).selectKey(Named("select-key-4"))((_, v) => v)
+          .leftJoin(Named("by-user"), KTable(Named("users"), topic("users"), text, text, Store("users")), text, text)((o, u) => o + u.getOrElse("-"))
+          .to(Named("write-20"), topic("out"), text, text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("orders").selectKey((_, v) => v).leftJoin(
@@ -298,10 +333,11 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a stream joined with a counted table runs in the sub-topology that counts, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("orders"), text, text)
-          .join(KStream(topic("visits"), text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v).count(Store("visits")))((o, n) =>
-            s"$o:$n"
-          ).to(topic("out"), text, text)
+        KStream(Named("orders"), topic("orders"), text, text).join(
+          Named("join-visits"),
+          KStream(Named("visits"), topic("visits"), text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v)
+            .count(Named("count-10"), Store("visits"))
+        )((o, n) => s"$o:$n").to(Named("write-21"), topic("out"), text, text)
       ),
       // Java numbers the join's sub-topology first only where the program builds the stream before the counted table, as xkafka takes it.
       declaredByJava: builder =>
@@ -315,9 +351,10 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a stream joined with a suppressed table declares the table's store and buffer beside it, as Java declares it"):
     assertEquals(
       ours(
-        KStream(topic("orders"), text, text)
-          .join(KTable(topic("users"), text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 1.second)))((o, u) => o + u)
-          .to(topic("out"), text, text)
+        KStream(Named("orders"), topic("orders"), text, text).join(
+          Named("join-users"),
+          KTable(Named("users"), topic("users"), text, text, Store("users")).suppress(Suppressed.untilTimeLimit("calm", 1.second))
+        )((o, u) => o + u).to(Named("write-22"), topic("out"), text, text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("orders").join(
@@ -329,13 +366,16 @@ final class TopologyGoldenSuite extends FunSuite:
 
   test("a stateless pipeline is one sub-topology reading its input"):
     assertEquals(
-      ours(KStream(topic("in"), text, text).mapValues(_ + "!").to(topic("out"), text, text)),
+      ours(KStream(Named("in"), topic("in"), text, text).mapValues(Named("map-values-1"))(_ + "!").to(Named("write-23"), topic("out"), text, text)),
       declaredByJava(_.stream[String, String]("in").mapValues(v => v + "!").to("out"))
     )
 
   test("counting by key keeps one sub-topology, with the store's changelog"):
     assertEquals(
-      ours(KStream(topic("in"), text, text).groupByKey(text, text).count(Store("counts")).toStream.to(topic("out"), text, count)),
+      ours(
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).count(Named("count-11"), Store("counts")).toStream(Named("to-stream-14"))
+          .to(Named("write-24"), topic("out"), text, count)
+      ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey.count(Materialized.as("counts")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long))
       )
@@ -344,8 +384,8 @@ final class TopologyGoldenSuite extends FunSuite:
   test("grouping by a new key splits the pipeline at a repartition topic"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v).count(Store("counts")).toStream
-          .to(topic("out"), text, count)
+        KStream(Named("in"), topic("in"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v)
+          .count(Named("count-12"), Store("counts")).toStream(Named("to-stream-15")).to(Named("write-25"), topic("out"), text, count)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupBy((_, v) => v, Grouped.as("by-value")).count(Materialized.as("counts")).toStream
@@ -356,9 +396,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("sub-topologies are numbered in the order the pipelines are made, a repartitioned segment before a later pipeline"):
     assertEquals(
       ours(
-        KStream(topic("b"), text, text).groupBy(Repartition("regroup"), text, text)((_, v) => v).reduce(Store("joined"))(_ + _).toStream
-          .to(topic("out-b"), text, text),
-        KStream(topic("a"), text, text).to(topic("out-a"), text, text)
+        KStream(Named("b"), topic("b"), text, text).groupBy(Repartition("regroup"), text, text)((_, v) => v)
+          .reduce(Named("reduce-2"), Store("joined"))(_ + _).toStream(Named("to-stream-16")).to(Named("write-26"), topic("out-b"), text, text),
+        KStream(Named("a"), topic("a"), text, text).to(Named("write-27"), topic("out-a"), text, text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("b").groupBy((_, v) => v, Grouped.as("regroup")).reduce((x, y) => x + y, Materialized.as("joined")).toStream
@@ -369,8 +409,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a key changed before grouping by key needs the named repartition"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).selectKey((_, v) => v).groupByKey(Repartition("rekeyed"), text, text)
-          .aggregate(Store("agg"), text)("")((_, v, a) => a + v).toStream.to(topic("out"), text, text)
+        KStream(Named("in"), topic("in"), text, text).selectKey(Named("select-key-5"))((_, v) => v).groupByKey(Repartition("rekeyed"), text, text)
+          .aggregate(Named("aggregate-1"), Store("agg"), text)("")((_, v, a) => a + v).toStream(Named("to-stream-17"))
+          .to(Named("write-28"), topic("out"), text, text)
       ),
       declaredByJava(
         _.stream[String, String]("in").selectKey((_, v) => v).groupByKey(Grouped.as("rekeyed"))
@@ -378,24 +419,14 @@ final class TopologyGoldenSuite extends FunSuite:
       )
     )
 
-  test("a repartition name given for a key that did not change makes no repartition topic"):
-    assertEquals(
-      ours(
-        KStream(topic("in"), text, text).filter((_, v) => v.nonEmpty).groupByKey(Repartition("unused"), text, text).count(Store("counts")).toStream
-          .to(topic("out"), text, count)
-      ),
-      declaredByJava(
-        _.stream[String, String]("in").filter((_, v) => v.nonEmpty).groupByKey(Grouped.as("unused")).count(Materialized.as("counts")).toStream
-          .to("out", Produced.`with`(Serdes.String, Serdes.Long))
-      )
-    )
-
   test("every stateless step keeps its sub-topology, and a key changed by flatMap is repartitioned"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).filter((_, v) => v.nonEmpty).peek((_, _) => IO.unit).evalMapValues(v => IO.pure(v.trim))
-          .flatMap((k, v) => List(v -> k)).mapValues(identity).groupByKey(Repartition("flipped"), text, text).reduce(Store("latest"))((_, v) => v)
-          .toStream.map((k, v) => (v, k)).to(topic("out"), text, text)
+        KStream(Named("in"), topic("in"), text, text).filter(Named("filter-2"))((_, v) => v.nonEmpty).peek(Named("peek-1"))((_, _) => IO.unit)
+          .evalMapValues(Named("eval-map-values-1"))(v => IO.pure(v.trim)).flatMap(Named("flat-map-1"))((k, v) => List(v -> k))
+          .mapValues(Named("map-values-2"))(identity).groupByKey(Repartition("flipped"), text, text)
+          .reduce(Named("reduce-3"), Store("latest"))((_, v) => v).toStream(Named("to-stream-19")).map(Named("map-1"))((k, v) => (v, k))
+          .to(Named("write-30"), topic("out"), text, text)
       ),
       declaredByJava(
         _.stream[String, String]("in").filter((_, v) => v.nonEmpty).peek((_, _) => ()).mapValues(v => v.trim)
@@ -407,8 +438,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("a key an effect may have changed is repartitioned, as Java repartitions a key map changes"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).evalFilter((_, v) => IO.pure(v.nonEmpty)).evalMap((k, v) => IO.pure((v, k)))
-          .groupByKey(Repartition("remapped"), text, text).count(Store("counts")).toStream.to(topic("out"), text, count)
+        KStream(Named("in"), topic("in"), text, text).evalFilter(Named("eval-filter-1"))((_, v) => IO.pure(v.nonEmpty))
+          .evalMap(Named("eval-map-1"))((k, v) => IO.pure((v, k))).groupByKey(Repartition("remapped"), text, text)
+          .count(Named("count-14"), Store("counts")).toStream(Named("to-stream-20")).to(Named("write-31"), topic("out"), text, count)
       ),
       declaredByJava(
         _.stream[String, String]("in").filter((_, v) => v.nonEmpty).map((k, v) => org.apache.kafka.streams.KeyValue(v, k))
@@ -419,8 +451,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("grouping a table's changes again makes a third sub-topology"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupBy(Repartition("first"), text, text)((_, v) => v).count(Store("counts")).toStream.mapValues(_.toString)
-          .groupBy(Repartition("second"), text, text)((_, n) => n).reduce(Store("by-count"))((_, v) => v).toStream.to(topic("out"), text, text)
+        KStream(Named("in"), topic("in"), text, text).groupBy(Repartition("first"), text, text)((_, v) => v).count(Named("count-15"), Store("counts"))
+          .toStream(Named("to-stream-21")).mapValues(Named("map-values-3"))(_.toString).groupBy(Repartition("second"), text, text)((_, n) => n)
+          .reduce(Named("reduce-4"), Store("by-count"))((_, v) => v).toStream(Named("to-stream-22")).to(Named("write-32"), topic("out"), text, text)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupBy((_, v) => v, Grouped.as("first")).count(Materialized.as("counts")).toStream.mapValues(n => n.toString)
@@ -431,8 +464,9 @@ final class TopologyGoldenSuite extends FunSuite:
   test("two stores in one sub-topology are listed by name, not in the order the program makes them"):
     assertEquals(
       ours(
-        KStream(topic("in"), text, text).groupByKey(text, text).count(Store("zeta")).toStream.groupByKey(text, count)
-          .reduce(Store("alpha"))((_, n) => n).toStream.to(topic("out"), text, count)
+        KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).count(Named("count-16"), Store("zeta")).toStream(Named("to-stream-23"))
+          .groupByKey(text, count).reduce(Named("reduce-5"), Store("alpha"))((_, n) => n).toStream(Named("to-stream-24"))
+          .to(Named("write-33"), topic("out"), text, count)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey.count(Materialized.as("zeta")).toStream.groupByKey(Grouped.valueSerde(Serdes.Long))

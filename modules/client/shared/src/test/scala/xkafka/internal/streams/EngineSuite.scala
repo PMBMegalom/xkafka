@@ -37,8 +37,8 @@ import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  BufferLimit, KafkaStreams, KStream, KTable, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState, Suppressed,
-  TimeWindows, Topology
+  BufferLimit, KafkaStreams, KStream, KTable, Named, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState,
+  Suppressed, TimeWindows, Topology
 }
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
@@ -377,8 +377,9 @@ final class EngineSuite extends CatsEffectSuite:
   test("an application joining topics it cannot list in Java's order says so in its state, and one joining topics it can does not"):
     def joined(table: String) =
       Topology.of(
-        KStream(Topic.from("orders").orFail, text, text).join(KTable(Topic.from(table).orFail, text, text, Store("t")))(_ + _)
-          .to(Topic.from("out").orFail, text, text)
+        KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+          .join(Named("join-t"), KTable(Named("t"), Topic.from(table).orFail, text, text, Store("t")))(_ + _)
+          .to(Named("write-1"), Topic.from("out").orFail, text, text)
       ).orFail
     assertEquals(Declaration.unordered("app", joined("owners")), List(List("orders", "owners")))
     assertEquals(Declaration.unordered("app", joined("users")), Nil)
@@ -390,9 +391,14 @@ final class EngineSuite extends CatsEffectSuite:
         )
 
   test("an application joining an input that has sub-topologies of its own says in its state that Java numbers them by its program's build order"):
-    val counted = KStream(Topic.from("visits").orFail, text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v).count(Store("visits"))
-    val joined  =
-      Topology.of(KStream(Topic.from("orders").orFail, text, text).join(counted)((o, n) => s"$o$n").to(Topic.from("out").orFail, text, text)).orFail
+    val counted =
+      KStream(Named("visits"), Topic.from("visits").orFail, text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v)
+        .count(Named("count-1"), Store("visits"))
+    val joined =
+      Topology.of(
+        KStream(Named("orders"), Topic.from("orders").orFail, text, text).join(Named("join-1"), counted)((o, n) => s"$o$n")
+          .to(Named("write-2"), Topic.from("out").orFail, text, text)
+      ).orFail
     watchedOf(joined): (world, _) =>
       IO.sleep(100.millis) *> world.states.get.map: states =>
         assertEquals(
@@ -574,9 +580,10 @@ final class EngineSuite extends CatsEffectSuite:
   test("a suppression's buffer set to shut down when full stops the engine with an error once it holds more"):
     val full =
       Topology.of(
-        KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
-          .count(Store("windows")).suppress(Suppressed.untilWindowCloses("final", BufferLimit.records(1).shutDownWhenFull)).toStream
-          .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+        KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text)
+          .windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Named("count-2"), Store("windows"))
+          .suppress(Suppressed.untilWindowCloses("final", BufferLimit.records(1).shutDownWhenFull)).toStream(Named("to-stream-1"))
+          .to(Named("write-3"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
       ).orFail
     run(topology = full): world =>
       world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis) *> world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(500.millis) *>
@@ -762,51 +769,55 @@ object EngineSuite:
   /** Counts by the value's first letter, through the repartition topic `app-by-letter-repartition`, read by the tasks of sub-topology 1. */
   private val byLetter: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts"))
-        .toStream.to(Topic.from("out").orFail, text, Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1))
+        .count(Named("count-3"), Store("counts")).toStream(Named("to-stream-2")).to(Named("write-4"), Topic.from("out").orFail, text, Serde.long[IO])
     ).orFail
 
   /** Waits a second over each value, then writes it unchanged. */
   private val slow: Topology[IO] =
-    Topology
-      .of(KStream(Topic.from("in").orFail, text, text).evalMapValues(value => IO.sleep(1.second).as(value)).to(Topic.from("out").orFail, text, text))
-      .orFail
+    Topology.of(
+      KStream(Named("in"), Topic.from("in").orFail, text, text).evalMapValues(Named("eval-map-values-1"))(value => IO.sleep(1.second).as(value))
+        .to(Named("write-5"), Topic.from("out").orFail, text, text)
+    ).orFail
 
   /** Counts each key's records in tumbling windows of 10 s with 5 s of grace, in the window store `windows`. */
   private val windowing: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
-        .count(Store("windows")).toStream.to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-4"), Store("windows")).toStream(Named("to-stream-3"))
+        .to(Named("write-6"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
     ).orFail
 
   /** Counts as `windowing` does, keeping windows a minute and emitting each once it closes. */
   private val emitting: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
-        .withRetention(1.minute).emitOnWindowClose.count(Store("windows")).toStream
-        .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .withRetention(1.minute).emitOnWindowClose.count(Named("count-5"), Store("windows")).toStream(Named("to-stream-4"))
+        .to(Named("write-7"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
     ).orFail
 
   /** Counts as `windowing` does, passing on each window's final result once it closes. */
   private val suppressing: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
-        .count(Store("windows")).suppress(Suppressed.untilWindowCloses("final")).toStream
-        .to(Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-6"), Store("windows")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-5"))
+        .to(Named("write-8"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
     ).orFail
 
   /** Joins each order with its user. */
   private val joining: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("orders").orFail, text, text).join(KTable(Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
-        .to(Topic.from("out").orFail, text, text)
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+        .join(Named("join-users"), KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+        .to(Named("write-9"), Topic.from("out").orFail, text, text)
     ).orFail
 
   /** Counts each key's records in sessions with a gap of 5 s and 5 s of grace, in the session store `sessions`. */
   private val sessioning: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 5.seconds))
-        .count(Store("sessions")).toStream.to(Topic.from("out").orFail, Serde.sessionWindowed(text), Serde.long[IO].option)
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 5.seconds))
+        .count(Named("count-7"), Store("sessions")).toStream(Named("to-stream-6"))
+        .to(Named("write-10"), Topic.from("out").orFail, Serde.sessionWindowed(text), Serde.long[IO].option)
     ).orFail
 
   private def session(key: String, start: Long, end: Long): Chunk[Byte] = SessionStore.key(Chunk.array(key.getBytes), start, end)
@@ -817,8 +828,8 @@ object EngineSuite:
 
   private val counting: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).count(Store("counts")).toStream
-        .to(Topic.from("out").orFail, text, Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count-8"), Store("counts"))
+        .toStream(Named("to-stream-7")).to(Named("write-11"), Topic.from("out").orFail, text, Serde.long[IO])
     ).orFail
 
   def partition(topic: String, n: Int): TopicPartition = TopicPartition(Topic.from(topic).orFail, Partition.from(n).orFail)
