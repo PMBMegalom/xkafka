@@ -401,15 +401,20 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           )(_.fold(order => s"$order:-", payment => s"-:$payment", (order, payment) => s"$order:$payment")).to(output, text, text)
       ): app =>
         val payments = Topic.from(s"${app.input.value}-payments").orFail
-        // Java looks for held records whose windows have closed at most once a second by the wall clock, when a record comes at the stream time:
-        // records well after the windows, to keys on every partition, each second, until a look sends the held ones on.
-        val closing =
-          fs2.Stream.iterate(1L)(_ + 1).evalMap(n => produceAt(server, app.input, (0 until 10).toList.map(i => s"z$i" -> (60000L + n * 1000L))))
-            .metered(1.second).compile.drain
-        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(payments, 2, 1).orFail))) *> running(server, app):
-          produceAt(server, app.input, List("a" -> 1000L, "b" -> 2000L)) *> produceAt(server, payments, List("a" -> 1500L, "c" -> 3000L)) *>
-            heldValues(server, app.output, Map("a" -> Some("a-value:a-value"))) *> closing.background.surround:
-              heldValues(server, app.output, Map("a" -> Some("a-value:a-value"), "b" -> Some("b-value:-"), "c" -> Some("-:c-value")))
+        // Times five minutes back, as the other tests take them, so that no topic's retention removes the records.
+        IO.realTime.flatMap: now =>
+          val at = (now.toMillis / 60000L - 5L) * 60000L
+          // Java looks for held records whose windows have closed at most once a second by the wall clock, when a record comes at the stream time:
+          // records well after the windows, to keys on every partition, each second, until a look sends the held ones on.
+          val closing =
+            fs2.Stream.iterate(1L)(_ + 1)
+              .evalMap(n => produceAt(server, app.input, (0 until 10).toList.map(i => s"z$i" -> (at + 60000L + n * 1000L)))).metered(1.second).compile
+              .drain
+          admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(payments, 2, 1).orFail))) *> running(server, app):
+            produceAt(server, app.input, List("a" -> (at + 1000L), "b" -> (at + 2000L))) *>
+              produceAt(server, payments, List("a" -> (at + 1500L), "c" -> (at + 3000L))) *>
+              heldValues(server, app.output, Map("a" -> Some("a-value:a-value"))) *> closing.background.surround:
+                heldValues(server, app.output, Map("a" -> Some("a-value:a-value"), "b" -> Some("b-value:-"), "c" -> Some("-:c-value")))
 
     test(s"$release, $under: a stream and the table it joins in topics of different partition counts are refused by the broker, as for Java"):
       counting(
