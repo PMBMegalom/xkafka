@@ -57,9 +57,8 @@ topic (see [Tables](#tables)), and is built with:
 - `to`, which ends the pipeline at its output topic.
 
 Every step has a name, given as a `Named`: a pipeline's source, each step, and
-its `to`. Names describe the program, and Java Kafka Streams names the nodes it
-makes for each step after them, as it does after its `Named`, `Consumed` and
-`Produced` names. A step that keeps a store also takes the store's name, as
+its `to`. Names label the program's nodes in [its description](#describing-a-program), as
+`Named`, `Consumed` and `Produced` names do in Java Kafka Streams. A step that keeps a store also takes the store's name, as
 Java takes a `Named` and a `Materialized` name. Two steps cannot share a name.
 
 Grouping records whose key may have changed, after `map`, `flatMap`, `selectKey`
@@ -123,6 +122,49 @@ A `Serde` holds the serializer and deserializer of one type, since a streams
 application both reads and writes its topics. `Serde.utf8`, `Serde.long` and
 `Serde.bytes` write the same bytes as Java's `Serdes.String()`, `Serdes.Long()`
 and `Serdes.ByteArray()`.
+
+### Describing a program
+
+`describe` shows what a program will run: the topics it reads and writes, the
+order of its steps, the stores each step uses, and where a repartition divides
+it. It needs no broker, so a program can be printed or checked in a test before
+it runs. Here is the first example's:
+
+```scala mdoc:silent
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+val described =
+  for
+    input    <- Topic.from("page-views").toOption
+    output   <- Topic.from("views-per-page").toOption
+    topology <- Topology.of(
+                  KStream(Named("page-views"), input, Serde.utf8[IO], Serde.utf8[IO])
+                    .groupBy(Repartition("views-by-page"), Serde.utf8[IO], Serde.utf8[IO])((_, viewed) => viewed)
+                    .count(Named("count-views"), Store("views-per-page"))
+                    .toStream(Named("view-counts"))
+                    .to(Named("write-view-counts"), output, Serde.utf8[IO], Serde.long[IO])
+                ).toOption
+  yield topology.describe
+```
+
+```scala mdoc
+described.foreach(println)
+```
+
+Each sub-topology is a part of the program that runs as tasks of its own, and a
+repartition topic joins two of them: here the first writes
+`views-by-page-repartition` and the second reads it. `-->` points to the nodes a
+node passes its records to, and `<--` to the nodes it gets them from.
+
+Each step appears under its name. A repartition adds the nodes that write and
+read its topic, named after it. The topic is shown without the application's id,
+so on the broker this one is `<application id>-views-by-page-repartition`.
+
+Java Kafka Streams' `Topology.describe` writes the same text for the same
+program, which lets you compare the two when moving a program between them.
 
 ## Tables
 
@@ -705,7 +747,11 @@ def runUntilRefused(streams: KafkaStreams[IO]): IO[Unit] =
 ```
 
 Some brokers are configured to ask applications for a description of their
-topology. xkafka members don't send one, and keep working without it.
+topology. A member sends the program's description when asked, as Java Kafka
+Streams does, and the broker keeps it for whoever describes the group, such as
+Java's `Admin.describeStreamsGroups` with `includeTopologyDescription`.
+`StreamsSettings`' `withoutTopologyDescriptionPush` stops members sending it:
+the application keeps working, and the group's description has none.
 
 ## Stores and standbys
 

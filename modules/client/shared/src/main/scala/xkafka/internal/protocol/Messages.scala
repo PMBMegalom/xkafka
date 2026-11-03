@@ -32,13 +32,14 @@ import Wire.*
   * except where the Java client leaves out in an older version what it cannot carry. Answers are read as the version they answer.
   */
 private[xkafka] enum Api(val key: Short, val lowest: Short, val highest: Short, val flexible: Boolean) derives CanEqual:
-  case OffsetCommit          extends Api(8, 9, 9, true)
-  case OffsetFetch           extends Api(9, 9, 9, true)
-  case FindCoordinator       extends Api(10, 4, 6, true)
-  case SaslHandshake         extends Api(17, 1, 1, false)
-  case ApiVersions           extends Api(18, 3, 4, true)
-  case SaslAuthenticate      extends Api(36, 2, 2, true)
-  case StreamsGroupHeartbeat extends Api(88, 0, 1, true)
+  case OffsetCommit                          extends Api(8, 9, 9, true)
+  case OffsetFetch                           extends Api(9, 9, 9, true)
+  case FindCoordinator                       extends Api(10, 4, 6, true)
+  case SaslHandshake                         extends Api(17, 1, 1, false)
+  case ApiVersions                           extends Api(18, 3, 4, true)
+  case SaslAuthenticate                      extends Api(36, 2, 2, true)
+  case StreamsGroupHeartbeat                 extends Api(88, 0, 1, true)
+  case StreamsGroupTopologyDescriptionUpdate extends Api(93, 0, 0, true)
 
 private[xkafka] object Api:
   /** The highest version of each request that both this codec and the broker read, leaving out the requests they share no version of. */
@@ -205,6 +206,21 @@ private[xkafka] final case class StreamsGroupHeartbeatResponse(
 )
 
 /** Offsets a member commits for its group under its id and epoch (KIP-848), which the coordinator takes only from a member at its current epoch. */
+/** A member's description of its application's topology (KIP-1331), which the coordinator asks for in a heartbeat when it keeps descriptions. */
+private[xkafka] final case class StreamsGroupTopologyDescriptionUpdateRequest(
+    groupId: String,
+    memberId: String,
+    topologyEpoch: Int,
+    description: StreamsGroup.Description
+) extends Request[StreamsGroupTopologyDescriptionUpdateResponse]:
+  val api: Api         = Api.StreamsGroupTopologyDescriptionUpdate
+  def body: ByteVector =
+    compactString(groupId) ++ compactString(memberId) ++ int32(topologyEpoch) ++ StreamsGroup.writeDescription(description) ++ noTags
+  def response(version: Short): Read[StreamsGroupTopologyDescriptionUpdateResponse] =
+    (readInt32, readInt16, readCompactNullableString).mapN(StreamsGroupTopologyDescriptionUpdateResponse.apply) <* skipTags
+
+private[xkafka] final case class StreamsGroupTopologyDescriptionUpdateResponse(throttleTimeMs: Int, errorCode: Short, errorMessage: Option[String])
+
 private[xkafka] final case class OffsetCommitRequest(
     groupId: String,
     memberId: String,
@@ -311,6 +327,32 @@ private[xkafka] object StreamsGroup:
 
   /** The partitions of the tasks behind one member's endpoint, for interactive queries. */
   final case class EndpointPartitions(endpoint: Endpoint, active: List[TopicPartitions], standby: List[TopicPartitions])
+
+  /** A topology's processing nodes, by sub-topology, as a member describes them to the coordinator. */
+  final case class Description(subtopologies: List[DescribedSubtopology])
+
+  final case class DescribedSubtopology(id: String, nodes: List[DescribedNode])
+
+  /** A node: its kind, 1 for a source, 2 for a processor and 3 for a sink, the topics it reads or writes, the stores it keeps, and its successors. */
+  final case class DescribedNode(
+      name: String,
+      kind: Byte,
+      sourceTopics: List[String],
+      sinkTopic: Option[String],
+      stores: List[String],
+      successors: List[String]
+  )
+
+  /** A description with no global stores, which xkafka programs do not have yet. */
+  private[protocol] def writeDescription(description: Description): ByteVector =
+    compactArray(description.subtopologies)(writeDescribedSubtopology) ++ compactArray(List.empty[Unit])(_ => ByteVector.empty) ++ noTags
+
+  private def writeDescribedSubtopology(subtopology: DescribedSubtopology): ByteVector =
+    compactString(subtopology.id) ++ compactArray(subtopology.nodes)(writeDescribedNode) ++ noTags
+
+  private def writeDescribedNode(node: DescribedNode): ByteVector =
+    compactString(node.name) ++ int8(node.kind.toInt) ++ compactArray(node.sourceTopics)(compactString) ++ compactNullableString(node.sinkTopic) ++
+      compactArray(node.stores)(compactString) ++ compactArray(node.successors)(compactString) ++ noTags
 
   private[protocol] def writeTopology(topology: Topology): ByteVector =
     int32(topology.epoch) ++ compactArray(topology.subtopologies)(writeSubtopology) ++ noTags

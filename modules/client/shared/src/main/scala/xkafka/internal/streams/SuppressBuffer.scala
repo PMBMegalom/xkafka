@@ -31,6 +31,7 @@ import scala.util.Try
 
 import cats.syntax.all.*
 import fs2.Chunk
+import xkafka.streams.JavaHashSet
 
 /** Where a change held in a suppression's buffer came from, as Java's `ProcessorRecordContext`: the time and headers it had, and the topic, partition
   * and offset of the record that made it.
@@ -135,41 +136,6 @@ private[xkafka] object Buffered:
   /** The index of a buffer's `contents`, as restored from its changelog, where each holds a change. */
   def of(contents: Map[Chunk[Byte], Stored]): Option[Buffered] =
     contents.toList.foldLeftM(empty)((index, entry) => Held.decode(entry._2.value).map(index.including(entry._1, _)))
-
-/** Values in the order a `java.util.HashSet` holding them iterates, having been added in the order given: by bucket, from each value's `hash` spread
-  * as `HashMap` spreads it, in a table of 16 buckets that doubles whenever it holds more than three quarters of its size, or a bucket of a table
-  * under 64 would hold more than 8, and never shrinks; within a bucket, in the order the values were first added, except in a bucket of more than 8
-  * in a larger table, which Java keeps as a tree and orders otherwise.
-  */
-private[xkafka] final case class JavaHashSet[A](keys: Vector[A], members: Set[A], capacity: Int, hash: A => Int):
-  def +(key: A): JavaHashSet[A] =
-    if members(key) then this
-    else
-      val bucket  = JavaHashSet.spread(hash(key)) % capacity
-      val crowded = capacity < 64 && keys.count(k => JavaHashSet.spread(hash(k)) % capacity == bucket) >= 8
-      val grown   = if crowded then capacity * 2 else capacity
-      JavaHashSet(keys :+ key, members + key, if members.size + 1 > grown / 4 * 3 then grown * 2 else grown, hash)
-
-  /** Whether two of its values share a bucket, whose order Java takes from how they were added, which may not be the order they were added here. */
-  def crowded: Boolean = keys.groupBy(key => JavaHashSet.spread(hash(key)) & (capacity - 1)).exists(_._2.size > 1)
-
-  /** The values in the order Java iterates them. */
-  def ordered: Vector[A] = keys.zipWithIndex.sortBy((key, added) => (JavaHashSet.spread(hash(key)) & (capacity - 1), added)).map(_._1)
-
-  /** No values, in a table of the same size, as `HashSet.clear` leaves it. */
-  def cleared: JavaHashSet[A] = JavaHashSet(Vector.empty, Set.empty, capacity, hash)
-
-private[xkafka] object JavaHashSet:
-  def empty[A](hash: A => Int): JavaHashSet[A] = JavaHashSet(Vector.empty, Set.empty, 16, hash)
-
-  /** A hash spread as `HashMap.hash` spreads it, as a non-negative number. */
-  def spread(h: Int): Int = (h ^ (h >>> 16)) & Int.MaxValue
-
-  /** `Arrays.hashCode` of bytes, as Java's `Bytes` hashes them. */
-  def bytes(key: Chunk[Byte]): Int = key.foldLeft(1)((h, b) => 31 * h + b)
-
-  /** The values `values` adds, in the order a `HashSet` Java fills with them iterates. */
-  def ordered[A](values: Iterable[A], hash: A => Int): Vector[A] = values.foldLeft(empty(hash))(_ + _).ordered
 
 /** The keys a buffer changed since its last commit, which it logs at the commit in the order Java's `HashSet` of them iterates. */
 type Dirty = JavaHashSet[Chunk[Byte]]

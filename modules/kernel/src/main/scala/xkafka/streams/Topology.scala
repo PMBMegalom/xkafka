@@ -1289,6 +1289,9 @@ final class Topology[F[_]] private (private[xkafka] val pipelines: NonEmptyList[
   /** The same program with its effects in `G`, as its serdes and effectful steps are mapped. */
   def mapK[G[_]](fk: FunctionK[F, G]): Topology[G] = new Topology(pipelines.map(_.mapK(fk)))
 
+  /** What the program runs: its topics, steps, stores and repartitions, which `toString` writes as Java Kafka Streams' `Topology.describe` does. */
+  def describe: TopologyDescription = Describing(this, repartition => s"${repartition.value}-repartition")
+
 object Topology:
   /** The longest store or repartition name, as Java allows. */
   val MaxNameLength = 249

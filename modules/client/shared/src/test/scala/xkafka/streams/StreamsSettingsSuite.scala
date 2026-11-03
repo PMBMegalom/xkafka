@@ -40,12 +40,13 @@ final class StreamsSettingsSuite extends FunSuite:
     List("my app", "app/1", "café", "app:1").foreach: id =>
       assertEquals(ApplicationId.from(id), Left(StreamsSettingsError.InvalidApplicationIdCharacters(id)))
 
-  test("settings default to at least once at Java's interval, one task at a time, and a close timeout of 30 seconds"):
+  test("settings default to at least once at Java's interval, one task at a time, a close timeout of 30 seconds, and the description pushed"):
     val settings = StreamsSettings.from(client, app).orFail
     assertEquals(
-      (settings.guarantee, settings.commitInterval, settings.concurrency, settings.closeTimeout),
-      (ProcessingGuarantee.AtLeastOnce, None, 1, 30.seconds)
+      (settings.guarantee, settings.commitInterval, settings.concurrency, settings.closeTimeout, settings.topologyDescriptionPush),
+      (ProcessingGuarantee.AtLeastOnce, None, 1, 30.seconds, true)
     )
+    assertEquals(StreamsSettings.from(client, app, topologyDescriptionPush = false).orFail.topologyDescriptionPush, false)
 
   test("every invalid setting is reported at once"):
     assertEquals(
@@ -79,6 +80,8 @@ final class StreamsSettingsSuite extends FunSuite:
       (ProcessingGuarantee.ExactlyOnce, "other", Some(1.second), 4, 5.seconds)
     )
     assertEquals(changed.withoutCommitInterval.commitInterval, None)
+    assertEquals(changed.withoutTopologyDescriptionPush.topologyDescriptionPush, false)
+    assertEquals(changed.withoutTopologyDescriptionPush.withTopologyDescriptionPush.topologyDescriptionPush, true)
     assertEquals(settings.withConcurrency(-2), Validated.invalidNel(StreamsSettingsError.NonPositiveConcurrency(-2)))
     assertEquals(settings.withCommitInterval(-1.second), Validated.invalidNel(StreamsSettingsError.NonPositiveCommitInterval(-1.second)))
     assertEquals(settings.withCloseTimeout(Duration.Zero), Validated.invalidNel(StreamsSettingsError.NonPositiveCloseTimeout(Duration.Zero)))

@@ -403,13 +403,14 @@ final class ProtocolGoldenSuite extends FunSuite:
 
   private val keys: List[(Api, ApiKeys)] =
     List(
-      Api.OffsetCommit          -> ApiKeys.OFFSET_COMMIT,
-      Api.OffsetFetch           -> ApiKeys.OFFSET_FETCH,
-      Api.ApiVersions           -> ApiKeys.API_VERSIONS,
-      Api.FindCoordinator       -> ApiKeys.FIND_COORDINATOR,
-      Api.SaslHandshake         -> ApiKeys.SASL_HANDSHAKE,
-      Api.SaslAuthenticate      -> ApiKeys.SASL_AUTHENTICATE,
-      Api.StreamsGroupHeartbeat -> ApiKeys.STREAMS_GROUP_HEARTBEAT
+      Api.OffsetCommit                          -> ApiKeys.OFFSET_COMMIT,
+      Api.OffsetFetch                           -> ApiKeys.OFFSET_FETCH,
+      Api.ApiVersions                           -> ApiKeys.API_VERSIONS,
+      Api.FindCoordinator                       -> ApiKeys.FIND_COORDINATOR,
+      Api.SaslHandshake                         -> ApiKeys.SASL_HANDSHAKE,
+      Api.SaslAuthenticate                      -> ApiKeys.SASL_AUTHENTICATE,
+      Api.StreamsGroupHeartbeat                 -> ApiKeys.STREAMS_GROUP_HEARTBEAT,
+      Api.StreamsGroupTopologyDescriptionUpdate -> ApiKeys.STREAMS_GROUP_TOPOLOGY_DESCRIPTION_UPDATE
     )
 
   /** How each version this codec does not write compares with the versions it does: whether its request, and then its answer, has the same bytes. */
@@ -504,7 +505,39 @@ final class ProtocolGoldenSuite extends FunSuite:
           SaslHandshakeResponse(0, List("PLAIN"))
         )
       case Api.StreamsGroupHeartbeat => Sample(heartbeatRequest, javaHeartbeatRequest, javaHeartbeatAnswer(version), heartbeatAnswer(version))
-      case Api.OffsetCommit          =>
+      case Api.StreamsGroupTopologyDescriptionUpdate =>
+        import StreamsGroupTopologyDescriptionUpdateRequestData as J
+        import StreamsGroup.{DescribedNode, DescribedSubtopology, Description}
+        def node(name: String, kind: Int, topics: List[String], sink: String, stores: List[String], successors: List[String]) =
+          new J.TopologyDescriptionNode().setName(name).setNodeType(kind.toByte).setSourceTopics(topics.asJava).setSinkTopic(sink)
+            .setStores(stores.asJava).setSuccessors(successors.asJava)
+        Sample(
+          StreamsGroupTopologyDescriptionUpdateRequest(
+            "app",
+            "member",
+            3,
+            Description(List(DescribedSubtopology(
+              "0",
+              List(
+                DescribedNode("count", 2, Nil, None, List("counts"), List("write")),
+                DescribedNode("read", 1, List("in"), None, Nil, List("count")),
+                DescribedNode("write", 3, Nil, Some("out"), Nil, Nil)
+              )
+            )))
+          ),
+          new J().setGroupId("app").setMemberId("member").setTopologyEpoch(3).setTopologyDescription(new J.TopologyDescription().setSubtopologies(
+            List(new J.TopologyDescriptionSubtopology().setSubtopologyId("0").setNodes(
+              List(
+                node("count", 2, Nil, null, List("counts"), List("write")),
+                node("read", 1, List("in"), null, Nil, List("count")),
+                node("write", 3, Nil, "out", Nil, Nil)
+              ).asJava
+            )).asJava
+          )),
+          new StreamsGroupTopologyDescriptionUpdateResponseData().setThrottleTimeMs(5).setErrorCode(0).setErrorMessage(null),
+          StreamsGroupTopologyDescriptionUpdateResponse(5, 0, None)
+        )
+      case Api.OffsetCommit =>
         import OffsetCommitRequestData as J
         import OffsetCommitResponseData as A
         Sample(

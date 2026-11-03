@@ -25,7 +25,7 @@ package streams
 
 import protocol.StreamsGroup
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{End, Source, Topology}
+import xkafka.streams.{Describing, End, JavaHashSet, Source, Topology, TopologyDescription}
 
 /** The topology a member declares to the coordinator for a program, as Java Streams declares the same program: sub-topologies numbered in the order
   * their segments are made, and every list sorted as Java's client sorts it before sending.
@@ -61,6 +61,24 @@ private[xkafka] object Declaration:
   def unordered[F[_]](application: String, topology: Topology[F]): List[List[String]] =
     topology.pipelines.toList.flatMap(_.segments.toList).map(_.copartitioned.map(Task.topicOf(application, _)))
       .filter(names => names.foldLeft(JavaHashSet.empty((name: String) => name.hashCode))(_ + _).crowded)
+
+  /** The program's nodes as a member describes them to the coordinator, as Java's client writes its description: by sub-topology, each node and its
+    * successors, topics and stores sorted by name, and repartition topics named with the application id.
+    */
+  def described[F[_]](application: String, topology: Topology[F]): StreamsGroup.Description =
+    val description = Describing(topology, repartition => s"$application-${repartition.value}-repartition")
+    StreamsGroup.Description(
+      description.subtopologies.map: subtopology =>
+        StreamsGroup.DescribedSubtopology(
+          subtopology.id.toString,
+          subtopology.nodes.sortBy(_.name).map:
+            case TopologyDescription.Node.Source(name, topics, successors) => StreamsGroup
+                .DescribedNode(name, 1, topics.sorted, None, Nil, successors.sorted)
+            case TopologyDescription.Node.Processor(name, stores, successors, _) => StreamsGroup
+                .DescribedNode(name, 2, Nil, None, stores.sorted, successors.sorted)
+            case TopologyDescription.Node.Sink(name, topic, _) => StreamsGroup.DescribedNode(name, 3, Nil, Some(topic), Nil, Nil)
+        )
+    )
 
   def apply[F[_]](application: String, topology: Topology[F], replicationFactor: Short = BrokerReplication): StreamsGroup.Topology =
     def repartitionTopic(name: String) = s"$application-$name-repartition"

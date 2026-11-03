@@ -34,7 +34,9 @@ import fs2.Stream
 import fs2.concurrent.{Signal, SignallingRef}
 import scodec.bits.ByteVector
 import internal.group.{Connection, Crypto}
-import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest}
+import internal.protocol.{
+  OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest, StreamsGroupTopologyDescriptionUpdateRequest
+}
 
 /** A member of a streams group, heartbeating to the group's coordinator on fibers of its own. The engine carries out the changes it is told of and
   * confirms each by its round.
@@ -107,7 +109,8 @@ private[xkafka] object GroupMember:
       offsets    <- Resource.eval(F.ref(Option.empty[F[TaskOffsets]]))
       offsetsAt  <- Resource.eval(F.ref(Option.empty[FiniteDuration]))
       sent       <- Resource.eval(F.ref(Option.empty[TaskOffsets]))
-      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current, offsets, offsetsAt, sent)
+      pushing    <- Resource.eval(F.ref(false))
+      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current, offsets, offsetsAt, sent, pushing)
       _ <- Resource.make(supervisor.supervise(loop.run(Member(identity)).void))(_ => leaving(events, ended, closeTimeout))
       _ <- Resource.eval(events.offer(MemberEvent.Start))
     yield new GroupMember[F]:
@@ -168,7 +171,8 @@ private[xkafka] object GroupMember:
       current: SignallingRef[F, Member],
       offsets: Ref[F, Option[F[TaskOffsets]]],
       offsetsAt: Ref[F, Option[FiniteDuration]],
-      offsetsSent: Ref[F, Option[TaskOffsets]]
+      offsetsSent: Ref[F, Option[TaskOffsets]],
+      pushing: Ref[F, Boolean]
   )(using F: Temporal[F]):
     import MemberAction.*
 
@@ -185,7 +189,7 @@ private[xkafka] object GroupMember:
         case Send(heartbeat) =>
           val answer =
             withOffsets(heartbeat).flatMap(request => connection.flatMap(_.send(request))).attempt.flatMap:
-              case Right(response)             => events.offer(MemberEvent.Answered(response))
+              case Right(response) => events.offer(MemberEvent.Answered(response)) *> described.whenA(response.topologyDescriptionRequired)
               case Left(error: KafkaException) => drop *> events.offer(MemberEvent.RequestFailed(error))
               case Left(other)                 => drop *> events.offer(MemberEvent.RequestFailed(unexpected(other)))
           supervisor.supervise(answer).void
@@ -212,6 +216,36 @@ private[xkafka] object GroupMember:
               (offsetsAt.set(Some(now)).whenA(newPositions.nonEmpty) *> offsetsSent.set(Some(read)))
                 .as(heartbeat.copy(taskOffsets = newPositions, taskEndOffsets = newEnds))
             case Left(_) => F.pure(heartbeat)
+
+    /** Pushes the member's description of its topology, which the coordinator asked for, unless a push is under way or the member pushes none, as
+      * Java's client pushes it: once, and again after a wait where the coordinator moved, was loading or could not be reached, the coordinator asking
+      * again later if it still wants one after any other answer. A push never stops the member.
+      */
+    private def described: F[Unit] =
+      current.get.flatMap: member =>
+        member.identity.description.fold(F.unit): description =>
+          val request =
+            StreamsGroupTopologyDescriptionUpdateRequest(
+              member.identity.groupId,
+              member.identity.memberId,
+              member.identity.topology.epoch,
+              description
+            )
+          pushing.getAndSet(true).flatMap(under => supervisor.supervise(F.guarantee(pushed(request, 1), pushing.set(false))).void.unlessA(under))
+
+    private def pushed(request: StreamsGroupTopologyDescriptionUpdateRequest, attempt: Int): F[Unit] =
+      def again(rediscover: Boolean, throttled: Int) =
+        drop.whenA(rediscover) *> backoff(attempt, random).flatMap(wait => F.sleep(wait.max(throttled.millis))) *> pushed(request, attempt + 1)
+      current.get.flatMap: member =>
+        val joined = member.phase == Phase.Joining || member.phase == Phase.Joined
+        connection.flatMap(_.send(request)).attempt.flatMap:
+          case Right(answer) if answer.errorCode == Member.NotCoordinator || answer.errorCode == Member.NotAvailable =>
+            again(rediscover = true, answer.throttleTimeMs)
+          case Right(answer) if answer.errorCode == Member.LoadInProgress                       => again(rediscover = false, answer.throttleTimeMs)
+          case Right(_)                                                                         => F.unit
+          case Left(failure: KafkaException.BackendFailure) if failure.retriable.contains(true) => again(rediscover = true, 0)
+          case Left(_)                                                                          => F.unit
+        .whenA(joined)
 
     /** Sends `Due` after `after`, unless another heartbeat was planned meanwhile. */
     private def due(after: FiniteDuration): F[Unit] =

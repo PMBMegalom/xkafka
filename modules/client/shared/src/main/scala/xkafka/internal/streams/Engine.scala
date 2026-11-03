@@ -106,6 +106,7 @@ private[xkafka] object Engine:
       concurrency: Int = 1,
       purgeInterval: FiniteDuration = PurgeInterval,
       closeTimeout: FiniteDuration = 30.seconds,
+      topologyDescriptionPush: Boolean = true,
       watch: Plane[F] => Plane[F] = identity[Plane[F]]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
@@ -120,7 +121,17 @@ private[xkafka] object Engine:
       memberId  <- Resource.eval(GroupMember.memberId[F])
       processId <- Resource.eval(UUIDGen[F].randomUUID.map(_.toString))
       identity =
-        MemberIdentity(application, memberId, processId, Declaration(application, topology), RebalanceTimeout.toMillis.toInt, None, Nil, None)
+        MemberIdentity(
+          application,
+          memberId,
+          processId,
+          Declaration(application, topology),
+          RebalanceTimeout.toMillis.toInt,
+          None,
+          Nil,
+          None,
+          Option.when(topologyDescriptionPush)(Declaration.described(application, topology))
+        )
       member   <- GroupMember(connections.coordinator(application), identity, closeTimeout)
       admin    <- client.admin(settings)
       input    <- consumer(if guarantee == ProcessingGuarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)

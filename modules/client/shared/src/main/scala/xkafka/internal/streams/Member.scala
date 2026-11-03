@@ -35,7 +35,9 @@ private[xkafka] final case class Assignment(active: Set[TaskId], standby: Set[Ta
 private[xkafka] object Assignment:
   val empty: Assignment = Assignment(Set.empty, Set.empty, Set.empty)
 
-/** What a member tells the coordinator about itself when it joins. */
+/** What a member tells the coordinator about itself when it joins, and the description of its topology it pushes when the coordinator asks, if it
+  * pushes one.
+  */
 private[xkafka] final case class MemberIdentity(
     groupId: String,
     memberId: String,
@@ -44,7 +46,8 @@ private[xkafka] final case class MemberIdentity(
     rebalanceTimeoutMs: Int,
     rackId: Option[String],
     clientTags: List[(String, String)],
-    userEndpoint: Option[StreamsGroup.Endpoint]
+    userEndpoint: Option[StreamsGroup.Endpoint],
+    description: Option[StreamsGroup.Description] = None
 )
 
 private[xkafka] enum Phase derives CanEqual:
@@ -303,10 +306,10 @@ private[xkafka] object Member:
 
   private val LeaveEpoch = -1
 
-  private val LoadInProgress: Short = 14 // COORDINATOR_LOAD_IN_PROGRESS
-  private val NotAvailable: Short   = 15 // COORDINATOR_NOT_AVAILABLE
-  private val NotCoordinator: Short = 16 // NOT_COORDINATOR
-  private val UnknownMember: Short  = 25 // UNKNOWN_MEMBER_ID
+  private[streams] val LoadInProgress: Short = 14 // COORDINATOR_LOAD_IN_PROGRESS
+  private[streams] val NotAvailable: Short   = 15 // COORDINATOR_NOT_AVAILABLE
+  private[streams] val NotCoordinator: Short = 16 // NOT_COORDINATOR
+  private val UnknownMember: Short           = 25 // UNKNOWN_MEMBER_ID
 
   private val TopicAuthorizationFailed: Short = 29  // TOPIC_AUTHORIZATION_FAILED
   private val FencedEpoch: Short              = 110 // FENCED_MEMBER_EPOCH
