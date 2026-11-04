@@ -30,7 +30,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 import cats.data.Ior
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
@@ -38,8 +38,9 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, Str
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
 import org.apache.kafka.streams.kstream.{
-  EmitStrategy, Grouped, JoinWindows as JavaJoinWindows, KTable as JavaTable, Materialized, Produced, SessionWindows as JavaSessionWindows,
-  SlidingWindows as JavaSlidingWindows, StreamJoined, Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
+  EmitStrategy, Grouped, JoinWindows as JavaJoinWindows, KTable as JavaTable, Materialized, Named as JavaNamed, Produced, Repartitioned,
+  SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, StreamJoined, Suppressed as JavaSuppressed,
+  TimeWindows as JavaTimeWindows, ValueMapper, WindowedSerdes
 }
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
@@ -985,6 +986,361 @@ final class WindowGoldenSuite extends CatsEffectSuite:
             .outerJoin(builder.stream[String, String]("right"), (a: String, b: String) => either(a, b), javaWithin, javaPaired).to("out")
       )
     ).traverse_((pipeline, java) => sameFrom(pipeline, java, keyless))
+
+  // Values going in and out of what `kept` keeps, deletes of keys held and never held, and a key's value replaced by one kept and one not.
+  private val filtering =
+    List(
+      ("k1", "keep-a", 1000L),
+      ("k2", "drop-b", 2000L), // nothing held, nothing to pass on where old values are asked for
+      ("k1", "drop-c", 3000L), // what the result held goes
+      ("k1", "keep-d", 4000L),
+      ("k1", null, 5000L),
+      ("k2", null, 6000L),
+      ("k3", null, 7000L),
+      ("k4", "keep-e", 8000L),
+      ("k4", "keep-f", 9000L),
+      ("k4", "drop-g", 10000L),
+      ("k5", "keep-h", 11000L),
+      ("k9", "keep-z", 60000L) // well after every other change, so held changes go
+    )
+
+  private def kept(value: String)                     = value.startsWith("keep")
+  private def users                                   = KTable(Named("users"), in, text, text, Store("users"))
+  private def javaUsersIn(builder: StreamsBuilder)    = javaTable(builder, "in", "users")
+  private def toOut(table: JavaTable[String, String]) = table.toStream.to("out", Produced.`with`(Serdes.String, Serdes.String))
+  private def calm                                    = Suppressed.untilTimeLimit("calm", 2.seconds)
+  private def javaCalm = JavaSuppressed.untilTimeLimit[String](Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm")
+  private def written(stream: KTable.Of[IO, String, String, Option]) = stream.toStream(Named("changes")).to(Named("write"), out, text, text.option)
+
+  test("records are dropped and flat mapped as Java's filterNot and flatMapValues do, each new record keeping the key"):
+    val doubled: ValueMapper[String, java.lang.Iterable[String]] = value => java.util.List.of(value, value + value)
+    sameEverywhere(
+      KStream(Named("read"), in, text, text).filterNot(Named("not-b"))((_, v) => v == "b").flatMapValues(Named("doubled"))(v => List(v, v + v))
+        .to(Named("write"), out, text, text),
+      _.stream[String, String]("in").filterNot((_, v) => v == "b").flatMapValues(doubled).to("out"),
+      updates
+    )
+
+  test("records keyed as they were read go through a repartition topic where asked, as Java's repartition sends them"):
+    sameEverywhere(
+      KStream(Named("read"), in, text, text).repartition(Repartition("through"), text, text).groupByKey(text, text)
+        .count(Named("count"), Store("counts")).toStream(Named("changes")).to(Named("write"), out, text, count),
+      _.stream[String, String]("in").repartition(Repartitioned.as("through")).groupByKey.count(Materialized.as("counts")).toStream
+        .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
+      updates
+    )
+
+  test("records with a new key repartitioned by hand are keyed as read afterwards, and group as Java's do"):
+    sameEverywhere(
+      KStream(Named("read"), in, text, text).selectKey(Named("by-value"))((_, v) => v).repartition(Repartition("through"), text, text)
+        .groupByKey(text, text).count(Named("count"), Store("counts")).toStream(Named("changes")).to(Named("write"), out, text, count),
+      _.stream[String, String]("in").selectKey((_, v) => v).repartition(Repartitioned.as("through")).groupByKey.count(Materialized.as("counts"))
+        .toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long)),
+      updates
+    )
+
+  test("a stream made a table keeps and logs each key's latest value as Java's toTable does"):
+    sameEverywhere(
+      KStream(Named("read"), in, text, text).toTable(Named("latest"), Store("latest"), text, text).toStream(Named("changes"))
+        .to(Named("write"), out, text, text.option),
+      _.stream[String, String]("in").toTable(JavaNamed.as("latest"), javaStored("latest")).toStream.to("out"),
+      updates
+    )
+
+  test("a stream of optional values made a table deletes a key on none, as Java's toTable does on null"):
+    sameEverywhere(
+      KStream(Named("read"), in, text, text.option).toTable(Named("latest"), Store("latest"), text, text).toStream(Named("changes"))
+        .to(Named("write"), out, text, text.option),
+      _.stream[String, String]("in").toTable(JavaNamed.as("latest"), javaStored("latest")).toStream.to("out"),
+      filtering
+    )
+
+  test("a stream with a new key made a table goes through a repartition topic the step names first, as Java's does"):
+    sameEverywhere(
+      KStream(Named("read"), in, text, text).selectKey(Named("by-letter"))((_, v) => v.take(1)).toTable(Named("latest"), Store("latest"), text, text)
+        .toStream(Named("changes")).to(Named("write"), out, text, text.option),
+      _.stream[String, String]("in").selectKey((_, v) => v.take(1)).toTable(JavaNamed.as("latest"), javaStored("latest")).toStream.to("out"),
+      updates
+    )
+
+  test("a stream made a table, then held for a time limit, holds and logs what Java's does"):
+    sameEverywhere(
+      written(KStream(Named("read"), in, text, text).toTable(Named("latest"), Store("latest"), text, text).suppress(calm)),
+      builder => toOut(builder.stream[String, String]("in").toTable(JavaNamed.as("latest"), javaStored("latest")).suppress(javaCalm)),
+      updates :+ ("k9", "z", 90000L)
+    )
+
+  test("a table filtered in no store passes a delete for a value it drops, and nothing where it held none, as Java's does"):
+    sameEverywhere(
+      written(users.filter(Named("kept"))((_, v) => kept(v))),
+      builder => toOut(javaUsersIn(builder).filter((_, v) => kept(v))),
+      filtering
+    )
+
+  test("a table filtered with filterNot passes what Java's does"):
+    sameEverywhere(
+      written(users.filterNot(Named("kept"))((_, v) => kept(v))),
+      builder => toOut(javaUsersIn(builder).filterNot((_, v) => kept(v))),
+      filtering
+    )
+
+  test("a table filtered into a store keeps and logs what Java's does"):
+    sameEverywhere(
+      written(users.filter(Named("kept"), Store("kept"), text)((_, v) => kept(v))),
+      builder => toOut(javaUsersIn(builder).filter((_, v) => kept(v), javaStored("kept"))),
+      filtering
+    )
+
+  test("a table filtered with filterNot into a store keeps and logs what Java's does"):
+    sameEverywhere(
+      written(users.filterNot(Named("kept"), Store("kept"), text)((_, v) => kept(v))),
+      builder => toOut(javaUsersIn(builder).filterNot((_, v) => kept(v), javaStored("kept"))),
+      filtering
+    )
+
+  test("a suppression asks a filter in no store for old values, so no value going to no value goes no further, as in Java"):
+    sameEverywhere(
+      written(users.filter(Named("kept"))((_, v) => kept(v)).suppress(calm)),
+      builder => toOut(javaUsersIn(builder).filter((_, v) => kept(v)).suppress(javaCalm)),
+      filtering
+    )
+
+  test("a suppression asks a filter kept in a store for old values, which it reads from there, as Java's does"):
+    sameEverywhere(
+      written(users.filter(Named("kept"), Store("kept"), text)((_, v) => kept(v)).suppress(calm)),
+      builder => toOut(javaUsersIn(builder).filter((_, v) => kept(v), javaStored("kept")).suppress(javaCalm)),
+      filtering
+    )
+
+  test("a table's values changed in no store pass on as Java's mapValues passes them, a delete staying a delete"):
+    sameEverywhere(
+      written(users.mapValues(Named("loud"))(_.toUpperCase)),
+      builder => toOut(javaUsersIn(builder).mapValues((v: String) => v.toUpperCase)),
+      filtering
+    )
+
+  test("a table's values changed into a store keep and log what Java's mapValues does"):
+    sameEverywhere(
+      written(users.mapValues(Named("loud"), Store("loud"), text)(_.toUpperCase)),
+      builder => toOut(javaUsersIn(builder).mapValues((v: String) => v.toUpperCase, javaStored("loud"))),
+      filtering
+    )
+
+  test("a suppression of changed values kept in a store reads old values as Java's does"):
+    sameEverywhere(
+      written(users.mapValues(Named("loud"), Store("loud"), text)(_.toUpperCase).suppress(calm)),
+      builder => toOut(javaUsersIn(builder).mapValues((v: String) => v.toUpperCase, javaStored("loud")).suppress(javaCalm)),
+      filtering
+    )
+
+  test("a suppression asks through values changed and filtered in no store, as Java's processors ask"):
+    sameEverywhere(
+      written(
+        users.mapValues(Named("loud"))(_.toLowerCase).filter(Named("kept"))((_, v) => kept(v))
+          .mapValues(Named("stored"), Store("stored"), text)(_ + "!").filterNot(Named("not-z"))((k, _) => k == "z").suppress(calm)
+      ),
+      builder =>
+        toOut(
+          javaUsersIn(builder).mapValues((v: String) => v.toLowerCase).filter((_, v) => kept(v))
+            .mapValues((v: String) => v + "!", javaStored("stored")).filterNot((k, _) => k == "z").suppress(javaCalm)
+        ),
+      filtering
+    )
+
+  test("a counted table changed, or filtered into a store, passes and logs what Java's does"):
+    val big: Materialized[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]] =
+      Materialized.as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]]("big").withValueSerde(Serdes.Long)
+    sameEverywhere(
+      KStream(Named("read"), in, text, text).groupByKey(text, text).count(Named("count"), Store("counts")).mapValues(Named("doubled"))(_ * 2)
+        .toStream(Named("changes")).filter(Named("any"))((_, _) => true).to(Named("write"), out, text, count),
+      _.stream[String, String]("in").groupByKey.count(Materialized.as("counts")).mapValues((n: java.lang.Long) => java.lang.Long.valueOf(n * 2))
+        .toStream.filter((_, _) => true).to("out", Produced.`with`(Serdes.String, Serdes.Long)),
+      updates
+    ) *> sameEverywhere(
+      KStream(Named("read"), in, text, text).groupByKey(text, text).count(Named("count"), Store("counts"))
+        .filter(Named("big"), Store("big"), count)((_, n) => n > 1).toStream(Named("changes")).to(Named("write"), out, text, count.option),
+      _.stream[String, String]("in").groupByKey.count(Materialized.as("counts")).filter((_, n) => n > 1, big).toStream
+        .to("out", Produced.`with`(Serdes.String, Serdes.Long)),
+      updates
+    )
+
+  test("a windowed table filtered in no store and into one passes and logs what Java's does"):
+    def windowed =
+      KStream(Named("read"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count"), Store("counts"))
+    def javaWindowed(builder: StreamsBuilder) =
+      builder.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L)).count(Materialized.as("counts"))
+    val windowKeys = windowedSerde(10000L)
+    val big        =
+      Materialized
+        .as[org.apache.kafka.streams.kstream.Windowed[String], java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](
+          "big"
+        ).withKeySerde(windowKeys).withValueSerde(Serdes.Long)
+    sameEverywhere(
+      windowed.filter(Named("big"))((_, n) => n > 1).toStream(Named("changes"))
+        .to(Named("write"), out, Serde.timeWindowed(text, 10.seconds), count.option),
+      builder => javaWindowed(builder).filter((_, n) => n > 1).toStream.to("out", Produced.`with`(windowKeys, Serdes.Long)),
+      updates
+    ) *> sameEverywhere(
+      windowed.filter(Named("big"), Store("big"), count)((_, n) => n > 1).toStream(Named("changes"))
+        .to(Named("write"), out, Serde.timeWindowed(text, 10.seconds), count.option),
+      builder => javaWindowed(builder).filter((_, n) => n > 1, big).toStream.to("out", Produced.`with`(windowKeys, Serdes.Long)),
+      updates
+    )
+
+  private def usersOfOrders = KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users"))
+  private def ordersStream  = KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+
+  test("a stream joined with a filtered table reads through the filter as Java's value getter does"):
+    sameFrom(
+      ordersStream.join(Named("with-user"), usersOfOrders.filter(Named("not-bob"))((_, u) => u != "bob"))((o, u) => s"$o:$u")
+        .to(Named("write"), out, text, text),
+      builder =>
+        builder.stream[String, String]("orders").join(javaUsers(builder).filter((_, u) => u != "bob"), (o: String, u: String) => s"$o:$u").to("out"),
+      ordering
+    )
+
+  test("a stream left joined with changed values reads through the change as Java's value getter does"):
+    sameFrom(
+      ordersStream.leftJoin(Named("with-user"), usersOfOrders.mapValues(Named("loud"))(_.toUpperCase))((o, u) => s"$o:${u.orNull}")
+        .to(Named("write"), out, text, text),
+      builder =>
+        builder.stream[String, String]("orders")
+          .leftJoin(javaUsers(builder).mapValues((u: String) => u.toUpperCase), (o: String, u: String) => s"$o:$u").to("out"),
+      ordering
+    )
+
+  test("a stream joined with a filter kept in a store reads the store, as Java's does"):
+    sameFrom(
+      ordersStream.join(Named("with-user"), usersOfOrders.filter(Named("not-bob"), Store("kept"), text)((_, u) => u != "bob"))((o, u) => s"$o:$u")
+        .to(Named("write"), out, text, text),
+      builder =>
+        builder.stream[String, String]("orders")
+          .join(javaUsers(builder).filter((_, u) => u != "bob", javaStored("kept")), (o: String, u: String) => s"$o:$u").to("out"),
+      ordering
+    )
+
+  test("a stream joined with a table made from a stream reads what Java's join reads"):
+    sameFrom(
+      ordersStream.join(
+        Named("with-user"),
+        KStream(Named("users"), Topic.from("users").orFail, text, text.option).toTable(Named("latest"), Store("latest"), text, text)
+      )((o, u) => s"$o:$u").to(Named("write"), out, text, text),
+      builder =>
+        val latest = builder.stream[String, String]("users").toTable(JavaNamed.as("latest"), javaStored("latest"))
+        builder.stream[String, String]("orders").join(latest, (o: String, u: String) => s"$o:$u").to("out")
+      ,
+      ordering
+    )
+
+  private def keepNames(value: String) = value.length > 2
+
+  test("tables joined through filters and changed values write what Java's do, inner, left and outer"):
+    def left                               = lefts.filter(Named("left-kept"))((_, v) => keepNames(v))
+    def right                              = rights.mapValues(Named("right-loud"))(_.toUpperCase)
+    def javaLeft(builder: StreamsBuilder)  = javaTable(builder, "left", "lefts").filter((_, v) => keepNames(v))
+    def javaRight(builder: StreamsBuilder) = javaTable(builder, "right", "rights").mapValues((v: String) => v.toUpperCase)
+    sameFrom(
+      written(left.join(Named("joined"), right)((a, b) => s"$a+$b")),
+      builder => toOut(javaLeft(builder).join(javaRight(builder), (a: String, b: String) => s"$a+$b")),
+      tabling
+    ) *> sameFrom(
+      written(left.leftJoin(Named("joined"), right)((a, b) => either(a, b.orNull))),
+      builder => toOut(javaLeft(builder).leftJoin(javaRight(builder), either)),
+      tabling
+    ) *> sameFrom(
+      written(left.outerJoin(Named("joined"), right)(ior)),
+      builder => toOut(javaLeft(builder).outerJoin(javaRight(builder), either)),
+      tabling
+    )
+
+  test("tables joined through filters kept in stores, into a store and suppressed, pass old values on as Java's do"):
+    def left  = lefts.filter(Named("left-kept"), Store("left-kept"), text)((_, v) => keepNames(v))
+    def right = rights.mapValues(Named("right-loud"))(_.toUpperCase)
+    sameFrom(
+      written(left.leftJoin(Named("joined"), right, Store("joined"), text)((a, b) => either(a, b.orNull)).suppress(calm)),
+      builder =>
+        toOut(
+          javaTable(builder, "left", "lefts").filter((_, v) => keepNames(v), javaStored("left-kept"))
+            .leftJoin(javaTable(builder, "right", "rights").mapValues((v: String) => v.toUpperCase), either, javaStored("joined")).suppress(javaCalm)
+        ),
+      tabling :+ ("left", "k9", "zzz", 90000L)
+    )
+
+  test("a filter asks through changed values kept in no store for the old values of the tables joined before them, as Java's processors ask"):
+    sameFrom(
+      written(
+        lefts.join(Named("joined"), rights)((a, b) => s"$a+$b").mapValues(Named("loud"))(_.toUpperCase).filter(Named("kept"))((_, v) => keepNames(v))
+      ),
+      builder =>
+        toOut(
+          javaTable(builder, "left", "lefts").join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b")
+            .mapValues((v: String) => v.toUpperCase).filter((_, v) => keepNames(v))
+        ),
+      tabling
+    )
+
+  test("a change joined with a later value read through changed values takes that value's time, as Java's does"):
+    sameFrom(
+      written(lefts.join(Named("joined"), rights.mapValues(Named("loud"))(_.toUpperCase))((a, b) => s"$a+$b")),
+      builder =>
+        toOut(
+          javaTable(builder, "left", "lefts")
+            .join(javaTable(builder, "right", "rights").mapValues((v: String) => v.toUpperCase), (a: String, b: String) => s"$a+$b")
+        ),
+      List(("right", "k", "later", 5000L), ("left", "k", "earlier", 1000L))
+    )
+
+  test("foreach acts on each record in turn, as Java's does, and ends the pipeline"):
+    val javaSeen = scala.collection.mutable.ListBuffer.empty[(String, String)]
+    Ref[IO].of(Vector.empty[(String, String)]).flatMap: seen =>
+      sameEverywhere(
+        KStream(Named("read"), in, text, text).filter(Named("not-b"))((_, v) => v != "b").foreach(Named("act"))((k, v) => seen.update(_ :+ (k -> v))),
+        _.stream[String, String]("in").filter((_, v) => v != "b").foreach((k, v) => javaSeen += (k -> v)),
+        updates,
+        wrote = Some(false)
+      ) *> seen.get.map(all => assertEquals(all.toList, javaSeen.toList))
+
+  test("print writes each record as Java's print does, under its label, or the name of the step before"):
+    final class Lines(lines: Ref[IO, Vector[String]]) extends cats.effect.std.Console[IO]:
+      def readLineWithCharset(charset: java.nio.charset.Charset): IO[String] = IO.raiseError(new UnsupportedOperationException)
+      def print[A](a: A)(implicit S: cats.Show[A]): IO[Unit]                 = IO.unit
+      def println[A](a: A)(implicit S: cats.Show[A]): IO[Unit]               = lines.update(_ :+ S.show(a))
+      def error[A](a: A)(implicit S: cats.Show[A]): IO[Unit]                 = IO.unit
+      def errorln[A](a: A)(implicit S: cats.Show[A]): IO[Unit]               = IO.unit
+    def javaPrinted(
+        build: (StreamsBuilder, org.apache.kafka.streams.kstream.Printed[String, String]) => Unit,
+        printed: org.apache.kafka.streams.kstream.Printed[String, String],
+        path: java.nio.file.Path
+    ) =
+      val _ = run(build(_, printed), None, updates)
+      java.nio.file.Files.readAllLines(path).asScala.toVector
+    val labelled = java.nio.file.Files.createTempFile("xkafka-print", ".txt")
+    val named    = java.nio.file.Files.createTempFile("xkafka-print", ".txt")
+    Ref[IO].of(Vector.empty[String]).flatMap: lines =>
+      given cats.effect.std.Console[IO] = Lines(lines)
+      for
+        _      <- ours(KStream(Named("read"), in, text, text).print(Named("shown"), "label"), updates)
+        first  <- lines.getAndSet(Vector.empty)
+        _      <- ours(KStream(Named("read"), in, text, text).filter(Named("all"))((_, _) => true).print(Named("shown")), updates)
+        second <- lines.get
+      yield
+        assertEquals(
+          first,
+          javaPrinted(
+            (b, p) => b.stream[String, String]("in").print(p),
+            org.apache.kafka.streams.kstream.Printed.toFile[String, String](labelled.toString).withLabel("label"),
+            labelled
+          )
+        )
+        assertEquals(
+          second,
+          javaPrinted(
+            (b, p) => b.stream[String, String]("in").filter((_, _) => true, JavaNamed.as("all")).print(p),
+            org.apache.kafka.streams.kstream.Printed.toFile[String, String](named.toString).withName("shown"),
+            named
+          )
+        )
 
   /** Runs `inputs` through the program ours and Java's ways and compares what each writes to every topic but repartition topics, its stores'
     * changelogs and its suppression buffers' included, record for record and byte for byte.

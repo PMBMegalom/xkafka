@@ -50,11 +50,15 @@ A program is a `Topology` of pipelines, each reading an input topic and writing
 an output topic. A pipeline starts from a `KStream`, or a `KTable` read from a
 topic (see [Tables](#tables)), and is built with:
 
-- `filter`, `map`, `mapValues`, `flatMap`, `selectKey` and `peek`;
+- `filter`, `filterNot`, `map`, `mapValues`, `flatMap`, `flatMapValues`,
+  `selectKey` and `peek`;
 - `evalFilter`, `evalMap` and `evalMapValues`, which run an effect;
+- `repartition`, which sends records through a repartition topic you name;
 - `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
   named `Store`. This gives a `KTable`, and its `toStream` is every change to it;
-- `to`, which ends the pipeline at its output topic.
+- `toTable`, which keeps each key's latest value as a `KTable`;
+- `to`, which ends the pipeline at its output topic, or `foreach` and `print`,
+  which end it by acting on each record or printing it.
 
 Every step has a name, given as a `Named`: a pipeline's source, each step, and
 its `to`. Names label the program's nodes in [its description](#describing-a-program), as
@@ -107,6 +111,15 @@ annotate a stream without losing it, use `KStream.Of`, as in
 `KStream[IO, String, String]` does not say, and is taken to have changed its
 key: grouping it by key takes a `Repartition`, and if its key had not changed
 after all, `Topology.of` refuses the name with `TopologyError.UnusedRepartition`.
+
+`repartition` sends records through a repartition topic whenever you ask, whether
+or not their key has changed. Afterwards they are keyed as read from that topic,
+so `groupByKey` needs no name for them.
+
+`foreach` runs an effect for each record, and runs it again for records replayed
+after a crash or a fencing, as `peek` does. `print` writes each record as
+`[label]: key, value` to the `Console[F]` in scope, labelled with the name of the
+step before it unless you give a label. Java's `print` writes the same lines.
 
 The application's own topics are named after its id: a store's changelog is
 `<application id>-<store>-changelog`, and a repartition topic is
@@ -201,6 +214,60 @@ type member says which, and `KTable.Of` names it in an annotation:
 only updates. Writing a table that can delete without `.option` does not
 compile. A plain `KTable[F, K, V]` does not say, so its `toStream` cannot be
 written with either serde.
+
+A stream becomes a table with `toTable`, which keeps each key's latest value in a
+store. Records whose key may have changed go through the repartition topic
+`<application id>-<step>-repartition` first, so the step's name also names that
+topic. For a stream of `Option` values, passing the serde of the values inside
+makes none delete the key:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def latestAddress(moves: Topic, output: Topic): Pipeline[IO] =
+  val user    = Serde.utf8[IO]
+  val address = Serde.utf8[IO]
+  KStream(Named("moves"), moves, user, address.option)
+    .toTable(Named("latest-address"), Store("addresses"), user, address)
+    .toStream(Named("address-changes"))
+    .to(Named("write-address-changes"), output, user, address.option)
+```
+
+### Filtering and changing a table
+
+A table's `filter`, `filterNot` and `mapValues` give another table, which follows
+every change to the first. `filter` and `filterNot` turn a value they drop into a
+delete, so the result can always delete keys, and its changes are `Option`s. A
+key that had no value in the result and still has none passes nothing on.
+`mapValues` passes a delete on as a delete:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def activeEmails(users: Topic, orders: Topic, output: Topic): Pipeline[IO] =
+  val id   = Serde.utf8[IO]
+  val text = Serde.utf8[IO]
+  val emails =
+    KTable(Named("users"), users, id, text, Store("users"))
+      .filterNot(Named("not-closed"))((_, user) => user.startsWith("closed:"))
+      .mapValues(Named("email"))(_.split(' ').last)
+  KStream(Named("orders"), orders, id, text)
+    .join(Named("order-email"), emails)((order, email) => s"$order for $email")
+    .to(Named("write-order-emails"), output, id, text)
+```
+
+These tables keep no store of their own: a join reads through to the store behind
+them, applying the filter and the change as it reads. To keep the result, which
+adds a changelog topic, give a `Store` and a `Serde`, as in
+`filter(Named("kept"), Store("kept"), text)(keep)`. `suppress` needs a serde for
+the values it holds, so a table from `mapValues` must be kept in a store before it
+is suppressed; `Topology.of` refuses it otherwise.
 
 ## Joins
 

@@ -146,6 +146,44 @@ final class TablesSuite extends FunSuite:
         table.suppress(Suppressed.untilTimeLimit("calm", 1.second)).toStream(Named("to-stream-7"))
           .to(Named("write-7"), Topic.from("out").orFail, text, text.option)
       ).left.toOption.map(_.toList)
-    assertEquals(suppressed(users.join(Named("join-4"), orders)(_ + _)), Some(List(TopologyError.SuppressedUnstoredJoin("calm"))))
+    assertEquals(suppressed(users.join(Named("join-4"), orders)(_ + _)), Some(List(TopologyError.SuppressedWithoutSerde("calm"))))
     assertEquals(suppressed(users.join(Named("joined"), orders, Store("joined"), text)(_ + _)), None)
-    assert(TopologyError.SuppressedUnstoredJoin("calm").message.contains("pass a Store and a Serde to the join"))
+    assert(TopologyError.SuppressedWithoutSerde("calm").message.contains("pass a Store and a Serde to the join or mapValues"))
+
+  test("values changed in no store are suppressed only once they are kept in a store, which gives the suppression a serde"):
+    val users = KTable(Named("users"), topic, text, text, Store("users"))
+    def suppressed(table: KTable.Of[IO, String, String, Option]): Option[List[TopologyError]] =
+      Topology.of(table.suppress(Suppressed.untilTimeLimit("calm", 1.second)).toStream(Named("changes")).to(Named("write"), topic, text, text.option))
+        .left.toOption.map(_.toList)
+    assertEquals(suppressed(users.mapValues(Named("loud"))(identity)), Some(List(TopologyError.SuppressedWithoutSerde("calm"))))
+    assertEquals(suppressed(users.mapValues(Named("loud"), Store("loud"), text)(identity)), None)
+    // A filter keeps the serde of what it filters.
+    assertEquals(suppressed(users.filter(Named("kept"))((_, _) => true)), None)
+
+  test("a table changing values keeps its kind of change, and a filter makes each change an option, a dropped value being a delete"):
+    val counted: KTable.Of[IO, String, Long, KTable.Updated] =
+      KStream(Named("read"), Topic.from("other").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts"))
+    val doubled: KStream[IO, String, Long]          = counted.mapValues(Named("doubled"))(_ * 2).toStream(Named("changes-1"))
+    val filtered: KStream[IO, String, Option[Long]] = counted.filter(Named("big"))((_, n) => n > 1).toStream(Named("changes-2"))
+    val read: KStream[IO, String, Option[Int]]      =
+      KTable(Named("users"), topic, text, text, Store("users")).mapValues(Named("lengths"))(_.length).toStream(Named("changes-3"))
+    assertEquals(
+      List(
+        Topology.of(doubled.to(Named("write"), topic, text, count)),
+        Topology.of(filtered.to(Named("write"), topic, text, count.option)),
+        Topology.of(read.mapValues(Named("shown"))(_.toString).to(Named("write"), topic, text, text))
+      ).map(_.isRight),
+      List(true, true, true)
+    )
+
+  test("a stream's records are made a table with optional values only where its values are options"):
+    val optional = KStream(Named("read"), topic, text, text.option)
+    val plain    = KStream(Named("read"), topic, text, text)
+    assert(
+      Topology.of(optional.toTable(Named("t"), Store("t"), text, text).toStream(Named("changes")).to(Named("write"), topic, text, text.option))
+        .isRight
+    )
+    assert(
+      Topology.of(plain.toTable(Named("t"), Store("t"), text, text).toStream(Named("changes")).to(Named("write"), topic, text, text.option)).isRight
+    )
+    assert(compileErrors("""KStream(Named("read"), topic, text, count).toTable(Named("t"), Store("t"), text, text)""").nonEmpty)

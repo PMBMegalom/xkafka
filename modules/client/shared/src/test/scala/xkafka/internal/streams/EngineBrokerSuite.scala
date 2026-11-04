@@ -86,6 +86,16 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def asTable(input: Topic, output: Topic): Pipeline[IO] =
     KTable(Named("counts"), input, text, text, Store("counts")).toStream(Named("to-stream-6")).to(Named("write-6"), output, text, text.option)
 
+  /** Takes each word of each value but "skip", keyed by its first letter through a repartition asked for by hand, as a table of each letter's latest
+    * word, kept in `latest`; then its length, kept in `counts`; then only lengths over one, so a shorter word deletes its letter.
+    */
+  private def throughFilter(input: Topic, output: Topic): Pipeline[IO] =
+    KStream(Named("read-8"), input, text, text).filterNot(Named("not-skip"))((_, value) => value == "skip")
+      .flatMapValues(Named("each"))(_.split(' ').toList).selectKey(Named("by-letter"))((_, value) => value.take(1))
+      .repartition(Repartition("through"), text, text).toTable(Named("latest"), Store("latest"), text, text)
+      .mapValues(Named("lengths"), Store("counts"), text)(_.length.toString).filter(Named("long"))((_, length) => length != "1")
+      .toStream(Named("to-stream-9")).to(Named("write-9"), output, text, text.option)
+
   /** Waits up to two minutes until `topic` holds at least `count` records. */
   private def holding(server: String, topic: Topic, count: Int)(using guarantee: ProcessingGuarantee): IO[Unit] =
     Names.fresh:
@@ -550,6 +560,14 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         produceValues(server, app.input, List("a" -> Some("1"), "b" -> Some("2"), "a" -> None, "c" -> None)) *> running(server, app):
           val held = Map("a" -> None, "b" -> Some("2"), "c" -> None)
           latestValues(server, app.output, held) *> latestValues(server, app.changelog, held)
+
+    test(s"$release, $under: an engine repartitions by hand, makes a stream a table and filters and changes it, a dropped value deleting its key"):
+      counting(server, throughFilter): app =>
+        val words = List("a" -> Some("apple bee"), "b" -> Some("skip"), "c" -> Some("cat c"), "d" -> Some("bee"))
+        produceValues(server, app.input, words) *> running(server, app):
+          // Apple then a word of one letter for c, and bee last for b: each letter's latest length, and the store behind the filter keeps c's.
+          latestValues(server, app.output, Map("a" -> Some("5"), "b" -> Some("3"), "c" -> None)) *>
+            latestValues(server, app.changelog, Map("a" -> Some("5"), "b" -> Some("3"), "c" -> Some("1")))
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

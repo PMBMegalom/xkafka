@@ -35,12 +35,12 @@ import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, Topology as JavaTopology}
 import org.apache.kafka.streams.kstream.{
-  Grouped, JoinWindows as JavaJoinWindows, Materialized, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows,
-  StreamJoined, Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
+  Grouped, JoinWindows as JavaJoinWindows, Materialized, Named as JavaNamed, Produced, Repartitioned, SessionWindows as JavaSessionWindows,
+  SlidingWindows as JavaSlidingWindows, StreamJoined, Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, WindowedSerdes
 }
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.processor.internals.{InternalTopologyBuilder, StreamThread, TopologyMetadata}
-import org.apache.kafka.streams.state.{SessionStore, WindowStore}
+import org.apache.kafka.streams.state.{KeyValueStore, SessionStore, WindowStore}
 import internal.protocol.StreamsGroup
 import internal.streams.Declaration
 
@@ -472,6 +472,27 @@ final class TopologyGoldenSuite extends FunSuite:
         _.stream[String, String]("in").groupByKey.count(Materialized.as("zeta")).toStream.groupByKey(Grouped.valueSerde(Serdes.Long))
           .reduce((_, n) => n, Materialized.as("alpha")).toStream.to("out", Produced.`with`(Serdes.String, Serdes.Long))
       )
+    )
+
+  test("a repartition asked for, a stream made a table, and tables kept by filter and mapValues declare what Java declares"):
+    assertEquals(
+      ours(
+        KStream(Named("read-1"), topic("in-1"), text, text).repartition(Repartition("through"), text, text).filterNot(Named("not"))((_, _) => false)
+          .to(Named("write-1"), topic("out-1"), text, text),
+        KStream(Named("read-2"), topic("in-2"), text, text).selectKey(Named("key"))((_, v) => v).toTable(Named("latest"), Store("latest"), text, text)
+          .filter(Named("kept"), Store("kept"), text)((_, _) => true).mapValues(Named("loud"), Store("loud"), text)(identity)
+          .mapValues(Named("unkept"))(identity).toStream(Named("to-stream-1")).to(Named("write-2"), topic("out-2"), text, text.option),
+        KStream(Named("read-3"), topic("in-3"), text, text).foreach(Named("act"))((_, _) => IO.unit)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("in-1").repartition(Repartitioned.`with`(Serdes.String, Serdes.String).withName("through"))
+          .filterNot((_, _) => false).to("out-1")
+        builder.stream[String, String]("in-2").selectKey((_, v) => v)
+          .toTable(JavaNamed.as("latest"), Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("latest"))
+          .filter((_, _) => true, Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("kept"))
+          .mapValues((v: String) => v, Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("loud")).mapValues((v: String) => v)
+          .toStream.to("out-2")
+        builder.stream[String, String]("in-3").foreach((_, _) => ())
     )
 
 object TopologyGoldenSuite:

@@ -35,7 +35,7 @@ import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{KeyValue, StreamsBuilder}
 import org.apache.kafka.streams.kstream.{
   Consumed, EmitStrategy, Grouped, Joined, JoinWindows as JavaJoinWindows, KStream as JavaKStream, KTable as JavaKTable, Materialized,
-  Named as JavaNamed, Produced, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, StreamJoined,
+  Named as JavaNamed, Printed, Produced, Repartitioned, SessionWindows as JavaSessionWindows, SlidingWindows as JavaSlidingWindows, StreamJoined,
   Suppressed as JavaSuppressed, TimeWindows as JavaTimeWindows, Windowed as JavaWindowed
 }
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
@@ -333,4 +333,106 @@ final class DescribeGoldenSuite extends FunSuite:
             .count(JavaNamed.as("count"), stored[java.lang.Long]("visits"))
         users.leftJoin(visits, (u: String, n: java.lang.Long) => s"$u$n", JavaNamed.as("visited")).toStream(JavaNamed.as("to-stream"))
           .to("out", written("write", s))
+    )
+
+  test("steps that drop, flat map, print and act on records, a pipeline ending at each"):
+    given cats.effect.std.Console[IO] = cats.effect.std.Console.make[IO]
+    assertEquals(
+      ours(
+        KStream(Named("read-1"), topic("in-1"), text, text).filterNot(Named("not"))((_, _) => false).flatMapValues(Named("flat"))(List(_))
+          .foreach(Named("act"))((_, _) => IO.unit),
+        KStream(Named("read-2"), topic("in-2"), text, text).print(Named("shown"), "label")
+      ),
+      javas: builder =>
+        read(builder, "in-1", "read-1").filterNot((_, _) => false, JavaNamed.as("not"))
+          .flatMapValues((v: String) => java.util.List.of(v), JavaNamed.as("flat")).foreach((_, _) => (), JavaNamed.as("act"))
+        read(builder, "in-2", "read-2").print(Printed.toSysOut[String, String].withLabel("label").withName("shown"))
+    )
+
+  test("a repartition asked for on records keyed as read, then one on records with a new key"):
+    assertEquals(
+      ours(
+        KStream(Named("read"), topic("in"), text, text).repartition(Repartition("first"), text, text).selectKey(Named("key"))((_, v) => v)
+          .repartition(Repartition("second"), text, text).groupByKey(text, text).count(Named("count"), Store("counts")).toStream(Named("to-stream"))
+          .to(Named("write"), topic("out"), text, count)
+      ),
+      javas: builder =>
+        read(builder, "in", "read").repartition(Repartitioned.`with`(s, s).withName("first")).selectKey((_, v) => v, JavaNamed.as("key"))
+          .repartition(Repartitioned.`with`(s, s).withName("second")).groupByKey(Grouped.`with`(s, s))
+          .count(JavaNamed.as("count"), stored[java.lang.Long]("counts")).toStream(JavaNamed.as("to-stream")).to("out", written("write", l))
+    )
+
+  test("a stream made a table, and one with a new key made a table through a repartition topic named after the step"):
+    assertEquals(
+      ours(
+        KStream(Named("read-1"), topic("in-1"), text, text).toTable(Named("first"), Store("first"), text, text).toStream(Named("to-stream-1"))
+          .to(Named("write-1"), topic("out-1"), text, text.option),
+        KStream(Named("read-2"), topic("in-2"), text, text).selectKey(Named("key"))((_, v) => v).toTable(Named("second"), Store("second"), text, text)
+          .toStream(Named("to-stream-2")).to(Named("write-2"), topic("out-2"), text, text.option)
+      ),
+      javas: builder =>
+        read(builder, "in-1", "read-1").toTable(JavaNamed.as("first"), stored[String]("first").withKeySerde(s).withValueSerde(s))
+          .toStream(JavaNamed.as("to-stream-1")).to("out-1", written("write-1", s))
+        read(builder, "in-2", "read-2").selectKey((_, v) => v, JavaNamed.as("key"))
+          .toTable(JavaNamed.as("second"), stored[String]("second").withKeySerde(s).withValueSerde(s)).toStream(JavaNamed.as("to-stream-2"))
+          .to("out-2", written("write-2", s))
+    )
+
+  test("a table filtered and changed in stores and in none, read by a join through the stores behind them"):
+    assertEquals(
+      ours(
+        KStream(Named("orders"), topic("orders"), text, text).join(
+          Named("with-user"),
+          KTable(Named("users"), topic("users"), text, text, Store("users")).filter(Named("kept"))((_, _) => true).mapValues(Named("loud"))(identity)
+            .filterNot(Named("dropped"))((_, _) => false)
+        )((o, u) => o + u).to(Named("write-1"), topic("out-1"), text, text),
+        KTable(Named("plans"), topic("plans"), text, text, Store("plans")).filter(Named("plan-kept"), Store("plan-kept"), text)((_, _) => true)
+          .mapValues(Named("plan-loud"), Store("plan-loud"), text)(identity).toStream(Named("to-stream"))
+          .to(Named("write-2"), topic("out-2"), text, text.option)
+      ),
+      javas: builder =>
+        val users =
+          table(builder, "users", "users").filter((_, _) => true, JavaNamed.as("kept")).mapValues((v: String) => v, JavaNamed.as("loud"))
+            .filterNot((_, _) => false, JavaNamed.as("dropped"))
+        read(builder, "orders", "orders").join(users, (o: String, u: String) => o + u, Joined.`with`(s, s, s, "with-user"))
+          .to("out-1", written("write-1", s))
+        table(builder, "plans", "plans")
+          .filter((_, _) => true, JavaNamed.as("plan-kept"), stored[String]("plan-kept").withKeySerde(s).withValueSerde(s))
+          .mapValues((v: String) => v, JavaNamed.as("plan-loud"), stored[String]("plan-loud").withKeySerde(s).withValueSerde(s))
+          .toStream(JavaNamed.as("to-stream")).to("out-2", written("write-2", s))
+    )
+
+  test("records with a new key repartitioned by hand need no second repartition to be made a table or joined"):
+    assertEquals(
+      ours(
+        KStream(Named("read-1"), topic("in-1"), text, text).selectKey(Named("key-1"))((_, v) => v).repartition(Repartition("first"), text, text)
+          .toTable(Named("table"), Store("latest"), text, text).toStream(Named("to-stream")).to(Named("write-1"), topic("out-1"), text, text.option)
+      ),
+      javas: builder =>
+        read(builder, "in-1", "read-1").selectKey((_, v) => v, JavaNamed.as("key-1")).repartition(Repartitioned.`with`(s, s).withName("first"))
+          .toTable(JavaNamed.as("table"), stored[String]("latest").withKeySerde(s).withValueSerde(s)).toStream(JavaNamed.as("to-stream"))
+          .to("out-1", written("write-1", s))
+    )
+
+  test("a join of a table filtered or changed into a store reads that store, not the one behind it"):
+    assertEquals(
+      ours(
+        KStream(Named("orders"), topic("orders"), text, text).join(
+          Named("with-user"),
+          KTable(Named("users"), topic("users"), text, text, Store("users")).filter(Named("kept"), Store("kept"), text)((_, _) => true)
+        )((o, u) => o + u).to(Named("write-1"), topic("out-1"), text, text),
+        KStream(Named("pays"), topic("pays"), text, text).join(
+          Named("with-plan"),
+          KTable(Named("plans"), topic("plans"), text, text, Store("plans")).mapValues(Named("loud"), Store("loud"), text)(identity)
+        )((o, u) => o + u).to(Named("write-2"), topic("out-2"), text, text)
+      ),
+      javas: builder =>
+        val users =
+          table(builder, "users", "users").filter((_, _) => true, JavaNamed.as("kept"), stored[String]("kept").withKeySerde(s).withValueSerde(s))
+        read(builder, "orders", "orders").join(users, (o: String, u: String) => o + u, Joined.`with`(s, s, s, "with-user"))
+          .to("out-1", written("write-1", s))
+        val plans =
+          table(builder, "plans", "plans").mapValues((v: String) => v, JavaNamed.as("loud"), stored[String]("loud").withKeySerde(s).withValueSerde(s))
+        read(builder, "pays", "pays").join(plans, (o: String, u: String) => o + u, Joined.`with`(s, s, s, "with-plan"))
+          .to("out-2", written("write-2", s))
     )

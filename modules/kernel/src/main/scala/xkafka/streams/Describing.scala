@@ -112,6 +112,9 @@ private[xkafka] object Describing:
     step match
       case Step.Aggregate(store, _, _, _, _, _)                    => List(store.value)
       case Step.TableSource(store, _, _)                           => List(store.value)
+      case Step.ToTable(_, store, _, _)                            => List(store.value)
+      case Step.TableFilter(_, _, store)                           => store.toList.map(_._1.value)
+      case Step.TableMapValues(_, _, _, store)                     => store.toList.map(_._1.value)
       case Step.WindowedAggregate(store, _, _, _, _, _, _, _, _)   => List(store.value)
       case Step.SlidingAggregate(store, _, _, _, _, _, _, _, _)    => List(store.value)
       case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => List(store.value)
@@ -128,6 +131,8 @@ private[xkafka] object Describing:
       case TableView.Stored(store, _, _)    => List(store.value)
       case TableView.Held(buffer, parent)   => buffer :: stores(parent)
       case TableView.Joined(left, right, _) => (stores(left) ++ stores(right)).distinct
+      case TableView.Filtered(parent, _)    => stores(parent)
+      case TableView.Mapped(parent, _)      => stores(parent)
 
   /** The nodes Java writes for a segment's end, after the node `last`. */
   private def ending[F[_], K, V](to: End[F, K, V], last: String, topic: Repartition => String): Vector[Made] =

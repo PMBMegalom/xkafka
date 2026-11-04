@@ -217,3 +217,29 @@ final class TopologySuite extends CatsEffectSuite:
       assertEquals(read, 258L)
       assert(short.isLeft)
       assert(missing.left.exists(_.isInstanceOf[Deserializer.NullValueException]))
+
+  test("a stream repartitioned by hand is keyed as read, so groups without a name, whatever came before"):
+    val text    = Serde.utf8[IO]
+    val in      = Topic.from("in").orFail
+    val out     = Topic.from("out").orFail
+    val rekeyed = KStream(Named("read"), in, text, text).selectKey(Named("key"))((_, v) => v)
+    assert(compileErrors("""rekeyed.groupByKey(text, text)""").nonEmpty)
+    val grouped = rekeyed.repartition(Repartition("through"), text, text).groupByKey(text, text)
+    assert(
+      Topology.of(grouped.count(Named("count"), Store("counts")).toStream(Named("changes")).to(Named("write"), out, text, Serde.long[IO])).isRight
+    )
+
+  test("a repartition asked for twice under one name is refused, as one for a join or a group is"):
+    val text                  = Serde.utf8[IO]
+    val out                   = Topic.from("out").orFail
+    def through(name: String) =
+      KStream(Named(name), Topic.from(name).orFail, text, text).repartition(Repartition("through"), text, text)
+        .to(Named(s"$name-write"), out, text, text)
+    assertEquals(Topology.of(through("a"), through("b")).left.toOption.map(_.toList), Some(List(TopologyError.DuplicateRepartition("through"))))
+
+  test("foreach and print end a pipeline"):
+    val text                          = Serde.utf8[IO]
+    given cats.effect.std.Console[IO] = cats.effect.std.Console.make[IO]
+    val read                          = KStream(Named("read"), Topic.from("in").orFail, text, text)
+    assert(Topology.of(read.foreach(Named("act"))((_, _) => IO.unit)).isRight)
+    assert(Topology.of(read.print(Named("shown"))).isRight)

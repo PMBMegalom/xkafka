@@ -140,7 +140,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     for
       fedIn <- fed(segment.origin, input, state, now, Task.requests(segment.chain, false))
       (read, records, logged) = fedIn
-      ran <- chained(segment.chain, records, read, now)
+      ran <- chained(segment.chain, records, read, now, false)
       (after, out, written) = ran
       ended <- out.flatTraverse(leaving(segment.end, _))
     yield (after, logged ++ written ++ ended)
@@ -167,15 +167,17 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       case Origin.Joined(_, left, right, joiner, store)              => joinedFed(left, right, joiner, store, input, state, now, requested)
       case joining @ Origin.StreamsJoined(_, _, _, _, _, _, _, _, _) => streamsJoined(joining, input, state, now)
 
-  /** Runs each of `records` through `steps`, in order. */
+  /** Runs each of `records` through `steps`, in order; `asked` says whether what reads them asks for old values. */
   private def chained[K, V, K2, V2](
       steps: Chain[F, K, V, K2, V2],
       records: Vector[Travelling[K, V]],
       state: TaskState,
-      now: Long
+      now: Long,
+      asked: Boolean
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     records.foldLeftM((state, Vector.empty[Travelling[K2, V2]], Vector.empty[TaskOutput])):
-      case ((current, done, out), record) => chain(steps, record, current, now).map((after, more, logged) => (after, done ++ more, out ++ logged))
+      case ((current, done, out), record) => chain(steps, record, current, now, asked)
+          .map((after, more, logged) => (after, done ++ more, out ++ logged))
 
   /** The changes one side of a join makes for `input`, read through its steps. Each keeps its old value: a join reads one only where Java's side
     * passes it on, since it reads it only for a side its kind asks, or once what reads the join asks, which asks both sides.
@@ -190,7 +192,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     for
       fedIn <- fed(side.origin, input, state, now, Task.requests(side.chain, requested))
       (read, records, logged) = fedIn
-      ran <- chained(side.chain, records, read, now)
+      ran <- chained(side.chain, records, read, now, requested)
       (after, changes, written) = ran
     yield (
       after,
@@ -258,7 +260,7 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
     for
       fedIn <- fed(flow.origin, input, state, now, Task.requests(flow.chain, false))
       (read, records, logged) = fedIn
-      ran <- chained(flow.chain, records, read, now)
+      ran <- chained(flow.chain, records, read, now, false)
       (after, out, written) = ran
     yield (after, out, logged ++ written)
 
@@ -522,13 +524,15 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       steps: Chain[F, K, V, K2, V2],
       record: Travelling[K, V],
       state: TaskState,
-      now: Long
+      now: Long,
+      asked: Boolean
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     steps match
       case Chain.Start()             => F.pure((state, Vector(record), Vector.empty))
-      case Chain.Then(init, last, _) => chain(init, record, state, now).flatMap: (before, records, written) =>
+      case Chain.Then(init, last, _) => chain(init, record, state, now, Task.asks(last, asked)).flatMap: (before, records, written) =>
           records.foldLeftM((before, Vector.empty[Travelling[K2, V2]], written)):
-            case ((current, done, out), next) => step(last, next, current, now).map((after, more, logged) => (after, done ++ more, out ++ logged))
+            case ((current, done, out), next) => step(last, next, current, now, asked)
+                .map((after, more, logged) => (after, done ++ more, out ++ logged))
 
   /** The record with what `step` makes of it and its key's value in the table, as Java's stream-table join makes it when the record comes. */
   private def joined[K, V, TV, R](
@@ -547,7 +551,8 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       step: Step[F, K, V, K2, V2],
       record: Travelling[K, V],
       state: TaskState,
-      now: Long
+      now: Long,
+      asked: Boolean
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     def passing(records: Vector[Travelling[K2, V2]]) = F.pure((state, records, Vector.empty[TaskOutput]))
     step match
@@ -569,18 +574,18 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
-      case Step.TableSource(store, key, value)                           => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
+      case filtering @ Step.TableFilter(_, _, _)                         => tableFiltered(filtering, record, state)
+      case mapping @ Step.TableMapValues(_, _, _, _)                     => tableMapped(mapping, record, state, asked)
+      case Step.ToTable(lift, store, key, value)                         => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
+          key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
+            // Java skips a record whose key is null, which here is a key its serializer writes as none.
+            case None        => F.pure((state, Vector.empty, Vector.empty))
+            case Some(bytes) => tableKept(store, value, changelog, record.key, bytes, lift(record.value), record.timestamp, record.headers, state)
+      case Step.TableSource(store, key, value) => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           record.key.flatTraverse(k => key.serializer.serialize(changelog, Headers.empty, k).map(_.map(k -> _))).flatMap:
             // Java skips a record whose key is null: one read without a key, or one its serializer writes as none.
             case None             => F.pure((state, Vector.empty, Vector.empty))
-            case Some((k, bytes)) => state.store(store.value).get(bytes)
-                .traverse(held => value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))).flatMap: replaced =>
-                  record.value.flatTraverse(value.serializer.serialize(changelog, Headers.empty, _)).map: written =>
-                    val contents =
-                      written.fold(state.store(store.value) - bytes)(v => state.store(store.value).updated(bytes, Stored(v, record.timestamp)))
-                    val after  = state.copy(stores = state.stores.updated(store.value, contents))
-                    val logged = TaskOutput(changelog, Some(partition), Some(bytes), written, record.timestamp, Headers.empty)
-                    (after, Vector(Travelling(k, record.value, record.timestamp, record.headers, Some(replaced))), Vector(logged))
+            case Some((k, bytes)) => tableKept(store, value, changelog, k, bytes, record.value, record.timestamp, record.headers, state)
       case Step.Aggregate(store, key, value, initial, start, add) => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
             // Java skips a record whose key is null, which here is a key its serializer writes as none.
@@ -598,6 +603,87 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
                   val after    = state.copy(stores = state.stores.updated(store.value, contents))
                   val logged   = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
                   (after, Vector(Travelling(record.key, aggregate, timestamp, record.headers, replaced)), Vector(logged))
+
+  /** The change `next` makes to the key written as `bytes` in a table's `store`, logged to `changelog`, going on with the value it replaced. */
+  private def tableKept[K, V](
+      store: xkafka.streams.Store,
+      value: xkafka.streams.Serde[F, V],
+      changelog: Topic,
+      key: K,
+      bytes: Chunk[Byte],
+      next: Option[V],
+      timestamp: Long,
+      headers: Headers,
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[K, Option[V]]], Vector[TaskOutput])] =
+    state.store(store.value).get(bytes).traverse(held => value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))).flatMap:
+      replaced =>
+        next.flatTraverse(value.serializer.serialize(changelog, Headers.empty, _)).map: written =>
+          val contents = written.fold(state.store(store.value) - bytes)(v => state.store(store.value).updated(bytes, Stored(v, timestamp)))
+          val after    = state.copy(stores = state.stores.updated(store.value, contents))
+          val logged   = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
+          (after, Vector(Travelling(key, next, timestamp, headers, Some(replaced))), Vector(logged))
+
+  /** What a change to `key` does to the store a filter or `mapValues` keeps its result in, as Java's does: the value it replaced, then the state with
+    * the change kept and logged; or nothing where its key is written as none, or where `dropEmpty` says a change from no value to no value goes no
+    * further, so it is not kept either.
+    */
+  private def keptResult[K, V](
+      kept: (xkafka.streams.Store, TableKey[F, K], xkafka.streams.Serde[F, V]),
+      key: K,
+      next: Option[V],
+      timestamp: Long,
+      state: TaskState,
+      dropEmpty: Boolean
+  ): F[Option[(TaskState, Option[V], TaskOutput)]] =
+    val (store, keys, value) = kept
+    topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
+      bufferKey(keys).serializer.serialize(changelog, Headers.empty, key).flatMap:
+        case None        => F.pure(None)
+        case Some(bytes) => state.store(store.value).get(bytes)
+            .traverse(held => value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))).flatMap: replaced =>
+              if dropEmpty && replaced.isEmpty && next.isEmpty then F.pure(None)
+              else
+                next.flatTraverse(value.serializer.serialize(changelog, Headers.empty, _)).map: written =>
+                  val contents = written.fold(state.store(store.value) - bytes)(v => state.store(store.value).updated(bytes, Stored(v, timestamp)))
+                  val after    = state.copy(stores = state.stores.updated(store.value, contents))
+                  Some((after, replaced, TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)))
+
+  /** What Java's table filter makes of a change: its value where `keep` keeps it, and otherwise none, with the old value filtered too; a change from
+    * no value to no value goes no further. Java's filter always asks for old values, which every table here can give. Kept in no store, the old value
+    * comes from the change.
+    */
+  private def tableFiltered[K, C, V](
+      step: Step.TableFilter[F, K, C, V],
+      record: Travelling[K, C],
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[K, Option[V]]], Vector[TaskOutput])] =
+    val value = step.present(record.value).filter(step.keep(record.key, _))
+    step.store match
+      case None =>
+        val old  = record.old.flatMap(step.present).filter(step.keep(record.key, _))
+        val goes = if old.isEmpty && value.isEmpty then Vector.empty else Vector(record.copy(value = value, old = Some(old)))
+        F.pure((state, goes, Vector.empty))
+      case Some(kept) => keptResult(kept, record.key, value, record.timestamp, state, true).map:
+          case None                         => (state, Vector.empty, Vector.empty)
+          case Some((after, replaced, log)) => (after, Vector(record.copy(value = value, old = Some(replaced))), Vector(log))
+
+  /** What Java's table `mapValues` makes of a change: its value changed, with the old value changed too where what reads it asks for one. Kept in no
+    * store, the old value comes from the change.
+    */
+  private def tableMapped[K, CA, CB, B](
+      step: Step.TableMapValues[F, K, CA, CB, B],
+      record: Travelling[K, CA],
+      state: TaskState,
+      asked: Boolean
+  ): F[(TaskState, Vector[Travelling[K, CB]], Vector[TaskOutput])] =
+    val value = step.mapped(record.value)
+    step.store match
+      case None       => F.pure((state, Vector(record.copy(value = value, old = if asked then record.old.map(step.mapped) else None)), Vector.empty))
+      case Some(kept) => keptResult(kept, record.key, step.present(value), record.timestamp, state, false).map:
+          case None                         => (state, Vector.empty, Vector.empty)
+          case Some((after, replaced, log)) =>
+            (after, Vector(record.copy(value = value, old = if asked then replaced.map(step.pure) else None)), Vector(log))
 
   /** What a window step gives: the task's state, the records it passes on, and what it writes to its store's changelog. */
   private type Windowing[K, A] = (TaskState, Vector[Travelling[Windowed[K], A]], Vector[TaskOutput])
@@ -1099,6 +1185,11 @@ private[xkafka] final class Task[F[_]](application: String, segment: Segment[F],
               case Some(stored) => (Held.decode(stored.value), Task.valuesOf(parent)).tupled.liftTo[F](unreadable).flatMap: (held, values) =>
                   held.prior.traverse(prior => values.deserializer.deserialize(changelog, held.context.headers, Some(prior)).map(_ -> Task.Unknown))
       case TableView.Joined(left, right, joiner) => joinedValueOf(left, right, joiner, key, state)
+      case TableView.Filtered(parent, keep)      => valueOf(parent, key, state).map(_.filter((value, _) => keep(key, value)))
+      case mapped @ TableView.Mapped(_, _)       => mappedValueOf(mapped, key, state)
+
+  private def mappedValueOf[K, A, B](view: TableView.Mapped[F, K, A, B], key: K, state: TaskState): F[Option[(B, Long)]] =
+    valueOf(view.parent, key, state).map(_.map((value, timestamp) => (view.change(value), timestamp)))
 
   private def joinedValueOf[K, A, B, R](
       left: TableView[F, K, A],
@@ -1161,16 +1252,24 @@ private[xkafka] object Task:
       case TableView.Stored(_, _, value) => Some(value)
       case TableView.Held(_, parent)     => valuesOf(parent)
       case TableView.Joined(_, _, _)     => None
+      case TableView.Filtered(parent, _) => valuesOf(parent)
+      case TableView.Mapped(_, _)        => None
 
-  /** Whether the first table step of `chain` asks the table before it for old values, as Java's suppression does, or where it has no steps, whether
-    * what follows it asks.
+  /** Whether `step` asks what comes before it for old values, as Java's processors after a table ask with `enableSendingOldValues`: a suppression and
+    * a filter always do; a `mapValues` kept in no store does where what follows it asks, and one kept in a store reads them from there.
     */
+  def asks[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2], after: Boolean): Boolean =
+    step match
+      case Step.Suppress(_, _, _, _)          => true
+      case Step.TableFilter(_, _, _)          => true
+      case Step.TableMapValues(_, _, _, None) => after
+      case _                                  => false
+
+  /** Whether the steps of `chain` ask what comes before them for old values, or where it has no steps, whether what follows it asks. */
   def requests[F[_], K, V, K2, V2](chain: Chain[F, K, V, K2, V2], outer: Boolean): Boolean =
     chain match
-      case Chain.Start()                                           => outer
-      case Chain.Then(Chain.Start(), Step.Suppress(_, _, _, _), _) => true
-      case Chain.Then(Chain.Start(), _, _)                         => false
-      case Chain.Then(init, _, _)                                  => requests(init, outer)
+      case Chain.Start()             => outer
+      case Chain.Then(init, last, _) => requests(init, asks(last, outer))
 
   /** What Java's join processor for the left side makes of `change` and the right side's value `other`, for each kind of join: the result's new
     * value, its old value where `sendOld`, and its time, or nothing where Java forwards nothing.
