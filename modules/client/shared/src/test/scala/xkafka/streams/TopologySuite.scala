@@ -170,7 +170,7 @@ final class TopologySuite extends CatsEffectSuite:
       val grouped =
         kept.groupByKey(text, text).count(Named("count-8"), Store("counts")).toStream(Named("to-stream-10"))
           .to(Named("write-9"), topic("out"), text, count)
-      assertEquals(Topology.of(grouped).map(_.pipelines.head.segments.size), Right(1))
+      assertEquals(Topology.of(grouped).map(_.subtopologies.size), Right(1))
       assert(compileErrors("kept.groupByKey(Repartition(\"unused\"), text, text)").contains(needless))
 
   test("a stream whose type does not say how it is keyed needs a repartition name, which Topology.of refuses where its key has not changed"):
@@ -187,7 +187,7 @@ final class TopologySuite extends CatsEffectSuite:
     val grouped                              =
       rekeyed.groupByKey(Repartition("rekeyed"), text, text).count(Named("count-7"), Store("counts")).toStream(Named("to-stream-9"))
         .to(Named("write-8"), topic("out"), text, count)
-    assertEquals(Topology.of(grouped).map(_.pipelines.head.segments.size), Right(2))
+    assertEquals(Topology.of(grouped).map(_.subtopologies.size), Right(2))
 
   test("records grouped by the key they were read with need no repartition name"):
     val grouped =

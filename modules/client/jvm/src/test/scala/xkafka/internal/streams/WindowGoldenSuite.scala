@@ -1291,6 +1291,30 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       List(("right", "k", "later", 5000L), ("left", "k", "earlier", 1000L))
     )
 
+  test("an outer join asks through changed values on its right for old values, so a delete of a key only that side held goes on, as Java's does"):
+    sameFrom(
+      written(lefts.outerJoin(Named("joined"), rights.mapValues(Named("loud"))(_.toUpperCase))(ior)),
+      builder =>
+        toOut(javaTable(builder, "left", "lefts").outerJoin(javaTable(builder, "right", "rights").mapValues((v: String) => v.toUpperCase), either)),
+      List(("right", "gone", "here", 1000L), ("right", "gone", null, 2000L))
+    )
+
+  test(
+    "a filter after a join asks through changed values on its left for old values, so a value it stops keeping goes on as a delete, as Java's does"
+  ):
+    def keep(value: String) = value.startsWith("KEEP")
+    sameFrom(
+      written(
+        lefts.mapValues(Named("loud"))(_.toUpperCase).join(Named("joined"), rights)((a, b) => s"$a+$b").filter(Named("kept"))((_, v) => keep(v))
+      ),
+      builder =>
+        toOut(
+          javaTable(builder, "left", "lefts").mapValues((v: String) => v.toUpperCase)
+            .join(javaTable(builder, "right", "rights"), (a: String, b: String) => s"$a+$b").filter((_, v) => keep(v))
+        ),
+      List(("right", "k", "plan", 1000L), ("left", "k", "keep", 2000L), ("left", "k", "drop", 3000L))
+    )
+
   test("foreach acts on each record in turn, as Java's does, and ends the pipeline"):
     val javaSeen = scala.collection.mutable.ListBuffer.empty[(String, String)]
     Ref[IO].of(Vector.empty[(String, String)]).flatMap: seen =>
@@ -1339,6 +1363,65 @@ final class WindowGoldenSuite extends CatsEffectSuite:
             (b, p) => b.stream[String, String]("in").filter((_, _) => true, JavaNamed.as("all")).print(p),
             org.apache.kafka.streams.kstream.Printed.toFile[String, String](named.toString).withName("shown"),
             named
+          )
+        )
+
+  test("print's default label after a stream-stream join or a repartition is the step before, as Java's is"):
+    final class Lines(lines: Ref[IO, Vector[String]]) extends cats.effect.std.Console[IO]:
+      def readLineWithCharset(charset: java.nio.charset.Charset): IO[String] = IO.raiseError(new UnsupportedOperationException)
+      def print[A](a: A)(implicit S: cats.Show[A]): IO[Unit]                 = IO.unit
+      def println[A](a: A)(implicit S: cats.Show[A]): IO[Unit]               = lines.update(_ :+ S.show(a))
+      def error[A](a: A)(implicit S: cats.Show[A]): IO[Unit]                 = IO.unit
+      def errorln[A](a: A)(implicit S: cats.Show[A]): IO[Unit]               = IO.unit
+    def javaLabels(
+        build: (StreamsBuilder, org.apache.kafka.streams.kstream.Printed[String, String]) => Unit,
+        from: List[(String, String, String, Long)]
+    ) =
+      val path = java.nio.file.Files.createTempFile("xkafka-print", ".txt")
+      val _    = runFrom(build(_, org.apache.kafka.streams.kstream.Printed.toFile[String, String](path.toString).withName("shown")), None, from)
+      java.nio.file.Files.readAllLines(path).asScala.toVector.map(_.takeWhile(_ != ':'))
+    val within     = JoinWindows(5.seconds, grace = 2.seconds)
+    val javaWithin = JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2))
+    val pairs      = List(("in", "k", "a", 1000L), ("other", "k", "b", 2000L))
+    Ref[IO].of(Vector.empty[String]).flatMap: lines =>
+      given cats.effect.std.Console[IO] = Lines(lines)
+      for
+        _ <-
+          oursFrom(
+            KStream(Named("read"), in, text, text)
+              .join(Named("pairs"), KStream(Named("other"), Topic.from("other").orFail, text, text), within, Store("pairs"), text, text, text)(_ + _)
+              .print(Named("shown")),
+            pairs
+          )
+        joined <- lines.getAndSet(Vector.empty)
+        _      <-
+          oursFrom(
+            KStream(Named("read"), in, text, text).repartition(Repartition("first"), text, text).print(Named("shown")),
+            List(("in", "k", "a", 1000L))
+          )
+        repartitioned <- lines.get
+      yield
+        assertEquals(
+          joined.map(_.takeWhile(_ != ':')),
+          javaLabels(
+            (b, p) =>
+              b.stream[String, String]("in").join(
+                b.stream[String, String]("other"),
+                (x: String, y: String) => x + y,
+                javaWithin,
+                org.apache.kafka.streams.kstream.StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs")
+                  .withStoreName("pairs")
+              ).print(p),
+            pairs
+          )
+        )
+        assertEquals(
+          repartitioned.map(_.takeWhile(_ != ':')),
+          javaLabels(
+            (b, p) =>
+              b.stream[String, String]("in")
+                .repartition(org.apache.kafka.streams.kstream.Repartitioned.`with`(Serdes.String, Serdes.String).withName("first")).print(p),
+            List(("in", "k", "a", 1000L))
           )
         )
 
@@ -1424,7 +1507,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   /** As `ours`, for records of several topics, each going to the task whose sub-topology reads its topic, at the next offset of that topic. */
   private def oursFrom(pipeline: Pipeline[IO], inputs: List[(String, String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
-    val segments              = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector
+    val segments              = Topology.of(pipeline).orFail.subtopologies.toVector
     val tasks                 = segments.map(Task[IO]("app", _, 0))
     def reader(topic: String) = segments.indexWhere(_.origins.exists(Task.topicOf("app", _) == topic))
     type Ran = (Vector[TaskOutput], Vector[TaskState], Map[String, Long])

@@ -25,10 +25,10 @@ package streams
 
 import protocol.StreamsGroup
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{Describing, End, JavaHashSet, Source, Topology, TopologyDescription}
+import xkafka.streams.{Describing, JavaHashSet, Source, Topology, TopologyDescription}
 
-/** The topology a member declares to the coordinator for a program, as Java Streams declares the same program: sub-topologies numbered in the order
-  * their segments are made, and every list sorted as Java's client sorts it before sending.
+/** The topology a member declares to the coordinator for a program, as Java Streams declares the same program: sub-topologies numbered as Java
+  * numbers them, and every list sorted as Java's client sorts it before sending.
   */
 private[xkafka] object Declaration:
   /** The configs Java gives a key-value store's changelog topic. */
@@ -59,7 +59,7 @@ private[xkafka] object Declaration:
     * group in which two topic names share a bucket of Java's set.
     */
   def unordered[F[_]](application: String, topology: Topology[F]): List[List[String]] =
-    topology.pipelines.toList.flatMap(_.segments.toList).map(_.copartitioned.map(Task.topicOf(application, _)))
+    topology.subtopologies.flatMap(_.copartitioned).map(_.map(Task.topicOf(application, _)))
       .filter(names => names.foldLeft(JavaHashSet.empty((name: String) => name.hashCode))(_ + _).crowded)
 
   /** The program's nodes as a member describes them to the coordinator, as Java's client writes its description: by sub-topology, each node and its
@@ -82,34 +82,31 @@ private[xkafka] object Declaration:
 
   def apply[F[_]](application: String, topology: Topology[F], replicationFactor: Short = BrokerReplication): StreamsGroup.Topology =
     def repartitionTopic(name: String) = s"$application-$name-repartition"
-    val segments                       = topology.pipelines.toList.flatMap(_.segments.toList)
     val subtopologies                  =
-      segments.zipWithIndex.map: (segment, id) =>
-        val sources      = segment.origins.collect { case Source.Input(topic) => topic.value }.sorted
-        val repartitions = segment.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.value) }.sorted
-        // A join puts the topics it reads in one copartition group, which Java keeps as a HashSet of their names, and sends as indices into the
-        // sorted lists of the sub-topology's topics, in the order that set iterates.
+      topology.subtopologies.zipWithIndex.map: (subtopology, id) =>
+        val sources      = subtopology.origins.collect { case Source.Input(topic) => topic.value }.sorted
+        val repartitions = subtopology.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.value) }.sorted
+        // Java keeps each copartition group as a HashSet of its topics' names, and its groups in a HashSet of those, and sends each as indices into the
+        // sorted lists of the sub-topology's topics, in the order those sets iterate.
         val copartitioned =
-          Option.when(segment.copartitioned.nonEmpty):
-            val names = JavaHashSet.ordered(segment.copartitioned.map(Task.topicOf(application, _)), (name: String) => name.hashCode)
-            StreamsGroup.CopartitionGroup(
-              names.flatMap(name => Option(sources.indexOf(name)).filter(_ >= 0)).map(_.toShort).toList,
-              Nil,
-              names.flatMap(name => Option(repartitions.indexOf(name)).filter(_ >= 0)).map(_.toShort).toList
-            )
+          JavaHashSet.ordered(subtopology.copartitioned.map(_.map(Task.topicOf(application, _))), (group: List[String]) => group.map(_.hashCode).sum)
+            .toList.map: group =>
+              val names = JavaHashSet.ordered(group, (name: String) => name.hashCode)
+              StreamsGroup.CopartitionGroup(
+                names.flatMap(name => Option(sources.indexOf(name)).filter(_ >= 0)).map(_.toShort).toList,
+                Nil,
+                names.flatMap(name => Option(repartitions.indexOf(name)).filter(_ >= 0)).map(_.toShort).toList
+              )
         StreamsGroup.Subtopology(
           id = id.toString,
           sourceTopics = sources,
           sourceTopicRegex = Nil,
           stateChangelogTopics =
-            segment.stores.map(store =>
-              changelog(application, store.value, segment.retentions.get(store.value), segment.duplicates(store.value), replicationFactor)
+            subtopology.stores.map(store =>
+              changelog(application, store.value, subtopology.retentions.get(store.value), subtopology.duplicates(store.value), replicationFactor)
             ).sortBy(_.name),
-          repartitionSinkTopics =
-            segment.end match
-              case End.Repartitioning(named, _, _) => List(repartitionTopic(named.value))
-              case _                               => Nil,
+          repartitionSinkTopics = subtopology.repartitions.map(named => repartitionTopic(named.value)),
           repartitionSourceTopics = repartitions.map(StreamsGroup.TopicInfo(_, 0, replicationFactor, RepartitionConfigs)),
-          copartitionGroups = copartitioned.toList
+          copartitionGroups = copartitioned
         )
     StreamsGroup.Topology(0, subtopologies.sortBy(_.id))

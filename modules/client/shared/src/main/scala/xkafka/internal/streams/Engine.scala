@@ -36,7 +36,7 @@ import driver.{KafkaDriver, PolledRecord, StartAt}
 import group.{Connections, PlatformCrypto, PlatformSockets}
 import protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KafkaStreams, ProcessingGuarantee, Segment, Source, StreamsPhase, StreamsProblem, StreamsState, Topology}
+import xkafka.streams.{KafkaStreams, ProcessingGuarantee, Source, StreamsPhase, StreamsProblem, StreamsState, Subtopology, Topology}
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
   * one consumer and write through one producer. At least once, they commit what they read through the member; exactly once, in the transaction that
@@ -241,13 +241,13 @@ private[xkafka] object Engine:
       closeTimeout: FiniteDuration,
       partitions: Topic => F[Int]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
-    val segments  = topology.pipelines.toList.flatMap(_.segments.toList).zipWithIndex.map((segment, id) => id.toString -> segment).toMap
-    val unordered =
+    val subtopologies = topology.subtopologies.zipWithIndex.map((subtopology, id) => id.toString -> subtopology).toMap
+    val unordered     =
       Declaration.unordered(application, topology).map: topics =>
         StreamsProblem.JavaMembersMayBeRefused(s"Java Streams may list the joined topics ${topics.mkString(", ")} in another order")
     // Java numbers a join's sub-topologies by which of its inputs the program builds first, which xkafka takes to be the join's receiver.
     val buildOrdered =
-      topology.pipelines.toList.flatMap(_.segments.toList).flatMap(_.all).flatMap(_.buildOrdered).distinct.map: sources =>
+      topology.subtopologies.flatMap(_.buildOrdered).distinct.map: sources =>
         val topics = sources.map(Task.topicOf(application, _)).mkString(", ")
         StreamsProblem
           .JavaMembersMayBeRefused(s"Java Streams numbers the sub-topologies of the join of $topics otherwise unless it builds the receiver first")
@@ -276,7 +276,7 @@ private[xkafka] object Engine:
       loop =
         Loop(
           application,
-          segments,
+          subtopologies,
           member,
           plane,
           transactions,
@@ -397,7 +397,7 @@ private[xkafka] object Engine:
 
   private final class Loop[F[_]](
       application: String,
-      segments: Map[String, Segment[F]],
+      subtopologies: Map[String, Subtopology[F]],
       member: GroupMember[F],
       plane: Plane[F],
       transactions: Option[Transactions[F]],
@@ -445,9 +445,9 @@ private[xkafka] object Engine:
             if records.isEmpty then after
             else
               after.map((id, standby) =>
-                id ->
-                  standby
-                    .copy(stores = WindowStore.prunedAll(standby.stores, segments(id.subtopology).retentions, segments(id.subtopology).sessionStores))
+                id -> standby.copy(stores =
+                  WindowStore.prunedAll(standby.stores, subtopologies(id.subtopology).retentions, subtopologies(id.subtopology).sessionStores)
+                )
               )
           val now = running.copy(standbys = pruned)
           report(now).as(now)
@@ -497,7 +497,7 @@ private[xkafka] object Engine:
             case Left(_) => running.copy(purged = now)
 
     private def repartitioned(partition: TopicPartition): Boolean =
-      segments.values.flatMap(_.origins).exists:
+      subtopologies.values.flatMap(_.origins).exists:
         case Source.Repartitioned(named) => partition.topic.value == s"$application-${named.value}-repartition"
         case _                           => false
 
@@ -530,8 +530,8 @@ private[xkafka] object Engine:
           F.monotonic.flatMap: now =>
             val stillKept = running.kept.filter((_, held) => now - held._2 < StateCleanupDelay)
             val available = running.standbys ++ stillKept.view.mapValues(_._1)
-            phase.set(StreamsPhase.Restoring).whenA(added.exists(id => segments(id.subtopology).stores.nonEmpty)) *> start(added, available).flatMap:
-              started =>
+            phase.set(StreamsPhase.Restoring).whenA(added.exists(id => subtopologies(id.subtopology).stores.nonEmpty)) *>
+              start(added, available).flatMap: started =>
                 standby((assignment.standby ++ assignment.warmup) -- assignment.active, available).flatMap: standbys =>
                   val dropped = running.standbys.view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).mapValues(_ -> now)
                   val keeping = (stillKept ++ dropped).view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toMap
@@ -545,7 +545,7 @@ private[xkafka] object Engine:
 
     /** The standby tasks of `wanted` that keep stores, those already standing by as they are and the others from the start of their changelogs. */
     private def standby(wanted: Set[TaskId], standing: Map[TaskId, Standby]): F[Map[TaskId, Standby]] =
-      wanted.toList.filter(id => segments(id.subtopology).stores.nonEmpty).traverse: id =>
+      wanted.toList.filter(id => subtopologies(id.subtopology).stores.nonEmpty).traverse: id =>
         standing.get(id).fold(changelogsOf(id).map(changelogs => Standby(Map.empty, changelogs, changelogs.keys.map(_ -> 0L).toMap)))(F.pure)
           .map(id -> _)
       .map(_.toMap)
@@ -562,8 +562,8 @@ private[xkafka] object Engine:
 
     /** The changelog partitions of a task's stores, with the store each backs. */
     private def changelogsOf(id: TaskId): F[Map[TopicPartition, String]] =
-      segments(id.subtopology).stores.traverse(store => partitionOf(s"$application-${store.value}-changelog", id.partition).map(_ -> store.value))
-        .map(_.toMap)
+      subtopologies(id.subtopology).stores
+        .traverse(store => partitionOf(s"$application-${store.value}-changelog", id.partition).map(_ -> store.value)).map(_.toMap)
 
     /** Reads each partition its task holds from where that task is. */
     private def reassign(running: Running[F]): F[Unit] =
@@ -580,11 +580,11 @@ private[xkafka] object Engine:
               val found   = partitions.map(partition => partition -> offsets.get((partition.topic.value, partition.partition.value)))
               val times   = found.flatMap((partition, at) => at.flatMap(_.metadata).flatMap(PartitionTime.decode).map(partition.topic.value -> _))
               val emitted = PartitionTime.merged(found.flatMap(_._2.flatMap(_.metadata)))
-              val segment = segments(id.subtopology)
-              val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), segment.retentions, segment.sessionStores)
+              val read    = subtopologies(id.subtopology)
+              val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), read.retentions, read.sessionStores)
               val state   = TaskState(kept, times.toMap, lastEmitted = emitted)
               val reads   = found.map((partition, at) => partition -> Input(at.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)))
-              F.pure(id -> Live(new Task[F](application, segment, id.partition), state, reads.toMap))
+              F.pure(id -> Live(new Task[F](application, read, id.partition), state, reads.toMap))
             .map(_.toMap)
 
     /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */
@@ -599,7 +599,7 @@ private[xkafka] object Engine:
       * to, onto what it holds, and any other from the start.
       */
     private def restore(tasks: List[TaskId], standbys: Map[TaskId, Standby]): F[Map[TaskId, Map[String, Map[Chunk[Byte], Stored]]]] =
-      val stateful = tasks.filter(id => segments(id.subtopology).stores.nonEmpty)
+      val stateful = tasks.filter(id => subtopologies(id.subtopology).stores.nonEmpty)
       if stateful.isEmpty then F.pure(Map.empty)
       else
         stateful.traverse: id =>
@@ -686,7 +686,7 @@ private[xkafka] object Engine:
 
     /** The partitions a task reads: those of its sub-topology's topics, input or repartition topics, at the task's partition. */
     private def sourcesOf(id: TaskId): F[List[TopicPartition]] =
-      segments(id.subtopology).origins.traverse(origin => partitionOf(Task.topicOf(application, origin), id.partition))
+      subtopologies(id.subtopology).origins.traverse(origin => partitionOf(Task.topicOf(application, origin), id.partition))
 
     private def partitionOf(topic: String, partition: Int): F[TopicPartition] =
       (Topic.from(topic), Partition.from(partition)).mapN(TopicPartition(_, _)).leftMap(new KafkaException.InvalidValue(_)).liftTo[F]

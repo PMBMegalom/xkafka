@@ -34,16 +34,11 @@ final class StreamJoinsSuite extends FunSuite:
   private val out    = Topic.from("out").orFail
   private val within = JoinWindows(5.seconds, grace = 1.second)
 
-  private def segments(pipeline: Pipeline[IO]) = Topology.of(pipeline).orFail.pipelines.head.segments.toList
+  private def segments(pipeline: Pipeline[IO]) = Topology.of(pipeline).orFail.subtopologies
   private def refused(pipeline: Pipeline[IO])  = Topology.of(pipeline).left.toOption.map(_.toList)
 
   /** The repartitionings its segments write to, by name. */
-  private def repartitions(pipeline: Pipeline[IO]) =
-    segments(pipeline).flatMap(
-      _.end match
-        case End.Repartitioning(named, _, _) => List(named.value)
-        case _                               => Nil
-    )
+  private def repartitions(pipeline: Pipeline[IO]) = segments(pipeline).flatMap(_.repartitions.map(_.value))
 
   test("join windows reach the time difference either way, or as far as each side is set to"):
     val windows = JoinWindows(5.seconds, grace = 1.second)
@@ -73,7 +68,10 @@ final class StreamJoinsSuite extends FunSuite:
       left.outerJoin(Named("outer-join-1"), right, within, store, text, text, text)(_.fold(identity, identity, _ + _))
         .to(Named("write-3"), out, text, text)
     assertEquals(stores(outer), List("pairs-outer-this-join-store", "pairs-outer-other-join-store", "pairs-outer-shared-join-store"))
-    assertEquals(segments(outer).map(_.copartitioned), List(List(Source.Input(Topic.from("left").orFail), Source.Input(Topic.from("right").orFail))))
+    assertEquals(
+      segments(outer).map(_.copartitioned),
+      List(List(List(Source.Input(Topic.from("left").orFail), Source.Input(Topic.from("right").orFail))))
+    )
 
   test("a side whose key has changed is repartitioned through a topic named after the join and its side, and the other side is not"):
     val joined =
@@ -88,6 +86,42 @@ final class StreamJoinsSuite extends FunSuite:
         .join(Named("pairs"), right.selectKey(Named("select-key-3"))((_, v) => v), within, Store("pairs"), text, text, text)(_ + _)
         .to(Named("write-5"), out, text, text)
     assertEquals(repartitions(both), List("pairs-left", "pairs-right"))
+
+  test("a sub-topology's topics start with its own, the table a stream joins following"):
+    val users = KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users"))
+    assertEquals(
+      segments(left.join(Named("with-user"), users)(_ + _).to(Named("write-13"), out, text, text)).map(_.origins),
+      List(List(Source.Input(Topic.from("left").orFail), Source.Input(Topic.from("users").orFail)))
+    )
+
+  test("sides that share a repartition topic, or a table's topic, are joined with themselves, and a join's name counts as a step's"):
+    def rekeyed(from: KStream.Of[IO, String, String, KeyState.AsRead]) =
+      from.groupBy(Repartition("shared"), text, text)((_, v) => v).count(Named(s"count-${from.lastNode}"), Store(s"counts-${from.lastNode}"))
+        .toStream(Named(s"to-stream-${from.lastNode}"))
+    val shared =
+      rekeyed(left).join(Named("pairs"), rekeyed(right), within, Store("pairs"), text, Serde.long[IO], Serde.long[IO])(_ + _)
+        .to(Named("write-14"), out, text, Serde.long[IO])
+    assert(refused(shared).exists(_.contains(TopologyError.JoinedWithItself)), clue(refused(shared)))
+    val users   = KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users"))
+    val through =
+      left.join(Named("with-user"), users)(_ + _)
+        .join(Named("pairs"), KStream(Named("users-again"), Topic.from("users").orFail, text, text), within, Store("pairs"), text, text, text)(_ + _)
+        .to(Named("write-15"), out, text, text)
+    assert(refused(through).exists(_.contains(TopologyError.JoinedWithItself)), clue(refused(through)))
+    assertEquals(
+      refused(
+        left.join(Named("pairs"), right, within, Store("pairs"), text, text, text)(_ + _).mapValues(Named("pairs"))(identity)
+          .to(Named("write-16"), out, text, text)
+      ),
+      Some(List(TopologyError.DuplicateName("pairs")))
+    )
+    assertEquals(
+      refused(
+        users.join(Named("joined"), KTable(Named("plans"), Topic.from("plans").orFail, text, text, Store("plans")))(_ + _)
+          .mapValues(Named("joined"))(identity).toStream(Named("to-stream-3")).to(Named("write-17"), out, text, text.option)
+      ),
+      Some(List(TopologyError.DuplicateName("joined")))
+    )
 
   test("a stream joined with itself or with a stream read from the same topic is refused, and so are windows that cannot be used"):
     assertEquals(
@@ -119,8 +153,40 @@ final class StreamJoinsSuite extends FunSuite:
     )
     assertEquals(windows(JoinWindows(1.second, grace = 0.seconds).withBefore(-1.second)), None)
 
+  test("a join says Java numbers it by build order where either side made a sub-topology before it, or both made one after it"):
+    def ordered(pipeline: Pipeline[IO]) = segments(pipeline).flatMap(_.buildOrdered).distinct
+    def source(name: String)            = Source.Input(Topic.from(name).orFail)
+    def counted(from: String)           =
+      KStream(Named(from), Topic.from(from).orFail, text, text).groupBy(Repartition(s"by-$from"), text, text)((_, v) => v)
+        .count(Named(s"count-$from"), Store(s"counts-$from"))
+    val before = counted("clicks").toStream(Named("clicks-stream"))
+    assertEquals(
+      ordered(
+        before.join(Named("pairs"), right, within, Store("pairs"), text, Serde.long[IO], text)((n, v) => s"$n$v")
+          .to(Named("write-18"), out, text, text)
+      ),
+      List(List(Source.Repartitioned(Repartition("by-clicks")), source("right")))
+    )
+    val first  = left.join(Named("with-a"), counted("a"))((v, n) => s"$v$n")
+    val second = right.join(Named("with-b"), counted("b"))((v, n) => s"$v$n")
+    val a      = List(source("left"), Source.Repartitioned(Repartition("by-a")))
+    val b      = List(source("right"), Source.Repartitioned(Repartition("by-b")))
+    assertEquals(
+      ordered(first.join(Named("pairs"), second, within, Store("pairs"), text, text, text)(_ + _).to(Named("write-19"), out, text, text)),
+      List(a, b, a ++ b)
+    )
+    // A side that made a sub-topology after it stays so through a join with a side that made none, so the next join with such a side says so.
+    def plain(name: String)                           = KStream(Named(name), Topic.from(name).orFail, text, text)
+    val c                                             = List(source("c"))
+    def throughLeft                                   = first.join(Named("pairs-1"), plain("c"), within, Store("pairs-1"), text, text, text)(_ + _)
+    def throughRight                                  = plain("c").join(Named("pairs-1"), first, within, Store("pairs-1"), text, text, text)(_ + _)
+    def finished(joined: KStream[IO, String, String]) =
+      joined.join(Named("pairs-2"), second, within, Store("pairs-2"), text, text, text)(_ + _).to(Named("write-20"), out, text, text)
+    assertEquals(ordered(finished(throughLeft)), List(a, b, a ++ c ++ b))
+    assertEquals(ordered(finished(throughRight)), List(a, b, a ++ c ++ b))
+
   test("a join whose sub-topologies Java numbers by which input its program builds first says so, and one Java numbers alike either way does not"):
-    def ordered(pipeline: Pipeline[IO]) = segments(pipeline).flatMap(_.all).flatMap(_.buildOrdered).distinct
+    def ordered(pipeline: Pipeline[IO]) = segments(pipeline).flatMap(_.buildOrdered).distinct
     val repartitioned                   = right.selectKey(Named("select-key-4"))((_, v) => v)
     val sources                         = List(Source.Input(Topic.from("left").orFail), Source.Repartitioned(Repartition("pairs-right")))
     assertEquals(

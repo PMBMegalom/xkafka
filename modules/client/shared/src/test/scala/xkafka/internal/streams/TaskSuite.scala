@@ -43,8 +43,7 @@ final class TaskSuite extends CatsEffectSuite:
   private def long(n: Long): Option[Chunk[Byte]]       = Some(Chunk.array(java.nio.ByteBuffer.allocate(8).putLong(n).array))
   private val trace                                    = Headers(Header("trace", bytes("1")))
 
-  private def task(pipeline: Pipeline[IO], partition: Int): Task[IO] =
-    Task("app", Topology.of(pipeline).orFail.pipelines.head.segments.head, partition)
+  private def task(pipeline: Pipeline[IO], partition: Int): Task[IO] = Task("app", Topology.of(pipeline).orFail.subtopologies.head, partition)
 
   private val counting =
     KStream(Named("read-1"), in, text, text).groupByKey(text, text).count(Named("count-1"), Store("counts")).toStream(Named("to-stream-1"))
@@ -116,9 +115,17 @@ final class TaskSuite extends CatsEffectSuite:
       KStream(Named("read-5"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .count(Named("count-5"), Store("windows")).toStream(Named("to-stream-5"))
         .to(Named("write-5"), out, Serde.timeWindowed(text, 10.seconds), count)
-    val mapped = Task("app", Topology.of(windowed).orFail.mapK(FunctionK.id[IO]).pipelines.head.segments.head, 0)
+    val mapped = Task("app", Topology.of(windowed).orFail.mapK(FunctionK.id[IO]).subtopologies.head, 0)
     List(task(windowed, 0), mapped).traverse(_.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L))
       .map(found => assertEquals(found.map(_._2.filter(_.topic == out).map(_.partitionBy)), List(Vector(bytes("k")), Vector(bytes("k")))))
+
+  test("what a task writes for a record comes in the order it runs: each record's change to a store, then what that record goes on to write"):
+    val fanned =
+      KStream(Named("read-9"), in, text, text).flatMapValues(Named("flat-map-values-1"))(v => List(s"${v}1", s"${v}2")).groupByKey(text, text)
+        .count(Named("count-9"), Store("counts")).toStream(Named("to-stream-9")).to(Named("write-9"), out, text, count)
+    task(fanned, 0).process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, Headers.empty), 0L).map: (_, written) =>
+      assertEquals(written.map(_.topic.value), Vector("app-counts-changelog", "out", "app-counts-changelog", "out"))
+      assertEquals(written.map(_.value), Vector(long(1), long(1), long(2), long(2)))
 
   test("each change to a store goes to its changelog on the task's own partition, without the record's headers"):
     task(counting, 3).process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 1000L, trace), 0L).map: (_, written) =>

@@ -117,6 +117,27 @@ final class TaskGoldenSuite extends CatsEffectSuite:
       List("counts" -> shown(count.deserializer))
     )
 
+  test("each record a step gives goes all the way through before the next, in the order Java runs their effects"):
+    IO.ref(Vector.empty[String]).flatMap: effects =>
+      def log(step: String)(key: String, value: String) = effects.update(_ :+ s"$step $key $value")
+      val program                                       =
+        KStream(Named("read-6"), in, text, text).flatMapValues(Named("flat-map-values-1"))(v => List(s"${v}1", s"${v}2"))
+          .peek(Named("first"))(log("first")).flatMapValues(Named("flat-map-values-2"))(v => List(s"${v}a", s"${v}b"))
+          .peek(Named("second"))(log("second")).to(Named("write-6"), out, text, text)
+      val javaEffects  = Vector.newBuilder[String]
+      val (javaOut, _) =
+        declaredRun(
+          _.stream[String, String]("in").flatMapValues(v => java.util.List.of(s"${v}1", s"${v}2")).peek((k, v) => javaEffects += s"first $k $v")
+            .flatMapValues(v => java.util.List.of(s"${v}a", s"${v}b")).peek((k, v) => javaEffects += s"second $k $v").to("out"),
+          Nil
+        )
+      for
+        ran  <- ours(program)
+        seen <- effects.get
+      yield
+        assertEquals(seen, javaEffects.result())
+        assertEquals(ran._1.filter(_.topic == out).map(output), javaOut)
+
   /** Runs `inputs` through the program both ways and compares the output topic's records, and the contents of the stores `stores` names. */
   /** Values as `values` reads them, written as text to compare with Java's. */
   private def shown[A](values: Deserializer[IO, A]): Deserializer[IO, String] = values.map(_.toString)
@@ -138,7 +159,7 @@ final class TaskGoldenSuite extends CatsEffectSuite:
 
   /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, as Java's test driver runs it. */
   private def ours(pipeline: Pipeline[IO]): IO[(Vector[TaskOutput], Vector[TaskState])] =
-    val tasks = Topology.of(pipeline).orFail.pipelines.head.segments.toList.toVector.map(Task[IO]("app", _, 0))
+    val tasks = Topology.of(pipeline).orFail.subtopologies.toVector.map(Task[IO]("app", _, 0))
     def run(index: Int, record: TaskInput, states: Vector[TaskState]): IO[(Vector[TaskOutput], Vector[TaskState])] =
       tasks(index).process(states(index), record, 0L).flatMap: (state, outputs) =>
         outputs.foldLeftM((Vector.empty[TaskOutput], states.updated(index, state))):

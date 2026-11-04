@@ -155,6 +155,8 @@ final class TopologyGoldenSuite extends FunSuite:
       )
     )
 
+  private def counted(store: String) = Materialized.as[String, java.lang.Long, KeyValueStore[Bytes, Array[Byte]]](store).withValueSerde(Serdes.Long)
+
   private def javaTable(builder: StreamsBuilder, topic: String, store: String) =
     builder.table[String, String](topic, Materialized.as[String, String, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](store))
 
@@ -313,6 +315,228 @@ final class TopologyGoldenSuite extends FunSuite:
       declaredByJava: builder =>
         builder.stream[String, String]("clicks").join(javaTable(builder, "pages", "pages"), (c: String, p: String) => c + p)
           .to("out", Produced.`with`(Serdes.String, Serdes.String))
+    )
+
+  // Java makes the source of a repartition topic a join needs only when it makes the join, after the other side's sub-topologies.
+  test("a join that repartitions its receiver is numbered after the sub-topologies its other side made, as Java numbers it"):
+    val produced = Produced.`with`(Serdes.String, Serdes.String)
+    assertEquals(
+      ours(
+        KStream(Named("orders"), topic("orders"), text, text).selectKey(Named("key"))((_, v) => v).join(
+          Named("joined"),
+          KStream(Named("clicks"), topic("clicks"), text, text).groupBy(Repartition("by"), text, text)((_, v) => v)
+            .count(Named("counted"), Store("counts")),
+          text,
+          text
+        )((o, n) => s"$o$n").to(Named("write"), topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        val orders = builder.stream[String, String]("orders").selectKey((_, v) => v)
+        val counts = builder.stream[String, String]("clicks").groupBy((_, v) => v, Grouped.as("by")).count(counted("counts"))
+        orders.join(
+          counts,
+          (o: String, n: java.lang.Long) => s"$o$n",
+          org.apache.kafka.streams.kstream.Joined.`with`(Serdes.String, Serdes.String, Serdes.Long).withName("joined")
+        ).to("out", produced)
+    )
+    assertEquals(
+      ours(
+        KStream(Named("left"), topic("left"), text, text).selectKey(Named("key"))((_, v) => v).join(
+          Named("pairs"),
+          KStream(Named("right"), topic("right"), text, text).repartition(Repartition("first"), text, text),
+          JoinWindows(5.seconds, grace = 2.seconds),
+          Store("pairs"),
+          text,
+          text,
+          text
+        )(_ + _).to(Named("write"), topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        val left  = builder.stream[String, String]("left").selectKey((_, v) => v)
+        val right = builder.stream[String, String]("right").repartition(Repartitioned.`with`(Serdes.String, Serdes.String).withName("first"))
+        left.join(
+          right,
+          (a: String, b: String) => a + b,
+          JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)),
+          StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+        ).to("out", produced)
+    )
+
+  test("what follows a join keeps its stores and writes its repartition topics in the join's sub-topology, as Java declares it"):
+    val produced = Produced.`with`(Serdes.String, Serdes.Long)
+    assertEquals(
+      ours(
+        KStream(Named("left"), topic("left"), text, text).join(
+          Named("pairs"),
+          KStream(Named("right"), topic("right"), text, text),
+          JoinWindows(5.seconds, grace = 2.seconds),
+          Store("pairs"),
+          text,
+          text,
+          text
+        )(_ + _).groupByKey(text, text).count(Named("counted"), Store("counts")).toStream(Named("to-stream"))
+          .to(Named("write"), topic("out"), text, count)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("left").join(
+          builder.stream[String, String]("right"),
+          (a: String, b: String) => a + b,
+          JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)),
+          StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+        ).groupByKey.count(counted("counts")).toStream.to("out", produced)
+    )
+    assertEquals(
+      ours(
+        KTable(Named("users"), topic("users"), text, text, Store("users"))
+          .join(Named("joined"), KTable(Named("plans"), topic("plans"), text, text, Store("plans")))(_ + _).toStream(Named("to-stream"))
+          .selectKey(Named("key"))((_, v) => v.getOrElse("")).groupByKey(Repartition("by"), text, text.option)
+          .count(Named("counted"), Store("counts")).toStream(Named("to-stream-2")).to(Named("write"), topic("out"), text, count)
+      ),
+      declaredByJava: builder =>
+        javaTable(builder, "users", "users").join(javaTable(builder, "plans", "plans"), (a: String, b: String) => a + b).toStream
+          .selectKey((_, v) => v).groupByKey(Grouped.as("by")).count(counted("counts")).toStream.to("out", produced)
+    )
+
+  test("a join copartitions for a table the topics Java's table gives it, which a suppression clears and later table steps keep"):
+    val produced = Produced.`with`(Serdes.String, Serdes.String)
+    def calm     = Suppressed.untilTimeLimit("calm", 1.second)
+    def javaCalm = JavaSuppressed.untilTimeLimit[String](java.time.Duration.ofSeconds(1), BufferConfig.unbounded()).withName("calm")
+    def users    = KTable(Named("users"), topic("users"), text, text, Store("users"))
+    def plans    = KTable(Named("plans"), topic("plans"), text, text, Store("plans"))
+    def orders   = KStream(Named("orders"), topic("orders"), text, text)
+    def write(stream: KStream[IO, String, String]) = stream.to(Named("write"), topic("out"), text, text)
+    // Filtered after the suppression.
+    assertEquals(
+      ours(write(orders.join(Named("j"), users.suppress(calm).filter(Named("f"))((_, _) => true))(_ + _))),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders")
+          .join(javaTable(builder, "users", "users").suppress(javaCalm).filter((_, _) => true), (o: String, u: String) => o + u).to("out", produced)
+    )
+    // Changed after the suppression.
+    assertEquals(
+      ours(write(orders.join(Named("j"), users.suppress(calm).mapValues(Named("m"))(identity))(_ + _))),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders")
+          .join(javaTable(builder, "users", "users").suppress(javaCalm).mapValues((v: String) => v), (o: String, u: String) => o + u)
+          .to("out", produced)
+    )
+    // Made a stream and a table again after the suppression.
+    assertEquals(
+      ours(write(
+        orders.join(
+          Named("j"),
+          users.suppress(calm).toStream(Named("ts")).filter(Named("present"))((_, v) => v.nonEmpty).mapValues(Named("got"))(_.getOrElse(""))
+            .toTable(Named("again"), Store("again"), text, text)
+        )(_ + _)
+      )),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").join(
+          javaTable(builder, "users", "users").suppress(javaCalm).toStream.filter((_, v) => v != null).mapValues((v: String) => v)
+            .toTable(Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("again")),
+          (o: String, u: String) => o + u
+        ).to("out", produced)
+    )
+    // A stream of a suppressed table joining a table.
+    assertEquals(
+      ours(
+        users.suppress(calm).toStream(Named("ts")).filter(Named("present"))((_, v) => v.nonEmpty).mapValues(Named("got"))(_.getOrElse(""))
+          .join(Named("j"), plans)(_ + _).to(Named("write"), topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        javaTable(builder, "users", "users").suppress(javaCalm).toStream.filter((_, v) => v != null).mapValues((v: String) => v)
+          .join(javaTable(builder, "plans", "plans"), (a: String, b: String) => a + b).to("out", produced)
+    )
+    // A stream of a suppressed table joining a stream.
+    assertEquals(
+      ours(
+        users.suppress(calm).toStream(Named("ts")).filter(Named("present"))((_, v) => v.nonEmpty).mapValues(Named("got"))(_.getOrElse(""))
+          .join(Named("pairs"), orders, JoinWindows(5.seconds, grace = 2.seconds), Store("pairs"), text, text, text)(_ + _)
+          .to(Named("write"), topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        javaTable(builder, "users", "users").suppress(javaCalm).toStream.filter((_, v) => v != null).mapValues((v: String) => v).join(
+          builder.stream[String, String]("orders"),
+          (a: String, b: String) => a + b,
+          JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)),
+          StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+        ).to("out", produced)
+    )
+    // A table made of a stream joined with a suppressed table, joined in turn.
+    assertEquals(
+      ours(write(
+        KStream(Named("pays"), topic("pays"), text, text)
+          .join(Named("j2"), orders.join(Named("j"), users.suppress(calm))(_ + _).toTable(Named("again"), Store("again"), text, text))(_ + _)
+      )),
+      declaredByJava: builder =>
+        val again =
+          builder.stream[String, String]("orders").join(javaTable(builder, "users", "users").suppress(javaCalm), (o: String, u: String) => o + u)
+            .toTable(Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("again"))
+        builder.stream[String, String]("pays").join(again, (o: String, u: String) => o + u).to("out", produced)
+    )
+    // The result of joining a suppressed table.
+    assertEquals(
+      ours(write(orders.join(Named("j"), users.suppress(calm).join(Named("joined"), plans)(_ + _))(_ + _))),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").join(
+          javaTable(builder, "users", "users").suppress(javaCalm).join(javaTable(builder, "plans", "plans"), (a: String, b: String) => a + b),
+          (o: String, u: String) => o + u
+        ).to("out", produced)
+    )
+    // A suppressed table that came from a join, joined with another: the first join's topics stay grouped.
+    assertEquals(
+      ours(
+        orders.join(Named("j"), users)(_ + _).toTable(Named("again"), Store("again"), text, text).suppress(calm).join(Named("joined"), plans)(_ + _)
+          .toStream(Named("ts")).to(Named("write"), topic("out"), text, text.option)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").join(javaTable(builder, "users", "users"), (o: String, u: String) => o + u)
+          .toTable(Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("again")).suppress(javaCalm)
+          .join(javaTable(builder, "plans", "plans"), (a: String, b: String) => a + b).toStream.to("out", produced)
+    )
+
+  test(
+    "a join's topics take in the groups of earlier joins they overlap, and leave apart those of a table a suppression cleared, as Java declares them"
+  ):
+    val produced = Produced.`with`(Serdes.String, Serdes.String)
+    def calm     = Suppressed.untilTimeLimit("calm", 1.second)
+    def javaCalm = JavaSuppressed.untilTimeLimit[String](java.time.Duration.ofSeconds(1), BufferConfig.unbounded()).withName("calm")
+    def users    = KTable(Named("users"), topic("users"), text, text, Store("users"))
+    def plans    = KTable(Named("plans"), topic("plans"), text, text, Store("plans"))
+    assertEquals(
+      ours(
+        KStream(Named("orders"), topic("orders"), text, text).join(Named("with-user"), users)(_ + _).join(
+          Named("pairs"),
+          KStream(Named("pays"), topic("pays"), text, text).join(Named("with-plan"), plans)(_ + _),
+          JoinWindows(5.seconds, grace = 2.seconds),
+          Store("pairs"),
+          text,
+          text,
+          text
+        )(_ + _).to(Named("write"), topic("out"), text, text)
+      ),
+      declaredByJava: builder =>
+        builder.stream[String, String]("orders").join(javaTable(builder, "users", "users"), (o: String, u: String) => o + u).join(
+          builder.stream[String, String]("pays").join(javaTable(builder, "plans", "plans"), (p: String, u: String) => p + u),
+          (a: String, b: String) => a + b,
+          JavaJoinWindows.ofTimeDifferenceAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)),
+          StreamJoined.`with`(Serdes.String, Serdes.String, Serdes.String).withName("pairs").withStoreName("pairs")
+        ).to("out", produced)
+    )
+    // The cleared table is the join's other side.
+    assertEquals(
+      ours(
+        plans.join(
+          Named("joined"),
+          KStream(Named("orders"), topic("orders"), text, text).join(Named("with-user"), users)(_ + _)
+            .toTable(Named("again"), Store("again"), text, text).suppress(calm)
+        )(_ + _).toStream(Named("ts")).to(Named("write"), topic("out"), text, text.option)
+      ),
+      declaredByJava: builder =>
+        javaTable(builder, "plans", "plans").join(
+          builder.stream[String, String]("orders").join(javaTable(builder, "users", "users"), (o: String, u: String) => o + u)
+            .toTable(Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("again")).suppress(javaCalm),
+          (a: String, b: String) => a + b
+        ).toStream.to("out", produced)
     )
 
   test("a stream joined after its key changed goes through the repartition topic named for the join, as Java declares it"):

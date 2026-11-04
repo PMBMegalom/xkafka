@@ -40,72 +40,65 @@ private[xkafka] object Describing:
   /** A node as Java's builder makes it: its name, what it is, and the nodes it reads from, in the order the builder is given them. */
   final case class Made(name: String, kind: Kind, predecessors: List[String])
 
-  /** The program's description, its sub-topologies numbered as its segments are, and each repartition topic named as `topic` names it. */
+  /** The program's description, each repartition topic named as `topic` names it. */
   def apply[F[_]](topology: Topology[F], topic: Repartition => String): TopologyDescription =
-    val segments = topology.pipelines.toList.flatMap(_.segments.toList)
-    TopologyDescription(segments.zipWithIndex.map((segment, id) => described(id, segment.all.toVector.flatMap(made(_, topic)))))
+    TopologyDescription(topology.subtopologies.zipWithIndex.map((subtopology, id) => described(id, made(subtopology, topic))))
 
-  /** The nodes Java makes for one segment, in the order it makes them. */
-  private def made[F[_]](segment: Segment[F], topic: Repartition => String): Vector[Made] =
-    val (begun, first) = origin(segment.origin, topic)
-    val (steps, last)  = chain(segment.chain, first)
-    begun ++ steps ++ ending(segment.end, last, topic)
+  /** The nodes Java makes for one sub-topology, each topic's in turn. A join's own nodes come once its last side has come. */
+  private def made[F[_]](subtopology: Subtopology[F], topic: Repartition => String): Vector[Made] =
+    subtopology.entries.foldLeft(Making(Vector.empty, Map.empty)): (making, entry) =>
+      val (node, first) = source(entry.origin, topic)
+      following(entry.consumer, first, making.copy(nodes = making.nodes :+ node), topic)
+    .nodes
 
-  /** The nodes an origin makes, and the name of the one its records come out of. */
-  private def origin[F[_], K, V](origin: Origin[F, K, V], topic: Repartition => String): (Vector[Made], String) =
+  /** The nodes made so far, and for each join the node its left side's records come out of. */
+  private final case class Making(nodes: Vector[Made], lefts: Map[AnyRef, String])
+
+  /** The node a topic's source makes, and its name. */
+  private def source[F[_], K, V](origin: Origin[F, K, V], topic: Repartition => String): (Made, String) =
     origin match
-      case Origin.Input(named, read, _, _)         => (Vector(Made(named.value, Kind.Source(List(read.value)), Nil)), named.value)
+      case Origin.Input(named, read, _, _)         => (Made(named.value, Kind.Source(List(read.value)), Nil), named.value)
       case Origin.Repartitioned(repartition, _, _) =>
         val name = s"${repartition.value}-repartition-source"
-        (Vector(Made(name, Kind.Source(List(topic(repartition))), Nil)), name)
-      case Origin.Joined(named, left, right, _, store) =>
+        (Made(name, Kind.Source(List(topic(repartition))), Nil), name)
+
+  /** The nodes `consumer` makes, reading the node `last`. */
+  private def following[F[_], K, V](consumer: Consumer[F, K, V], last: String, making: Making, topic: Repartition => String): Making =
+    consumer match
+      case Consumer.Then(named, step, next) =>
+        following(next, named.value, making.copy(nodes = making.nodes :+ Made(named.value, Kind.Processor(kept(step)), List(last))), topic)
+      case Consumer.Output(named, written, _, _) => making.copy(nodes = making.nodes :+ Made(named.value, Kind.Sink(written.value), List(last)))
+      case Consumer.Repartitioning(repartition, _, _, _, _) =>
+        val filter = s"${repartition.value}-repartition-filter"
+        making.copy(nodes =
+          making.nodes ++ Vector(
+            Made(filter, Kind.Processor(Nil), List(last)),
+            Made(s"${repartition.value}-repartition-sink", Kind.Sink(topic(repartition)), List(filter))
+          )
+        )
+      case Consumer.Beside(_, next)  => following(next, last, making, topic)
+      case Consumer.LeftTable(join)  => making.copy(lefts = making.lefts.updated(join, last))
+      case Consumer.LeftStream(join) => making.copy(lefts = making.lefts.updated(join, last))
+      case Consumer.RightTable(join) =>
         // Each side joins its changes with the other side's values, read through the other side's stores, and the merge passes on what either makes.
-        val (mine, mineLast)     = flow(left.origin, left.chain, topic)
-        val (theirs, theirsLast) = flow(right.origin, right.chain, topic)
-        val joinThis             = Made(s"${named.value}-join-this", Kind.Processor(right.view.fold(Nil)(stores)), List(mineLast))
-        val joinOther            = Made(s"${named.value}-join-other", Kind.Processor(left.view.fold(Nil)(stores)), List(theirsLast))
-        val merge                = Made(named.value, Kind.Processor(store.toList.map(_._1.value)), List(joinThis.name, joinOther.name))
-        (mine ++ theirs ++ Vector(joinThis, joinOther, merge), named.value)
-      case Origin.StreamsJoined(named, left, right, _, joiner, store, _, _, _) =>
+        val joinThis  = Made(s"${join.named.value}-join-this", Kind.Processor(join.right.view.fold(Nil)(stores)), making.lefts.get(join).toList)
+        val joinOther = Made(s"${join.named.value}-join-other", Kind.Processor(join.left.view.fold(Nil)(stores)), List(last))
+        val merge     = Made(join.named.value, Kind.Processor(join.store.toList.map(_._1.value)), List(joinThis.name, joinOther.name))
+        following(join.next, join.named.value, making.copy(nodes = making.nodes ++ Vector(joinThis, joinOther, merge)), topic)
+      case Consumer.RightStream(join) =>
         // Each side's records are kept in its window store, then joined with the other side's, and the merge passes on what either makes.
-        val (mine, mineLast)        = flow(left.origin, left.chain, topic)
-        val (theirs, theirsLast)    = flow(right.origin, right.chain, topic)
-        val kept                    = StreamJoin.names(store, joiner)
-        val (leftOuter, rightOuter) = joiner.outer
-        val thisWindowed            = Made(s"${named.value}-this-windowed", Kind.Processor(List(kept.left)), List(mineLast))
-        val otherWindowed           = Made(s"${named.value}-other-windowed", Kind.Processor(List(kept.right)), List(theirsLast))
+        val named                   = join.named.value
+        val held                    = StreamJoin.names(join.store, join.joiner)
+        val (leftOuter, rightOuter) = join.joiner.outer
+        val thisWindowed            = Made(s"$named-this-windowed", Kind.Processor(List(held.left)), making.lefts.get(join).toList)
+        val otherWindowed           = Made(s"$named-other-windowed", Kind.Processor(List(held.right)), List(last))
         val thisJoin                =
-          Made(
-            s"${named.value}-${if rightOuter then "outer-" else ""}this-join",
-            Kind.Processor(kept.right :: kept.shared.toList),
-            List(thisWindowed.name)
-          )
+          Made(s"$named-${if rightOuter then "outer-" else ""}this-join", Kind.Processor(held.right :: held.shared.toList), List(thisWindowed.name))
         val otherJoin =
-          Made(
-            s"${named.value}-${if leftOuter then "outer-" else ""}other-join",
-            Kind.Processor(kept.left :: kept.shared.toList),
-            List(otherWindowed.name)
-          )
-        val merge = Made(s"${named.value}-merge", Kind.Processor(Nil), List(thisJoin.name, otherJoin.name))
-        (mine ++ theirs ++ Vector(thisWindowed, otherWindowed, thisJoin, otherJoin, merge), merge.name)
-
-  /** The nodes a join's input makes, and the name of the one its records come out of. */
-  private def flow[F[_], K0, V0, K, C](
-      from: Origin[F, K0, V0],
-      through: Chain[F, K0, V0, K, C],
-      topic: Repartition => String
-  ): (Vector[Made], String) =
-    val (begun, first) = origin(from, topic)
-    val (steps, last)  = chain(through, first)
-    (begun ++ steps, last)
-
-  /** The processors a chain's steps make, after the node `first`, and the name of the last. */
-  private def chain[F[_], K, V, K2, V2](chain: Chain[F, K, V, K2, V2], first: String): (Vector[Made], String) =
-    chain match
-      case Chain.Start()                 => (Vector.empty, first)
-      case Chain.Then(init, last, named) =>
-        val (made, before) = this.chain(init, first)
-        (made :+ Made(named.value, Kind.Processor(kept(last)), List(before)), named.value)
+          Made(s"$named-${if leftOuter then "outer-" else ""}other-join", Kind.Processor(held.left :: held.shared.toList), List(otherWindowed.name))
+        val merge = Made(s"$named-merge", Kind.Processor(Nil), List(thisJoin.name, otherJoin.name))
+        following(join.next, merge.name, making.copy(nodes = making.nodes ++ Vector(thisWindowed, otherWindowed, thisJoin, otherJoin, merge)), topic)
+      case Consumer.Done() => making
 
   /** The stores a step's processor keeps, or reads for a join. */
   private def kept[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): List[String] =
@@ -133,18 +126,6 @@ private[xkafka] object Describing:
       case TableView.Joined(left, right, _) => (stores(left) ++ stores(right)).distinct
       case TableView.Filtered(parent, _)    => stores(parent)
       case TableView.Mapped(parent, _)      => stores(parent)
-
-  /** The nodes Java writes for a segment's end, after the node `last`. */
-  private def ending[F[_], K, V](to: End[F, K, V], last: String, topic: Repartition => String): Vector[Made] =
-    to match
-      case End.Output(named, written, _, _)      => Vector(Made(named.value, Kind.Sink(written.value), List(last)))
-      case End.Repartitioning(repartition, _, _) =>
-        val filter = s"${repartition.value}-repartition-filter"
-        Vector(
-          Made(filter, Kind.Processor(Nil), List(last)),
-          Made(s"${repartition.value}-repartition-sink", Kind.Sink(topic(repartition)), List(filter))
-        )
-      case End.Stored() => Vector.empty
 
   /** A sub-topology as Java describes it: each node, in the order Java's `HashMap` of them iterates, connected to its predecessors and they to it in
     * `TreeSet`s ordered by the size of the nodes' subtrees at the time, larger first, then by name, each connection growing the subtrees above it;
