@@ -408,6 +408,24 @@ final class EngineSuite extends CatsEffectSuite:
           )))
         )
 
+  test("an application cogrouping through a repartition topic says in its state that Java cannot start it"):
+    def group(name: String) = KStream(Named(name), Topic.from(name).orFail, text, text)
+    val cogrouped           =
+      Topology.of(
+        group("a").groupBy(Repartition("r"), text, text)((_, v) => v).cogroup[String]((_, v, t) => t + v)
+          .cogroup(group("b").groupByKey(text, text))((_, v, t) => t + v).aggregate(Named("co"), Store("kept"), text)("").toStream(Named("c"))
+          .to(Named("w"), Topic.from("out").orFail, text, text)
+      ).orFail
+    watchedOf(cogrouped): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(
+            StreamsProblem
+              .JavaMembersMayBeRefused("Java Streams cannot start a cogroup of app-r-repartition, b, since a group goes through a repartition topic")
+          ))
+        )
+
   test("an application can stop itself on a state it sees, giving back its tasks as it leaves"):
     val run =
       World().flatMap: world =>

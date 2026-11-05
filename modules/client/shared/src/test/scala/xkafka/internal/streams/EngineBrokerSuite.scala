@@ -640,6 +640,73 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         produceValues(server, app.input, List("a" -> Some("x"), "b" -> Some("x"), "c" -> Some("y"), "a" -> Some("y"), "b" -> None)) *>
           running(server, app)(latestValues(server, app.output, Map("x" -> Some("0"), "y" -> Some("2"))))
 
+    test(s"$release, $under: an engine cogroups two topics into one store, each record folded by its own group's function"):
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-27"), orders, text, text).groupByKey(text, text).cogroup[String]((_, v, total) => s"$total+$v")
+            .cogroup(KStream(Named("read-28"), Topic.from(s"${orders.value}-more").orFail, text, text).groupByKey(text, text))((_, v, total) =>
+              s"$total*$v"
+            ).aggregate(Named("co-27"), Store("co-27"), text)("").toStream(Named("changes-27")).to(Named("write-27"), output, text, text)
+      ): app =>
+        val more = Topic.from(s"${app.input.value}-more").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(more, 2, 1).orFail))) *>
+          produceValues(server, app.input, List("x" -> Some("1"))) *> running(server, app):
+            latestValues(server, app.output, Map("x" -> Some("+1"))) *> produceValues(server, more, List("x" -> Some("2"), "y" -> Some("3"))) *>
+              latestValues(server, app.output, Map("x" -> Some("+1*2"), "y" -> Some("*3")))
+
+    test(s"$release, $under: an engine cogroups through repartition topics from topics of different partition counts, each key's values together"):
+      val keys = (0 until 12).toList.map(n => s"key-$n")
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-29"), orders, text, text).groupBy(Repartition("left-29"), text, text)((_, v) => v).cogroup[Long]((_, _, n) => n + 1)
+            .cogroup(KStream(Named("read-30"), Topic.from(s"${orders.value}-more").orFail, text, text).groupBy(Repartition("right-29"), text, text)(
+              (_, v) => v
+            ))((_, _, n) => n + 10).aggregate(Named("co-29"), Store("counts"), Serde.long[IO])(0L).toStream(Named("changes-29"))
+            .to(Named("write-29"), output, text, Serde.long[IO])
+      ): app =>
+        val more = Topic.from(s"${app.input.value}-more").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(more, 3, 1).orFail))) *>
+          produceValues(server, app.input, keys.map(k => s"from-$k" -> Some(k))) *>
+          produceValues(server, more, keys.map(k => s"more-$k" -> Some(k))) *>
+          running(server, app)(latest(server, app.output, keys.map(_ -> 11L).toMap))
+
+    test(
+      s"$release, $under: an engine cogroups one group through a repartition topic and one read as it is, from topics of different partition counts"
+    ):
+      val keys = (0 until 12).toList.map(n => s"key-$n")
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-33"), orders, text, text).groupBy(Repartition("left-33"), text, text)((_, v) => v).cogroup[Long]((_, _, n) => n + 1)
+            .cogroup(KStream(Named("read-34"), Topic.from(s"${orders.value}-more").orFail, text, text).groupByKey(text, text))((_, _, n) => n + 10)
+            .aggregate(Named("co-33"), Store("counts"), Serde.long[IO])(0L).toStream(Named("changes-33"))
+            .to(Named("write-33"), output, text, Serde.long[IO])
+      ): app =>
+        val more = Topic.from(s"${app.input.value}-more").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(more, 3, 1).orFail))) *>
+          produceValues(server, app.input, keys.map(k => s"from-$k" -> Some(k))) *> produceValues(server, more, keys.map(k => k -> Some("more"))) *>
+          running(server, app)(latest(server, app.output, keys.map(_ -> 11L).toMap))
+
+    test(s"$release, $under: an engine reports a cogroup of topics with different partition counts, read as they are"):
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-31"), orders, text, text).groupByKey(text, text).cogroup[String]((_, v, total) => total + v)
+            .cogroup(KStream(Named("read-32"), Topic.from(s"${orders.value}-more").orFail, text, text).groupByKey(text, text))((_, v, total) =>
+              total + v
+            ).aggregate(Named("co-31"), Store("co-31"), text)("").toStream(Named("changes-31")).to(Named("write-31"), output, text, text)
+      ): app =>
+        val more     = Topic.from(s"${app.input.value}-more").orFail
+        val settings = StreamsSettings.from(client(server), ApplicationId.from(app.application).orFail, under).orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(more, 3, 1).orFail))) *>
+          PlatformKafkaClient().streams(settings, app.topology).use: streams =>
+            val refused = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.IncorrectlyPartitionedTopics])).compile.lastOrError
+            streams.run.race(refused.timeout(2.minutes)).flatMap:
+              case Left(_)  => IO.raiseError(new AssertionError("the application stopped"))
+              case Right(_) => IO.unit
+
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>
         produce(server, app.input, first) *> running(server, app)(latest(server, app.output, total(first))) *> produce(server, app.input, second) *>

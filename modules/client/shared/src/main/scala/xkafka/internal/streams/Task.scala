@@ -28,8 +28,8 @@ import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
 import xkafka.streams.{
-  Consumer, Entry, Joiner, Origin, Release, Source, Step, StreamJoin, StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue, TableView,
-  Window, Windowed
+  Consumer, Entry, Joiner, Origin, Release, Source, Step, Store, StreamJoin, StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue,
+  TableView, Window, Windowed
 }
 
 /** A record as a topic holds it, read by a task. */
@@ -60,9 +60,10 @@ private[xkafka] final case class TaskOutput(
 private[xkafka] final case class Stored(value: Chunk[Byte], timestamp: Long)
 
 /** What a task keeps between records: each store's contents by serialized key, the partition time, the largest timestamp it has read, and for each
-  * window store, the stream time its windowing step has seen, which starts again on each member as Java's does, the store's clock (see
-  * [[WindowStore]]), taken from its contents where the task has not yet kept it, and where its step emits windows once they close, the close time it
-  * last emitted for, committed with the task's offsets, and the wall-clock time before which it does not look for closed windows again.
+  * window store, the stream time its windowing steps have seen, each side of a cogroup its own, which starts again on each member as Java's does, the
+  * store's clock (see [[WindowStore]]), taken from its contents where the task has not yet kept it, and where its step emits windows once they close,
+  * the close time it last emitted for, committed with the task's offsets, and the wall-clock time before which it does not look for closed windows
+  * again.
   */
 private[xkafka] final case class TaskState(
     stores: Map[String, Map[Chunk[Byte], Stored]],
@@ -165,10 +166,12 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
         written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record)
           // Java drops a value that is null before a grouped table's repartition topic, which here is a change its serializer writes as none.
           .map(out => (state, if aggregate.isDefined then out.filter(_.value.isDefined) else out))
-      case Consumer.Beside(_, _, next) => pushed(next, record, state, now)
-      case Consumer.Merged(_, next)    => pushed(next, record, state, now)
-      case Consumer.Refused(_, next)   => pushed(next, record, state, now)
-      case Consumer.Fan(children)      => children.foldLeftM((state, Vector.empty[TaskOutput])):
+      case Consumer.Beside(_, _, next)  => pushed(next, record, state, now)
+      case Consumer.Merged(_, next)     => pushed(next, record, state, now)
+      case Consumer.Cogroup(_, _, next) => pushed(next, record, state, now)
+      case Consumer.Copartitioned(next) => pushed(next, record, state, now)
+      case Consumer.Refused(_, next)    => pushed(next, record, state, now)
+      case Consumer.Fan(children)       => children.foldLeftM((state, Vector.empty[TaskOutput])):
           case ((current, out), child) => pushed(child, record, current, now).map((after, more) => (after, out ++ more))
       case Consumer.Splitting(_, branches) => branches.find(_.keep(record.key, record.value))
           .fold(F.pure((state, Vector.empty[TaskOutput])))(branch => pushed(branch.next, record, state, now))
@@ -496,7 +499,8 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       record: Travelling[K, V],
       state: TaskState,
       now: Long,
-      asked: => Boolean
+      asked: => Boolean,
+      clock: Option[Int] = None
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     def passing(records: Vector[Travelling[K2, V2]]) = F.pure((state, records, Vector.empty[TaskOutput]))
     step match
@@ -514,9 +518,10 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
       case Step.ToStream()                                               => passing(Vector(record))
-      case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _, _)   => windowed(folding, record, state, now)
-      case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now)
-      case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now)
+      case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _, _)   => windowed(folding, record, state, now, clock)
+      case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
+      case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
+      case Step.Cogrouped(side, folding)                                 => this.step(folding, record, state, now, asked, Some(side))
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
       case filtering @ Step.TableFilter(_, _, _)                         => tableFiltered(filtering, record, state)
@@ -685,14 +690,21 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
     * written to the changelog either way. The store never holds an expired window, since it drops them as its clock moves and once restored, so one
     * reads as absent, as Java's store reads it. A record whose key its serializer writes as none is skipped, as Java skips a null key.
     */
-  private def windowed[K, V, A](step: Step.WindowedAggregate[F, K, V, A], record: Travelling[K, V], state: TaskState, now: Long): F[Windowing[K, A]] =
+  private def windowed[K, V, A](
+      step: Step.WindowedAggregate[F, K, V, A],
+      record: Travelling[K, V],
+      state: TaskState,
+      now: Long,
+      clock: Option[Int]
+  ): F[Windowing[K, A]] =
     import step.{add, emitOnClose, key, retention, store, value, windows}
     topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
       key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
         case None        => F.pure((state, Vector.empty, Vector.empty))
         case Some(bytes) =>
-          val streamTime = math.max(state.streamTimes.getOrElse(store.value, WindowStore.NoTime), record.timestamp)
-          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.value, streamTime))
+          val timer      = Task.timer(store, clock)
+          val streamTime = math.max(state.streamTimes.getOrElse(timer, WindowStore.NoTime), record.timestamp)
+          val timed      = state.copy(streamTimes = state.streamTimes.updated(timer, streamTime))
           val closeTime  = streamTime - windows.graceMillis
           val open       = windows.windowsFor(record.timestamp).filter(_.end > closeTime)
           val updated    =
@@ -726,7 +738,13 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
     * starting just after it where later records are within the time difference, and the window starting just after the record before it where it
     * falls in that one.
     */
-  private def sliding[K, V, A](step: Step.SlidingAggregate[F, K, V, A], record: Travelling[K, V], state: TaskState, now: Long): F[Windowing[K, A]] =
+  private def sliding[K, V, A](
+      step: Step.SlidingAggregate[F, K, V, A],
+      record: Travelling[K, V],
+      state: TaskState,
+      now: Long,
+      clock: Option[Int]
+  ): F[Windowing[K, A]] =
     import step.{add, emitOnClose, key, retention, store, value, windows}
     val difference = windows.differenceMillis
     val timestamp  = record.timestamp
@@ -734,8 +752,9 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
         case None        => F.pure((state, Vector.empty, Vector.empty))
         case Some(bytes) =>
-          val streamTime               = math.max(state.streamTimes.getOrElse(store.value, WindowStore.NoTime), record.timestamp)
-          val timed                    = state.copy(streamTimes = state.streamTimes.updated(store.value, streamTime))
+          val timer                    = Task.timer(store, clock)
+          val streamTime               = math.max(state.streamTimes.getOrElse(timer, WindowStore.NoTime), record.timestamp)
+          val timed                    = state.copy(streamTimes = state.streamTimes.updated(timer, streamTime))
           val closeTime                = streamTime - windows.graceMillis
           def read(held: Stored): F[A] = value.deserializer.deserialize(changelog, Headers.empty, Some(held.value))
           // Puts a window and passes it on, as Java puts a window it makes from an aggregate it found.
@@ -811,7 +830,8 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       step: Step.SessionAggregate[F, K, V, A],
       record: Travelling[K, V],
       state: TaskState,
-      now: Long
+      now: Long,
+      clock: Option[Int]
   ): F[Windowing[K, Option[A]]] =
     import step.{add, emitOnClose, initial, key, merge, retention, store, value, windows}
     val gap       = windows.gapMillis
@@ -820,8 +840,9 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
         case None        => F.pure((state, Vector.empty, Vector.empty))
         case Some(bytes) =>
-          val streamTime = math.max(state.streamTimes.getOrElse(store.value, WindowStore.NoTime), timestamp)
-          val timed      = state.copy(streamTimes = state.streamTimes.updated(store.value, streamTime))
+          val timer      = Task.timer(store, clock)
+          val streamTime = math.max(state.streamTimes.getOrElse(timer, WindowStore.NoTime), timestamp)
+          val timed      = state.copy(streamTimes = state.streamTimes.updated(timer, streamTime))
           val closeTime  = streamTime - windows.graceMillis - gap
           val entries    = timed.store(store.value)
           val found      =
@@ -1185,6 +1206,9 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
+  /** The name a step's stream time goes by: its store's, or for a side of a cogroup, which has one of its own, a name no store can have. */
+  def timer(store: Store, side: Option[Int]): String = side.fold(store.value)(number => s"${store.value}#$number")
+
   /** A look through a stream-stream join's held records: the earliest time it has reached, the sides, by whether they are the left, found with a
     * record whose window is open, whether it has ended, and the held records it sends on, with their keys, in order.
     */

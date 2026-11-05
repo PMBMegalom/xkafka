@@ -104,6 +104,8 @@ private[xkafka] object Wiring:
         case Consumer.Beside(table, _, next)                 => linked(next, added.copy(tables = added.tables ++ table))
         case Consumer.Fan(children)                          => children.foldLeft(added)((graph, child) => linked(child, graph))
         case Consumer.Merged(_, next)                        => linked(next, added)
+        case Consumer.Cogroup(_, _, next)                    => linked(next, added)
+        case Consumer.Copartitioned(next)                    => linked(next, added)
         case Consumer.Splitting(_, branches)                 => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
         case Consumer.Refused(_, next)                       => linked(next, added)
         case Consumer.LeftTable(join)                        => onward(join.id, join.kept, join.next)
@@ -158,6 +160,7 @@ private[xkafka] object Wiring:
       repartitions: Vector[(Source, Repartition)],
       joins: Vector[List[Source]],
       unsure: Vector[List[Source]],
+      unstartable: Vector[List[Source]],
       problems: Vector[TopologyError],
       steps: Vector[String]
   ):
@@ -224,6 +227,7 @@ private[xkafka] object Wiring:
         Vector.empty,
         Vector.empty,
         Vector.empty,
+        Vector.empty,
         Vector.empty
       )
     val walked                                          = own.foldLeft(start)((walk, entry) => entered(entry, false, walk))
@@ -241,6 +245,7 @@ private[xkafka] object Wiring:
               (entries ++ beside).map(_._1),
               groups(walked.joins.toList.filter(inside)),
               walked.unsure.toList.filter(inside).distinct,
+              walked.unstartable.toList.filter(inside),
               of(walked.kept, home),
               of(walked.repartitions, home),
               of(walked.nodes, home)
@@ -323,6 +328,18 @@ private[xkafka] object Wiring:
       case Consumer.Merged(named, next) =>
         val after = at.copy(last = List(named.value))
         arrive(next, after, walk.making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last)).coming(named.value, after))
+      case Consumer.Cogroup(named, together, next) =>
+        val after  = at.copy(last = List(named.value), sources = Nil, unwritten = Nil)
+        val joined = if together then walk.copy(joins = walk.joins :+ at.sources) else walk
+        // Java cannot start a cogroup of several groups with a repartition topic at all, so which sub-topology it numbers first does not come into it.
+        val judged =
+          if together && at.unwritten.nonEmpty then
+            joined
+              .copy(unsure = joined.unsure.filterNot(_.forall((at.joined ++ at.sources).contains)), unstartable = joined.unstartable :+ at.sources)
+          else joined
+        val made = judged.writing(at.unwritten).making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last))
+        arrive(next, after, made.coming(named.value, after))
+      case Consumer.Copartitioned(next)        => arrive(next, at, walk.copy(joins = walk.joins :+ at.sources))
       case Consumer.Splitting(named, branches) =>
         val made  = walk.making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last))
         val after =

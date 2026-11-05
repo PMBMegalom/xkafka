@@ -70,6 +70,7 @@ private[xkafka] object Describing:
       case Step.SessionAggregate(store, _, _, _, _, _, _, _, _, _) => List(store.value)
       case Step.Suppress(suppressed, _, _, _)                      => List(s"${suppressed.name}-store")
       case Step.Join(view, _)                                      => stores(view)
+      case Step.Cogrouped(_, folding)                              => kept(folding)
       case _                                                       => Nil
 
   /** The stores Java reads a table's values through, in the order its value getter names them: a suppression's buffer before its table's, and for

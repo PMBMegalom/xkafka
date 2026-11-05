@@ -211,6 +211,11 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** Each change to the table, as a record. */
   case ToStream[F[_], K, V]() extends Step[F, K, V, K, V]
 
+  /** The fold `step` as one side of a cogroup, numbered `side`: each folds into one store, which the first keeps, and has a stream time of its own,
+    * as each of Java's processors does.
+    */
+  case Cogrouped[F[_], K, V, K2, V2](side: Int, step: Step[F, K, V, K2, V2]) extends Step[F, K, V, K2, V2]
+
   def mapK[G[_]](fk: FunctionK[F, G]): Step[G, K, V, K2, V2] =
     this match
       case Filter(keep)                                            => Filter(keep)
@@ -239,6 +244,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case Suppress(suppressed, key, value, release) => Suppress(suppressed, key.mapK(fk), value.mapK(fk), release)
       case Join(view, join)                          => Join(view.mapK(fk), join)
       case ToStream()                                => ToStream()
+      case Cogrouped(side, step)                     => Cogrouped(side, step.mapK(fk))
 
   /** The stores it keeps. */
   def kept: List[KeptStore] =
@@ -253,6 +259,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case SlidingAggregate(store, _, retention, _, _, _, _, _, _)    => List(KeptStore(store, Some(retention)))
       case SessionAggregate(store, _, retention, _, _, _, _, _, _, _) => List(KeptStore(store, Some(retention), session = true))
       case Suppress(suppressed, _, _, _)                              => List(KeptStore(Store(s"${suppressed.name}-store"), buffer = true))
+      case Cogrouped(side, step)                                      => if side == 0 then step.kept else Nil
       case _                                                          => Nil
 
   /** Whether it may give its records a new key. */
@@ -489,6 +496,14 @@ private[xkafka] enum Consumer[F[_], K, V]:
   /** A node of its own that `next` reads, the node Java's `merge` makes. */
   case Merged(named: Named, next: Consumer[F, K, V])
 
+  /** The node a cogroup's sides meet in, the one Java names `<named>-cogroup-merge`, which `next` reads. Java takes that node for the source of what
+    * follows, which so has no topics to copartition. The topics meeting here are copartitioned where `together` says so, as several sides need.
+    */
+  case Cogroup(named: Named, together: Boolean, next: Consumer[F, K, V])
+
+  /** `next`, for a cogroup of one side, whose topics Java copartitions as they are before any repartition topic. */
+  case Copartitioned(next: Consumer[F, K, V])
+
   /** The first of `branches` that takes a record, and none if none does, as Java's `split` makes. */
   case Splitting(named: Named, branches: List[SplitBranch[F, K, V]])
 
@@ -540,17 +555,19 @@ private[xkafka] enum Consumer[F[_], K, V]:
       case Output(named, topic, key, value)                                     => Output(named, topic, key.mapK(fk), value.mapK(fk))
       case Repartitioning(repartition, key, value, at, always, next, aggregate) =>
         Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.mapK(fk), aggregate)
-      case Beside(table, last, next)  => Beside(table.map(_.mapK(fk)), last, next.mapK(fk))
-      case Fan(children)              => Fan(children.map(_.mapK(fk)))
-      case Merged(named, next)        => Merged(named, next.mapK(fk))
-      case Splitting(named, branches) => Splitting(named, branches.map(_.mapK(fk)))
-      case LeftTable(join)            => LeftTable(join.mapK(fk))
-      case RightTable(join)           => RightTable(join.mapK(fk))
-      case LeftStream(join)           => LeftStream(join.mapK(fk))
-      case RightStream(join)          => RightStream(join.mapK(fk))
-      case Refused(problem, next)     => Refused(problem, next.mapK(fk))
-      case Done()                     => Done()
-      case mapped @ Mapped(_, _)      => mapped.expanded.mappedBy(fk)
+      case Beside(table, last, next)      => Beside(table.map(_.mapK(fk)), last, next.mapK(fk))
+      case Fan(children)                  => Fan(children.map(_.mapK(fk)))
+      case Merged(named, next)            => Merged(named, next.mapK(fk))
+      case Cogroup(named, together, next) => Cogroup(named, together, next.mapK(fk))
+      case Copartitioned(next)            => Copartitioned(next.mapK(fk))
+      case Splitting(named, branches)     => Splitting(named, branches.map(_.mapK(fk)))
+      case LeftTable(join)                => LeftTable(join.mapK(fk))
+      case RightTable(join)               => RightTable(join.mapK(fk))
+      case LeftStream(join)               => LeftStream(join.mapK(fk))
+      case RightStream(join)              => RightStream(join.mapK(fk))
+      case Refused(problem, next)         => Refused(problem, next.mapK(fk))
+      case Done()                         => Done()
+      case mapped @ Mapped(_, _)          => mapped.expanded.mappedBy(fk)
 
   /** Whether what reads a table's changes here asks for their old values: a side of a table join does where its kind of join reads them, or what
     * reads the join asks, a fan where any of its children does, and nothing else after a table does unless a step of it does. Each node works it out
@@ -595,17 +612,21 @@ private[xkafka] object Entry:
 
 /** The topics and steps that make one sub-topology: the topics it reads, its own first, each going into what reads it; the groups of topics its joins
   * copartition, as Java groups their sources; the joins and merges it holds, by the topics they read, whose sub-topologies Java numbers by which of
-  * their inputs its program builds first; the stores it keeps and the repartition topics it writes; and its nodes as Java's builder makes them.
+  * their inputs its program builds first; the cogroups it holds, by the topics they read, that Java cannot start, since it copartitions what they
+  * read from before a repartition topic, in other sub-topologies; the stores it keeps and the repartition topics it writes; and its nodes as Java's
+  * builder makes them.
   */
 private[xkafka] final case class Subtopology[F[_]](
     entries: List[Entry[F]],
     copartitioned: List[List[Source]],
     buildOrdered: List[List[Source]],
+    unstartable: List[List[Source]],
     kept: List[KeptStore],
     repartitions: List[Repartition],
     nodes: List[Describing.Made]
 ):
-  def mapK[G[_]](fk: FunctionK[F, G]): Subtopology[G] = Subtopology(entries.map(_.mapK(fk)), copartitioned, buildOrdered, kept, repartitions, nodes)
+  def mapK[G[_]](fk: FunctionK[F, G]): Subtopology[G] =
+    Subtopology(entries.map(_.mapK(fk)), copartitioned, buildOrdered, unstartable, kept, repartitions, nodes)
 
   /** The topics it reads, its own first. */
   def origins: List[Source] = entries.flatMap(_.origin.sources)
@@ -1075,6 +1096,19 @@ final class KGroupedStream[F[_], K, V, O] private[xkafka] (
             stream.feed(Consumer.Repartitioning(repartition, key, value, false, false, Consumer.refusing(found, Consumer.Then(named, fold, next))))
     KStream.of[F, K2, A, KeyState.AsRead, O](feeding, named.value, false, stream.ending)
 
+  /** This group as a side of a cogroup, whose values `add` folds in. Java makes a repartition topic's source only when it makes the aggregate. */
+  private[xkafka] def side[A](add: (K, V, A) => A): CogroupSide[F, K, A, O] =
+    new CogroupSide[F, K, A, O]:
+      def fed[K2, R](named: Named, number: Int, alone: Boolean, fold: CogroupFold[F, K, A, K2, R], merge: Consumer[F, K2, R]): O =
+        val folding = Consumer.Then(named, Step.Cogrouped(number, fold[V](add)), merge)
+        val read    = through.fold[Consumer[F, K, V]](folding)(Consumer.Repartitioning(_, key, value, true, false, folding))
+        stream.feed(if alone then Consumer.Copartitioned(read) else read)
+
+  /** These records folded along with those of other groups, as Java's `cogroup` does: `add` folds this group's values, and each further group's
+    * `cogroup` gives its own, all into one store.
+    */
+  def cogroup[A](add: (K, V, A) => A): CogroupedKStream[F, K, A, O] = CogroupedKStream(Vector(side(add)), key, stream.ending)
+
   /** Counts each key's records in `store`, in the step `named`. */
   def count(named: Named, store: Store)(using F: ApplicativeThrow[F]): KTable.Flowing[F, K, Long, KTable.Updated, O] =
     aggregated(named, store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
@@ -1164,25 +1198,9 @@ final class TimeWindowedKStream[F[_], K, V, O] private[xkafka] (
       start: (K, V) => A,
       add: (K, V, A) => A
   ): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] =
-    val (least, rule, problem) =
-      windows match
-        case time: TimeWindows       => (time.retentionMillis, time.retentionRule, time.problem)
-        case sliding: SlidingWindows => (sliding.retentionMillis, sliding.retentionRule, sliding.problem)
-    val kept =
-      problem.orElse:
-        retention.flatMap: asked =>
-          if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
-          else Option.when(asked.toMillis < least)(s"the retention must be at least $rule, ${least} ms, was $asked")
-    val problems = kept.map(TopologyError.InvalidWindows(store.value, _))
-    val keep     = retention.fold(least)(_.toMillis)
-    val fold     =
-      windows match
-        case time: TimeWindows       => Step.WindowedAggregate(store, time, keep, emitOnClose, key, serde, initial, start, add)
-        case sliding: SlidingWindows => Step.SlidingAggregate(store, sliding, keep, emitOnClose, key, serde, initial, start, add)
-    val (size, grace) =
-      windows match
-        case time: TimeWindows       => (time.sizeMillis, time.graceMillis)
-        case sliding: SlidingWindows => (sliding.differenceMillis, sliding.graceMillis)
+    val (problems, keep) = TimeWindowedKStream.kept(windows, retention, store)
+    val fold             = TimeWindowedKStream.fold(windows, store, keep, emitOnClose, key, serde, initial, start, add)
+    val (size, grace)    = TimeWindowedKStream.sized(windows)
     KTable.updating(grouped.folded(named, fold, problems), TableKey.TimeWindowed(key, size), serde, Some(grace))
 
   /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
@@ -1211,6 +1229,151 @@ final class TimeWindowedKStream[F[_], K, V, O] private[xkafka] (
       add: (K, V, A) => A
   ): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] = aggregated(named, store, serde, Some(initial), (k, v) => add(k, v, initial), add)
 
+private[xkafka] object TimeWindowedKStream:
+  /** What is wrong with `windows` kept for `retention` in `store`, if anything, and how long they are kept, in milliseconds. */
+  def kept(windows: TimeWindows | SlidingWindows, retention: Option[FiniteDuration], store: Store): (Option[TopologyError], Long) =
+    val (least, rule, problem) =
+      windows match
+        case time: TimeWindows       => (time.retentionMillis, time.retentionRule, time.problem)
+        case sliding: SlidingWindows => (sliding.retentionMillis, sliding.retentionRule, sliding.problem)
+    val found =
+      problem.orElse:
+        retention.flatMap: asked =>
+          if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
+          else Option.when(asked.toMillis < least)(s"the retention must be at least $rule, ${least} ms, was $asked")
+    (found.map(TopologyError.InvalidWindows(store.value, _)), retention.fold(least)(_.toMillis))
+
+  /** The step folding each key's records in `windows` into `store`. */
+  def fold[F[_], K, V, A](
+      windows: TimeWindows | SlidingWindows,
+      store: Store,
+      keep: Long,
+      emitOnClose: Boolean,
+      key: Serde[F, K],
+      serde: Serde[F, A],
+      initial: Option[A],
+      start: (K, V) => A,
+      add: (K, V, A) => A
+  ): Step[F, K, V, Windowed[K], A] =
+    windows match
+      case time: TimeWindows       => Step.WindowedAggregate(store, time, keep, emitOnClose, key, serde, initial, start, add)
+      case sliding: SlidingWindows => Step.SlidingAggregate(store, sliding, keep, emitOnClose, key, serde, initial, start, add)
+
+  /** The size a windowed key is written with, and the grace. */
+  def sized(windows: TimeWindows | SlidingWindows): (Long, Long) =
+    windows match
+      case time: TimeWindows       => (time.sizeMillis, time.graceMillis)
+      case sliding: SlidingWindows => (sliding.differenceMillis, sliding.graceMillis)
+
+/** The fold a cogroup makes of a side's values: given what folds a value in, for values of any type, the step that does it. */
+private[xkafka] type CogroupFold[F[_], K, A, K2, R] = [V] => ((K, V, A) => A) => Step[F, K, V, K2, R]
+
+/** A group going into a cogroup, whose values only it knows the type of. */
+private[xkafka] trait CogroupSide[F[_], K, A, O]:
+  /** The group's records folded by `fold` in the step `named`, the side numbered `number`, the only side where `alone` says so, then going into
+    * `merge`.
+    */
+  def fed[K2, R](named: Named, number: Int, alone: Boolean, fold: CogroupFold[F, K, A, K2, R], merge: Consumer[F, K2, R]): O
+
+/** Groups of records with one key type, of any value types, ready to be folded into one store, as Java's `cogroup` makes them: each record is folded
+  * by the function of the group it came from, in the group's own step, and each change to the store goes on as one table's. The groups' topics are
+  * processed together, so they must have the same number of partitions.
+  */
+final class CogroupedKStream[F[_], K, A, O] private[xkafka] (sides: Vector[CogroupSide[F, K, A, O]], key: Serde[F, K], ending: Ending[F, O]):
+  /** The records of `other` folded in too, by `add`. */
+  def cogroup[V](other: KGroupedStream[F, K, V, O])(add: (K, V, A) => A): CogroupedKStream[F, K, A, O] =
+    CogroupedKStream(sides :+ other.side(add), key, ending)
+
+  /** The stream of what `fold` makes of each side's records, which meet in the node `<named>-cogroup-merge`, each side's step being
+    * `<named>-cogroup-agg-<number>`, as Java names them.
+    */
+  private[xkafka] def folded[K2, R](named: Named, fold: CogroupFold[F, K, A, K2, R], problems: Option[TopologyError]): KStream.Ends[F, K2, R, O] =
+    val merge = Named(s"${named.value}-cogroup-merge")
+    KStream.of[F, K2, R, KeyState.AsRead, O](
+      next =>
+        val met = Consumer.Cogroup(merge, sides.size > 1, Consumer.refusing(problems, next))
+        sides.zipWithIndex.map((side, number) => side.fed(Named(s"${named.value}-cogroup-agg-$number"), number, sides.size == 1, fold, met))
+          .reduceLeft(ending.both)
+      ,
+      merge.value,
+      false,
+      ending
+    )
+
+  /** Folds each key's values into `store`, starting from `initial`, in the steps `named` names. */
+  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A): KTable.Flowing[F, K, A, KTable.Updated, O] =
+    KTable.updating(
+      folded[K, A](named, [V] => (add: (K, V, A) => A) => Step.Aggregate(store, key, serde, Some(initial), (k, v) => add(k, v, initial), add), None),
+      TableKey.Plain(key),
+      serde,
+      None,
+      Some(TableView.Stored(store, key, serde))
+    )
+
+  /** The records split by key and by each of `windows` they fall in, ready to be folded into a window store. */
+  def windowedBy(windows: TimeWindows): TimeWindowedCogroupedKStream[F, K, A, O] = TimeWindowedCogroupedKStream(this, windows, None, key)
+
+  /** The records split by key and by each sliding window they fall in, ready to be folded into a window store. */
+  def windowedBy(windows: SlidingWindows): TimeWindowedCogroupedKStream[F, K, A, O] = TimeWindowedCogroupedKStream(this, windows, None, key)
+
+  /** The records split by key into sessions of activity, ready to be folded into a session store. */
+  def windowedBy(windows: SessionWindows): SessionWindowedCogroupedKStream[F, K, A, O] = SessionWindowedCogroupedKStream(this, windows, None, key)
+
+/** Groups of records split by key and window, ready to be folded into one window store. Each update to a window goes downstream as it happens. A
+  * record is dropped when its window has closed by the latest time read from its own group, as in Java.
+  */
+final class TimeWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
+    cogrouped: CogroupedKStream[F, K, A, O],
+    windows: TimeWindows | SlidingWindows,
+    retention: Option[FiniteDuration],
+    key: Serde[F, K]
+):
+  /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. */
+  def withRetention(retention: FiniteDuration): TimeWindowedCogroupedKStream[F, K, A, O] =
+    TimeWindowedCogroupedKStream(cogrouped, windows, Some(retention), key)
+
+  /** Folds each key's values in each window into `store`, starting each window from `initial`, in the steps `named` names. */
+  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] =
+    val (problems, keep) = TimeWindowedKStream.kept(windows, retention, store)
+    val (size, grace)    = TimeWindowedKStream.sized(windows)
+    val folding          =
+      cogrouped.folded[Windowed[K], A](
+        named,
+        [V] =>
+          (add: (K, V, A) => A) =>
+            TimeWindowedKStream.fold(windows, store, keep, false, key, serde, Some(initial), (k: K, v: V) => add(k, v, initial), add),
+        problems
+      )
+    KTable.updating(folding, TableKey.TimeWindowed(key, size), serde, Some(grace))
+
+/** Groups of records split by key into sessions, ready to be folded into one session store, as for [[SessionWindowedKStream]], a record being dropped
+  * when its session has closed by the latest time read from its own group, as in Java.
+  */
+final class SessionWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
+    cogrouped: CogroupedKStream[F, K, A, O],
+    windows: SessionWindows,
+    retention: Option[FiniteDuration],
+    key: Serde[F, K]
+):
+  /** Keeps each session in the store for `retention` after its end, which must be at least the inactivity gap and grace, their default. */
+  def withRetention(retention: FiniteDuration): SessionWindowedCogroupedKStream[F, K, A, O] =
+    SessionWindowedCogroupedKStream(cogrouped, windows, Some(retention), key)
+
+  /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them, in the
+    * steps `named` names.
+    */
+  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A)(merge: (K, A, A) => A): KTable.Flowing[F, Windowed[K], A, Option, O] =
+    val (problems, keep) = SessionWindowedKStream.kept(windows, retention, store)
+    val folding          =
+      cogrouped.folded[Windowed[K], Option[A]](
+        named,
+        [V] =>
+          (add: (K, V, A) => A) =>
+            Step.SessionAggregate(store, windows, keep, false, key, serde, Some(initial), (k: K, v: V) => add(k, v, initial), add, merge),
+        problems
+      )
+    KTable.deleting(folding, TableKey.SessionWindowed(key), serde, Some(windows.graceMillis + windows.gapMillis))
+
 /** Records grouped by key into sessions, ready to be folded into a session store. Each session's value goes downstream as it changes, and a session
   * merged into another goes on as none, as Java sends a session merged away as a tombstone. A record later than its session's end by more than the
   * inactivity gap and grace is dropped, and a session is kept for the gap and grace after its end.
@@ -1232,14 +1395,8 @@ final class SessionWindowedKStream[F[_], K, V, O] private[xkafka] (
       add: (K, V, A) => A,
       merge: (K, A, A) => A
   ): KTable.Flowing[F, Windowed[K], A, Option, O] =
-    val least = windows.retentionMillis
-    val kept  =
-      windows.problem.orElse:
-        retention.flatMap: asked =>
-          if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
-          else Option.when(asked.toMillis < least)(s"the retention must be at least ${windows.retentionRule}, ${least} ms, was $asked")
-    val problems = kept.map(TopologyError.InvalidWindows(store.value, _))
-    val fold     = Step.SessionAggregate(store, windows, retention.fold(least)(_.toMillis), emitOnClose, key, serde, initial, start, add, merge)
+    val (problems, keep) = SessionWindowedKStream.kept(windows, retention, store)
+    val fold             = Step.SessionAggregate(store, windows, keep, emitOnClose, key, serde, initial, start, add, merge)
     KTable.deleting(grouped.folded(named, fold, problems), TableKey.SessionWindowed(key), serde, Some(windows.graceMillis + windows.gapMillis))
 
   /** Counts each key's records in each session in `store`, in the step `named`. */
@@ -1265,6 +1422,17 @@ final class SessionWindowedKStream[F[_], K, V, O] private[xkafka] (
 
   /** Passes on only each session's final value once it has closed, as for time windows. */
   def emitOnWindowClose: SessionWindowedKStream[F, K, V, O] = SessionWindowedKStream(grouped, windows, retention, true, key, value)
+
+private[xkafka] object SessionWindowedKStream:
+  /** What is wrong with `windows` kept for `retention` in `store`, if anything, and how long they are kept, in milliseconds. */
+  def kept(windows: SessionWindows, retention: Option[FiniteDuration], store: Store): (Option[TopologyError], Long) =
+    val least = windows.retentionMillis
+    val found =
+      windows.problem.orElse:
+        retention.flatMap: asked =>
+          if asked.toNanos % 1000000L != 0L then Some("the retention must be whole milliseconds")
+          else Option.when(asked.toMillis < least)(s"the retention must be at least ${windows.retentionRule}, ${least} ms, was $asked")
+    (found.map(TopologyError.InvalidWindows(store.value, _)), retention.fold(least)(_.toMillis))
 
 /** How a table's keys are written in a suppression's buffer: as the table's key serde writes them, or, for a windowed table, as Java's windowed
   * serdes write a windowed key.

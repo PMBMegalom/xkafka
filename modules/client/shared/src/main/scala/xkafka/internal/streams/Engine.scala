@@ -251,6 +251,10 @@ private[xkafka] object Engine:
         val topics = sources.map(Task.topicOf(application, _)).mkString(", ")
         StreamsProblem
           .JavaMembersMayBeRefused(s"Java Streams numbers the sub-topologies of the join of $topics otherwise unless it builds the receiver first")
+    val unstartable =
+      topology.subtopologies.flatMap(_.unstartable).map: sources =>
+        val topics = sources.map(Task.topicOf(application, _)).mkString(", ")
+        StreamsProblem.JavaMembersMayBeRefused(s"Java Streams cannot start a cogroup of $topics, since a group goes through a repartition topic")
     for
       changes  <- Resource.eval(Queue.unbounded[F, Either[Throwable, MemberAction]])
       _        <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
@@ -295,7 +299,8 @@ private[xkafka] object Engine:
     yield new KafkaStreams[F]:
       def run: F[Unit]                   = running.joinWithNever
       def state: Stream[F, StreamsState] =
-        (phase, member.reports).mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered ++ buildOrdered)).discrete.changes
+        (phase, member.reports).mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered ++ buildOrdered ++ unstartable)).discrete
+          .changes
 
   /** A task's records, taken partition by partition in the order each was read, as Java's partition group takes them: next the record with the
     * smallest timestamp at the head of its partition, the earliest read of those with equal timestamps.

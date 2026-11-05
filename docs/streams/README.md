@@ -55,7 +55,9 @@ A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as
 - `repartition`, which sends records through a repartition topic you name;
 - `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
   named `Store`. This gives a `KTable`, and its `toStream` is every change to it.
-  A table can be grouped too (see [Grouping a table](tables.md#grouping-a-table));
+  A table can be grouped too (see [Grouping a table](tables.md#grouping-a-table)),
+  and several groups can be folded together
+  (see [Folding streams together](tables.md#folding-streams-together));
 - `toTable`, which keeps each key's latest value as a `KTable`;
 - `join`, `leftJoin` and `outerJoin`, which combine it with a table or a stream
   (see [Joins](joins.md));

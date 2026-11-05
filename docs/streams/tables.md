@@ -124,3 +124,62 @@ Changes to the result are `Option`s, which is why the example writes them with
 `amount.option`. A change is `None` when a value leaves a group that holds nothing.
 You can see this when you group a `count` by its value: a key's first count also
 leaves the group for 0, so if that group is empty, its change is `None`.
+
+## Folding streams together
+
+`cogroup` folds several grouped streams into one store, as Java Kafka Streams'
+`cogroup` does. Each group has its own function, and each can hold a different
+type of value. Here orders and refunds, both keyed by the user, make one balance
+for each user:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def balances(orders: Topic, refunds: Topic, output: Topic): Pipeline[IO] =
+  val user  = Serde.utf8[IO]
+  val cents = Serde.long[IO]
+  KStream(Named("orders"), orders, user, cents)
+    .groupByKey(user, cents)
+    .cogroup[Long]((_, paid, balance) => balance + paid)
+    .cogroup(KStream(Named("refunds"), refunds, user, cents).groupByKey(user, cents))((_, refunded, balance) => balance - refunded)
+    .aggregate(Named("balance"), Store("balances"), cents)(0L)
+    .toStream(Named("balance-changes"))
+    .to(Named("write-balances"), output, user, cents)
+```
+
+The result is a table like any other, and each change to it is written to the
+store's changelog. Its steps take their names from the one you give:
+`balance-cogroup-agg-0` and `balance-cogroup-agg-1` for the groups, and
+`balance-cogroup-merge` for what comes out of them.
+
+The groups' topics are processed together, so they must have the same number of
+partitions. If they do not, the application's `state` lists
+`StreamsProblem.IncorrectlyPartitionedTopics`. Groups that go through repartition
+topics do not need this of the topics they read.
+
+To fold two paths of one stream, group each with its `flow` and send the stream
+into the result with `into`, as in [Branching](branching.md).
+
+@:callout(warning)
+Java Kafka Streams cannot start a program in which several groups are folded
+together and any of them goes through a repartition topic. Such a program runs on
+xkafka, but cannot have Java members, and the application's `state` lists
+`StreamsProblem.JavaMembersMayBeRefused`, naming the topics.
+@:@
+
+Folding in windows works as for one group, with `windowedBy` before `aggregate`.
+A session's `aggregate` also takes a function to merge two sessions:
+
+```scala
+grouped
+  .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+  .aggregate(Named("balance"), Store("balances"), cents)(0L)
+```
+
+A record is late by the latest time read from its own group, not from the others,
+so a group that falls behind keeps its records, as in Java. As in Java, these
+windows have no `emitOnWindowClose`. To send only each window's final result, use
+[`suppress`](holding-back-updates.md).
