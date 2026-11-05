@@ -70,7 +70,7 @@ Topology.of(words).liftTo[IO].flatMap: topology =>
   KafkaClient[IO].streams(settings, topology).use(_.run)
 ```
 
-See [Streams](https://pmbmegalom.github.io/xkafka/streams.html) for programs,
+See [Streams](https://pmbmegalom.github.io/xkafka/streams/index.html) for programs,
 guarantees, state and standby tasks.
 
 ## Documentation

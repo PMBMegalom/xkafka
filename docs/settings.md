@@ -155,7 +155,7 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | `closeTimeout` | 30s | how long releasing the application waits to give back its tasks and leave |
 | `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
 
-See [Streams](streams.md#guarantees) for each of them.
+See [Streams](streams/running.md#guarantees) for each of them.
 
 ## Client settings
 
