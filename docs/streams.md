@@ -54,7 +54,8 @@ A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as
 - `evalFilter`, `evalMap` and `evalMapValues`, which run an effect;
 - `repartition`, which sends records through a repartition topic you name;
 - `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
-  named `Store`. This gives a `KTable`, and its `toStream` is every change to it;
+  named `Store`. This gives a `KTable`, and its `toStream` is every change to it.
+  A table can be grouped too (see [Grouping a table](#grouping-a-table));
 - `toTable`, which keeps each key's latest value as a `KTable`;
 - `join`, `leftJoin` and `outerJoin`, which combine it with a table or a stream
   (see [Joins](#joins));
@@ -280,6 +281,43 @@ adds a changelog topic, give a `Store` and a `Serde`, as in
 `filter(Named("kept"), Store("kept"), text)(keep)`. `suppress` needs a serde for
 the values it holds, so a table from `mapValues` must be kept in a store before it
 is suppressed; `Topology.of` refuses it otherwise.
+
+### Grouping a table
+
+A table's `groupBy` puts its values in new groups, as Java Kafka Streams'
+`KTable.groupBy` does, and `count`, `reduce` or `aggregate` keep a result for each
+group in a store. A value can leave its group, when it is replaced or deleted, so
+`reduce` and `aggregate` take two functions, one to put a value in and one to take
+it out. Here each user's balance counts towards their country's total, and moving
+to another country takes it out of one total and puts it in the other:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def totals(balances: Topic, output: Topic): Pipeline[IO] =
+  val text   = Serde.utf8[IO]
+  val amount = Serde.long[IO]
+  KTable(Named("balances"), balances, text, text, Store("balances"))
+    .groupBy(Repartition("by-country"), text, amount): (_, balance) =>
+      val Array(country, money) = balance.split(':')
+      (country, money.toLong)
+    .reduce(Named("total"), Store("totals"))(_ + _)(_ - _)
+    .toStream(Named("total-changes"))
+    .to(Named("write-totals"), output, text, amount.option)
+```
+
+Each change goes through the repartition topic
+`<application id>-<name>-repartition`, which the application's Java Kafka Streams
+members can read and write too. A group that loses its last value stays in the
+result, so a count stays at 0. To leave such groups out, `filter` the result.
+
+Changes to the result are `Option`s, which is why the example writes them with
+`amount.option`. A change is `None` when a value leaves a group that holds nothing.
+You can see this when you group a `count` by its value: a key's first count also
+leaves the group for 0, so if that group is empty, its change is `None`.
 
 ## Joins
 

@@ -150,8 +150,8 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
         v      <- value.deserializer.deserialize(source, input.headers, input.value)
       yield Travelling(k, v, input.timestamp, input.headers)
     origin match
-      case Origin.Input(_, topics, key, value)           => from(F.pure(topics.find(_.value == input.topic).getOrElse(topics.head)), key, value)
-      case Origin.Repartitioned(repartition, key, value) => from(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
+      case Origin.Input(_, topics, key, value)              => from(F.pure(topics.find(_.value == input.topic).getOrElse(topics.head)), key, value)
+      case Origin.Repartitioned(repartition, key, value, _) => from(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
 
   /** `record` through `consumer` and all that reads what it gives, each record a step gives going all the way through before the next, as Java
     * forwards them, and what it writes in the order it writes it.
@@ -160,9 +160,11 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
     consumer.expanded match
       case Consumer.Then(_, last, next) => step(last, record, state, now, next.requests).flatMap: (after, records, written) =>
           allPushed(next, records, after, written, now)
-      case Consumer.Output(_, topic, key, value)                     => written(F.pure(topic), key, value, false, record).map((state, _))
-      case Consumer.Repartitioning(repartition, key, value, _, _, _) =>
-        written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record).map((state, _))
+      case Consumer.Output(_, topic, key, value)                                => written(F.pure(topic), key, value, false, record).map((state, _))
+      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate) =>
+        written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record)
+          // Java drops a value that is null before a grouped table's repartition topic, which here is a change its serializer writes as none.
+          .map(out => (state, if aggregate.isDefined then out.filter(_.value.isDefined) else out))
       case Consumer.Beside(_, _, next) => pushed(next, record, state, now)
       case Consumer.Merged(_, next)    => pushed(next, record, state, now)
       case Consumer.Refused(_, next)   => pushed(next, record, state, now)
@@ -546,6 +548,18 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
                   val after    = state.copy(stores = state.stores.updated(store.value, contents))
                   val logged   = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
                   (after, Vector(Travelling(record.key, aggregate, timestamp, record.headers, replaced)), Vector(logged))
+      case Step.TableGroupBy(grouped) =>
+        passing(grouped(record.key, record.value, record.old).map((k, v) => Travelling(k, v, record.timestamp, record.headers)))
+      case Step.TableAggregate(store, key, value, start, add, subtract) => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
+          key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
+            case None        => F.pure((state, Vector.empty, Vector.empty))
+            case Some(bytes) =>
+              val held = state.store(store.value).get(bytes)
+              held.traverse(old => value.deserializer.deserialize(changelog, Headers.empty, Some(old.value))).flatMap: replaced =>
+                val taken   = record.value.old.flatMap(left => replaced.map(subtract(record.key, left, _))).orElse(replaced)
+                val updated = record.value.current.fold(taken)(joined => Some(taken.fold(start(record.key, joined))(add(record.key, joined, _))))
+                val at      = held.fold(record.timestamp)(old => math.max(old.timestamp, record.timestamp))
+                tableKept(store, value, changelog, record.key, bytes, updated, at, record.headers, state)
 
   /** The change `next` makes to the key written as `bytes` in a table's `store`, logged to `changelog`, going on with the value it replaced. */
   private def tableKept[K, V](

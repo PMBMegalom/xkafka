@@ -135,6 +135,24 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   case Aggregate[F[_], K, V, A](store: Store, key: Serde[F, K], value: Serde[F, A], initial: Option[A], start: (K, V) => A, add: (K, V, A) => A)
       extends Step[F, K, V, K, A]
 
+  /** Each change to a table as what it changes in the groups `select` puts its values in, as Java's table `groupBy` makes it: one change where the
+    * value stays in its group, and otherwise the old value leaving its group, then the new one joining its own.
+    */
+  case TableGroupBy[F[_], K, C, K2, V2](grouped: (K, C, Option[C]) => Vector[(K2, V2)]) extends Step[F, K, C, K2, V2]
+
+  /** Folds each key's changes into `store`, as Java's grouped table aggregation does: the value leaving is taken out with `subtract` and the value
+    * joining put in with `add`, or for a key holding nothing, with `start`. A value leaving a key holding nothing leaves it holding nothing, which
+    * goes on as a delete, as Java's does.
+    */
+  case TableAggregate[F[_], K, V, A](
+      store: Store,
+      key: Serde[F, K],
+      value: Serde[F, A],
+      start: (K, V) => A,
+      add: (K, V, A) => A,
+      subtract: (K, V, A) => A
+  ) extends Step[F, K, TableChange[V], K, Option[A]]
+
   /** Folds each key's records into `store`, once for each of `windows` a record falls in, as for `Aggregate`, keeping each window for `retention`
     * milliseconds after its start, passing on each update, or with `emitOnClose` only each window's final value once it has closed.
     */
@@ -195,18 +213,20 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
 
   def mapK[G[_]](fk: FunctionK[F, G]): Step[G, K, V, K2, V2] =
     this match
-      case Filter(keep)                                      => Filter(keep)
-      case Map(change)                                       => Map(change)
-      case MapValues(change)                                 => MapValues(change)
-      case FlatMap(change)                                   => FlatMap(change)
-      case FlatMapValues(change)                             => FlatMapValues(change)
-      case Peek(effect)                                      => Peek((key, value) => fk(effect(key, value)))
-      case EvalMapValues(change)                             => EvalMapValues(value => fk(change(value)))
-      case EvalFilter(keep)                                  => EvalFilter((key, value) => fk(keep(key, value)))
-      case EvalMap(change)                                   => EvalMap((key, value) => fk(change(key, value)))
-      case Aggregate(store, key, value, initial, start, add) => Aggregate(store, key.mapK(fk), value.mapK(fk), initial, start, add)
-      case TableSource(store, key, value)                    => TableSource(store, key.mapK(fk), value.mapK(fk))
-      case ToTable(lift, store, key, value)                  => ToTable(lift, store, key.mapK(fk), value.mapK(fk))
+      case Filter(keep)                                            => Filter(keep)
+      case Map(change)                                             => Map(change)
+      case MapValues(change)                                       => MapValues(change)
+      case FlatMap(change)                                         => FlatMap(change)
+      case FlatMapValues(change)                                   => FlatMapValues(change)
+      case Peek(effect)                                            => Peek((key, value) => fk(effect(key, value)))
+      case EvalMapValues(change)                                   => EvalMapValues(value => fk(change(value)))
+      case EvalFilter(keep)                                        => EvalFilter((key, value) => fk(keep(key, value)))
+      case EvalMap(change)                                         => EvalMap((key, value) => fk(change(key, value)))
+      case Aggregate(store, key, value, initial, start, add)       => Aggregate(store, key.mapK(fk), value.mapK(fk), initial, start, add)
+      case TableGroupBy(grouped)                                   => TableGroupBy(grouped)
+      case TableAggregate(store, key, value, start, add, subtract) => TableAggregate(store, key.mapK(fk), value.mapK(fk), start, add, subtract)
+      case TableSource(store, key, value)                          => TableSource(store, key.mapK(fk), value.mapK(fk))
+      case ToTable(lift, store, key, value)                        => ToTable(lift, store, key.mapK(fk), value.mapK(fk))
       case TableFilter(keep, present, store) => TableFilter(keep, present, store.map((named, key, value) => (named, key.mapK(fk), value.mapK(fk))))
       case TableMapValues(mapped, present, pure, store) =>
         TableMapValues(mapped, present, pure, store.map((named, key, value) => (named, key.mapK(fk), value.mapK(fk))))
@@ -224,6 +244,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   def kept: List[KeptStore] =
     this match
       case Aggregate(store, _, _, _, _, _)                            => List(KeptStore(store))
+      case TableAggregate(store, _, _, _, _, _)                       => List(KeptStore(store))
       case TableSource(store, _, _)                                   => List(KeptStore(store))
       case ToTable(_, store, _, _)                                    => List(KeptStore(store))
       case TableFilter(_, _, store)                                   => store.toList.map((stored, _, _) => KeptStore(stored))
@@ -237,18 +258,36 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** Whether it may give its records a new key. */
   def rekeys: Boolean =
     this match
-      case Map(_) | FlatMap(_) | EvalMap(_) => true
-      case _                                => false
+      case Map(_) | FlatMap(_) | EvalMap(_) | TableGroupBy(_) => true
+      case _                                                  => false
 
-  /** Whether it asks for the old values of the changes it reads, given whether what reads it asks: a suppression and a filter always do, as Java's
-    * ask in their constructors, and a `mapValues` kept in no store only for what reads it.
+  /** Whether it asks for the old values of the changes it reads, given whether what reads it asks: a suppression, a filter and a table's `groupBy`
+    * always do, as Java's ask, and a `mapValues` kept in no store only for what reads it.
     */
   def asks(after: Boolean): Boolean =
     this match
       case Suppress(_, _, _, _)          => true
       case TableFilter(_, _, _)          => true
+      case TableGroupBy(_)               => true
       case TableMapValues(_, _, _, None) => after
       case _                             => false
+
+/** A change to a group of a table's values: the value joining it and the value leaving it, as Java writes a `Change` to the repartition topic of a
+  * table's `groupBy`.
+  */
+private[xkafka] final case class TableChange[V](current: Option[V], old: Option[V])
+
+private[xkafka] object TableChange:
+  /** What a change to a table from `old` to `current` changes in the groups `select` puts values in: `select` makes the new pair first, and a pair
+    * leaving a group goes before the pair joining another, as Java's.
+    */
+  def grouped[K, V, K2, V2](select: (K, V) => (K2, V2))(key: K, current: Option[V], old: Option[V]): Vector[(K2, TableChange[V2])] =
+    val joining = current.map(select(key, _))
+    val leaving = old.map(select(key, _))
+    (leaving, joining) match
+      case (Some((from, left)), Some((to, joined))) if from.equals(to) => Vector(to -> TableChange(Some(joined), Some(left)))
+      case _ => leaving.map((from, left) => from -> TableChange(None, Some(left))).toVector ++
+          joining.map((to, joined) => to -> TableChange(Some(joined), None))
 
 /** When a suppression lets a held change to a key go on. */
 private[xkafka] enum Release[K]:
@@ -268,24 +307,24 @@ private[xkafka] enum Source derives CanEqual:
 /** A topic's records as they come into a sub-topology: from an input topic, or from the repartition topic an earlier sub-topology writes. */
 private[xkafka] enum Origin[F[_], K, V]:
   case Input(named: Named, topics: NonEmptyList[Topic], key: Serde[F, K], value: Serde[F, V])
-  case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])
+  case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], aggregate: Option[Named] = None)
 
   def mapK[G[_]](fk: FunctionK[F, G]): Origin[G, K, V] =
     this match
-      case Input(named, topics, key, value)       => Input(named, topics, key.mapK(fk), value.mapK(fk))
-      case Repartitioned(repartition, key, value) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk))
+      case Input(named, topics, key, value)                  => Input(named, topics, key.mapK(fk), value.mapK(fk))
+      case Repartitioned(repartition, key, value, aggregate) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk), aggregate)
 
   /** The topics it reads, as one source. */
   def sources: List[Source] =
     this match
-      case Input(_, topics, _, _)           => topics.toList.distinct.map(Source.Input(_))
-      case Repartitioned(repartition, _, _) => List(Source.Repartitioned(repartition))
+      case Input(_, topics, _, _)              => topics.toList.distinct.map(Source.Input(_))
+      case Repartitioned(repartition, _, _, _) => List(Source.Repartitioned(repartition))
 
   /** The name the program gives its step, where it gives one. */
   def names: List[Named] =
     this match
-      case Input(named, _, _, _)  => List(named)
-      case Repartitioned(_, _, _) => Nil
+      case Input(named, _, _, _)             => List(named)
+      case Repartitioned(_, _, _, aggregate) => aggregate.map(named => Named(s"${named.value}-source")).toList
 
 /** A store a sub-topology keeps: how long it keeps a window, if it keeps windows, and whether it holds a session's values, a suppression's held
   * changes, or as a stream-stream join's window store does, every record.
@@ -426,9 +465,18 @@ private[xkafka] enum Consumer[F[_], K, V]:
 
   /** Writes each record to the repartition topic `repartition` names, whose records `next` reads, in another sub-topology. A join that repartitions a
     * side says so with `atJoin`, since Java makes that topic's source only when it makes the join, which decides how sub-topologies are numbered. It
-    * is refused where no record reaching it has a new key, unless `always` says the program asked for the topic itself.
+    * is refused where no record reaching it has a new key, unless `always` says the program asked for the topic itself. A grouped table's `aggregate`
+    * names the topic's sink and source after itself, as Java does, and writes no record without a value.
     */
-  case Repartitioning(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], atJoin: Boolean, always: Boolean, next: Consumer[F, K, V])
+  case Repartitioning(
+      repartition: Repartition,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      atJoin: Boolean,
+      always: Boolean,
+      next: Consumer[F, K, V],
+      aggregate: Option[Named] = None
+  )
 
   /** `next`, in the sub-topology of the table made in the node named `last`, as the table a stream-table join reads runs beside the stream. A table
     * read from a topic comes with `table`, which reads it if nothing else in the program does.
@@ -488,10 +536,10 @@ private[xkafka] enum Consumer[F[_], K, V]:
 
   private def mappedBy[G[_]](fk: FunctionK[F, G]): Consumer[G, K, V] =
     expanded match
-      case Then(named, step, next)                                   => Then(named, step.mapK(fk), next.mapK(fk))
-      case Output(named, topic, key, value)                          => Output(named, topic, key.mapK(fk), value.mapK(fk))
-      case Repartitioning(repartition, key, value, at, always, next) =>
-        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.mapK(fk))
+      case Then(named, step, next)                                              => Then(named, step.mapK(fk), next.mapK(fk))
+      case Output(named, topic, key, value)                                     => Output(named, topic, key.mapK(fk), value.mapK(fk))
+      case Repartitioning(repartition, key, value, at, always, next, aggregate) =>
+        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.mapK(fk), aggregate)
       case Beside(table, last, next)  => Beside(table.map(_.mapK(fk)), last, next.mapK(fk))
       case Fan(children)              => Fan(children.map(_.mapK(fk)))
       case Merged(named, next)        => Merged(named, next.mapK(fk))
@@ -1048,6 +1096,55 @@ final class KGroupedStream[F[_], K, V, O] private[xkafka] (
   /** The records split by key and by each sliding window they fall in, ready to be folded into a window store. */
   def windowedBy(windows: SlidingWindows): TimeWindowedKStream[F, K, V, O] = TimeWindowedKStream(this, windows, None, false, key, value)
 
+/** A table's values in new groups, ready to be folded into a store. A value is added to its group when it appears and subtracted when it is replaced
+  * or deleted. A group that loses its last value keeps what the fold leaves, as Java's does, and what `count`, `reduce` and `aggregate` make is a
+  * table that can delete keys, since a value leaving a group holding nothing, as the 0 a stream's `count` starts from does, goes on as a delete.
+  */
+final class KGroupedTable[F[_], K, V, O] private[xkafka] (
+    stream: KStream.Ends[F, K, TableChange[V], O],
+    repartition: Repartition,
+    key: Serde[F, K],
+    value: Serde[F, V]
+)(using F: ApplicativeThrow[F]):
+  private def aggregated[A](
+      named: Named,
+      store: Store,
+      serde: Serde[F, A],
+      start: (K, V) => A,
+      add: (K, V, A) => A,
+      subtract: (K, V, A) => A
+  ): KTable.Flowing[F, K, A, Option, O] =
+    val fold = Step.TableAggregate(store, key, serde, start, add, subtract)
+    KTable.deleting(
+      KStream.of[F, K, Option[A], KeyState.AsRead, O](
+        next =>
+          stream
+            .feed(Consumer.Repartitioning(repartition, key, Serde.tableChange(value), false, true, Consumer.Then(named, fold, next), Some(named))),
+        named.value,
+        false,
+        stream.ending
+      ),
+      TableKey.Plain(key),
+      serde,
+      None,
+      Some(TableView.Stored(store, key, serde))
+    )
+
+  /** Counts the values in each group in `store`, in the step `named`. */
+  def count(named: Named, store: Store): KTable.Flowing[F, K, Long, Option, O] =
+    aggregated(named, store, Serde.long[F], (_, _) => 1L, (_, _, n) => n + 1, (_, _, n) => n - 1)
+
+  /** Combines the values in each group in `store`, in the step `named`, starting from the first: `add` puts a value in and `subtract` takes one out.
+    */
+  def reduce(named: Named, store: Store)(add: (V, V) => V)(subtract: (V, V) => V): KTable.Flowing[F, K, V, Option, O] =
+    aggregated(named, store, value, (_, v) => v, (_, v, acc) => add(acc, v), (_, v, acc) => subtract(acc, v))
+
+  /** Folds the values in each group into `store`, in the step `named`, starting from `initial`: `add` puts a value in and `subtract` takes one out.
+    */
+  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(
+      subtract: (K, V, A) => A
+  ): KTable.Flowing[F, K, A, Option, O] = aggregated(named, store, serde, (k, v) => add(k, v, initial), add, subtract)
+
 /** Records grouped by key and window, ready to be folded into a window store. Each update to a window goes downstream as it happens. A record later
   * than its window's end by more than the windows' grace is dropped, and a window is kept for its size and grace after its start.
   */
@@ -1342,8 +1439,19 @@ sealed trait KTable[F[_], K, V]:
     suppressed(until, Release.WindowCloses(windowed(_).window.end, grace.getOrElse(0L)))
 
   /** The table's changes with `step` as their last step. */
-  private def after[A](named: Named, step: Step[F, K, Change[V], K, A]): KStream.Ends[F, K, A, Out] =
-    KStream.of[F, K, A, KeyState.AsRead, Out](next => stream.feed(Consumer.Then(named, step, next)), named.value, false, stream.ending)
+  private def after[K2, A](named: Named, step: Step[F, K, Change[V], K2, A]): KStream.Ends[F, K2, A, Out] =
+    KStream.of[F, K2, A, KeyState.AsRead, Out](next => stream.feed(Consumer.Then(named, step, next)), named.value, false, stream.ending)
+
+  /** Puts the table's values in new groups, ready to be folded into a store, as Java's `KTable.groupBy`: `select` gives each value its group's key
+    * and what goes in the group, the step being named after `repartition`. Each change goes through the repartition topic
+    * `<application id>-<repartition>-repartition`.
+    */
+  def groupBy[K2, V2](repartition: Repartition, key: Serde[F, K2], value: Serde[F, V2])(select: (K, V) => (K2, V2))(using
+      F: ApplicativeThrow[F]
+  ): KGroupedTable[F, K2, V2, Out] =
+    val grouped: (K, Change[V], Option[Change[V]]) => Vector[(K2, TableChange[V2])] =
+      (at, current, old) => TableChange.grouped(select)(at, kind.present(current), old.flatMap(kind.present))
+    KGroupedTable(after(Named(repartition.value), Step.TableGroupBy(grouped)), repartition, key, value)
 
   /** The table's values `keep` keeps, each other value becoming a delete, as Java's table filter makes them. */
   private def filtered(named: Named, keep: (K, V) => Boolean, store: Option[(Store, Serde[F, V])]): Deleting[V] =

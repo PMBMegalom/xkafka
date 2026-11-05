@@ -629,6 +629,17 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           produce(server, app.input, keys.take(3).map(_ -> 1).toMap) *>
           running(server, app)(latest(server, app.output, keys.map(k => k -> (if keys.take(3).contains(k) then 2L else 1L)).toMap))
 
+    test(s"$release, $under: an engine groups a table anew through a repartition topic, each value moved or deleted leaving its group"):
+      counting(
+        server,
+        (input, output) =>
+          KTable(Named("read-26"), input, text, text, Store("read-26")).groupBy(Repartition("by-value-26"), text, text)((_, value) => (value, value))
+            .count(Named("count-26"), Store("count-26")).toStream(Named("changes-26")).mapValues(Named("shown-26"))(_.map(_.toString))
+            .to(Named("write-26"), output, text, text.option)
+      ): app =>
+        produceValues(server, app.input, List("a" -> Some("x"), "b" -> Some("x"), "c" -> Some("y"), "a" -> Some("y"), "b" -> None)) *>
+          running(server, app)(latestValues(server, app.output, Map("x" -> Some("0"), "y" -> Some("2"))))
+
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>
         produce(server, app.input, first) *> running(server, app)(latest(server, app.output, total(first))) *> produce(server, app.input, second) *>
