@@ -28,8 +28,8 @@ import scala.annotation.tailrec
 private[xkafka] object Describing:
   /** What a node is, as Java's builder makes it. */
   enum Kind:
-    /** Reads `topic`. */
-    case Reads(topic: Source)
+    /** Reads `topics`. */
+    case Reads(topics: List[Source])
 
     /** Keeps or reads `stores`, in the order Java connects them. */
     case Processor(stores: List[String])
@@ -51,10 +51,10 @@ private[xkafka] object Describing:
   /** The node a topic's source makes, and its name. */
   def source[F[_], K, V](origin: Origin[F, K, V]): (Made, String) =
     origin match
-      case Origin.Input(named, read, _, _)         => (Made(named.value, Kind.Reads(origin.source), Nil), named.value)
+      case Origin.Input(named, _, _, _)            => (Made(named.value, Kind.Reads(origin.sources), Nil), named.value)
       case Origin.Repartitioned(repartition, _, _) =>
         val name = s"${repartition.value}-repartition-source"
-        (Made(name, Kind.Reads(origin.source), Nil), name)
+        (Made(name, Kind.Reads(origin.sources), Nil), name)
 
   /** The stores a step's processor keeps, or reads for a join. */
   def kept[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): List[String] =
@@ -97,7 +97,8 @@ private[xkafka] object Describing:
         val successors   = graph.successors(node.name)
         val predecessors = graph.predecessors(node.name)
         node.kind match
-          case Kind.Reads(read)       => TopologyDescription.Node.Source(node.name, List(topic(read)), successors)
+          case Kind.Reads(read) => TopologyDescription.Node
+              .Source(node.name, JavaHashSet.ordered(read.map(topic), (_: String).hashCode).toList, successors)
           case Kind.Processor(stores) => TopologyDescription.Node
               .Processor(node.name, JavaHashSet.ordered(stores, (_: String).hashCode).toList, successors, predecessors)
           case Kind.Writes(written) => TopologyDescription.Node.Sink(node.name, topic(written), predecessors)

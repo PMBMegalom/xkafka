@@ -116,7 +116,8 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
   )
 
   /** What reads each of the sub-topology's topics. */
-  private val readers: Map[String, Entry[F]] = subtopology.entries.map(entry => Task.topicOf(application, entry.origin.source) -> entry).toMap
+  private val readers: Map[String, Entry[F]] =
+    subtopology.entries.flatMap(entry => entry.origin.sources.map(Task.topicOf(application, _) -> entry)).toMap
 
   /** Runs `input` through what reads its topic at wall-clock time `now`, in epoch milliseconds. */
   def process(state: TaskState, input: TaskInput, now: Long): F[(TaskState, Vector[TaskOutput])] =
@@ -149,7 +150,7 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
         v      <- value.deserializer.deserialize(source, input.headers, input.value)
       yield Travelling(k, v, input.timestamp, input.headers)
     origin match
-      case Origin.Input(_, topic, key, value)            => from(F.pure(topic), key, value)
+      case Origin.Input(_, topics, key, value)           => from(F.pure(topics.find(_.value == input.topic).getOrElse(topics.head)), key, value)
       case Origin.Repartitioned(repartition, key, value) => from(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
 
   /** `record` through `consumer` and all that reads what it gives, each record a step gives going all the way through before the next, as Java

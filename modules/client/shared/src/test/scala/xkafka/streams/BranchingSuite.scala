@@ -25,6 +25,7 @@ package streams
 import scala.concurrent.duration.*
 
 import cats.arrow.FunctionK
+import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.effect.std.Console
 import munit.CatsEffectSuite
@@ -124,6 +125,17 @@ final class BranchingSuite extends CatsEffectSuite:
       Some(List(TopologyError.UnusedRepartition("r2")))
     )
     assertEquals(refused(read("in").repartition(Repartition("r1"), text, text).to(Named("write"), out, text, text)), None)
+
+  test("a topic listed twice in a stream is read once, and one also read by another stream is read twice, which is refused"):
+    def several(first: String, second: String) = KStream(Named("several"), NonEmptyList.of(topic(first), topic(second)), text, text)
+    assertEquals(refused(several("in", "in").to(Named("w"), out, text, text)), None)
+    assertEquals(
+      Topology.of(several("in", "in").to(Named("w"), out, text, text)).orFail.subtopologies.flatMap(_.origins),
+      List(Source.Input(topic("in")))
+    )
+    List(several("in", "more"), several("more", "in")).foreach: both =>
+      val other = read("in").merge(Named("m"), both).to(Named("w"), out, text, text)
+      assert(refused(other).exists(_.contains(TopologyError.DuplicateSource(topic("in")))))
 
   test("into takes any number of flows, and refuses in words one that cannot take the records, wherever it is, and none at all"):
     def path(n: Int) = Flow.asRead[IO, String, String].to(Named(s"w$n"), topic(s"t$n"), text, text)

@@ -267,19 +267,19 @@ private[xkafka] enum Source derives CanEqual:
 
 /** A topic's records as they come into a sub-topology: from an input topic, or from the repartition topic an earlier sub-topology writes. */
 private[xkafka] enum Origin[F[_], K, V]:
-  case Input(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V])
+  case Input(named: Named, topics: NonEmptyList[Topic], key: Serde[F, K], value: Serde[F, V])
   case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V])
 
   def mapK[G[_]](fk: FunctionK[F, G]): Origin[G, K, V] =
     this match
-      case Input(named, topic, key, value)        => Input(named, topic, key.mapK(fk), value.mapK(fk))
+      case Input(named, topics, key, value)       => Input(named, topics, key.mapK(fk), value.mapK(fk))
       case Repartitioned(repartition, key, value) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk))
 
-  /** The topic it reads. */
-  def source: Source =
+  /** The topics it reads, as one source. */
+  def sources: List[Source] =
     this match
-      case Input(_, topic, _, _)            => Source.Input(topic)
-      case Repartitioned(repartition, _, _) => Source.Repartitioned(repartition)
+      case Input(_, topics, _, _)           => topics.toList.distinct.map(Source.Input(_))
+      case Repartitioned(repartition, _, _) => List(Source.Repartitioned(repartition))
 
   /** The name the program gives its step, where it gives one. */
   def names: List[Named] =
@@ -560,7 +560,7 @@ private[xkafka] final case class Subtopology[F[_]](
   def mapK[G[_]](fk: FunctionK[F, G]): Subtopology[G] = Subtopology(entries.map(_.mapK(fk)), copartitioned, buildOrdered, kept, repartitions, nodes)
 
   /** The topics it reads, its own first. */
-  def origins: List[Source] = entries.map(_.origin.source)
+  def origins: List[Source] = entries.flatMap(_.origin.sources)
 
   /** Its stores. */
   def stores: List[Store] = kept.map(_.store)
@@ -912,7 +912,13 @@ object KStream:
 
   /** The records of `topic`, read in the step `named`, as Java's `Consumed` names it. */
   def apply[F[_], K, V](named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V]): Of[F, K, V, KeyState.AsRead] =
-    of(next => Pipeline(List(Entry(Origin.Input(named, topic, key, value), next))), named.value, false, Ending.source)
+    apply(named, NonEmptyList.one(topic), key, value)
+
+  /** The records of each of `topics` as one stream, read in the one step `named`, as Java's `stream` given several topics reads them. A topic listed
+    * twice is read once.
+    */
+  def apply[F[_], K, V](named: Named, topics: NonEmptyList[Topic], key: Serde[F, K], value: Serde[F, V]): Of[F, K, V, KeyState.AsRead] =
+    of(next => Pipeline(List(Entry(Origin.Input(named, topics, key, value), next))), named.value, false, Ending.source)
 
   private[xkafka] def of[F[_], K, V, P <: KeyState, O](
       feed: Consumer[F, K, V] => O,

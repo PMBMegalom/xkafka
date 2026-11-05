@@ -30,6 +30,7 @@ import scala.collection.immutable.Queue
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
+import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
@@ -139,6 +140,49 @@ final class BranchingTaskGoldenSuite extends CatsEffectSuite:
         in.to("c")
       ,
       List("a", "b", "c")
+    )
+
+  test("a stream of several topics passes on each record as it comes, sharing its store, its deserializer told the topic the record came from"):
+    val inputs    = List(Input("one", "a", "x", 1000L), Input("two", "a", "y", 2000L), Input("three", "b", "z", 3000L), Input("one", "b", "w", 2500L))
+    val fromTopic =
+      Serde(
+        text.serializer,
+        Deserializer.instance[IO, String]((read, _, value) => IO.pure(s"${read.value}:${value.fold("")(v => String(v.toArray))}"))
+      )
+    val javaFromTopic =
+      Serdes.serdeFrom(
+        StringSerializer(),
+        new org.apache.kafka.common.serialization.Deserializer[String]:
+          override def deserialize(read: String, value: Array[Byte]): String = s"$read:${String(value)}"
+      )
+    same(
+      List(
+        KStream(Named("read"), NonEmptyList.of(topic("one"), topic("two"), topic("three")), text, fromTopic).groupByKey(text, text)
+          .reduce(Named("joined"), Store("joined"))(_ + _).toStream(Named("changes")).to(Named("write"), topic("out"), text, text)
+      ),
+      builder =>
+        builder
+          .stream[String, String](List("one", "two", "three").asJava, org.apache.kafka.streams.kstream.Consumed.`with`(Serdes.String, javaFromTopic))
+          .groupByKey(Grouped.`with`(Serdes.String, Serdes.String)).reduce((a: String, b: String) => a + b, stored[String]("joined")).toStream
+          .to("out"),
+      List("out"),
+      inputs
+    )
+
+  test("each topic of a stream of several goes to what reads that stream, when it is not the first thing its sub-topology reads"):
+    val inputs = List(Input("three", "a", "x", 1000L), Input("one", "a", "y", 2000L), Input("two", "b", "z", 3000L))
+    same(
+      List(
+        KStream(Named("first"), topic("three"), text, text).mapValues(Named("mark-first"))(v => s"first:$v").merge(
+          Named("merged"),
+          KStream(Named("several"), NonEmptyList.of(topic("one"), topic("two")), text, text).mapValues(Named("mark"))(v => s"several:$v")
+        ).to(Named("write"), topic("out"), text, text)
+      ),
+      builder =>
+        builder.stream[String, String]("three").mapValues((v: String) => s"first:$v")
+          .merge(builder.stream[String, String](List("one", "two").asJava).mapValues((v: String) => s"several:$v")).to("out"),
+      List("out"),
+      inputs
     )
 
   test("into sends each record to as many paths as it is given, in the order given"):

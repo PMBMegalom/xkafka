@@ -79,7 +79,8 @@ private[xkafka] object Wiring:
     def unsure(other: Path): Boolean = before || other.before || (after && other.after)
 
   private object Path:
-    def of(source: Source, node: String, pulled: Boolean): Path = Path(source, List(node), List(source), Nil, false, false, false, Nil, pulled)
+    def of(sources: List[Source], node: String, pulled: Boolean): Path =
+      Path(sources.head, List(node), sources, Nil, false, false, false, Nil, pulled)
 
   /** The stores and topics of the program's own pipelines. */
   private final case class Own(stores: Set[String], sources: Set[Source])
@@ -116,14 +117,14 @@ private[xkafka] object Wiring:
     */
   private def onlyKeeps[F[_]](entry: Entry[F], own: Own): Boolean =
     entry.consumer.expanded match
-      case Consumer.Then(_, Step.TableSource(store, _, _), next) => own.stores(store.value) && own.sources(entry.origin.source) &&
+      case Consumer.Then(_, Step.TableSource(store, _, _), next) => own.stores(store.value) && entry.origin.sources.forall(own.sources) &&
         (next.expanded match
           case Consumer.Done() => true
           case _               => false)
       case _ => false
 
   /** The graph with the entries the tables it brings read, and what those bring. */
-  private def pulled[F[_]](graph: Graph[F], own: Own, reached: Set[(Source, AnyRef)]): Graph[F] =
+  private def pulled[F[_]](graph: Graph[F], own: Own, reached: Set[(List[Source], AnyRef)]): Graph[F] =
     graph.tables.headOption match
       case None        => graph
       case Some(table) =>
@@ -135,7 +136,7 @@ private[xkafka] object Wiring:
         )
 
   /** What makes an entry the one it is: several topics can go into one node, and one table is brought by each join that reads it. */
-  private def identified[F[_]](entry: Entry[F]): (Source, AnyRef) = (entry.origin.source, entry.consumer)
+  private def identified[F[_]](entry: Entry[F]): (List[Source], AnyRef) = (entry.origin.sources, entry.consumer)
 
   /** How far the walk has got: the topics whose sources it has written, in order; what has reached each node with several parents that has yet to
     * come; each join with the side that reached it first; where each named node's records have come from, and what is waiting for a node to come;
@@ -150,7 +151,7 @@ private[xkafka] object Wiring:
       came: Map[String, Path],
       readers: Map[String, Vector[(Path, Walk[F]) => Walk[F]]],
       shared: Map[Source, Source],
-      entered: Set[(Source, AnyRef)],
+      entered: Set[(List[Source], AnyRef)],
       found: Vector[(Entry[F], Boolean)],
       nodes: Vector[(Source, Describing.Made)],
       kept: Vector[(Source, KeptStore)],
@@ -203,7 +204,7 @@ private[xkafka] object Wiring:
     val own       = pipelines.flatMap(_.entries)
     val distinct  = own.distinctBy(identified)
     val first     = distinct.foldLeft(Graph[F](Map.empty, Set.empty, Set.empty, Vector.empty))((graph, entry) => linked(entry.consumer, graph))
-    val ownership = Own(first.stores, distinct.map(_.origin.source).toSet)
+    val ownership = Own(first.stores, distinct.flatMap(_.origin.sources).toSet)
     val graph     = pulled(first, ownership, distinct.map(identified).toSet)
     val start     =
       Walk[F](
@@ -228,22 +229,22 @@ private[xkafka] object Wiring:
     val walked                                          = own.foldLeft(start)((walk, entry) => entered(entry, false, walk))
     val unfed                                           = walked.readers.keys.toList.sorted.map(TopologyError.UnfedTable(_))
     def of[A](found: Vector[(Source, A)], home: Source) = found.collect { case (source, value) if walked.homeOf(source) == home => value }.toList
-    val inputs = (own ++ walked.found.map(_._1).filterNot(entry => own.exists(identified(_) == identified(entry)))).map(_.origin.source).collect {
-      case Source.Input(topic) => topic
-    }
+    val inputs = (own ++ walked.found.map(_._1).filterNot(entry => own.exists(identified(_) == identified(entry)))).flatMap(_.origin.sources)
+      .collect { case Source.Input(topic) => topic }
     val subtopologies =
-      walked.found.map(_._1.origin.source).map(walked.homeOf).distinct
-        .sortBy(home => walked.found.map(_._1.origin.source).filter(walked.homeOf(_) == home).map(walked.written.indexOf(_)).min).toList.map: home =>
-          val (beside, entries) = walked.found.filter((entry, _) => walked.homeOf(entry.origin.source) == home).toList.partition(_._2)
-          val inside            = (topics: List[Source]) => topics.headOption.exists(walked.homeOf(_) == home)
-          Subtopology(
-            (entries ++ beside).map(_._1),
-            groups(walked.joins.toList.filter(inside)),
-            walked.unsure.toList.filter(inside).distinct,
-            of(walked.kept, home),
-            of(walked.repartitions, home),
-            of(walked.nodes, home)
-          )
+      walked.found.flatMap(_._1.origin.sources).map(walked.homeOf).distinct
+        .sortBy(home => walked.found.flatMap(_._1.origin.sources).filter(walked.homeOf(_) == home).map(walked.written.indexOf(_)).min).toList.map:
+          home =>
+            val (beside, entries) = walked.found.filter((entry, _) => walked.homeOf(entry.origin.sources.head) == home).toList.partition(_._2)
+            val inside            = (topics: List[Source]) => topics.headOption.exists(walked.homeOf(_) == home)
+            Subtopology(
+              (entries ++ beside).map(_._1),
+              groups(walked.joins.toList.filter(inside)),
+              walked.unsure.toList.filter(inside).distinct,
+              of(walked.kept, home),
+              of(walked.repartitions, home),
+              of(walked.nodes, home)
+            )
     Wired(subtopologies, walked.problems.toList ++ unfed, walked.steps.toList, inputs)
 
   /** The copartition groups each join's topics make, as Java makes them: a join's topics go in the group of the first it finds already in one, and
@@ -260,11 +261,12 @@ private[xkafka] object Wiring:
   private def entered[F[_]](entry: Entry[F], pulled: Boolean, walk: Walk[F]): Walk[F] =
     if walk.entered(identified(entry)) || (pulled && onlyKeeps(entry, walk.own)) then walk
     else
-      val source       = entry.origin.source
+      val sources      = entry.origin.sources
       val (node, name) = Describing.source(entry.origin)
-      val noted        = walk.copy(entered = walk.entered + identified(entry), found = walk.found :+ (entry, pulled)).writing(List(source))
-      val at           = Path.of(source, name, pulled)
-      val named        = noted.copy(nodes = noted.nodes :+ (source, node), steps = noted.steps ++ entry.origin.names.map(_.value))
+      val noted        = walk.copy(entered = walk.entered + identified(entry), found = walk.found :+ (entry, pulled)).writing(sources)
+      val at           = Path.of(sources, name, pulled)
+      val together     = sources.tail.foldLeft(noted)(_.united(sources.head, _))
+      val named        = together.copy(nodes = together.nodes :+ (sources.head, node), steps = together.steps ++ entry.origin.names.map(_.value))
       arrive(entry.consumer, at, named.coming(name, at))
 
   /** One edge reaching `consumer`, which comes once all have. */
@@ -298,7 +300,7 @@ private[xkafka] object Wiring:
               found = walk.found :+ (read, at.pulled),
               entered = walk.entered + identified(read)
             )
-        val after   = Path.of(source, name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil)
+        val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil)
         val refused =
           if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(repartition.value))
         val placed = (if atJoin then refused else refused.writing(List(source))).copy(nodes = refused.nodes :+ (source, node))

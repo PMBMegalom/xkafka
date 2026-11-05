@@ -63,6 +63,13 @@ A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as
 - `to`, which ends a path at an output topic, or `foreach` and `print`, which end
   it by acting on each record or printing it.
 
+A `KStream` can read several topics as one source, given as a `NonEmptyList`, as
+Java's `stream` can given several topics. A record is read with the same serdes
+whichever topic it came from, and each deserializer is told that topic. A topic
+listed twice is read once. A task reads one partition number of each topic, so to
+keep a key's records together for grouping or joining, give the topics the same
+number of partitions.
+
 Every step has a name, given as a `Named`: a pipeline's source, each step, and
 its `to`. Names label the program's nodes in [its description](#describing-a-program), as
 `Named`, `Consumed` and `Produced` names do in Java Kafka Streams. A step that keeps a store also takes the store's name, as

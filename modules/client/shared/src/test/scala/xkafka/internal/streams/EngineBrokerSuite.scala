@@ -616,6 +616,19 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           running(server, app):
             latestValues(server, app.output, keys.map(k => k -> Some("more")).toMap.updated("own", Some("own")))
 
+    test(s"$release, $under: an engine reads a stream of several topics, counting a key's records from each in one store"):
+      val keys = (0 until 12).toList.map(n => s"key-$n")
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-25"), NonEmptyList.of(orders, Topic.from(s"${orders.value}-more").orFail), text, text).groupByKey(text, text)
+            .count(Named("count-25"), Store("count-25")).toStream(Named("changes-25")).to(Named("write-25"), output, text, Serde.long[IO])
+      ): app =>
+        val more = Topic.from(s"${app.input.value}-more").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(more, 2, 1).orFail))) *> produce(server, more, keys.map(_ -> 1).toMap) *>
+          produce(server, app.input, keys.take(3).map(_ -> 1).toMap) *>
+          running(server, app)(latest(server, app.output, keys.map(k => k -> (if keys.take(3).contains(k) then 2L else 1L)).toMap))
+
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>
         produce(server, app.input, first) *> running(server, app)(latest(server, app.output, total(first))) *> produce(server, app.input, second) *>
