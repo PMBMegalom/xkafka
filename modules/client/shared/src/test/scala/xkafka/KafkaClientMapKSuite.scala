@@ -86,7 +86,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override val nextOffset: Offset                  = Offset.from(1L).toOption.get
       override val committer: OffsetCommitter[ErrorIO] = from
 
-  private val refusing: List[(String, KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String])] =
+  private val refusing: List[(String, KStream.Unkeyed[ErrorIO, String, String] => KStream.Unkeyed[ErrorIO, String, String])] =
     List(
       "evalMapValues" -> (_.evalMapValues(Named("eval-map-values-1"))(_ => EitherT.leftT[IO, String]("refused"))),
       "evalFilter"    -> (_.evalFilter(Named("eval-filter-1"))((_, _) => EitherT.leftT[IO, Boolean]("refused"))),
@@ -97,7 +97,7 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
     test(s"a streams program transformed between effects runs its effects in the source effect, and its state comes back: $name"):
       streamsRefused(refuse)
 
-  private def streamsRefused(refuse: KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String]) =
+  private def streamsRefused(refuse: KStream.Unkeyed[ErrorIO, String, String] => KStream.Unkeyed[ErrorIO, String, String]) =
     val text     = Serde.utf8[ErrorIO]
     val topic    = Topic.from("in").toOption.get
     val program  = refuse(KStream(Named("read-1"), topic, text, text)).to(Named("write-1"), topic, text, text)

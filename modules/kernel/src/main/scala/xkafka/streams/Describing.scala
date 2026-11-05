@@ -28,80 +28,36 @@ import scala.annotation.tailrec
 private[xkafka] object Describing:
   /** What a node is, as Java's builder makes it. */
   enum Kind:
-    /** Reads `topics`. */
-    case Source(topics: List[String])
+    /** Reads `topic`. */
+    case Reads(topic: Source)
 
     /** Keeps or reads `stores`, in the order Java connects them. */
     case Processor(stores: List[String])
 
     /** Writes `topic`. */
-    case Sink(topic: String)
+    case Writes(topic: Source)
 
   /** A node as Java's builder makes it: its name, what it is, and the nodes it reads from, in the order the builder is given them. */
   final case class Made(name: String, kind: Kind, predecessors: List[String])
 
   /** The program's description, each repartition topic named as `topic` names it. */
   def apply[F[_]](topology: Topology[F], topic: Repartition => String): TopologyDescription =
-    TopologyDescription(topology.subtopologies.zipWithIndex.map((subtopology, id) => described(id, made(subtopology, topic))))
-
-  /** The nodes Java makes for one sub-topology, each topic's in turn. A join's own nodes come once its last side has come. */
-  private def made[F[_]](subtopology: Subtopology[F], topic: Repartition => String): Vector[Made] =
-    subtopology.entries.foldLeft(Making(Vector.empty, Map.empty)): (making, entry) =>
-      val (node, first) = source(entry.origin, topic)
-      following(entry.consumer, first, making.copy(nodes = making.nodes :+ node), topic)
-    .nodes
-
-  /** The nodes made so far, and for each join the node its left side's records come out of. */
-  private final case class Making(nodes: Vector[Made], lefts: Map[AnyRef, String])
+    def named(source: Source): String =
+      source match
+        case Source.Input(read)            => read.value
+        case Source.Repartitioned(written) => topic(written)
+    TopologyDescription(topology.subtopologies.zipWithIndex.map((subtopology, id) => described(id, subtopology.nodes.toVector, named)))
 
   /** The node a topic's source makes, and its name. */
-  private def source[F[_], K, V](origin: Origin[F, K, V], topic: Repartition => String): (Made, String) =
+  def source[F[_], K, V](origin: Origin[F, K, V]): (Made, String) =
     origin match
-      case Origin.Input(named, read, _, _)         => (Made(named.value, Kind.Source(List(read.value)), Nil), named.value)
+      case Origin.Input(named, read, _, _)         => (Made(named.value, Kind.Reads(origin.source), Nil), named.value)
       case Origin.Repartitioned(repartition, _, _) =>
         val name = s"${repartition.value}-repartition-source"
-        (Made(name, Kind.Source(List(topic(repartition))), Nil), name)
-
-  /** The nodes `consumer` makes, reading the node `last`. */
-  private def following[F[_], K, V](consumer: Consumer[F, K, V], last: String, making: Making, topic: Repartition => String): Making =
-    consumer match
-      case Consumer.Then(named, step, next) =>
-        following(next, named.value, making.copy(nodes = making.nodes :+ Made(named.value, Kind.Processor(kept(step)), List(last))), topic)
-      case Consumer.Output(named, written, _, _) => making.copy(nodes = making.nodes :+ Made(named.value, Kind.Sink(written.value), List(last)))
-      case Consumer.Repartitioning(repartition, _, _, _, _) =>
-        val filter = s"${repartition.value}-repartition-filter"
-        making.copy(nodes =
-          making.nodes ++ Vector(
-            Made(filter, Kind.Processor(Nil), List(last)),
-            Made(s"${repartition.value}-repartition-sink", Kind.Sink(topic(repartition)), List(filter))
-          )
-        )
-      case Consumer.Beside(_, next)  => following(next, last, making, topic)
-      case Consumer.LeftTable(join)  => making.copy(lefts = making.lefts.updated(join, last))
-      case Consumer.LeftStream(join) => making.copy(lefts = making.lefts.updated(join, last))
-      case Consumer.RightTable(join) =>
-        // Each side joins its changes with the other side's values, read through the other side's stores, and the merge passes on what either makes.
-        val joinThis  = Made(s"${join.named.value}-join-this", Kind.Processor(join.right.view.fold(Nil)(stores)), making.lefts.get(join).toList)
-        val joinOther = Made(s"${join.named.value}-join-other", Kind.Processor(join.left.view.fold(Nil)(stores)), List(last))
-        val merge     = Made(join.named.value, Kind.Processor(join.store.toList.map(_._1.value)), List(joinThis.name, joinOther.name))
-        following(join.next, join.named.value, making.copy(nodes = making.nodes ++ Vector(joinThis, joinOther, merge)), topic)
-      case Consumer.RightStream(join) =>
-        // Each side's records are kept in its window store, then joined with the other side's, and the merge passes on what either makes.
-        val named                   = join.named.value
-        val held                    = StreamJoin.names(join.store, join.joiner)
-        val (leftOuter, rightOuter) = join.joiner.outer
-        val thisWindowed            = Made(s"$named-this-windowed", Kind.Processor(List(held.left)), making.lefts.get(join).toList)
-        val otherWindowed           = Made(s"$named-other-windowed", Kind.Processor(List(held.right)), List(last))
-        val thisJoin                =
-          Made(s"$named-${if rightOuter then "outer-" else ""}this-join", Kind.Processor(held.right :: held.shared.toList), List(thisWindowed.name))
-        val otherJoin =
-          Made(s"$named-${if leftOuter then "outer-" else ""}other-join", Kind.Processor(held.left :: held.shared.toList), List(otherWindowed.name))
-        val merge = Made(s"$named-merge", Kind.Processor(Nil), List(thisJoin.name, otherJoin.name))
-        following(join.next, merge.name, making.copy(nodes = making.nodes ++ Vector(thisWindowed, otherWindowed, thisJoin, otherJoin, merge)), topic)
-      case Consumer.Done() => making
+        (Made(name, Kind.Reads(origin.source), Nil), name)
 
   /** The stores a step's processor keeps, or reads for a join. */
-  private def kept[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): List[String] =
+  def kept[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): List[String] =
     step match
       case Step.Aggregate(store, _, _, _, _, _)                    => List(store.value)
       case Step.TableSource(store, _, _)                           => List(store.value)
@@ -119,7 +75,7 @@ private[xkafka] object Describing:
     * tables joined without a store, both sides'. Java gathers those in a `HashSet` of their own, whose order a processor's set of them keeps for two
     * names in one bucket, so they are taken in the order they come.
     */
-  private def stores[F[_], K, V](view: TableView[F, K, V]): List[String] =
+  def stores[F[_], K, V](view: TableView[F, K, V]): List[String] =
     view match
       case TableView.Stored(store, _, _)    => List(store.value)
       case TableView.Held(buffer, parent)   => buffer :: stores(parent)
@@ -131,7 +87,7 @@ private[xkafka] object Describing:
     * `TreeSet`s ordered by the size of the nodes' subtrees at the time, larger first, then by name, each connection growing the subtrees above it;
     * then the nodes listed in that order, once every size is known.
     */
-  private def described(id: Int, made: Vector[Made]): TopologyDescription.Subtopology =
+  private def described(id: Int, made: Vector[Made], topic: Source => String): TopologyDescription.Subtopology =
     val byName = made.map(node => node.name -> node).toMap
     val graph  =
       JavaHashSet.ordered(made.map(_.name), (_: String).hashCode)
@@ -141,10 +97,10 @@ private[xkafka] object Describing:
         val successors   = graph.successors(node.name)
         val predecessors = graph.predecessors(node.name)
         node.kind match
-          case Kind.Source(topics) => TopologyDescription.Node.Source(node.name, JavaHashSet.ordered(topics, (_: String).hashCode).toList, successors)
+          case Kind.Reads(read)       => TopologyDescription.Node.Source(node.name, List(topic(read)), successors)
           case Kind.Processor(stores) => TopologyDescription.Node
               .Processor(node.name, JavaHashSet.ordered(stores, (_: String).hashCode).toList, successors, predecessors)
-          case Kind.Sink(topic) => TopologyDescription.Node.Sink(node.name, topic, predecessors)
+          case Kind.Writes(written) => TopologyDescription.Node.Sink(node.name, topic(written), predecessors)
     TopologyDescription.Subtopology(id, nodes)
 
   /** Java's nodes as they are being connected: the size of each one's subtree, counting a node once for each path to it, and each one's successors

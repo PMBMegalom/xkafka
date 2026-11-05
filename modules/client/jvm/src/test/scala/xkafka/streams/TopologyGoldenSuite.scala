@@ -404,7 +404,7 @@ final class TopologyGoldenSuite extends FunSuite:
     def users    = KTable(Named("users"), topic("users"), text, text, Store("users"))
     def plans    = KTable(Named("plans"), topic("plans"), text, text, Store("plans"))
     def orders   = KStream(Named("orders"), topic("orders"), text, text)
-    def write(stream: KStream[IO, String, String]) = stream.to(Named("write"), topic("out"), text, text)
+    def write(stream: KStream.Unkeyed[IO, String, String]) = stream.to(Named("write"), topic("out"), text, text)
     // Filtered after the suppression.
     assertEquals(
       ours(write(orders.join(Named("j"), users.suppress(calm).filter(Named("f"))((_, _) => true))(_ + _))),

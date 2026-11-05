@@ -174,7 +174,7 @@ final class TopologySuite extends CatsEffectSuite:
       assert(compileErrors("kept.groupByKey(Repartition(\"unused\"), text, text)").contains(needless))
 
   test("a stream whose type does not say how it is keyed needs a repartition name, which Topology.of refuses where its key has not changed"):
-    val widened: KStream[IO, String, String] = KStream(Named("in"), topic("in"), text, text)
+    val widened: KStream.Unkeyed[IO, String, String] = KStream(Named("in"), topic("in"), text, text)
     assert(compileErrors("widened.groupByKey(text, text)").contains(unnamed))
     assertEquals(
       Topology.of(
@@ -183,8 +183,8 @@ final class TopologySuite extends CatsEffectSuite:
       ).left.map(_.toList),
       Left(List(TopologyError.UnusedRepartition("unused")))
     )
-    val rekeyed: KStream[IO, String, String] = KStream(Named("in"), topic("in"), text, text).selectKey(Named("select-key-2"))((_, v) => v)
-    val grouped                              =
+    val rekeyed: KStream.Unkeyed[IO, String, String] = KStream(Named("in"), topic("in"), text, text).selectKey(Named("select-key-2"))((_, v) => v)
+    val grouped                                      =
       rekeyed.groupByKey(Repartition("rekeyed"), text, text).count(Named("count-7"), Store("counts")).toStream(Named("to-stream-9"))
         .to(Named("write-8"), topic("out"), text, count)
     assertEquals(Topology.of(grouped).map(_.subtopologies.size), Right(2))

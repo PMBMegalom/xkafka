@@ -248,7 +248,10 @@ final class DescribeGoldenSuite extends FunSuite:
 
   for (kind, joined) <-
       List[
-        (String, (KStream.Of[IO, String, String, KeyState.Changed], KStream.Of[IO, String, String, KeyState.AsRead]) => KStream[IO, String, String])
+        (
+            String,
+            (KStream.Of[IO, String, String, KeyState.Changed], KStream.Of[IO, String, String, KeyState.AsRead]) => KStream.Unkeyed[IO, String, String]
+        )
       ](
         "join" ->
           ((left, right) => left.join(Named("pay"), right, JoinWindows(5.seconds, grace = 1.second), Store("payments"), text, text, text)(_ + _)),

@@ -101,13 +101,13 @@ final class StreamJoinsSuite extends FunSuite:
     val shared =
       rekeyed(left).join(Named("pairs"), rekeyed(right), within, Store("pairs"), text, Serde.long[IO], Serde.long[IO])(_ + _)
         .to(Named("write-14"), out, text, Serde.long[IO])
-    assert(refused(shared).exists(_.contains(TopologyError.JoinedWithItself)), clue(refused(shared)))
+    assert(refused(shared).exists(_.contains(TopologyError.DuplicateRepartition("shared"))), clue(refused(shared)))
     val users   = KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users"))
     val through =
       left.join(Named("with-user"), users)(_ + _)
         .join(Named("pairs"), KStream(Named("users-again"), Topic.from("users").orFail, text, text), within, Store("pairs"), text, text, text)(_ + _)
         .to(Named("write-15"), out, text, text)
-    assert(refused(through).exists(_.contains(TopologyError.JoinedWithItself)), clue(refused(through)))
+    assert(refused(through).exists(_.contains(TopologyError.DuplicateSource(Topic.from("users").orFail))), clue(refused(through)))
     assertEquals(
       refused(
         left.join(Named("pairs"), right, within, Store("pairs"), text, text, text)(_ + _).mapValues(Named("pairs"))(identity)
@@ -124,16 +124,16 @@ final class StreamJoinsSuite extends FunSuite:
     )
 
   test("a stream joined with itself or with a stream read from the same topic is refused, and so are windows that cannot be used"):
-    assertEquals(
-      refused(left.join(Named("pairs"), left, within, Store("pairs"), text, text, text)(_ + _).to(Named("write-6"), out, text, text)),
-      Some(List(TopologyError.JoinedWithItself))
+    val leftTopic = Topic.from("left").orFail
+    assert(
+      refused(left.join(Named("pairs"), left, within, Store("pairs"), text, text, text)(_ + _).to(Named("write-6"), out, text, text))
+        .exists(_.contains(TopologyError.DuplicateSource(leftTopic)))
     )
-    assertEquals(
+    assert(
       refused(
         left.join(Named("pairs"), left.mapValues(Named("map-values-1"))(_.reverse), within, Store("pairs"), text, text, text)(_ + _)
           .to(Named("write-7"), out, text, text)
-      ),
-      Some(List(TopologyError.JoinedWithItself))
+      ).exists(_.contains(TopologyError.DuplicateSource(leftTopic)))
     )
     def windows(joining: JoinWindows) =
       refused(left.join(Named("pairs"), right, joining, Store("pairs"), text, text, text)(_ + _).to(Named("write-8"), out, text, text))
@@ -176,11 +176,11 @@ final class StreamJoinsSuite extends FunSuite:
       List(a, b, a ++ b)
     )
     // A side that made a sub-topology after it stays so through a join with a side that made none, so the next join with such a side says so.
-    def plain(name: String)                           = KStream(Named(name), Topic.from(name).orFail, text, text)
-    val c                                             = List(source("c"))
-    def throughLeft                                   = first.join(Named("pairs-1"), plain("c"), within, Store("pairs-1"), text, text, text)(_ + _)
-    def throughRight                                  = plain("c").join(Named("pairs-1"), first, within, Store("pairs-1"), text, text, text)(_ + _)
-    def finished(joined: KStream[IO, String, String]) =
+    def plain(name: String) = KStream(Named(name), Topic.from(name).orFail, text, text)
+    val c                   = List(source("c"))
+    def throughLeft         = first.join(Named("pairs-1"), plain("c"), within, Store("pairs-1"), text, text, text)(_ + _)
+    def throughRight        = plain("c").join(Named("pairs-1"), first, within, Store("pairs-1"), text, text, text)(_ + _)
+    def finished(joined: KStream.Unkeyed[IO, String, String]) =
       joined.join(Named("pairs-2"), second, within, Store("pairs-2"), text, text, text)(_ + _).to(Named("write-20"), out, text, text)
     assertEquals(ordered(finished(throughLeft)), List(a, b, a ++ c ++ b))
     assertEquals(ordered(finished(throughRight)), List(a, b, a ++ c ++ b))

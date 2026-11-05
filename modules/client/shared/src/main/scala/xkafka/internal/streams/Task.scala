@@ -156,27 +156,33 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
     * forwards them, and what it writes in the order it writes it.
     */
   private def pushed[K, V](consumer: Consumer[F, K, V], record: Travelling[K, V], state: TaskState, now: Long): F[(TaskState, Vector[TaskOutput])] =
-    consumer match
-      case Consumer.Then(_, last, next) => step(last, record, state, now, Task.requests(next)).flatMap: (after, records, written) =>
+    consumer.expanded match
+      case Consumer.Then(_, last, next) => step(last, record, state, now, next.requests).flatMap: (after, records, written) =>
           allPushed(next, records, after, written, now)
-      case Consumer.Output(_, topic, key, value)                  => written(F.pure(topic), key, value, false, record).map((state, _))
-      case Consumer.Repartitioning(repartition, key, value, _, _) =>
+      case Consumer.Output(_, topic, key, value)                     => written(F.pure(topic), key, value, false, record).map((state, _))
+      case Consumer.Repartitioning(repartition, key, value, _, _, _) =>
         written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record).map((state, _))
-      case Consumer.Beside(_, next) => pushed(next, record, state, now)
+      case Consumer.Beside(_, _, next) => pushed(next, record, state, now)
+      case Consumer.Merged(_, next)    => pushed(next, record, state, now)
+      case Consumer.Refused(_, next)   => pushed(next, record, state, now)
+      case Consumer.Fan(children)      => children.foldLeftM((state, Vector.empty[TaskOutput])):
+          case ((current, out), child) => pushed(child, record, current, now).map((after, more) => (after, out ++ more))
+      case Consumer.Splitting(_, branches) => branches.find(_.keep(record.key, record.value))
+          .fold(F.pure((state, Vector.empty[TaskOutput])))(branch => pushed(branch.next, record, state, now))
       case Consumer.LeftTable(join) =>
         val change = Task.Change(record.key, join.left.present(record.value), record.old.flatMap(join.left.present), record.timestamp, record.headers)
-        lookup(join.right.view, record.key, state).flatMap(other =>
-          tablesJoined(join, record.key, record.headers, Task.joinLeft(join.joiner, change, other, Task.requests(join.next)), state, now)
-        )
+        lookup(join.right.view, record.key, state)
+          .flatMap(other => tablesJoined(join, record.key, record.headers, Task.joinLeft(join.joiner, change, other, join.next.requests), state, now))
       case Consumer.RightTable(join) =>
         val change =
           Task.Change(record.key, join.right.present(record.value), record.old.flatMap(join.right.present), record.timestamp, record.headers)
         lookup(join.left.view, record.key, state).flatMap(other =>
-          tablesJoined(join, record.key, record.headers, Task.joinRight(join.joiner, change, other, Task.requests(join.next)), state, now)
+          tablesJoined(join, record.key, record.headers, Task.joinRight(join.joiner, change, other, join.next.requests), state, now)
         )
-      case Consumer.LeftStream(join)  => streamsJoined(join, leftSide(join), record, state, now)
-      case Consumer.RightStream(join) => streamsJoined(join, rightSide(join), record, state, now)
-      case Consumer.Done()            => F.pure((state, Vector.empty))
+      case Consumer.LeftStream(join)      => streamsJoined(join, leftSide(join), record, state, now)
+      case Consumer.RightStream(join)     => streamsJoined(join, rightSide(join), record, state, now)
+      case Consumer.Done()                => F.pure((state, Vector.empty))
+      case mapped @ Consumer.Mapped(_, _) => pushed(mapped.expanded, record, state, now)
 
   /** Each of `records` through `consumer`, in order, after what has been `written`. */
   private def allPushed[K, V](
@@ -495,8 +501,9 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       case Step.Map(change)  =>
         val (k, v) = change(record.key, record.value)
         passing(Vector(Travelling(k, v, record.timestamp, record.headers)))
-      case Step.MapValues(change) => passing(Vector(record.copy(value = change(record.value), old = None)))
-      case Step.FlatMap(change)   =>
+      case Step.MapValues(change)     => passing(Vector(record.copy(value = change(record.value), old = None)))
+      case Step.FlatMapValues(change) => passing(change(record.value).iterator.map(value => record.copy(value = value, old = None)).toVector)
+      case Step.FlatMap(change)       =>
         passing(change(record.key, record.value).toVector.map((k, v) => Travelling(k, v, record.timestamp, record.headers)))
       case Step.Peek(effect)          => effect(record.key, record.value) *> passing(Vector(record))
       case Step.EvalMapValues(change) => change(record.value).flatMap(v => passing(Vector(record.copy(value = v, old = None))))
@@ -1182,26 +1189,6 @@ private[xkafka] object Task:
       case TableView.Joined(_, _, _)     => None
       case TableView.Filtered(parent, _) => valuesOf(parent)
       case TableView.Mapped(_, _)        => None
-
-  /** Whether `step` asks what comes before it for old values, as Java's processors after a table ask with `enableSendingOldValues`: a suppression and
-    * a filter always do; a `mapValues` kept in no store does where what follows it asks, and one kept in a store reads them from there.
-    */
-  def asks[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2], after: Boolean): Boolean =
-    step match
-      case Step.Suppress(_, _, _, _)          => true
-      case Step.TableFilter(_, _, _)          => true
-      case Step.TableMapValues(_, _, _, None) => after
-      case _                                  => false
-
-  /** Whether what `consumer` reads a table's changes through asks for old values: a side of a table join does where its kind of join reads them, or
-    * what reads the join asks, and nothing else after a table does unless a step of it does.
-    */
-  def requests[F[_], K, V](consumer: Consumer[F, K, V]): Boolean =
-    consumer match
-      case Consumer.Then(_, step, next) => asks(step, requests(next))
-      case Consumer.LeftTable(join)     => join.joiner.outer._1 || requests(join.next)
-      case Consumer.RightTable(join)    => join.joiner.outer._2 || requests(join.next)
-      case _                            => false
 
   /** What Java's join processor for the left side makes of `change` and the right side's value `other`, for each kind of join: the result's new
     * value, its old value where `sendOld`, and its time, or nothing where Java forwards nothing.

@@ -34,7 +34,7 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, JoinWindows, KStream, KTable, Named, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store,
+  ApplicationId, Flow, JoinWindows, KStream, KTable, Named, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store,
   StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
@@ -568,6 +568,53 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           // Apple then a word of one letter for c, and bee last for b: each letter's latest length, and the store behind the filter keeps c's.
           latestValues(server, app.output, Map("a" -> Some("5"), "b" -> Some("3"), "c" -> None)) *>
             latestValues(server, app.changelog, Map("a" -> Some("5"), "b" -> Some("3"), "c" -> Some("1")))
+
+    test(s"$release, $under: an engine sends records down a fork and a split, whose paths merge back into one topic"):
+      counting(
+        server,
+        (orders, output) =>
+          val back = Flow[IO, String, String].merged(Named("back")).to(Named("write-20"), output, text, text)
+          KStream(Named("read-20"), orders, text, text).fork(
+            _.split(Named("route-")).branch(Named("long"))((_, v) => v.length > 2)(_.mapValues(Named("loud"))(_.toUpperCase).into(back))
+              .noDefaultBranch,
+            _.filter(Named("short"))((_, v) => v.length <= 2).selectKey(Named("marked"))((k, _) => s"$k-short").into(back)
+          )
+      ): app =>
+        produceValues(server, app.input, List("a" -> Some("long"), "b" -> Some("no"))) *> running(server, app):
+          latestValues(server, app.output, Map("a" -> Some("LONG"), "b-short" -> Some("no")))
+
+    test(s"$release, $under: an engine enriches a stream with its own count, and joins it with itself in windows"):
+      counting(
+        server,
+        (orders, output) =>
+          val read   = KStream(Named("read-21"), orders, text, text)
+          val counts = read.flow.groupByKey(text, text).count(Named("count-21"), Store("counts"))
+          read.into(
+            counts.consumer,
+            read.flow.join(Named("with-count"), counts)((v, n) => s"$v#$n").to(Named("write-21"), output, text, text),
+            read.flow.join(Named("pairs"), read.flow, JoinWindows(1.minute, grace = 0.seconds), Store("pairs"), text, text, text)((x, y) => s"$x+$y")
+              .to(Named("write-22"), Topic.from(s"${output.value}-pairs").orFail, text, text)
+          )
+      ): app =>
+        val pairs = Topic.from(s"${app.output.value}-pairs").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(pairs, 1, 1).orFail))) *>
+          produceValues(server, app.input, List("a" -> Some("x"), "a" -> Some("y"))) *> running(server, app):
+            latestValues(server, app.output, Map("a" -> Some("y#2"))) *> latestValues(server, pairs, Map("a" -> Some("y+y")))
+
+    test(s"$release, $under: an engine merges topics of different partition counts, reading every record of each"):
+      val keys = (0 until 12).toList.map(n => s"key-$n")
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-23"), orders, text, text)
+            .merge(Named("merged"), KStream(Named("read-24"), Topic.from(s"${orders.value}-more").orFail, text, text))
+            .to(Named("write-23"), output, text, text)
+      ): app =>
+        val more = Topic.from(s"${app.input.value}-more").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(more, 3, 1).orFail))) *>
+          produceValues(server, more, keys.map(k => k -> Some("more"))) *> produceValues(server, app.input, List("own" -> Some("own"))) *>
+          running(server, app):
+            latestValues(server, app.output, keys.map(k => k -> Some("more")).toMap.updated("own", Some("own")))
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

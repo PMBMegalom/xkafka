@@ -57,3 +57,40 @@ object KeyState:
 
   object MayHaveChanged:
     given [P](using NotGiven[Unchanged[P]]): MayHaveChanged[P] = new MayHaveChanged[P] {}
+
+  /** Evidence that `C`, a flow or a tuple of them, is somewhere `into` can send records keyed `K` with values `V`. */
+  sealed trait Takes[F[_], K, V, C]:
+    private[xkafka] def consumers(to: C): List[Consumer[F, K, V]]
+
+  object Takes extends TakesOtherwise:
+    given flow[F[_], K, V, P <: KeyState]: Takes[F, K, V, Into[F, K, V, P]] =
+      new Takes[F, K, V, Into[F, K, V, P]]:
+        private[xkafka] def consumers(to: Into[F, K, V, P]): List[Consumer[F, K, V]] = List(to.consumer)
+
+    given last[F[_], K, V, H](using head: Takes[F, K, V, H]): Takes[F, K, V, H *: EmptyTuple] =
+      new Takes[F, K, V, H *: EmptyTuple]:
+        private[xkafka] def consumers(to: H *: EmptyTuple): List[Consumer[F, K, V]] = head.consumers(to.head)
+
+    given several[F[_], K, V, H, N, T <: Tuple](using head: Takes[F, K, V, H], tail: Takes[F, K, V, N *: T]): Takes[F, K, V, H *: N *: T] =
+      new Takes[F, K, V, H *: N *: T]:
+        private[xkafka] def consumers(to: H *: N *: T): List[Consumer[F, K, V]] = head.consumers(to.head) ++ tail.consumers(to.tail)
+
+  sealed trait TakesOtherwise:
+    inline given refused[F[_], K, V, C]: Takes[F, K, V, C] =
+      compiletime.error("into can only send records to a flow that starts with this stream's key and value types")
+
+  /** Evidence that `C`, a flow or a tuple of them, can read records whose key is in the state `P`. */
+  sealed trait KeyFits[P, C]
+
+  object KeyFits extends KeyFitsOtherwise:
+    given flow[F[_], K, V, P <: KeyState, Q >: P <: KeyState]: KeyFits[P, Into[F, K, V, Q]] = new KeyFits[P, Into[F, K, V, Q]] {}
+
+    given last[P, H](using KeyFits[P, H]): KeyFits[P, H *: EmptyTuple] = new KeyFits[P, H *: EmptyTuple] {}
+
+    given several[P, H, N, T <: Tuple](using KeyFits[P, H], KeyFits[P, N *: T]): KeyFits[P, H *: N *: T] = new KeyFits[P, H *: N *: T] {}
+
+  sealed trait KeyFitsOtherwise:
+    inline given refused[P, C]: KeyFits[P, C] =
+      compiletime.error(
+        "these records may have a new key, and this flow takes them keyed as they were read, since it groups or joins by key; send them through a repartition topic first, or start the flow with Flow[F, K, V], whose groupByKey takes a Repartition"
+      )

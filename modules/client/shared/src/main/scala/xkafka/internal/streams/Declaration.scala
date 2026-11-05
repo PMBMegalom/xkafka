@@ -105,7 +105,7 @@ private[xkafka] object Declaration:
             subtopology.stores.map(store =>
               changelog(application, store.value, subtopology.retentions.get(store.value), subtopology.duplicates(store.value), replicationFactor)
             ).sortBy(_.name),
-          repartitionSinkTopics = subtopology.repartitions.map(named => repartitionTopic(named.value)),
+          repartitionSinkTopics = subtopology.repartitions.map(named => repartitionTopic(named.value)).sorted,
           repartitionSourceTopics = repartitions.map(StreamsGroup.TopicInfo(_, 0, replicationFactor, RepartitionConfigs)),
           copartitionGroups = copartitioned
         )

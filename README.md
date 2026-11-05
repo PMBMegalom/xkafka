@@ -60,7 +60,11 @@ processes each record at least once or exactly once. It needs brokers of Kafka
 ```scala
 val text = Serde.utf8[IO]
 val words =
-  KStream(input, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(output, text, Serde.long[IO])
+  KStream(Named("read"), input, text, text)
+    .groupByKey(text, text)
+    .count(Named("count"), Store("counts"))
+    .toStream(Named("changes"))
+    .to(Named("write"), output, text, Serde.long[IO])
 
 Topology.of(words).liftTo[IO].flatMap: topology =>
   KafkaClient[IO].streams(settings, topology).use(_.run)
@@ -92,8 +96,8 @@ To build xkafka or run its tests, see
 
 ## Modules
 
-- `xkafka-kernel` contains the data types and the producer, consumer, and
-  administration interfaces, with no backend.
+- `xkafka-kernel` contains the data types, the producer, consumer, and
+  administration interfaces, and the streams DSL, with no backend.
 - `xkafka-client` contains `KafkaClient` and the JVM, Scala.js, and Scala Native
   backends.
 

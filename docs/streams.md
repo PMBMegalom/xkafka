@@ -46,9 +46,8 @@ leaves, waiting at most `closeTimeout`.
 
 ## Programs
 
-A program is a `Topology` of pipelines, each reading an input topic and writing
-an output topic. A pipeline starts from a `KStream`, or a `KTable` read from a
-topic (see [Tables](#tables)), and is built with:
+A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as a
+`KStream` or as a `KTable` (see [Tables](#tables)), and is built with:
 
 - `filter`, `filterNot`, `map`, `mapValues`, `flatMap`, `flatMapValues`,
   `selectKey` and `peek`;
@@ -57,8 +56,12 @@ topic (see [Tables](#tables)), and is built with:
 - `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
   named `Store`. This gives a `KTable`, and its `toStream` is every change to it;
 - `toTable`, which keeps each key's latest value as a `KTable`;
-- `to`, which ends the pipeline at its output topic, or `foreach` and `print`,
-  which end it by acting on each record or printing it.
+- `join`, `leftJoin` and `outerJoin`, which combine it with a table or a stream
+  (see [Joins](#joins));
+- `fork`, `forkMerge`, `merge`, `split` and `into`, which send records down
+  several paths or bring them together (see [Branching](#branching));
+- `to`, which ends a path at an output topic, or `foreach` and `print`, which end
+  it by acting on each record or printing it.
 
 Every step has a name, given as a `Named`: a pipeline's source, each step, and
 its `to`. Names label the program's nodes in [its description](#describing-a-program), as
@@ -97,8 +100,8 @@ def viewsPerPage(input: Topic, output: Topic): Pipeline[IO] =
 Without the `Repartition`, this does not compile: the views of a page must
 reach one partition before they can be counted together. A stream's type says
 whether its records are keyed as they were read, so the compiler knows which
-`groupByKey` applies. `KStream(...)` and `filter`, `mapValues`, `peek`,
-`evalFilter` and `evalMapValues` after it keep the key as read, and
+`groupByKey` applies. `KStream(...)` and `filter`, `filterNot`, `mapValues`,
+`flatMapValues`, `peek`, `evalFilter` and `evalMapValues` after it keep the key as read, and
 `groupByKey(key, value)` groups the records where they are. After `map`,
 `flatMap`, `selectKey` or `evalMap`, only `groupByKey(repartition, key, value)`
 compiles. Each fails to compile where the other applies, with a message saying
@@ -107,10 +110,11 @@ which to use.
 The stream's `Keying` type member carries this: `KeyState.AsRead` or
 `KeyState.Changed`. Types are inferred, so a program rarely names it. To
 annotate a stream without losing it, use `KStream.Of`, as in
-`KStream.Of[IO, String, String, KeyState.AsRead]`. A plain
-`KStream[IO, String, String]` does not say, and is taken to have changed its
-key: grouping it by key takes a `Repartition`, and if its key had not changed
-after all, `Topology.of` refuses the name with `TopologyError.UnusedRepartition`.
+`KStream.Of[IO, String, String, KeyState.AsRead]`. A
+`KStream.Unkeyed[IO, String, String]` is a stream read from a topic whose type does
+not say how it is keyed, and it is taken to have changed its key: grouping it by
+key takes a `Repartition`, and if its key had not changed after all, `Topology.of`
+refuses the name with `TopologyError.UnusedRepartition`.
 
 `repartition` sends records through a repartition topic whenever you ask, whether
 or not their key has changed. Afterwards they are keyed as read from that topic,
@@ -119,7 +123,8 @@ so `groupByKey` needs no name for them.
 `foreach` runs an effect for each record, and runs it again for records replayed
 after a crash or a fencing, as `peek` does. `print` writes each record as
 `[label]: key, value` to the `Console[F]` in scope, labelled with the name of the
-step before it unless you give a label. Java's `print` writes the same lines.
+step before it unless you give a label, or with its own name if it starts a
+[flow](#paths-that-share-what-follows). Java's `print` writes the same lines.
 
 The application's own topics are named after its id: a store's changelog is
 `<application id>-<store>-changelog`, and a repartition topic is
@@ -127,7 +132,7 @@ The application's own topics are named after its id: a store's changelog is
 application first starts.
 
 `Topology.of` checks the program and reports every problem at once, such as two
-stores or steps with the same name, or two pipelines reading the same topic. `liftTo`
+stores or steps with the same name, or one topic read twice. `liftTo`
 raises them in `F` as an `InvalidTopology`, and refused settings as an
 `InvalidStreamsSettings`.
 
@@ -296,10 +301,9 @@ A record whose key the table holds no value for, never set or deleted, is
 dropped. `leftJoin` keeps it, passing `None` instead of the table's value. The
 result keeps each record's timestamp and headers.
 
-The table can be any table with a store: read from a topic, or made by `count`,
-`reduce` or `aggregate`. Joining a suppressed table sees, for a key the
+The table can be read from a topic, made by `count`, `reduce`, `aggregate` or
+`toTable`, or come from another table's `filter`, `mapValues` or join. Joining a suppressed table sees, for a key the
 suppression holds, the value from before the change it holds, as Java does.
-Windowed tables cannot be joined yet.
 
 A stream and the table it joins are processed together, so their topics must
 have the same number of partitions, as in Java. If they do not, the broker
@@ -335,8 +339,8 @@ orders.join(visits, (order, count) -> order + count).to("out");
 If the stream's key may have changed since it was read, for example after
 `selectKey`, its records first go through a repartition topic, and `join` and
 `leftJoin` compile only with serdes to write it with, as `groupByKey` compiles
-only with a name. The topic is named after the join, `<name>-repartition`, as
-Java names it after its `Joined` name:
+only with a name. The topic is named after the join,
+`<application id>-<name>-repartition`, as Java names it after its `Joined` name:
 
 ```scala mdoc:compile-only
 import cats.effect.IO
@@ -407,9 +411,8 @@ names
 ```
 
 Like a stream and a table, two joined tables are processed together, so their
-topics must have the same number of partitions. A table cannot be joined with
-itself, or with a table read from the same topic, and windowed tables cannot be
-joined yet; `Topology.of` refuses each with a `TopologyError`.
+topics must have the same number of partitions. To join a table with itself, see
+[Branching](#branching).
 
 ### Joining streams
 
@@ -479,7 +482,8 @@ The stores are named from the store's name, as Java names them:
 
 The three serdes write the key and each stream's values to the stores. A
 stream whose key has changed is written first to a repartition topic named
-after the join, `<join>-left` or `<join>-right`, with the same serdes. A Java
+after the join, `<application id>-<join>-left-repartition` or
+`<application id>-<join>-right-repartition`, with the same serdes. A Java
 program names everything the same way with
 `StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(join).withStoreName(store)`.
 
@@ -488,9 +492,170 @@ once by a left join's left stream and by either stream of an outer join, and
 is otherwise dropped.
 
 The two streams are processed together, so their topics must have the same
-number of partitions. A stream cannot be joined with itself, or with a stream
-read from the same topic, yet; `Topology.of` refuses it with a
-`TopologyError`.
+number of partitions. To join a stream with itself, see [Branching](#branching).
+
+## Branching
+
+A stream is a description of steps, so each use of it is another copy of them all.
+A stream used twice would read its topic twice, and `Topology.of` refuses that with
+a `TopologyError`. To send records down several paths, say so where the stream
+branches.
+
+`fork` sends each record down the first path, including everything that follows
+on it, then down the next, so a later path sees what an earlier one did to a store.
+Only then does the next record start. Java runs the paths of a branching stream in
+the same way. Each path starts from the stream's records and ends in a topic or a
+table:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+import xkafka.*
+import xkafka.streams.*
+
+def audited(orders: Topic, all: Topic, audit: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(Named("orders"), orders, text, text).fork(
+    _.to(Named("all"), all, text, text),
+    _.mapValues(Named("mark"))(order => s"audit: $order").to(Named("audit"), audit, text, text)
+  )
+```
+
+`forkMerge` works like `fork`, and what the paths make goes on as one stream.
+
+`merge` makes one stream of two, in one sub-topology, and their topics need not
+have the same number of partitions. A merge is keyed as read only if each of its
+sides is:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+import xkafka.*
+import xkafka.streams.*
+
+def movements(orders: Topic, refunds: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(Named("orders"), orders, text, text)
+    .merge(Named("movements"), KStream(Named("refunds"), refunds, text, text))
+    .forkMerge(Named("marked"))(
+      _.filter(Named("large"))((_, amount) => amount.length > 3).mapValues(Named("flag"))(amount => s"large $amount"),
+      _.filterNot(Named("small"))((_, amount) => amount.length > 3)
+    )
+    .to(Named("write"), output, text, text)
+```
+
+`split` sends each record down the first branch that takes it, as Java's `split`
+does. A branch's node is named by the split's name followed by the branch's, here
+`route-large`. `defaultBranch` takes what no branch took; with `noDefaultBranch`,
+those records go no further:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+import xkafka.*
+import xkafka.streams.*
+
+def routed(orders: Topic, large: Topic, small: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  KStream(Named("orders"), orders, text, text)
+    .split(Named("route-"))
+    .branch(Named("large"))((_, amount) => amount.length > 3)(_.to(Named("write-large"), large, text, text))
+    .defaultBranch(Named("small"))(_.to(Named("write-small"), small, text, text))
+```
+
+### Paths that share what follows
+
+`fork` writes each path once, so it cannot send two paths to the same place. For
+that, write the shared part first as a flow, then send records to it with `into`.
+A flow starts from one of:
+
+- `Flow.asRead[F, K, V]`, for records keyed as they were read;
+- `Flow[F, K, V]`, for records whose key may have changed;
+- `s.flow`, for the records of the stream `s`, whose types and key it takes on.
+
+`into` sends each record to any number of flows, in the order given, one finishing
+before the next starts, as `fork` does. Java goes by the order the paths were
+written in, so to match a Java program, list them in that order.
+
+Here large orders and every refund go to both of two topics:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+import xkafka.*
+import xkafka.streams.*
+
+def reviewed(orders: Topic, refunds: Topic, all: Topic, review: Topic) =
+  val text     = Serde.utf8[IO]
+  val toAll    = Flow.asRead[IO, String, String].merged(Named("all")).to(Named("write-all"), all, text, text)
+  val toReview = Flow.asRead[IO, String, String].merged(Named("review")).to(Named("write-review"), review, text, text)
+  val large    = Flow.asRead[IO, String, String].filter(Named("large"))((_, amount) => amount.length > 3).into(toAll, toReview)
+  Topology.of(
+    KStream(Named("orders"), orders, text, text).into(large),
+    KStream(Named("refunds"), refunds, text, text).into(toAll, toReview)
+  )
+```
+
+A flow sent records from several places has its first step read from all of them.
+`merged` gives it a node of its own to do that, as `merge` would.
+
+### Joining a stream or a table with itself
+
+Flows are also how a stream is joined with something made from itself, such as its
+own count, or with itself. `consumer` ends a table with no further steps, so that
+it can be sent to while a join reads it. Here the count's path comes first, so the
+join sees a count that includes the record it is joining:
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+import cats.effect.IO
+import xkafka.*
+import xkafka.streams.*
+
+def withCounts(clicks: Topic, output: Topic): Pipeline[IO] =
+  val text   = Serde.utf8[IO]
+  val read   = KStream(Named("clicks"), clicks, text, text)
+  val counts = read.flow.groupByKey(text, text).count(Named("counted"), Store("counts"))
+  read.into(
+    counts.consumer,
+    read.flow.join(Named("with-count"), counts)((click, seen) => s"$click, seen $seen").to(Named("write"), output, text, text)
+  )
+
+def pairs(clicks: Topic, output: Topic): Pipeline[IO] =
+  val text = Serde.utf8[IO]
+  val read = KStream(Named("clicks"), clicks, text, text)
+  read.into(
+    read.flow.join(Named("pairs"), read.flow, JoinWindows(1.minute, grace = 10.seconds), Store("pairs"), text, text, text)(_ + _)
+      .to(Named("write"), output, text, text)
+  )
+```
+
+As in Java, a stream joined with itself pairs each record with itself too, as well
+as with the other records in its window.
+
+A table is sent down several paths in the same way, with its own `flow`, `into` and
+`fork`:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+import xkafka.*
+import xkafka.streams.*
+
+def selfJoined(users: Topic, output: Topic): Pipeline[IO] =
+  val text  = Serde.utf8[IO]
+  val table = KTable(Named("users"), users, text, text, Store("users"))
+  table.into(
+    table.flow.join(Named("self"), table.flow)(_ + _).toStream(Named("changes")).to(Named("write"), output, text, text.option)
+  )
+```
+
+`Topology.of` refuses, with a `TopologyError`, a join reading a table no records
+reach. A table read from a topic needs none of this to be read by several joins, or
+to be read while its changes are written somewhere: use the one table in each.
+
+### Flows whose records may have a new key
+
+A flow made with `Flow` has no source to say how its records are keyed, so every
+path that groups or joins them goes through a repartition topic. `Topology.of`
+refuses that topic with `TopologyError.UnusedRepartition` if none of the records
+reaching it have a new key. In that case start the flow with `Flow.asRead` or
+`s.flow`, which need no repartition topic for those records.
 
 ## Windows
 
