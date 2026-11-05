@@ -12,8 +12,8 @@ each one runs on its platform's Kafka client.
 
 Two modules are published:
 
-- `xkafka-kernel` holds the data types and the producer, consumer, and
-  administration interfaces, with no backend.
+- `xkafka-kernel` holds the data types, the producer, consumer, and
+  administration interfaces, and the streams DSL, with no backend.
 - `xkafka-client` holds `KafkaClient` and the three backends, and depends on the
   kernel.
 

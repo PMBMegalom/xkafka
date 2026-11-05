@@ -299,5 +299,5 @@ partition on its own, and `deleteConsumerGroups` each group on its own:
 
 ## What it does not do
 
-Access control, quotas, changing configuration, delegation tokens, and log
+Access control, quotas, changing broker configuration, delegation tokens, and log
 directories are not covered.

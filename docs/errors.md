@@ -1,7 +1,7 @@
 # Errors
 
 Failures Kafka reports, and values or settings xkafka rejects, are
-`KafkaException` values. User-supplied effects keep their own failures, and
+`KafkaException` values, except for the [streams](#streams) ones below. User-supplied effects keep their own failures, and
 ordinary method precondition failures such as a non-positive partition-stream
 queue threshold use their usual exception type.
 
@@ -19,6 +19,14 @@ queue threshold use their usual exception type.
 `InvalidValue` carries the `ValidationError` that rejected the value, and
 `InvalidSettings` carries every `SettingsError`, so accumulated validation
 survives being lifted into an effect.
+
+## Streams
+
+A streams program or its settings being refused raises an exception of its own,
+when `liftTo` carries the refusal into the effect:
+
+- `InvalidTopology` carries every `TopologyError` in `errors`.
+- `InvalidStreamsSettings` carries every `StreamsSettingsError` in `errors`.
 
 ## Backend failures
 

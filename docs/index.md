@@ -12,7 +12,8 @@ Native while using the established Kafka client for each runtime.
 
 The API uses `Resource` for producer and consumer lifecycles, `Stream` for
 consumer records, effectful serializers and deserializers, and explicit offset
-commits. Scala.js targets Node.js rather than browsers.
+commits. Scala.js targets Node.js rather than browsers. xkafka also runs
+[Kafka Streams programs](streams.md), alongside Java Kafka Streams instances.
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList

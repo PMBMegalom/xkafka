@@ -3,7 +3,8 @@
 `ClientSettings` describes the connection. `ProducerSettings` and
 `ConsumerSettings` each build on it and add what their client needs.
 `TransactionalProducerSettings` wraps `ProducerSettings`, and is covered in
-[Transactions](transactions.md).
+[Transactions](transactions.md). `StreamsSettings` also builds on `ClientSettings`,
+and is [described below](#streams-settings).
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList
@@ -141,6 +142,20 @@ Beyond the serializers, `ProducerSettings` carries:
 | `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 
 See [Producing](producing.md) for each of them.
+
+## Streams settings
+
+Beyond the client and the application's id, `StreamsSettings` carries:
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `guarantee` | `ProcessingGuarantee.AtLeastOnce` | whether a record can be processed again after work moves |
+| `commitInterval` | unset, which is 30s at least once and 100ms exactly once | how often tasks commit |
+| `concurrency` | 1 | how many tasks process records at once |
+| `closeTimeout` | 30s | how long releasing the application waits to give back its tasks and leave |
+| `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
+
+See [Streams](streams.md#guarantees) for each of them.
 
 ## Client settings
 
