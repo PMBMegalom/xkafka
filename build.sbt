@@ -98,6 +98,9 @@ def cacheLibrdkafkaLibrary = Def.setting {
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
 )
+// Linking the Native tests takes more than sbt's default heap of 1 GB.
+ThisBuild / githubWorkflowEnv += "SBT_OPTS" -> "-Xmx4g"
+
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
 // A failure on one entry cancels the others, so nothing waits on a matrix that has already failed.
