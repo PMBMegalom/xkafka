@@ -65,7 +65,7 @@ final class WindowsSuite extends CatsEffectSuite:
       Some(List(TopologyError.InvalidWindows("counts", "the advance must not exceed the size, was 11 seconds for a size of 10 seconds")))
     )
     assertEquals(
-      refused(TimeWindows.tumbling(10.seconds, grace = -1.second)),
+      refused(TimeWindows.tumbling(10.seconds, grace = (-1).second)),
       Some(List(TopologyError.InvalidWindows("counts", "the grace must not be negative, was -1 seconds")))
     )
     assertEquals(
@@ -117,11 +117,11 @@ final class WindowsSuite extends CatsEffectSuite:
           .to(Named("write-3"), topic, Serde.timeWindowed(text, 1.second), count)
       ).left.toOption.map(_.toList)
     assertEquals(
-      refused(SlidingWindows.withNoGrace(-1.second)),
+      refused(SlidingWindows.withNoGrace((-1).second)),
       Some(List(TopologyError.InvalidWindows("counts", "the time difference must not be negative, was -1 seconds")))
     )
     assertEquals(
-      refused(SlidingWindows(1.second, grace = -1.second)),
+      refused(SlidingWindows(1.second, grace = (-1).second)),
       Some(List(TopologyError.InvalidWindows("counts", "the grace must not be negative, was -1 seconds")))
     )
     assertEquals(
@@ -144,7 +144,7 @@ final class WindowsSuite extends CatsEffectSuite:
   test("a suppression waiting a negative time or parts of a millisecond, or with a negative limit, is refused, and one waiting no time is not"):
     def refused(held: Suppressed.UntilTimeLimit) = Topology.of(suppressed(held)).left.toOption.map(_.toList)
     assertEquals(
-      refused(Suppressed.untilTimeLimit("calm", -1.second)),
+      refused(Suppressed.untilTimeLimit("calm", (-1).second)),
       Some(List(TopologyError.InvalidSuppression("calm", "the time to wait must not be negative, was -1 seconds")))
     )
     assertEquals(
@@ -192,11 +192,11 @@ final class WindowsSuite extends CatsEffectSuite:
           .to(Named("write-6"), topic, Serde.sessionWindowed(text), count.option)
       ).left.toOption.map(_.toList)
     assertEquals(
-      refused(SessionWindows.withNoGrace(-1.second)),
+      refused(SessionWindows.withNoGrace((-1).second)),
       Some(List(TopologyError.InvalidWindows("counts", "the inactivity gap must not be negative, was -1 seconds")))
     )
     assertEquals(
-      refused(SessionWindows(1.second, grace = -1.second)),
+      refused(SessionWindows(1.second, grace = (-1).second)),
       Some(List(TopologyError.InvalidWindows("counts", "the grace must not be negative, was -1 seconds")))
     )
     assertEquals(

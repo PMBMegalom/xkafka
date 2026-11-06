@@ -969,7 +969,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("streams joined in windows reaching further one way than the other write what Java's do"):
     List(
       (within.withBefore(1.second).withAfter(6.seconds), javaWithin.before(Duration.ofSeconds(1)).after(Duration.ofSeconds(6))),
-      (within.withBefore(7.seconds).withAfter(-2.seconds), javaWithin.before(Duration.ofSeconds(7)).after(Duration.ofSeconds(-2)))
+      (within.withBefore(7.seconds).withAfter((-2).seconds), javaWithin.before(Duration.ofSeconds(7)).after(Duration.ofSeconds(-2)))
     ).traverse_ : (windows, javaWindows) =>
       sameFrom(
         leftStream.outerJoin(Named("outer-join-5"), rightStream, windows, Store("pairs"), text, text, text)(ior)

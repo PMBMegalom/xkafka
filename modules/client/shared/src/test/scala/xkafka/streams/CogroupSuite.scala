@@ -105,7 +105,7 @@ final class CogroupSuite extends CatsEffectSuite:
     )
 
   test("windows a cogroup cannot use are refused once, however many groups it has"):
-    val negative = TimeWindows.tumbling(-1.second, grace = 0.seconds)
+    val negative = TimeWindows.tumbling((-1).second, grace = 0.seconds)
     assertEquals(
       refused(
         two.windowedBy(negative).aggregate(Named("co"), Store("kept"), text)("s").toStream(Named("c"))

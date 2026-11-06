@@ -35,7 +35,7 @@ final class CommitRecoverySuite extends CatsEffectSuite:
   test("a policy rejects the values it cannot honour"):
     assertEquals(CommitRecovery.exponential(-1), Left(ValidationError.NegativeAttemptCount(-1)))
     assertEquals(CommitRecovery.exponential(1, initialDelay = Duration.Zero), Left(ValidationError.NonPositiveDelay(Duration.Zero)))
-    assertEquals(CommitRecovery.exponential(1, maxDelay = -1.second), Left(ValidationError.NonPositiveDelay(-1.second)))
+    assertEquals(CommitRecovery.exponential(1, maxDelay = (-1).second), Left(ValidationError.NonPositiveDelay((-1).second)))
     assertEquals(CommitRecovery.exponential(1, jitter = 1.5), Left(ValidationError.JitterOutOfRange(1.5)))
     assertEquals(CommitRecovery.exponential(1, jitter = -0.1), Left(ValidationError.JitterOutOfRange(-0.1)))
     assert(CommitRecovery.exponential(1).isRight)

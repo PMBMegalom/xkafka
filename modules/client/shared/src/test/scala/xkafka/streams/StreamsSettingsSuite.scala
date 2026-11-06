@@ -50,11 +50,11 @@ final class StreamsSettingsSuite extends FunSuite:
 
   test("every invalid setting is reported at once"):
     assertEquals(
-      StreamsSettings.from(client, app, commitInterval = Some(Duration.Zero), concurrency = 0, closeTimeout = -1.second),
+      StreamsSettings.from(client, app, commitInterval = Some(Duration.Zero), concurrency = 0, closeTimeout = (-1).second),
       Validated.invalid(NonEmptyList.of(
         StreamsSettingsError.NonPositiveCommitInterval(Duration.Zero),
         StreamsSettingsError.NonPositiveConcurrency(0),
-        StreamsSettingsError.NonPositiveCloseTimeout(-1.second)
+        StreamsSettingsError.NonPositiveCloseTimeout((-1).second)
       ))
     )
 
@@ -83,5 +83,5 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(changed.withoutTopologyDescriptionPush.topologyDescriptionPush, false)
     assertEquals(changed.withoutTopologyDescriptionPush.withTopologyDescriptionPush.topologyDescriptionPush, true)
     assertEquals(settings.withConcurrency(-2), Validated.invalidNel(StreamsSettingsError.NonPositiveConcurrency(-2)))
-    assertEquals(settings.withCommitInterval(-1.second), Validated.invalidNel(StreamsSettingsError.NonPositiveCommitInterval(-1.second)))
+    assertEquals(settings.withCommitInterval((-1).second), Validated.invalidNel(StreamsSettingsError.NonPositiveCommitInterval((-1).second)))
     assertEquals(settings.withCloseTimeout(Duration.Zero), Validated.invalidNel(StreamsSettingsError.NonPositiveCloseTimeout(Duration.Zero)))

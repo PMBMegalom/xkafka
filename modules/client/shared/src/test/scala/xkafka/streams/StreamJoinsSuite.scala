@@ -138,20 +138,20 @@ final class StreamJoinsSuite extends FunSuite:
     def windows(joining: JoinWindows) =
       refused(left.join(Named("pairs"), right, joining, Store("pairs"), text, text, text)(_ + _).to(Named("write-8"), out, text, text))
     assertEquals(
-      windows(JoinWindows(1.second, grace = 0.seconds).withBefore(-2.seconds)),
+      windows(JoinWindows(1.second, grace = 0.seconds).withBefore((-2).seconds)),
       Some(
         List(TopologyError.InvalidWindows("pairs", "the time before and after must not add up to less than nothing, were -2 seconds and 1 second"))
       )
     )
     assertEquals(
-      windows(JoinWindows(1.second, grace = -1.second)),
+      windows(JoinWindows(1.second, grace = (-1).second)),
       Some(List(TopologyError.InvalidWindows("pairs", "the grace must not be negative, was -1 seconds")))
     )
     assertEquals(
       windows(JoinWindows(1.second, grace = 1.micro)),
       Some(List(TopologyError.InvalidWindows("pairs", "the time differences and grace must be whole milliseconds")))
     )
-    assertEquals(windows(JoinWindows(1.second, grace = 0.seconds).withBefore(-1.second)), None)
+    assertEquals(windows(JoinWindows(1.second, grace = 0.seconds).withBefore((-1).second)), None)
 
   test("a join says Java numbers it by build order where either side made a sub-topology before it, or both made one after it"):
     def ordered(pipeline: Pipeline[IO]) = segments(pipeline).flatMap(_.buildOrdered).distinct

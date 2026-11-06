@@ -7,7 +7,7 @@ import scala.sys.process.ProcessLogger
 import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
-ThisBuild / scalaVersion     := "3.3.8"
+ThisBuild / scalaVersion     := "3.3.9"
 ThisBuild / tlBaseVersion    := "0.7"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
