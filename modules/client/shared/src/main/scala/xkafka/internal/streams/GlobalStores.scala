@@ -61,6 +61,7 @@ private[xkafka] object GlobalStores:
                 .traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F].map(TopicPartition(global.topic, _)))
         )
       _        <- Resource.eval(driver.assign(consumer, starts.toVector, starts.toVector.map(StartAt(_, 0L, -1))))
+      ends     <- Resource.eval(Restore.endsOf(driver, consumer, starts.toVector))
       held     <- Resource.eval(F.ref[Contents](globals.map(_.store.value -> StoreContents.empty).toMap))
       ready    <- Resource.eval(F.deferred[Unit])
       failed   <- Resource.eval(F.deferred[Throwable])
@@ -78,7 +79,7 @@ private[xkafka] object GlobalStores:
                       else updated(global, now, record)
                     after.flatMap(held.set)
               } *> {
-                val remaining = left -- polled.ends.map(end => (end.topic, end.partition))
+                val remaining = Restore.unfinished(left, polled.ends, ends)
                 ready.complete(()).whenA(remaining.isEmpty) *> read(remaining)
               }
           )
