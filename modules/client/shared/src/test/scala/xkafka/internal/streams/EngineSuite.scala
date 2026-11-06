@@ -543,7 +543,7 @@ final class EngineSuite extends CatsEffectSuite:
     val fetched = OffsetFetchRequest.Answer(List(Fetched("in", 1, 1L, -1, Some(PartitionTime.encode(20000L, Map("windows" -> 15000L))), 0)), 0)
     run(committed = _ => IO.pure(fetched), topology = emitting): world =>
       for
-        _       <- world.restoredAlso.set(Map("windows" -> Map(window("k", 0L) -> counted(5L))))
+        _       <- world.restoredAlso.set(Map("windows" -> StoreContents.of(Map(window("k", 0L) -> counted(5L)))))
         _       <- world.tell(assign(TaskId("0", 1)))
         _       <- IO.sleep(100.millis)
         _       <- world.records(record(1, 1L, "k", 20000L))
@@ -634,7 +634,7 @@ final class EngineSuite extends CatsEffectSuite:
     val held    = Held(10000L, context, None, Some(counted(4L).value), Some(counted(5L).value))
     run(topology = suppressing): world =>
       for
-        _       <- world.restoredAlso.set(Map("final-store" -> Map(window("k", 0L) -> Stored(held.encode, 0L))))
+        _       <- world.restoredAlso.set(Map("final-store" -> StoreContents.of(Map(window("k", 0L) -> Stored(held.encode, 0L)))))
         _       <- world.tell(assign(TaskId("0", 1)))
         _       <- IO.sleep(100.millis)
         _       <- world.records(record(1, 8L, "other", 15000L))
@@ -693,7 +693,8 @@ final class EngineSuite extends CatsEffectSuite:
     run(topology = sessioning): world =>
       for
         _ <-
-          world.restoredAlso.set(Map("sessions" -> Map(session("k", 1000L, 9000L) -> counted(5L), session("other", 12000L, 12000L) -> counted(1L))))
+          world.restoredAlso
+            .set(Map("sessions" -> StoreContents.of(Map(session("k", 1000L, 9000L) -> counted(5L), session("other", 12000L, 12000L) -> counted(1L)))))
         _       <- world.tell(assign(TaskId("0", 1)))
         _       <- IO.sleep(100.millis)
         _       <- world.records(record(1, 0L, "k", 10000L))
@@ -721,11 +722,11 @@ final class EngineSuite extends CatsEffectSuite:
   test("a restored window store loses the windows its clock has expired, so a record for one starts it again"):
     run(topology = windowing): world =>
       for
-        _       <- world.restoredAlso.set(Map("windows" -> Map(window("k", 0L) -> counted(5L), window("other", 30000L) -> counted(1L))))
-        _       <- world.tell(assign(TaskId("0", 1)))
-        _       <- IO.sleep(100.millis)
-        _       <- world.records(record(1, 0L, "k", 2000L))
-        _       <- IO.sleep(1.second)
+        _ <- world.restoredAlso.set(Map("windows" -> StoreContents.of(Map(window("k", 0L) -> counted(5L), window("other", 30000L) -> counted(1L)))))
+        _ <- world.tell(assign(TaskId("0", 1)))
+        _ <- IO.sleep(100.millis)
+        _ <- world.records(record(1, 0L, "k", 2000L))
+        _ <- IO.sleep(1.second)
         written <- world.written.get
       yield
         val counts = written.filter(_.topic.value == "out").flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong)
@@ -923,9 +924,9 @@ object EngineSuite:
       val states: Ref[IO, List[StreamsState]],
       standingBy: Queue[IO, PolledRecord],
       ending: Ref[IO, Map[TopicPartition, Long]],
-      val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]],
+      val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, StoreContents])]],
       offsetsRead: Ref[IO, IO[TaskOffsets]],
-      val restoredAlso: Ref[IO, Map[String, Map[Chunk[Byte], Stored]]]
+      val restoredAlso: Ref[IO, Map[String, StoreContents]]
   ):
     /** Changelog records for the standby tasks to follow. */
     def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
@@ -993,8 +994,8 @@ object EngineSuite:
         def restore(
             changelogs: Map[TopicPartition, String],
             from: Map[TopicPartition, Long],
-            held: Map[String, Map[Chunk[Byte], Stored]]
-        ): IO[Map[String, Map[Chunk[Byte], Stored]]] =
+            held: Map[String, StoreContents]
+        ): IO[Map[String, StoreContents]] =
           restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)) *>
             restoredAlso.get.map(held ++ _)
         def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
@@ -1029,9 +1030,9 @@ object EngineSuite:
         IO.ref(List.empty[StreamsState]),
         Queue.unbounded[IO, PolledRecord],
         IO.ref(Map.empty[TopicPartition, Long]),
-        IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]),
+        IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, StoreContents])]),
         IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
-        IO.ref(Map.empty[String, Map[Chunk[Byte], Stored]])
+        IO.ref(Map.empty[String, StoreContents])
       ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while

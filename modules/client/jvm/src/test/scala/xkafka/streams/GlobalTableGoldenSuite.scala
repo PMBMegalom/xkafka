@@ -95,9 +95,7 @@ final class GlobalTableGoldenSuite extends CatsEffectSuite:
     val tasks    = topology.subtopologies.toVector.map(Task[IO]("app", _, 0))
     val reading  = topology.subtopologies.zipWithIndex.flatMap((sub, id) => sub.origins.map(Task.topicOf("app", _) -> id)).toMap
     val tables   = topology.globals.map(_._2).map(global => global.topic.value -> global).toMap
-    inputs.foldLeftM(
-      (Vector.fill(tasks.size)(TaskState.empty), Map.empty[String, Map[Chunk[Byte], internal.streams.Stored]], Vector.empty[(String, Output)])
-    ):
+    inputs.foldLeftM((Vector.fill(tasks.size)(TaskState.empty), Map.empty[String, internal.streams.StoreContents], Vector.empty[(String, Output)])):
       case ((states, held, out), input) => tables.get(input.topic) match
           case Some(global) =>
             val polled = PolledRecord(input.topic, 0, 0L, Some(input.timestamp), 0, -1, input.key.map(bytes), input.value.map(bytes), headers(input))

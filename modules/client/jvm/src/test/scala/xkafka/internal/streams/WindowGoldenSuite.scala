@@ -350,6 +350,25 @@ final class WindowGoldenSuite extends CatsEffectSuite:
 
   private def javaSessions = JavaSessionWindows.ofInactivityGapAndGrace(Duration.ofSeconds(5), Duration.ofSeconds(5))
 
+  test("sessions of a key that starts another key are its own, whichever came first"):
+    sameSessions[java.lang.Long](
+      KStream(Named("read-10"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-4"), Store("counts"))
+        .toStream(Named("to-stream-10")).to(Named("write-10"), out, Serde.sessionWindowed(text), count.option),
+      materialized =>
+        _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
+          .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
+      "counts",
+      List(
+        ("ab", "v", 1000L),
+        ("a", "v", 1100L),
+        ("abc", "v", 1200L),
+        ("ab", "v", 1300L),
+        ("a", "v", 1400L),
+        ("abcdefghijklmnopqrstuvwx", "v", 1500L),
+        ("a", "v", 1600L)
+      )
+    )
+
   test("counting in sessions writes and logs what Java does, merged sessions going on as tombstones"):
     sameSessions[java.lang.Long](
       KStream(Named("read-10"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-4"), Store("counts"))
@@ -874,6 +893,23 @@ final class WindowGoldenSuite extends CatsEffectSuite:
         builder.stream[String, String]("left")
           .join(builder.stream[String, String]("right"), (a: String, b: String) => s"$a+$b", javaWithin, javaPaired).to("out"),
       streaming
+    )
+
+  test("records of a key that starts another key join only their own, as Java's do"):
+    sameFrom(
+      leftStream.join(Named("pairs"), rightStream, within, Store("pairs"), text, text, text)((a, b) => s"$a+$b")
+        .to(Named("write-43"), out, text, text),
+      builder =>
+        builder.stream[String, String]("left")
+          .join(builder.stream[String, String]("right"), (a: String, b: String) => s"$a+$b", javaWithin, javaPaired).to("out"),
+      List(
+        ("right", "ab", "r1", 1000L),
+        ("right", "abcdefghijklmnop", "r2", 1100L),
+        ("left", "a", "l1", 1200L),
+        ("left", "ab", "l2", 1300L),
+        ("right", "a", "r3", 1400L),
+        ("left", "abcdefghijklmnop", "l3", 1500L)
+      )
     )
 
   test("two streams left joined write what Java's left join of streams does, a left record matching nothing sent alone once its window closes"):
@@ -1486,7 +1522,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   ): IO[Unit] =
     val changelog = s"app-$store-changelog"
     ours(pipeline, inputs).flatMap: (written, state) =>
-      state.store(store).toList.traverse: (key, stored) =>
+      state.store(store).toVector.toList.traverse: (key, stored) =>
         values.deserialize(in, Headers.empty, Some(stored.value)).map: value =>
           (String(key.take(key.size - 12).toArray), internal.streams.WindowStore.startOf(key)) -> (value.toString, stored.timestamp)
       .map: kept =>

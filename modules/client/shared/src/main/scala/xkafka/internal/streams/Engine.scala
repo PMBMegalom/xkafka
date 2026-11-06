@@ -173,8 +173,8 @@ private[xkafka] object Engine:
           def restore(
               changelogs: Map[TopicPartition, String],
               from: Map[TopicPartition, Long],
-              held: Map[String, Map[Chunk[Byte], Stored]]
-          ): F[Map[String, Map[Chunk[Byte], Stored]]]  = consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, held))
+              held: Map[String, StoreContents]
+          ): F[Map[String, StoreContents]]             = consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, held))
           def follow(starts: Vector[StartAt]): F[Unit] = driver.assign(follower, starts.map(_.partition), starts)
           def followed: F[List[PolledRecord]]          = driver.poll(follower, PollMillis).map(_.records)
           def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]] =
@@ -305,7 +305,7 @@ private[xkafka] object Engine:
           read,
           following,
           partitions,
-          globals.fold(F.pure(Map.empty[String, Map[Chunk[Byte], Stored]]))(_.contents)
+          globals.fold(F.pure(Map.empty[String, StoreContents]))(_.contents)
         )
       running <-
         Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
@@ -365,8 +365,8 @@ private[xkafka] object Engine:
     def restore(
         changelogs: Map[TopicPartition, String],
         from: Map[TopicPartition, Long],
-        held: Map[String, Map[Chunk[Byte], Stored]]
-    ): F[Map[String, Map[Chunk[Byte], Stored]]]
+        held: Map[String, StoreContents]
+    ): F[Map[String, StoreContents]]
 
     /** Follows exactly these changelog partitions for standby tasks, each from where it starts. */
     def follow(starts: Vector[StartAt]): F[Unit]
@@ -399,11 +399,7 @@ private[xkafka] object Engine:
     def read: Boolean = inputs.values.exists(_.read.nonEmpty)
 
   /** A standby task: its stores, kept as their changelogs are read, the changelog partition of each, and where it has read each to. */
-  private final case class Standby(
-      stores: Map[String, Map[Chunk[Byte], Stored]],
-      changelogs: Map[TopicPartition, String],
-      positions: Map[TopicPartition, Long]
-  )
+  private final case class Standby(stores: Map[String, StoreContents], changelogs: Map[TopicPartition, String], positions: Map[TopicPartition, Long])
 
   /** The tasks the engine runs and keeps standing by, and when it last committed and purged. */
   private final case class Running[F[_]](
@@ -429,7 +425,7 @@ private[xkafka] object Engine:
       read: Queue[F, PolledRecord],
       following: Ref[F, Boolean],
       partitions: Topic => F[Int],
-      globals: F[Map[String, Map[Chunk[Byte], Stored]]]
+      globals: F[Map[String, StoreContents]]
   )(using F: Async[F]):
     import MemberAction.*
 
@@ -618,7 +614,7 @@ private[xkafka] object Engine:
     /** Each task's stores, read back from the task's partition of their changelogs, one task after another: a task that stood by from where it read
       * to, onto what it holds, and any other from the start.
       */
-    private def restore(tasks: List[TaskId], standbys: Map[TaskId, Standby]): F[Map[TaskId, Map[String, Map[Chunk[Byte], Stored]]]] =
+    private def restore(tasks: List[TaskId], standbys: Map[TaskId, Standby]): F[Map[TaskId, Map[String, StoreContents]]] =
       val stateful = tasks.filter(id => subtopologies(id.subtopology).stores.nonEmpty)
       if stateful.isEmpty then F.pure(Map.empty)
       else

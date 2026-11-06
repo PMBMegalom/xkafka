@@ -53,23 +53,19 @@ private[xkafka] object WindowStore:
   def startOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.drop(key.size - 12).take(8).toArray).getLong
 
   /** The clock of a store holding `entries`: the latest window start among them. */
-  def clockOf(entries: Map[Chunk[Byte], Stored]): Long = entries.keysIterator.map(startOf).maxOption.getOrElse(NoTime)
+  def clockOf(entries: StoreContents): Long = entries.keysIterator.map(startOf).maxOption.getOrElse(NoTime)
 
   /** Whether a window starting at `start` has expired by `clock`. */
   def expired(start: Long, clock: Long, retention: Long): Boolean = start <= clock - retention
 
   /** The windows of `entries` that have not expired by `clock`. */
-  def pruned(entries: Map[Chunk[Byte], Stored], clock: Long, retention: Long): Map[Chunk[Byte], Stored] =
+  def pruned(entries: StoreContents, clock: Long, retention: Long): StoreContents =
     entries.filter((key, _) => !expired(startOf(key), clock, retention))
 
   /** Each window or session store of `stores`, those `sessions` names being session stores, without what has expired by its clock, as Java leaves a
     * store after restoring it.
     */
-  def prunedAll(
-      stores: Map[String, Map[Chunk[Byte], Stored]],
-      retentions: Map[String, Long],
-      sessions: Set[String] = Set.empty
-  ): Map[String, Map[Chunk[Byte], Stored]] =
+  def prunedAll(stores: Map[String, StoreContents], retentions: Map[String, Long], sessions: Set[String] = Set.empty): Map[String, StoreContents] =
     stores.map: (name, entries) =>
       name -> retentions.get(name).fold(entries): retention =>
         if sessions(name) then SessionStore.pruned(entries, SessionStore.clockOf(entries), retention)
@@ -91,10 +87,10 @@ private[xkafka] object SessionStore:
   def startOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.drop(key.size - 8).toArray).getLong
 
   /** The clock of a store holding `entries`: the latest session end among them. */
-  def clockOf(entries: Map[Chunk[Byte], Stored]): Long = entries.keysIterator.map(endOf).maxOption.getOrElse(WindowStore.NoTime)
+  def clockOf(entries: StoreContents): Long = entries.keysIterator.map(endOf).maxOption.getOrElse(WindowStore.NoTime)
 
   /** The sessions of `entries` that have not expired by `clock`. */
-  def pruned(entries: Map[Chunk[Byte], Stored], clock: Long, retention: Long): Map[Chunk[Byte], Stored] =
+  def pruned(entries: StoreContents, clock: Long, retention: Long): StoreContents =
     entries.filter((key, _) => !WindowStore.expired(endOf(key), clock, retention))
 
 /** The window store of one side of a stream-stream join, as Java's keeps one, which keeps every record: keyed as its changelog is, by the serialized
@@ -148,9 +144,3 @@ private[xkafka] object SharedJoinStore:
           case Some(size) if size >= 0 && at + 4 + size <= list.size => read(at + 4 + size, remaining - 1, done :+ list.drop(at + 4).take(size))
           case _                                                     => None
     if list.isEmpty || list(0) != 1 then None else int(1).filter(_ >= 0).flatMap(read(5, _, Vector.empty))
-
-  /** Keys in the order Java's store iterates them: byte by byte, unsigned, so by time, then the right before the left, then key. */
-  given Ordering[Chunk[Byte]] =
-    (x, y) =>
-      x.zip(y).iterator.collectFirst { case (a, b) if a != b => java.lang.Integer.compare(a & 0xff, b & 0xff) }
-        .getOrElse(java.lang.Integer.compare(x.size, y.size))

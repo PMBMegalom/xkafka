@@ -25,7 +25,6 @@ package streams
 
 import cats.Monad
 import cats.syntax.all.*
-import fs2.Chunk
 import driver.{KafkaDriver, PolledRecord, StartAt}
 
 /** Refills stores from their changelogs. */
@@ -42,11 +41,11 @@ private[xkafka] object Restore:
       consumer: driver.Client,
       changelogs: Map[TopicPartition, String],
       from: Map[TopicPartition, Long] = Map.empty,
-      held: Map[String, Map[Chunk[Byte], Stored]] = Map.empty
-  )(using F: Monad[F]): F[Map[String, Map[Chunk[Byte], Stored]]] =
+      held: Map[String, StoreContents] = Map.empty
+  )(using F: Monad[F]): F[Map[String, StoreContents]] =
     val stores   = changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> store)
     val starting = changelogs.keys.toVector
-    def read(left: Set[(String, Int)], restored: Map[String, Map[Chunk[Byte], Stored]]): F[Map[String, Map[Chunk[Byte], Stored]]] =
+    def read(left: Set[(String, Int)], restored: Map[String, StoreContents]): F[Map[String, StoreContents]] =
       if left.isEmpty then F.pure(restored)
       else
         driver.poll(consumer, PollMillis).flatMap: polled =>
@@ -54,10 +53,10 @@ private[xkafka] object Restore:
             polled.records.foldLeft(restored)((now, record) => stores.get((record.topic, record.partition)).fold(now)(applied(now, _, record)))
           read(left -- polled.ends.map(end => (end.topic, end.partition)), after)
     driver.assign(consumer, starting, starting.map(partition => StartAt(partition, from.getOrElse(partition, 0L), -1))) *>
-      read(stores.keySet, stores.values.map(store => store -> held.getOrElse(store, Map.empty[Chunk[Byte], Stored])).toMap)
+      read(stores.keySet, stores.values.map(store => store -> held.getOrElse(store, StoreContents.empty)).toMap)
 
   /** The stores with one changelog record applied to `store`. */
-  def applied(restored: Map[String, Map[Chunk[Byte], Stored]], store: String, record: PolledRecord): Map[String, Map[Chunk[Byte], Stored]] =
+  def applied(restored: Map[String, StoreContents], store: String, record: PolledRecord): Map[String, StoreContents] =
     record.key.fold(restored): key =>
-      val contents = restored.getOrElse(store, Map.empty)
+      val contents = restored.getOrElse(store, StoreContents.empty)
       restored.updated(store, record.value.fold(contents - key)(value => contents.updated(key, Stored(value, record.timestamp.getOrElse(-1L)))))

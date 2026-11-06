@@ -29,7 +29,6 @@ import scala.concurrent.duration.*
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
-import fs2.Chunk
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
@@ -178,7 +177,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       def watch(plane: Engine.Plane[IO]): Engine.Plane[IO] =
         new Engine.Plane[IO]:
           export plane.{ends, followed, poll, purge, read, write}
-          def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], held: Map[String, Map[Chunk[Byte], Stored]]) =
+          def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], held: Map[String, StoreContents]) =
             restores.update(_ :+ from) *> plane.restore(changelogs, from, held)
           def follow(starts: Vector[StartAt]) = follows.update(_ :+ starts) *> plane.follow(starts)
       val member =

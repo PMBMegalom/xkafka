@@ -66,7 +66,7 @@ private[xkafka] final case class Stored(value: Chunk[Byte], timestamp: Long)
   * again.
   */
 private[xkafka] final case class TaskState(
-    stores: Map[String, Map[Chunk[Byte], Stored]],
+    stores: Map[String, StoreContents],
     partitionTimes: Map[String, Long],
     streamTimes: Map[String, Long] = Map.empty,
     clocks: Map[String, Long] = Map.empty,
@@ -77,9 +77,9 @@ private[xkafka] final case class TaskState(
     sequences: Map[String, Int] = Map.empty,
     joinTimes: Map[String, JoinTime] = Map.empty,
     reading: Option[TaskInput] = None,
-    globals: Map[String, Map[Chunk[Byte], Stored]] = Map.empty
+    globals: Map[String, StoreContents] = Map.empty
 ):
-  def store(name: String): Map[Chunk[Byte], Stored] = stores.getOrElse(name, Map.empty)
+  def store(name: String): StoreContents = stores.getOrElse(name, StoreContents.empty)
 
   /** The partition time of the task's partition of `topic`: the largest timestamp read from it, or -1 before any. */
   def partitionTime(topic: String): Long = partitionTimes.getOrElse(topic, -1L)
@@ -354,9 +354,8 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
     * restored.
     */
   private def joinedOthers(state: TaskState, store: String, bytes: Chunk[Byte], from: Long, to: Long): Vector[(Long, Stored)] =
-    state.store(store).toVector.collect:
-      case (held, stored) if held.size == bytes.size + 12 && held.take(bytes.size) == bytes =>
-        (WindowStore.startOf(held), JoinWindowStore.sequenceOf(held), stored)
+    state.store(store).prefixed(bytes).collect:
+      case (held, stored) if held.size == bytes.size + 12 => (WindowStore.startOf(held), JoinWindowStore.sequenceOf(held), stored)
     .filter((at, _, _) => at >= from && at <= to).sortBy((at, sequence, _) => (at, sequence)).map((at, _, stored) => (at, stored))
 
   /** The join's shared store without the records held at `key`, and the tombstone its changelog gets, where it holds any, as Java's
@@ -446,12 +445,11 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       now: Long
   ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
     import join.windows
-    import SharedJoinStore.given
     val time = state.joinTimes.getOrElse(shared, JoinTime.initial)
     // Java adds these as longs, so an earliest time of none wraps below the stream time.
     if time.minTime + after + windows.graceMillis >= time.streamTime || now < time.nextEmit then F.pure((state, Vector.empty, Vector.empty))
     else
-      state.store(shared).toVector.sortBy(_._1).flatTraverse: (key, stored) =>
+      state.store(shared).toVector.flatTraverse: (key, stored) =>
         F.fromOption(SharedJoinStore.elements(stored.value), unreadableJoin(shared)).map(_.map(key -> _))
       .flatMap: elements =>
         val looked =
@@ -501,7 +499,7 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
   ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
     import step.table
     table.key.serializer.serialize(table.topic, Headers.empty, step.select(record.key, record.value)).flatMap: written =>
-      written.flatMap(state.globals.getOrElse(table.store.value, Map.empty).get)
+      written.flatMap(state.globals.getOrElse(table.store.value, StoreContents.empty).get)
         .traverse(held => table.value.deserializer.deserialize(table.topic, Headers.empty, Some(held.value)))
         .map(found => (state, step.join(record.value, found).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
 
@@ -862,9 +860,8 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
           val closeTime  = streamTime - windows.graceMillis - gap
           val entries    = timed.store(store.value)
           val found      =
-            entries.toVector.collect:
-              case (held, stored) if held.size == bytes.size + 16 && held.take(bytes.size) == bytes =>
-                (SessionStore.startOf(held), SessionStore.endOf(held), stored)
+            entries.prefixed(bytes).collect:
+              case (held, stored) if held.size == bytes.size + 16 => (SessionStore.startOf(held), SessionStore.endOf(held), stored)
             .filter((start, end, _) => end >= timestamp - gap && start <= timestamp + gap).sortBy((start, end, _) => (end, start))
           val changed =
             found.traverse((_, _, stored) => value.deserializer.deserialize(changelog, Headers.empty, Some(stored.value))).flatMap: aggregates =>
@@ -921,7 +918,7 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
             throttled.store(store).toVector.map: (held, stored) =>
               (SessionStore.endOf(held), held.take(held.size - 16), SessionStore.startOf(held), stored)
             .filter((end, _, _, _) => end >= lower && end <= upper).sortWith: (a, b) =>
-              a._1 < b._1 || (a._1 == b._1 && (Task.unsigned.compare(a._2, b._2) < 0 || (a._2 == b._2 && a._3 < b._3)))
+              a._1 < b._1 || (a._1 == b._1 && (StoreContents.keys.compare(a._2, b._2) < 0 || (a._2 == b._2 && a._3 < b._3)))
           due.traverse: (end, serialized, start, stored) =>
             (
               key.deserializer.deserialize(changelog, Headers.empty, Some(serialized)),
@@ -1152,7 +1149,7 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
           val due =
             throttled.store(store).toVector.map((stored, held) => (WindowStore.startOf(stored), stored.take(stored.size - 12), held))
               .filter((start, _, _) => start >= lower && start <= upper).sortWith: (a, b) =>
-                a._1 < b._1 || (a._1 == b._1 && Task.unsigned.compare(a._2, b._2) < 0)
+                a._1 < b._1 || (a._1 == b._1 && StoreContents.keys.compare(a._2, b._2) < 0)
           due.traverse: (start, serialized, held) =>
             (
               key.deserializer.deserialize(changelog, Headers.empty, Some(serialized)),
@@ -1304,10 +1301,3 @@ private[xkafka] object Task:
     * `emit.interval.ms.kstreams.windowed.aggregation`, an internal setting of a second.
     */
   val EmitIntervalMillis: Long = 1000L
-
-  /** Bytes compared as unsigned, from the first, as Java orders a store's keys. */
-  val unsigned: Ordering[Chunk[Byte]] =
-    (a, b) =>
-      a.toArray.zipAll(b.toArray, 0: Byte, 0: Byte).zipWithIndex.collectFirst {
-        case ((x, y), _) if x != y => java.lang.Byte.toUnsignedInt(x) - java.lang.Byte.toUnsignedInt(y)
-      }.getOrElse(a.size - b.size)

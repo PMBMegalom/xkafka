@@ -36,11 +36,11 @@ final class WindowStoreSuite extends FunSuite:
     assertEquals(WindowStore.startOf(key), 10000L)
 
   test("a store's clock is its latest window start, or none for an empty store"):
-    assertEquals(WindowStore.clockOf(Map.empty), WindowStore.NoTime)
-    assertEquals(WindowStore.clockOf(Map(stored("a", 5000L), stored("b", 20000L), stored("a", 10000L))), 20000L)
+    assertEquals(WindowStore.clockOf(StoreContents.empty), WindowStore.NoTime)
+    assertEquals(WindowStore.clockOf(StoreContents.of(Map(stored("a", 5000L), stored("b", 20000L), stored("a", 10000L)))), 20000L)
 
   test("a window expires once the clock is a whole retention past its start"):
-    val entries = Map(stored("a", 4999L), stored("a", 5000L), stored("a", 5001L))
+    val entries = StoreContents.of(Map(stored("a", 4999L), stored("a", 5000L), stored("a", 5001L)))
     assertEquals(WindowStore.pruned(entries, clock = 20000L, retention = 15000L).values.map(_.timestamp).toSet, Set(5001L))
     assertEquals(
       WindowStore.prunedAll(Map("windows" -> entries, "counts" -> entries), Map("windows" -> 15000L)).view.mapValues(_.size).toMap,
@@ -48,7 +48,7 @@ final class WindowStoreSuite extends FunSuite:
     )
 
   test("restored stores lose the windows their own clock has expired, and other stores nothing"):
-    val entries = Map(stored("a", 0L), stored("a", 15000L), stored("b", 30000L))
+    val entries = StoreContents.of(Map(stored("a", 0L), stored("a", 15000L), stored("b", 30000L)))
     assertEquals(WindowStore.prunedAll(Map("windows" -> entries), Map("windows" -> 15000L))("windows").values.map(_.timestamp).toSet, Set(30000L))
 
   test("a window changelog keeps a window for the store's retention and a day, as Java declares it, and no longer than Java can say"):
@@ -63,11 +63,11 @@ final class WindowStoreSuite extends FunSuite:
     assertEquals(key.toVector, "k".getBytes.toVector ++ Vector[Byte](0, 0, 0, 0, 0, 0, 0x27, 0x10, 0, 0, 0, 0, 0, 0, 0x03, 0xe8.toByte))
     assertEquals((SessionStore.startOf(key), SessionStore.endOf(key)), (1000L, 10000L))
     val entries =
-      Map(
+      StoreContents.of(Map(
         SessionStore.key(Chunk.array("a".getBytes), 0L, 5000L)      -> Stored(Chunk.empty, 1L),
         key                                                         -> Stored(Chunk.empty, 2L),
         SessionStore.key(Chunk.array("b".getBytes), 20000L, 20000L) -> Stored(Chunk.empty, 3L)
-      )
+      ))
     assertEquals(SessionStore.clockOf(entries), 20000L)
     assertEquals(SessionStore.pruned(entries, 20000L, 10000L).values.map(_.timestamp).toSet, Set(3L))
     assertEquals(WindowStore.prunedAll(Map("s" -> entries), Map("s" -> 10000L), Set("s"))("s").values.map(_.timestamp).toSet, Set(3L))

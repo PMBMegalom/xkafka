@@ -26,13 +26,12 @@ package streams
 import cats.effect.{Async, Resource}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
-import fs2.Chunk
 import driver.{KafkaDriver, PolledRecord, StartAt}
 import xkafka.streams.GlobalStore
 
 /** Keeps a program's global tables on one member, apart from its tasks, as Java's global thread keeps them. */
 private[xkafka] object GlobalStores:
-  type Contents = Map[String, Map[Chunk[Byte], Stored]]
+  type Contents = Map[String, StoreContents]
 
   /** What the tables hold now, and what fails if reading them does. */
   final class Held[F[_]](val contents: F[Contents], val failure: F[Unit])
@@ -42,7 +41,7 @@ private[xkafka] object GlobalStores:
     global.change(record.key, record.value, record.headers).map:
       case None              => contents
       case Some((key, kept)) =>
-        val held = contents.getOrElse(global.store.value, Map.empty)
+        val held = contents.getOrElse(global.store.value, StoreContents.empty)
         contents.updated(global.store.value, kept.fold(held - key)(value => held.updated(key, Stored(value, record.timestamp.getOrElse(-1L)))))
 
   /** Acquired once each table has read to the end of its topic, as Java starts no stream thread before that, the bytes read so far kept as they are,
@@ -62,7 +61,7 @@ private[xkafka] object GlobalStores:
                 .traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F].map(TopicPartition(global.topic, _)))
         )
       _        <- Resource.eval(driver.assign(consumer, starts.toVector, starts.toVector.map(StartAt(_, 0L, -1))))
-      held     <- Resource.eval(F.ref[Contents](globals.map(_.store.value -> Map.empty[Chunk[Byte], Stored]).toMap))
+      held     <- Resource.eval(F.ref[Contents](globals.map(_.store.value -> StoreContents.empty).toMap))
       ready    <- Resource.eval(F.deferred[Unit])
       failed   <- Resource.eval(F.deferred[Throwable])
       stopping <- Resource.eval(F.ref(false))

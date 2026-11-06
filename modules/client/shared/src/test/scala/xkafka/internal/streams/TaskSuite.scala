@@ -62,8 +62,10 @@ final class TaskSuite extends CatsEffectSuite:
     // Restoring drops the windows the store's clock has expired, as the engine and Java's store do.
     val restored =
       TaskState(
-        WindowStore
-          .prunedAll(Map("windows" -> Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L))), Map("windows" -> 15000L)),
+        WindowStore.prunedAll(
+          Map("windows" -> StoreContents.of(Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L)))),
+          Map("windows" -> 15000L)
+        ),
         Map("in" -> 30000L)
       )
     task(windowed, 0).process(restored, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L).map: (state, written) =>
@@ -159,7 +161,7 @@ final class TaskSuite extends CatsEffectSuite:
       second <- running.process(first._1, TaskInput(bytes("k"), bytes(""), 2000L, Headers.empty), 0L)
     yield
       assertEquals(first._1.store("latest").keySet, Set(Chunk.array("k".getBytes)))
-      assertEquals(second._1.store("latest"), Map.empty)
+      assertEquals(second._1.store("latest"), StoreContents.empty)
       assertEquals(second._2.head, TaskOutput(Topic.from("app-latest-changelog").orFail, Some(0), bytes("k"), None, 2000L, Headers.empty))
 
   test("a record whose key its serializer writes as none is not counted, as Java skips a record with a null key"):
@@ -172,7 +174,7 @@ final class TaskSuite extends CatsEffectSuite:
         0
       )
     counted.process(TaskState.empty, TaskInput(bytes("-"), bytes("v"), 1000L, Headers.empty), 0L).map: (state, written) =>
-      assertEquals((state.store("counts"), written), (Map.empty, Vector.empty))
+      assertEquals((state.store("counts"), written), (StoreContents.empty, Vector.empty))
 
   // The values and times Java's outer join of tables writes for these changes (WindowGoldenSuite runs Java's against ours): a delete on the left
   // joins the right's value alone, at the later time, and the right's delete after it, finding neither side, deletes the result, since the outer
@@ -196,4 +198,4 @@ final class TaskSuite extends CatsEffectSuite:
       assertEquals(results, Vector((Some("a1+-"), 1000L), (Some("a1+b1"), 2000L), (Some("-+b1"), 2000L), (None, 3000L)))
       val logged = written.filter(_.topic.value == "app-joined-changelog").map(record => (record.value.isDefined, record.timestamp))
       assertEquals(logged, Vector((true, 1000L), (true, 2000L), (true, 2000L), (false, 3000L)))
-      assertEquals(state.store("joined"), Map.empty)
+      assertEquals(state.store("joined"), StoreContents.empty)

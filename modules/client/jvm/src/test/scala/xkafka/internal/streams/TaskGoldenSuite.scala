@@ -148,7 +148,7 @@ final class TaskGoldenSuite extends CatsEffectSuite:
       (written, states) = ran
       kept <-
         stores.traverse: (name, values) =>
-          states.toList.flatMap(_.store(name).toList).traverse: (key, stored) =>
+          states.toList.flatMap(_.store(name).toVector.toList).traverse: (key, stored) =>
             values.deserialize(in, Headers.empty, Some(stored.value)).map(v => String(key.toArray) -> (v, stored.timestamp))
           .map(name -> _.toMap)
     yield

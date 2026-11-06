@@ -140,11 +140,9 @@ final class RestoreSuite extends CatsEffectSuite:
         yield assertEquals(
           restored,
           Map(
-            "kept" -> Map(
-              text("k1") -> Stored(text("a2"), now + 500),
-              text("k3") -> Stored(text("c"), now + 400),
-              text("k5") -> Stored(text("e"), now + 200)
+            "kept" -> StoreContents.of(
+              Map(text("k1") -> Stored(text("a2"), now + 500), text("k3") -> Stored(text("c"), now + 400), text("k5") -> Stored(text("e"), now + 200))
             ),
-            "none" -> Map.empty
+            "none" -> StoreContents.empty
           )
         )

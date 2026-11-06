@@ -129,13 +129,13 @@ private[xkafka] final case class Buffered(order: SortedSet[(Long, Chunk[Byte])],
   def excluding(key: Chunk[Byte], held: Held): Buffered = Buffered(order - ((held.time, key)), bytes - held.size(key))
 
 private[xkafka] object Buffered:
-  private given Ordering[Chunk[Byte]] = Task.unsigned
+  private given Ordering[Chunk[Byte]] = StoreContents.keys
 
   val empty: Buffered = Buffered(SortedSet.empty, 0L)
 
   /** The index of a buffer's `contents`, as restored from its changelog, where each holds a change. */
-  def of(contents: Map[Chunk[Byte], Stored]): Option[Buffered] =
-    contents.toList.foldLeftM(empty)((index, entry) => Held.decode(entry._2.value).map(index.including(entry._1, _)))
+  def of(contents: StoreContents): Option[Buffered] =
+    contents.toVector.foldLeftM(empty)((index, entry) => Held.decode(entry._2.value).map(index.including(entry._1, _)))
 
 /** The keys a buffer changed since its last commit, which it logs at the commit in the order Java's `HashSet` of them iterates. */
 type Dirty = JavaHashSet[Chunk[Byte]]

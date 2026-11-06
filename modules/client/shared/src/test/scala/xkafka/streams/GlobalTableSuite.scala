@@ -27,7 +27,7 @@ import cats.effect.IO
 import fs2.Chunk
 import munit.CatsEffectSuite
 import internal.driver.PolledRecord
-import internal.streams.{GlobalStores, Stored, Task, TaskInput, TaskState}
+import internal.streams.{GlobalStores, StoreContents, Stored, Task, TaskInput, TaskState}
 
 /** The parts of a global table that do not need Java to compare with, on every platform: what a record does to it, and which programs are refused. */
 final class GlobalTableSuite extends CatsEffectSuite:
@@ -53,13 +53,13 @@ final class GlobalTableSuite extends CatsEffectSuite:
     val global = table
     for
       kept <- GlobalStores.updated(global, Map.empty, polled(Some("k"), Some("v")))
-      _ = assertEquals(kept, Map("gs" -> Map(bytes("k") -> Stored(bytes("v"), 7L))))
+      _ = assertEquals(kept, Map("gs" -> StoreContents.of(Map(bytes("k") -> Stored(bytes("v"), 7L)))))
       again <- GlobalStores.updated(global, kept, polled(Some("k"), Some("w"), 3L))
-      _ = assertEquals(again, Map("gs" -> Map(bytes("k") -> Stored(bytes("w"), 3L))))
+      _ = assertEquals(again, Map("gs" -> StoreContents.of(Map(bytes("k") -> Stored(bytes("w"), 3L)))))
       skipped <- GlobalStores.updated(global, again, polled(None, Some("x")))
       _ = assertEquals(skipped, again)
       gone <- GlobalStores.updated(global, skipped, polled(Some("k"), None))
-    yield assertEquals(gone, Map("gs" -> Map.empty[Chunk[Byte], Stored]))
+    yield assertEquals(gone, Map("gs" -> StoreContents.empty))
 
   test("a record the table cannot read fails"):
     val refusing = Serde(text.serializer, Deserializer.instance[IO, String]((_, _, _) => IO.raiseError(new IllegalArgumentException("unreadable"))))
@@ -73,7 +73,7 @@ final class GlobalTableSuite extends CatsEffectSuite:
     for
       none <- task.process(TaskState.empty, input, 0L)
       _ = assertEquals(none._2, Vector.empty)
-      some <- task.process(TaskState.empty.copy(globals = Map("gs" -> Map(bytes("k") -> Stored(bytes("v"), 1L)))), input, 0L)
+      some <- task.process(TaskState.empty.copy(globals = Map("gs" -> StoreContents.of(Map(bytes("k") -> Stored(bytes("v"), 1L))))), input, 0L)
     yield assertEquals(some._2.map(out => new String(out.value.get.toArray)), Vector("kv"))
 
   test("a table's two nodes are names of the program, which nothing else can take"):
