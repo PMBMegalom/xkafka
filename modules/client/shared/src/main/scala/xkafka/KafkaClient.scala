@@ -57,7 +57,7 @@ trait KafkaClient[F[_]]:
       override def admin(settings: ClientSettings): Resource[G, KafkaAdminClient[G]] = self.admin(settings).map(_.mapK(fk)).mapK(fk)
 
       override def streams(settings: StreamsSettings, topology: Topology[G]): Resource[G, KafkaStreams[G]] =
-        self.streams(settings, topology.mapK(gk)).map(_.mapK(fk)).mapK(fk)
+        self.streams(settings, topology.imapK(gk, fk)).map(_.mapK(fk)).mapK(fk)
 
 object KafkaClient:
   /** The client for the platform this runs on. */

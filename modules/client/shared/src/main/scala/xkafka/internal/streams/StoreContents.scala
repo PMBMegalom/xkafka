@@ -61,6 +61,10 @@ private[xkafka] final case class StoreContents(entries: TreeMap[Chunk[Byte], Sto
   /** The keys starting with `prefix` and what they hold, in order. */
   def prefixed(prefix: Chunk[Byte]): Vector[(Chunk[Byte], Stored)] = StoreContents.starting(entries, prefix).toVector
 
+  /** The keys from `from` to `to`, both included, and what they hold, in order. */
+  def between(from: Chunk[Byte], to: Chunk[Byte]): Vector[(Chunk[Byte], Stored)] =
+    entries.iteratorFrom(from).takeWhile((key, _) => StoreContents.keys.lteq(key, to)).toVector
+
   /** What it holds once `changes` are made, a key with nothing to hold being removed. */
   def after(changes: IterableOnce[(Chunk[Byte], Option[Stored])]): StoreContents =
     StoreContents(

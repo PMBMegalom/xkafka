@@ -96,3 +96,7 @@ cats-tagless `FunctorK` instances. `KafkaProducer` has `mapK`, which needs a
 `Functor` for the target effect, and so no `FunctorK` instance. `KafkaClient.imapK` transforms a complete
 client between effects in both directions while preserving `Resource`
 cancellation semantics.
+
+A streams `Pipeline` or `Topology` changes effect with `imapK`, which also needs
+both directions: a [processor](streams/processors.md) runs its handler in one
+effect and its stores in the other.

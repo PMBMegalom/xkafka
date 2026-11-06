@@ -116,7 +116,7 @@ final class TaskSuite extends CatsEffectSuite:
       KStream(Named("read-5"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .count(Named("count-5"), Store("windows")).toStream(Named("to-stream-5"))
         .to(Named("write-5"), out, Serde.timeWindowed(text, 10.seconds), count)
-    val mapped = Task("app", Topology.of(windowed).orFail.mapK(FunctionK.id[IO]).subtopologies.head, 0)
+    val mapped = Task("app", Topology.of(windowed).orFail.imapK(FunctionK.id[IO], FunctionK.id[IO]).subtopologies.head, 0)
     List(task(windowed, 0), mapped).traverse(_.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L))
       .map(found => assertEquals(found.map(_._2.filter(_.topic == out).map(_.partitionBy)), List(Vector(bytes("k")), Vector(bytes("k")))))
 

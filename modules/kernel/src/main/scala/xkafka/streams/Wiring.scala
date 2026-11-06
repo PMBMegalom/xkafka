@@ -189,7 +189,11 @@ private[xkafka] object Wiring:
     def making(at: Path, node: Describing.Made, named: Boolean = true): Walk[F] =
       copy(nodes = nodes :+ (at.home, node), steps = if named then steps :+ node.name else steps)
 
-    def keeping(at: Path, stores: List[KeptStore]): Walk[F] = copy(kept = kept ++ stores.map(at.home -> _))
+    /** `stores` kept at `at`. A store processors share is kept once, and the processors sharing it are in one sub-topology, as Java's are. */
+    def keeping(at: Path, stores: List[KeptStore]): Walk[F] =
+      stores.foldLeft(this): (walk, store) =>
+        val same = walk.kept.collectFirst { case (home, held) if held.shared.exists(one => store.shared.exists(_ eq one)) => home }
+        same.fold(walk.copy(kept = walk.kept :+ (at.home -> store)))(walk.united(at.home, _))
 
     /** `first` and `second` meeting in one node, noting where that decides which Java numbers first. */
     def meeting(first: Path, second: Path): (Path, Walk[F]) =
@@ -370,12 +374,12 @@ private[xkafka] object Wiring:
             val taken = walking.making(at, Describing.Made(branch.named.value, Describing.Kind.Processor(Nil), List(named.value)))
             arrive(branch.next, at.copy(last = List(branch.named.value), after = at.after || walking.written.size > walk.written.size), taken)
         after
-      case Consumer.Refused(problem, next) => arrive(next, at, walk.copy(problems = walk.problems :+ problem))
-      case Consumer.LeftTable(join)        => reached(join.id, true, at, walk)(tablesJoined(join, _, _, _))
-      case Consumer.RightTable(join)       => reached(join.id, false, at, walk)(tablesJoined(join, _, _, _))
-      case Consumer.LeftStream(join)       => reached(join.id, true, at, walk)(streamsJoined(join, _, _, _))
-      case Consumer.RightStream(join)      => reached(join.id, false, at, walk)(streamsJoined(join, _, _, _))
-      case mapped @ Consumer.Mapped(_, _)  => followed(mapped.expanded, at, walk)
+      case Consumer.Refused(problem, next)   => arrive(next, at, walk.copy(problems = walk.problems :+ problem))
+      case Consumer.LeftTable(join)          => reached(join.id, true, at, walk)(tablesJoined(join, _, _, _))
+      case Consumer.RightTable(join)         => reached(join.id, false, at, walk)(tablesJoined(join, _, _, _))
+      case Consumer.LeftStream(join)         => reached(join.id, true, at, walk)(streamsJoined(join, _, _, _))
+      case Consumer.RightStream(join)        => reached(join.id, false, at, walk)(streamsJoined(join, _, _, _))
+      case mapped @ Consumer.Mapped(_, _, _) => followed(mapped.expanded, at, walk)
 
   /** A side reaching the join `id`, its left where `left` says: it waits if the other has not reached it yet, and otherwise `next` goes on from the
     * two, left first.

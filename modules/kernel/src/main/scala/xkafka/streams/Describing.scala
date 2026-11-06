@@ -80,6 +80,7 @@ private[xkafka] object Describing:
       case Step.Suppress(suppressed, _, _, _)                      => List(s"${suppressed.name}-store")
       case Step.Join(view, _)                                      => stores(view)
       case Step.Cogrouped(_, folding)                              => kept(folding)
+      case Step.Process(processor)                                 => processor.kept.map(_.store.value)
       case _                                                       => Nil
 
   /** The stores Java reads a table's values through, in the order its value getter names them: a suppression's buffer before its table's, and for

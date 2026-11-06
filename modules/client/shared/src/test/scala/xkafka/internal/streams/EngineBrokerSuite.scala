@@ -484,6 +484,23 @@ final class EngineBrokerSuite extends CatsEffectSuite:
                   latest(server, app.output, total(first, second, third))
               stayer.run.race(steps).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure))
 
+    test(s"$release, $under: an engine runs a processor, and one started later restores its store from its changelog and goes on"):
+      val program =
+        (input: Topic, output: Topic) =>
+          val tally = xkafka.streams.KeyValueStore.of(Store("tally"), text, Serde.long[IO])
+          KStream(Named("read-40"), input, text, text).process(
+            Named("processor-40"),
+            xkafka.streams.Processor.withStore(tally): kept =>
+              xkafka.streams.Processor.onRecord: record =>
+                kept.get(record.key).flatMap: seen =>
+                  val total = seen.getOrElse(0L) + 1L
+                  kept.put(record.key, total).as(List(record.withValue(total)))
+          ).to(Named("write-40"), output, text, Serde.long[IO])
+      counting(server, program): app =>
+        produce(server, app.input, Map("a" -> 3, "b" -> 2)) *> running(server, app)(latest(server, app.output, Map("a" -> 3L, "b" -> 2L))) *>
+          produce(server, app.input, Map("a" -> 2, "c" -> 1)) *>
+          running(server, app)(latest(server, app.output, Map("a" -> 5L, "b" -> 2L, "c" -> 1L)))
+
     test(s"$release, $under: an engine counts in windows, its window changelog made as Java declares it, and one started later goes on from it"):
       counting(server, byMinute): app =>
         IO.realTime.flatMap: now =>

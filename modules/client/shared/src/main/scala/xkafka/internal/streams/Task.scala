@@ -24,13 +24,13 @@ package internal
 package streams
 
 import cats.MonadThrow
-import cats.effect.Concurrent
+import cats.effect.{Concurrent, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
 import xkafka.streams.{
-  Consumer, Entry, Joiner, Origin, Release, Source, Step, Store, StreamJoin, StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue,
-  TableView, Window, Windowed
+  Consumer, Entry, Joiner, Origin, Processor, Record, RecordOrigin, Release, Source, Step, Store, StoreAccess, StreamJoin, StreamsJoined, Subtopology,
+  TableKey, TablesJoined, TableValue, TableView, Window, Windowed
 }
 
 /** A record as a topic holds it, read by a task. */
@@ -115,7 +115,7 @@ private[xkafka] final class Task[F[_]](
     subtopology: Subtopology[F],
     partition: Int,
     stores: Map[String, TaskStore[F]] = Map.empty[String, TaskStore[F]]
-)(using F: MonadThrow[F]):
+)(using F: MonadThrow[F], refs: Ref.Make[F]):
   /** A record going from step to step; a table's change also carries the value it replaced, where Java passes one on, and a change a suppression
     * held, where it came from, which Java passes on with it.
     */
@@ -224,10 +224,10 @@ private[xkafka] final class Task[F[_]](
         lookup(join.left.view, record.key, state).flatMap(other =>
           tablesJoined(join, record.key, record.headers, Task.joinRight(join.joiner, change, other, join.next.requests), state, now)
         )
-      case Consumer.LeftStream(join)      => streamsJoined(join, leftSide(join), record, state, now)
-      case Consumer.RightStream(join)     => streamsJoined(join, rightSide(join), record, state, now)
-      case Consumer.Done()                => F.pure((state, Vector.empty))
-      case mapped @ Consumer.Mapped(_, _) => pushed(mapped.expanded, record, state, now)
+      case Consumer.LeftStream(join)         => streamsJoined(join, leftSide(join), record, state, now)
+      case Consumer.RightStream(join)        => streamsJoined(join, rightSide(join), record, state, now)
+      case Consumer.Done()                   => F.pure((state, Vector.empty))
+      case mapped @ Consumer.Mapped(_, _, _) => pushed(mapped.expanded, record, state, now)
 
   /** Each of `records` through `consumer`, in order, after what has been `written`. */
   private def allPushed[K, V](
@@ -563,6 +563,7 @@ private[xkafka] final class Task[F[_]](
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
       case Step.Cogrouped(side, folding)                                 => this.step(folding, record, state, now, asked, Some(side))
+      case Step.Process(processor)                                       => processed(processor, record, state)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
       case joining @ Step.GlobalJoin(_, _, _)                            => globallyJoined(joining, record, state)
@@ -647,6 +648,48 @@ private[xkafka] final class Task[F[_]](
                 next.flatTraverse(value.serializer.serialize(changelog, Headers.empty, _)).map: written =>
                   val after = state.written(store.value, bytes, written.map(Stored(_, timestamp)))
                   Some((after, replaced, TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)))
+
+  /** What `processor` makes of `record`: the records it returns, and what it wrote to its stores, each write kept and logged as it is made, as Java's
+    * logging store does, with the record's time. Nothing it did counts if it fails.
+    */
+  private def processed[K, V, K2, V2](
+      processor: Processor[F, K, V, K2, V2],
+      record: Travelling[K, V],
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
+    def origin(input: TaskInput) =
+      (Topic.from(input.topic).toOption, Partition.from(input.partition).toOption, Offset.from(input.offset).toOption).mapN(RecordOrigin(_, _, _))
+    val read = Record(record.key, record.value, Timestamp.fromEpochMillis(record.timestamp), record.headers, state.reading.flatMap(origin))
+    for
+      working <- Ref.of[F, (TaskState, Vector[TaskOutput])]((state, Vector.empty))
+      access  <- processor.kept.traverse(kept => accessTo(kept.store.value, record.timestamp, working).map(kept.store.value -> _))
+      results <- processor.handling(access.toMap).onRecord(read)
+      ended   <- working.get
+    yield (ended._1, results.toVector.map(result => Travelling(result.key, result.value, result.timestamp.epochMillis, result.headers)), ended._2)
+
+  /** `store` as a processor reads and writes it, through `working`, each write at `timestamp`. */
+  private def accessTo(store: String, timestamp: Long, working: Ref[F, (TaskState, Vector[TaskOutput])]): F[StoreAccess[F]] =
+    topicNamed(s"$application-$store-changelog").map: changelog =>
+      new StoreAccess[F]:
+        val topic: Topic = changelog
+
+        def get(key: Chunk[Byte]): F[Option[Chunk[Byte]]] = working.get.flatMap((state, _) => storedAt(state, store, key)).map(_.map(_.value))
+
+        def put(key: Chunk[Byte], value: Option[Chunk[Byte]]): F[Unit] =
+          working.update: (state, logged) =>
+            (
+              state.written(store, key, value.map(Stored(_, timestamp))),
+              logged :+ TaskOutput(changelog, Some(partition), Some(key), value, timestamp, Headers.empty)
+            )
+
+        def between(from: Chunk[Byte], to: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
+          working.get.flatMap((state, _) => contents(state, store)).map(_.between(from, to).map((key, held) => (key, held.value)))
+
+        def all: F[Vector[(Chunk[Byte], Chunk[Byte])]] =
+          working.get.flatMap((state, _) => contents(state, store)).map(_.toVector.map((key, held) => (key, held.value)))
+
+        def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
+          working.get.flatMap((state, _) => storedUnder(state, store, prefix)).map(_.map((key, held) => (key, held.value)))
 
   /** What Java's table filter makes of a change: its value where `keep` keeps it, and otherwise none, with the old value filtered too; a change from
     * no value to no value goes no further. Java's filter always asks for old values, which every table here can give. Kept in no store, the old value
@@ -1247,7 +1290,8 @@ private[xkafka] final class Task[F[_]](
 private[xkafka] object Task:
   /** A task over each store its sub-topology declares, opened with `open`, holding what `held` gives for it. */
   def over[F[_]](application: String, subtopology: Subtopology[F], partition: Int, held: Map[String, StoreContents], open: TaskStore.Open[F])(using
-      F: MonadThrow[F]
+      F: MonadThrow[F],
+      refs: Ref.Make[F]
   ): F[Task[F]] =
     subtopology.stores.traverse(store => open(store.value, held.getOrElse(store.value, StoreContents.empty)).map(store.value -> _))
       .map(stores => new Task(application, subtopology, partition, stores.toMap))
