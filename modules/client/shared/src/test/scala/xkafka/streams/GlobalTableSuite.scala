@@ -109,10 +109,10 @@ final class GlobalTableSuite extends CatsEffectSuite:
     val topology = Topology.of(two).orFail
     assertEquals(topology.globals.map(_._2.store), List(Store("gs")))
     assertEquals(
-      topology.imapK(identity, identity).globals.map((id, kept) => (id, kept.store, kept.topic)),
+      topology.imapK(identity)(identity).globals.map((id, kept) => (id, kept.store, kept.topic)),
       topology.globals.map((id, kept) => (id, kept.store, kept.topic))
     )
-    assertEquals(Topology.of(two.imapK(identity, identity)).map(_.globals.size), Right(1))
+    assertEquals(Topology.of(two.imapK(identity)(identity)).map(_.globals.size), Right(1))
 
   test("the description names the table's nodes and numbers it where it is first joined"):
     val described = Topology.of(joined(table)).orFail.describe

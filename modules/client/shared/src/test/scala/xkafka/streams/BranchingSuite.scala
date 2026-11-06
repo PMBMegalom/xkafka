@@ -217,11 +217,11 @@ final class BranchingSuite extends CatsEffectSuite:
       left.join(Named("p"), right, JoinWindows(1.second, grace = 0.seconds), Store("p"), text, text, text)(_ + _)
         .forkMerge(Named("back"))(_.filter(Named("a"))((_, _) => true), _.mapValues(Named("b"))(identity)).to(Named("write"), out, text, text)
     val topology = Topology.of(joined).orFail
-    assertEquals(topology.imapK(FunctionK.id[IO], FunctionK.id[IO]).describe.toString, topology.describe.toString)
-    val mapped = Topology.of(joined.imapK(FunctionK.id[IO], FunctionK.id[IO])).orFail
+    assertEquals(topology.imapK(FunctionK.id[IO])(FunctionK.id[IO]).describe.toString, topology.describe.toString)
+    val mapped = Topology.of(joined.imapK(FunctionK.id[IO])(FunctionK.id[IO])).orFail
     assertEquals(mapped.describe.toString, topology.describe.toString)
     assertEquals(mapped.subtopologies.flatMap(_.stores), topology.subtopologies.flatMap(_.stores))
-    val task = Task[IO]("app", topology.imapK(FunctionK.id[IO], FunctionK.id[IO]).subtopologies.head, 0)
+    val task = Task[IO]("app", topology.imapK(FunctionK.id[IO])(FunctionK.id[IO]).subtopologies.head, 0)
     for
       first  <- task.process(TaskState.empty, TaskInput(bytes("k"), bytes("l"), 1000L, Headers.empty, "left"), 0L)
       second <- task.process(first._1, TaskInput(bytes("k"), bytes("r"), 1000L, Headers.empty, "right"), 0L)
@@ -236,9 +236,9 @@ final class BranchingSuite extends CatsEffectSuite:
         .defaultBranch(Named("b"))(_.into(back))
     val topology = Topology.of(read("in").into(chain)).orFail
     assertEquals(topology.subtopologies.head.nodes.size, 2 + 4 * depth)
-    val mapped = Topology.of(read("in").into(chain).imapK(FunctionK.id[IO], FunctionK.id[IO])).orFail
+    val mapped = Topology.of(read("in").into(chain).imapK(FunctionK.id[IO])(FunctionK.id[IO])).orFail
     assertEquals(mapped.subtopologies.head.nodes.size, 2 + 4 * depth)
-    Task[IO]("app", topology.imapK(FunctionK.id[IO], FunctionK.id[IO]).subtopologies.head, 0)
+    Task[IO]("app", topology.imapK(FunctionK.id[IO])(FunctionK.id[IO]).subtopologies.head, 0)
       .process(TaskState.empty, TaskInput(bytes("k"), bytes("a"), 0L, Headers.empty, "in"), 0L).map: (_, written) =>
         assertEquals(written.map(_.topic), Vector(out))
 

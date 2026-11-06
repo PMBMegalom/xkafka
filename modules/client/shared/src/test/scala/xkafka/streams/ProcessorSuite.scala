@@ -241,10 +241,10 @@ final class ProcessorSuite extends CatsEffectSuite:
     val left   = KStream(Named("left"), in, text, text).process(Named("p1"), tally(store)).to(Named("w1"), out, text, count)
     val right  = KStream(Named("right"), Topic.from("in2").orFail, text, text).process(Named("p2"), tally(store)).to(Named("w2"), out, text, count)
     val id     = FunctionK.id[IO]
-    val mapped = Topology.of(left.imapK(id, id), right.imapK(id, id)).orFail
+    val mapped = Topology.of(left.imapK(id)(id), right.imapK(id)(id)).orFail
     assertEquals(mapped.subtopologies.map(_.stores.map(_.value)), List(List("tally")))
     for
-      running <- Task.inMemory[IO]("app", Topology.of(left, right).orFail.imapK(id, id).subtopologies.head, 0)
+      running <- Task.inMemory[IO]("app", Topology.of(left, right).orFail.imapK(id)(id).subtopologies.head, 0)
       first   <- running.process(TaskState.empty, input("a", "x"), 0L)
       second  <- running.process(first._1, input("a", "y"), 0L)
     yield assertEquals(second._2.filter(_.topic == out).flatMap(valueOf), Vector(2L))

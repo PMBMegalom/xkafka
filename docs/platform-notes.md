@@ -99,4 +99,6 @@ cancellation semantics.
 
 A streams `Pipeline` or `Topology` changes effect with `imapK`, which also needs
 both directions: a [processor](streams/processors.md) runs its handler in one
-effect and its stores in the other.
+effect and its stores in the other. They have cats-tagless `InvariantK`
+instances, as do `Transaction` and `KafkaTransactionalProducer`, and a streams
+`Serde` and `KafkaStreams` have `FunctorK` instances.

@@ -29,6 +29,7 @@ import cats.arrow.FunctionK
 import cats.data.{Ior, NonEmptyList}
 import cats.effect.std.Console
 import cats.syntax.all.*
+import cats.tagless.InvariantK
 import fs2.Chunk
 
 /** Why a topology could not be built. */
@@ -227,7 +228,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** Each record with what `processor` makes of it, reading and writing the stores it declares. */
   case Process[F[_], K, V, K2, V2](processor: Processor[F, K, V, K2, V2]) extends Step[F, K, V, K2, V2]
 
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Step[G, K, V, K2, V2] =
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Step[G, K, V, K2, V2] =
     this match
       case Filter(keep)                                            => Filter(keep)
       case Map(change)                                             => Map(change)
@@ -256,8 +257,8 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case Join(view, join)                          => Join(view.mapK(fk), join)
       case ToStream()                                => ToStream()
       case GlobalJoin(table, select, join)           => GlobalJoin(table.mapK(fk), select, join)
-      case Cogrouped(side, step)                     => Cogrouped(side, step.imapK(fk, gk))
-      case Process(processor)                        => Process(processor.imapK(fk, gk))
+      case Cogrouped(side, step)                     => Cogrouped(side, step.imapK(fk)(gk))
+      case Process(processor)                        => Process(processor.imapK(fk)(gk))
 
   /** The stores it keeps. */
   def kept: List[KeptStore] =
@@ -384,14 +385,14 @@ private[xkafka] final class TablesJoined[F[_], K, A, B, R, C1, C2](
     val next: Consumer[F, K, Option[R]],
     val id: AnyRef = new Object
 ):
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): TablesJoined[G, K, A, B, R, C1, C2] =
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): TablesJoined[G, K, A, B, R, C1, C2] =
     TablesJoined(
       named,
       left.mapK(fk),
       right.mapK(fk),
       joiner,
       store.map((stored, key, value) => (stored, key.mapK(fk), value.mapK(fk))),
-      next.imapK(fk, gk),
+      next.imapK(fk)(gk),
       id
     )
 
@@ -413,8 +414,8 @@ private[xkafka] final class StreamsJoined[F[_], K, A, B, R](
     val next: Consumer[F, K, R],
     val id: AnyRef = new Object
 ):
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): StreamsJoined[G, K, A, B, R] =
-    StreamsJoined(named, windows, joiner, store, key.mapK(fk), value.mapK(fk), otherValue.mapK(fk), next.imapK(fk, gk), id)
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): StreamsJoined[G, K, A, B, R] =
+    StreamsJoined(named, windows, joiner, store, key.mapK(fk), value.mapK(fk), otherValue.mapK(fk), next.imapK(fk)(gk), id)
 
   /** Its stores: a window store for each side, keeping each for the windows' retention, and the store they share, if any. */
   def kept: List[KeptStore] =
@@ -478,7 +479,7 @@ private[xkafka] enum Joiner[A, B, R]:
 
 /** One way out of a split: the records `keep` gives true for that no earlier branch took, which `next` reads, in the node `named`. */
 private[xkafka] final case class SplitBranch[F[_], K, V](named: Named, keep: (K, V) => Boolean, next: Consumer[F, K, V]):
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): SplitBranch[G, K, V] = SplitBranch(named, keep, next.imapK(fk, gk))
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): SplitBranch[G, K, V] = SplitBranch(named, keep, next.imapK(fk)(gk))
 
 /** What happens to records keyed `K` with values `V`, in the direction they run: each node holds what reads what it gives, and one node can be read
   * from several, so a node is itself and equals nothing else. A join's two sides each hold one object for the join, which what follows the join hangs
@@ -562,33 +563,33 @@ private[xkafka] enum Consumer[F[_], K, V]:
       case Mapped(origin, fk, _) => origin.hashCode * 31 + System.identityHashCode(fk)
       case _                     => System.identityHashCode(this)
 
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Consumer[G, K, V] = Mapped(this, fk, gk)
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Consumer[G, K, V] = Mapped(this, fk, gk)
 
   /** The node itself, with a mapped node's own steps and serdes mapped and what reads it still to be. */
   lazy val expanded: Consumer[F, K, V] =
     this match
-      case Mapped(origin, fk, gk) => origin.mappedBy(fk, gk)
+      case Mapped(origin, fk, gk) => origin.mappedBy(fk)(gk)
       case _                      => this
 
-  private def mappedBy[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Consumer[G, K, V] =
+  private def mappedBy[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Consumer[G, K, V] =
     expanded match
-      case Then(named, step, next)                                              => Then(named, step.imapK(fk, gk), next.imapK(fk, gk))
+      case Then(named, step, next)                                              => Then(named, step.imapK(fk)(gk), next.imapK(fk)(gk))
       case Output(named, topic, key, value)                                     => Output(named, topic, key.mapK(fk), value.mapK(fk))
       case Repartitioning(repartition, key, value, at, always, next, aggregate) =>
-        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.imapK(fk, gk), aggregate)
-      case Beside(table, last, next)      => Beside(table.map(_.imapK(fk, gk)), last, next.imapK(fk, gk))
-      case Fan(children)                  => Fan(children.map(_.imapK(fk, gk)))
-      case Merged(named, next)            => Merged(named, next.imapK(fk, gk))
-      case Cogroup(named, together, next) => Cogroup(named, together, next.imapK(fk, gk))
-      case Copartitioned(next)            => Copartitioned(next.imapK(fk, gk))
-      case Splitting(named, branches)     => Splitting(named, branches.map(_.imapK(fk, gk)))
-      case LeftTable(join)                => LeftTable(join.imapK(fk, gk))
-      case RightTable(join)               => RightTable(join.imapK(fk, gk))
-      case LeftStream(join)               => LeftStream(join.imapK(fk, gk))
-      case RightStream(join)              => RightStream(join.imapK(fk, gk))
-      case Refused(problem, next)         => Refused(problem, next.imapK(fk, gk))
+        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.imapK(fk)(gk), aggregate)
+      case Beside(table, last, next)      => Beside(table.map(_.imapK(fk)(gk)), last, next.imapK(fk)(gk))
+      case Fan(children)                  => Fan(children.map(_.imapK(fk)(gk)))
+      case Merged(named, next)            => Merged(named, next.imapK(fk)(gk))
+      case Cogroup(named, together, next) => Cogroup(named, together, next.imapK(fk)(gk))
+      case Copartitioned(next)            => Copartitioned(next.imapK(fk)(gk))
+      case Splitting(named, branches)     => Splitting(named, branches.map(_.imapK(fk)(gk)))
+      case LeftTable(join)                => LeftTable(join.imapK(fk)(gk))
+      case RightTable(join)               => RightTable(join.imapK(fk)(gk))
+      case LeftStream(join)               => LeftStream(join.imapK(fk)(gk))
+      case RightStream(join)              => RightStream(join.imapK(fk)(gk))
+      case Refused(problem, next)         => Refused(problem, next.imapK(fk)(gk))
       case Done()                         => Done()
-      case mapped @ Mapped(_, _, _)       => mapped.expanded.mappedBy(fk, gk)
+      case mapped @ Mapped(_, _, _)       => mapped.expanded.mappedBy(fk)(gk)
 
   /** Whether what reads a table's changes here asks for their old values: a side of a table join does where its kind of join reads them, or what
     * reads the join asks, a fan where any of its children does, and nothing else after a table does unless a step of it does. Each node works it out
@@ -622,7 +623,7 @@ private[xkafka] sealed trait Entry[F[_]]:
   def origin: Origin[F, K, V]
   def consumer: Consumer[F, K, V]
 
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Entry[G] = Entry(origin.mapK(fk), consumer.imapK(fk, gk))
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Entry[G] = Entry(origin.mapK(fk), consumer.imapK(fk)(gk))
 
 private[xkafka] object Entry:
   def apply[F[_], K0, V0](origin: Origin[F, K0, V0], consumer: Consumer[F, K0, V0]): Entry[F] = Of(origin, consumer)
@@ -646,8 +647,8 @@ private[xkafka] final case class Subtopology[F[_]](
     repartitions: List[Repartition],
     nodes: List[Describing.Made]
 ):
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Subtopology[G] =
-    Subtopology(entries.map(_.imapK(fk, gk)), copartitioned, buildOrdered, unstartable, kept, repartitions, nodes)
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Subtopology[G] =
+    Subtopology(entries.map(_.imapK(fk)(gk)), copartitioned, buildOrdered, unstartable, kept, repartitions, nodes)
 
   /** The topics it reads, its own first. */
   def origins: List[Source] = entries.flatMap(_.origin.sources)
@@ -1897,10 +1898,14 @@ object KTable:
 /** A pipeline from an input topic to an output topic. */
 final class Pipeline[F[_]] private[xkafka] (private[xkafka] val entries: List[Entry[F]]):
   /** The same pipeline with its effects in `G`. A processor's stores run in `G` and its handlers in `F`, so this needs both directions. */
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Pipeline[G] = new Pipeline(entries.map(_.imapK(fk, gk)))
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Pipeline[G] = new Pipeline(entries.map(_.imapK(fk)(gk)))
 
   /** This pipeline's records and those of `other`, which reads the same join. */
   private[xkafka] def ++(other: Pipeline[F]): Pipeline[F] = new Pipeline(entries ++ other.entries)
+
+object Pipeline:
+  given InvariantK[Pipeline] with
+    override def imapK[F[_], G[_]](pipeline: Pipeline[F])(fk: FunctionK[F, G])(gk: FunctionK[G, F]): Pipeline[G] = pipeline.imapK(fk)(gk)
 
 /** A streams program: its sub-topologies, numbered as a Java program building the same topology numbers them. */
 final class Topology[F[_]] private (
@@ -1913,13 +1918,16 @@ final class Topology[F[_]] private (
   /** The same program with its effects in `G`, as its serdes and effectful steps are mapped. A processor's stores run in `G` and its handlers in `F`,
     * so this needs both directions.
     */
-  def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Topology[G] =
-    new Topology(numbered.map((id, subtopology) => id -> subtopology.imapK(fk, gk)), globals.map((id, global) => id -> global.mapK(fk)))
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Topology[G] =
+    new Topology(numbered.map((id, subtopology) => id -> subtopology.imapK(fk)(gk)), globals.map((id, global) => id -> global.mapK(fk)))
 
   /** What the program runs: its topics, steps, stores and repartitions, which `toString` writes as Java Kafka Streams' `Topology.describe` does. */
   def describe: TopologyDescription = Describing(this, repartition => s"${repartition.value}-repartition")
 
 object Topology:
+  given InvariantK[Topology] with
+    override def imapK[F[_], G[_]](topology: Topology[F])(fk: FunctionK[F, G])(gk: FunctionK[G, F]): Topology[G] = topology.imapK(fk)(gk)
+
   /** The longest store or repartition name, as Java allows. */
   val MaxNameLength = 249
 

@@ -160,7 +160,7 @@ final class Processor[F[_], K, V, K2, V2] private (
     private[xkafka] val handling: Map[String, StoreAccess[F]] => ProcessorLogic[F, K, V, K2, V2]
 ):
   /** The same processor with its effects in `G`: its stores come from `G` and its handlers go to it. */
-  private[xkafka] def imapK[G[_]](fk: FunctionK[F, G], gk: FunctionK[G, F]): Processor[G, K, V, K2, V2] =
+  private[xkafka] def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Processor[G, K, V, K2, V2] =
     new Processor(kept, access => handling(access.view.mapValues(_.imapK(gk)).toMap).mapK(fk))
 
 object Processor:

@@ -29,6 +29,7 @@ import scala.concurrent.duration.FiniteDuration
 import cats.{ApplicativeThrow, MonadThrow}
 import cats.arrow.FunctionK
 import cats.syntax.all.*
+import cats.tagless.FunctorK
 import fs2.Chunk
 
 /** How a streams program writes and reads one type, since a streams application both writes and reads its topics. */
@@ -39,6 +40,9 @@ final case class Serde[F[_], A](serializer: Serializer[F, A], deserializer: Dese
   def option(using F: cats.Applicative[F]): Serde[F, Option[A]] = Serde(serializer.option, deserializer.option)
 
 object Serde:
+  given [A]: FunctorK[[F[_]] =>> Serde[F, A]] with
+    override def mapK[F[_], G[_]](serde: Serde[F, A])(fk: FunctionK[F, G]): Serde[G, A] = serde.mapK(fk)
+
   /** Bytes as they are. */
   def bytes[F[_]: ApplicativeThrow]: Serde[F, Chunk[Byte]] = Serde(Serializer.bytes[F], Deserializer.bytes[F])
 

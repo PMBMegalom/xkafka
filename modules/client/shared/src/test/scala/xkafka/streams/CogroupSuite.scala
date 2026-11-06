@@ -141,7 +141,7 @@ final class CogroupSuite extends CatsEffectSuite:
     val program =
       two.windowedBy(TimeWindows.tumbling(10.seconds, grace = 0.seconds)).withRetention(5.minutes).aggregate(Named("co"), Store("kept"), text)("s")
         .toStream(Named("c")).selectKey(Named("k"))((windowed, _) => windowed.key).to(Named("w"), topic("out"), text, text)
-    val mapped = Topology.of(program).orFail.imapK(cats.arrow.FunctionK.id[IO], cats.arrow.FunctionK.id[IO])
+    val mapped = Topology.of(program).orFail.imapK(cats.arrow.FunctionK.id[IO])(cats.arrow.FunctionK.id[IO])
     assertEquals(mapped.subtopologies.flatMap(_.stores), List(Store("kept")))
     val task    = Task[IO]("app", mapped.subtopologies.head, 0)
     val records = List(("a", "1", 100000L), ("b", "2", 1000L), ("a", "3", 1000L))
