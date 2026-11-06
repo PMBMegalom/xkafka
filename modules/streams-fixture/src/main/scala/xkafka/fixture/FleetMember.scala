@@ -71,6 +71,14 @@ object FleetMember:
         val users = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
         builder.stream[String, String](s"$application-input-orders").join(users, (order: String, user: String) => s"$order:$user")
           .to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
+      case "globals" =>
+        // Built after the stream that joins it, which is how xkafka numbers the sub-topologies around it.
+        val orders = builder.stream[String, String](s"$application-input-orders")
+        orders.join(
+          builder.globalTable[String, String](s"$application-input-users", Materialized.as("users")),
+          (key: String, _: String) => key,
+          (order: String, user: String) => s"$order:$user"
+        ).to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
       case "tables" =>
         val users    = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
         val accounts = Materialized.as[String, String, KeyValueStore[Bytes, Array[Byte]]]("accounts").withValueSerde(Serdes.String)

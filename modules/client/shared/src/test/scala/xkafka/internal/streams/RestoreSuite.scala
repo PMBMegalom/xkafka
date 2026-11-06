@@ -67,6 +67,26 @@ final class RestoreSuite extends CatsEffectSuite:
           .use(_.createTopics(NonEmptySet.fromSetUnsafe(scala.collection.immutable.SortedSet.from(made)(using Ordering.by(_.topic.value)))))
     yield ()
 
+  for
+    broker    <- server.toList
+    isolation <- List("read_uncommitted", "read_committed")
+  do
+    test(s"a global table under $isolation has read its whole topic once acquired, however many polls that takes"):
+      Names.fresh:
+        val table    = topic("global")
+        val keys     = (0 until 2000).toList.map(n => s"key-$n")
+        val text     = xkafka.streams.Serde.utf8[IO]
+        val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> isolation), reportEnds = true)
+          )(driver.destroyConsumer)
+        create(broker, table) *> transactionally(broker)(
+          _.produce(NonEmptyList.fromListUnsafe(keys.zipWithIndex.map((key, n) => record(table, n % 2, key, Some("v"), 1000L)))).void
+        ) *> consumer.use: client =>
+          GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
+            held.contents.map(contents => assertEquals(contents("gs").keySet.map(key => new String(key.toArray)), keys.toSet))
+
   /** A consumer reading under read_committed and reporting the ends it reaches, as the engine's restore consumer does. */
   private def restoring(server: String): Resource[IO, driver.Client] =
     Resource.make(

@@ -24,10 +24,12 @@ package streams
 
 import scala.concurrent.duration.FiniteDuration
 
-import cats.{Applicative, ApplicativeThrow, Show}
+import cats.{Applicative, ApplicativeThrow, MonadThrow, Show}
 import cats.arrow.FunctionK
 import cats.data.{Ior, NonEmptyList}
 import cats.effect.std.Console
+import cats.syntax.all.*
+import fs2.Chunk
 
 /** Why a topology could not be built. */
 enum TopologyError derives CanEqual:
@@ -211,6 +213,12 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** Each change to the table, as a record. */
   case ToStream[F[_], K, V]() extends Step[F, K, V, K, V]
 
+  /** Each record with what `join` makes of it and the value `table` holds for the key `select` gives, or none if it holds none, as Java's join of a
+    * stream with a global table reads it when the record comes; a record `join` makes nothing of is dropped.
+    */
+  case GlobalJoin[F[_], K, V, GK, GV, R](table: GlobalKTable[F, GK, GV], select: (K, V) => GK, join: (V, Option[GV]) => Option[R])
+      extends Step[F, K, V, K, R]
+
   /** The fold `step` as one side of a cogroup, numbered `side`: each folds into one store, which the first keeps, and has a stream time of its own,
     * as each of Java's processors does.
     */
@@ -244,6 +252,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case Suppress(suppressed, key, value, release) => Suppress(suppressed, key.mapK(fk), value.mapK(fk), release)
       case Join(view, join)                          => Join(view.mapK(fk), join)
       case ToStream()                                => ToStream()
+      case GlobalJoin(table, select, join)           => GlobalJoin(table.mapK(fk), select, join)
       case Cogrouped(side, step)                     => Cogrouped(side, step.mapK(fk))
 
   /** The stores it keeps. */
@@ -261,6 +270,12 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case Suppress(suppressed, _, _, _)                              => List(KeptStore(Store(s"${suppressed.name}-store"), buffer = true))
       case Cogrouped(side, step)                                      => if side == 0 then step.kept else Nil
       case _                                                          => Nil
+
+  /** The global table it reads, if any. */
+  def global: Option[GlobalStore[F]] =
+    this match
+      case GlobalJoin(table, _, _) => Some(table)
+      case _                       => None
 
   /** Whether it may give its records a new key. */
   def rekeys: Boolean =
@@ -736,6 +751,17 @@ sealed trait KStream[F[_], K, V]:
 
   /** Sends each record down the first branch that takes it, as Java's `split` does, each branch's name added to `named` to name its node. */
   def split(named: Named): Split[F, K, V, Keying, Out] = new Split(named, this, Vector.empty)
+
+  /** Each record with what `join` makes of it and the value of the key `select` gives in `table`, in the step `named`, as Java's join of a stream
+    * with a global table: a record whose key `table` holds no value for is dropped. The records stay in their partitions, and need not be
+    * copartitioned with `table`, which every member reads whole.
+    */
+  def join[GK, GV, R](named: Named, table: GlobalKTable[F, GK, GV])(select: (K, V) => GK)(join: (V, GV) => R): Kept[K, R] =
+    kept(named, Step.GlobalJoin(table, select, (value, found) => found.map(join(value, _))))
+
+  /** As `join` with a global table, a record whose key `table` holds no value for going on with none. */
+  def leftJoin[GK, GV, R](named: Named, table: GlobalKTable[F, GK, GV])(select: (K, V) => GK)(join: (V, Option[GV]) => R): Kept[K, R] =
+    kept(named, Step.GlobalJoin(table, select, (value, found) => Some(join(value, found))))
 
   /** Keeps the records `keep` gives true for. */
   def filter(named: Named)(keep: (K, V) => Boolean): Kept[K, V] = kept(named, Step.Filter(keep))
@@ -1434,6 +1460,54 @@ private[xkafka] object SessionWindowedKStream:
           else Option.when(asked.toMillis < least)(s"the retention must be at least ${windows.retentionRule}, ${least} ms, was $asked")
     (found.map(TopologyError.InvalidWindows(store.value, _)), retention.fold(least)(_.toMillis))
 
+/** A global table as the engine keeps it, whose key and value types only it knows. */
+private[xkafka] sealed trait GlobalStore[F[_]]:
+  /** What is the same however the table is mapped, by which the program's joins of one table are told apart from those of another. */
+  private[xkafka] def identity: AnyRef
+  private[xkafka] def named: Named
+  private[xkafka] def topic: Topic
+  private[xkafka] def store: Store
+
+  /** What a record read from the topic does to the store once the table is up to date, as Java's global task reads it and its table source keeps it:
+    * the key and the value to keep, or none to delete the key, written as the table's serdes write them, or nothing for a record without a key. A
+    * record the table cannot read fails.
+    */
+  private[xkafka] def change(key: Option[Chunk[Byte]], value: Option[Chunk[Byte]], headers: Headers)(using
+      MonadThrow[F]
+  ): F[Option[(Chunk[Byte], Option[Chunk[Byte]])]]
+
+  private[xkafka] def mapK[G[_]](fk: FunctionK[F, G]): GlobalStore[G]
+
+/** A topic's latest value for each key, kept whole by every member of the application, as Java's `GlobalKTable`. A stream joins it by a key taken
+  * from each record, so the topic need not be copartitioned with anything. Records are read from it apart from the application's tasks, and no
+  * changelog backs it: a member reads the topic to its end as it starts, then follows it.
+  */
+final class GlobalKTable[F[_], K, V] private (
+    private[xkafka] val identity: AnyRef,
+    private[xkafka] val named: Named,
+    private[xkafka] val topic: Topic,
+    private[xkafka] val key: Serde[F, K],
+    private[xkafka] val value: Serde[F, V],
+    private[xkafka] val store: Store
+) extends GlobalStore[F]:
+  private[xkafka] def change(key: Option[Chunk[Byte]], value: Option[Chunk[Byte]], headers: Headers)(using
+      MonadThrow[F]
+  ): F[Option[(Chunk[Byte], Option[Chunk[Byte]])]] =
+    key.flatTraverse: bytes =>
+      this.key.deserializer.deserialize(topic, headers, Some(bytes)).flatMap(this.key.serializer.serialize(topic, headers, _)).flatMap:
+        _.traverse: written =>
+          value.flatTraverse(bytes =>
+            this.value.deserializer.deserialize(topic, headers, Some(bytes)).flatMap(this.value.serializer.serialize(topic, headers, _))
+          ).map(written -> _)
+
+  private[xkafka] def mapK[G[_]](fk: FunctionK[F, G]): GlobalKTable[G, K, V] =
+    new GlobalKTable(identity, named, topic, key.mapK(fk), value.mapK(fk), store)
+
+object GlobalKTable:
+  /** The table of `topic`, kept in `store`, in the nodes `<named>-source` and `named`, as Java names them. */
+  def apply[F[_], K, V](named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V], store: Store): GlobalKTable[F, K, V] =
+    new GlobalKTable(new Object, named, topic, key, value, store)
+
 /** How a table's keys are written in a suppression's buffer: as the table's key serde writes them, or, for a windowed table, as Java's windowed
   * serdes write a windowed key.
   */
@@ -1817,9 +1891,16 @@ final class Pipeline[F[_]] private[xkafka] (private[xkafka] val entries: List[En
   private[xkafka] def ++(other: Pipeline[F]): Pipeline[F] = new Pipeline(entries ++ other.entries)
 
 /** A streams program: its sub-topologies, numbered as a Java program building the same topology numbers them. */
-final class Topology[F[_]] private (private[xkafka] val subtopologies: List[Subtopology[F]]):
+final class Topology[F[_]] private (
+    private[xkafka] val numbered: List[(Int, Subtopology[F])],
+    private[xkafka] val globals: List[(Int, GlobalStore[F])]
+):
+  /** Its sub-topologies, without the numbers Java gives them, which its global tables also take. */
+  private[xkafka] def subtopologies: List[Subtopology[F]] = numbered.map(_._2)
+
   /** The same program with its effects in `G`, as its serdes and effectful steps are mapped. */
-  def mapK[G[_]](fk: FunctionK[F, G]): Topology[G] = new Topology(subtopologies.map(_.mapK(fk)))
+  def mapK[G[_]](fk: FunctionK[F, G]): Topology[G] =
+    new Topology(numbered.map((id, subtopology) => id -> subtopology.mapK(fk)), globals.map((id, global) => id -> global.mapK(fk)))
 
   /** What the program runs: its topics, steps, stores and repartitions, which `toString` writes as Java Kafka Streams' `Topology.describe` does. */
   def describe: TopologyDescription = Describing(this, repartition => s"${repartition.value}-repartition")
@@ -1830,14 +1911,14 @@ object Topology:
 
   def of[F[_]](first: Pipeline[F], rest: Pipeline[F]*): Either[NonEmptyList[TopologyError], Topology[F]] =
     val wired        = Wiring(first :: rest.toList)
-    val stores       = wired.subtopologies.flatMap(_.stores).map(_.value)
+    val stores       = wired.subtopologies.flatMap(_.stores).map(_.value) ++ wired.globals.map(_._2.store.value)
     val repartitions = wired.subtopologies.flatMap(_.origins).collect { case Source.Repartitioned(named) if named.value.nonEmpty => named.value }
     def twice[A](values: List[A]) = values.groupBy(identity).collect { case (value, all) if all.size > 1 => value }.toList
     val problems                  =
       wired.problems ++ (stores ++ repartitions ++ wired.steps).flatMap(invalid) ++ twice(wired.steps).sorted.map(TopologyError.DuplicateName(_)) ++
         twice(stores).sorted.map(TopologyError.DuplicateStore(_)) ++ twice(repartitions).sorted.map(TopologyError.DuplicateRepartition(_)) ++
         twice(wired.inputs).sortBy(_.value).map(TopologyError.DuplicateSource(_))
-    NonEmptyList.fromList(problems.distinct).toLeft(new Topology(wired.subtopologies))
+    NonEmptyList.fromList(problems.distinct).toLeft(new Topology(wired.numbered, wired.globals))
 
   private def invalid(name: String): Option[TopologyError] =
     def legal(c: Char) =

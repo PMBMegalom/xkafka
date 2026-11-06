@@ -77,13 +77,18 @@ private[xkafka] object Declaration:
             case TopologyDescription.Node.Processor(name, stores, successors, _) => StreamsGroup
                 .DescribedNode(name, 2, Nil, None, stores.sorted, successors.sorted)
             case TopologyDescription.Node.Sink(name, topic, _) => StreamsGroup.DescribedNode(name, 3, Nil, Some(topic), Nil, Nil)
+        ),
+      description.globalStores.map: store =>
+        StreamsGroup.DescribedGlobalStore(
+          StreamsGroup.DescribedNode(store.source.name, 1, store.source.topics, None, Nil, store.source.successors),
+          StreamsGroup.DescribedNode(store.processor.name, 2, Nil, None, store.processor.stores, Nil)
         )
     )
 
   def apply[F[_]](application: String, topology: Topology[F], replicationFactor: Short = BrokerReplication): StreamsGroup.Topology =
     def repartitionTopic(name: String) = s"$application-$name-repartition"
     val subtopologies                  =
-      topology.subtopologies.zipWithIndex.map: (subtopology, id) =>
+      topology.numbered.map: (id, subtopology) =>
         val sources      = subtopology.origins.collect { case Source.Input(topic) => topic.value }.sorted
         val repartitions = subtopology.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.value) }.sorted
         // Java keeps each copartition group as a HashSet of its topics' names, and its groups in a HashSet of those, and sends each as indices into the

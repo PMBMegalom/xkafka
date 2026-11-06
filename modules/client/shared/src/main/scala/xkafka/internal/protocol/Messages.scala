@@ -329,7 +329,10 @@ private[xkafka] object StreamsGroup:
   final case class EndpointPartitions(endpoint: Endpoint, active: List[TopicPartitions], standby: List[TopicPartitions])
 
   /** A topology's processing nodes, by sub-topology, as a member describes them to the coordinator. */
-  final case class Description(subtopologies: List[DescribedSubtopology])
+  final case class Description(subtopologies: List[DescribedSubtopology], globalStores: List[DescribedGlobalStore] = Nil)
+
+  /** A global table's two nodes. */
+  final case class DescribedGlobalStore(source: DescribedNode, processor: DescribedNode)
 
   final case class DescribedSubtopology(id: String, nodes: List[DescribedNode])
 
@@ -343,9 +346,9 @@ private[xkafka] object StreamsGroup:
       successors: List[String]
   )
 
-  /** A description with no global stores, which xkafka programs do not have yet. */
   private[protocol] def writeDescription(description: Description): ByteVector =
-    compactArray(description.subtopologies)(writeDescribedSubtopology) ++ compactArray(List.empty[Unit])(_ => ByteVector.empty) ++ noTags
+    compactArray(description.subtopologies)(writeDescribedSubtopology) ++
+      compactArray(description.globalStores)(store => writeDescribedNode(store.source) ++ writeDescribedNode(store.processor) ++ noTags) ++ noTags
 
   private def writeDescribedSubtopology(subtopology: DescribedSubtopology): ByteVector =
     compactString(subtopology.id) ++ compactArray(subtopology.nodes)(writeDescribedNode) ++ noTags

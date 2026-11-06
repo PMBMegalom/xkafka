@@ -32,7 +32,14 @@ package streams
 private[xkafka] object Wiring:
   /** A program as the walk found it: its sub-topologies in the order Java numbers them, what is wrong with it, its steps' names, and each topic read.
     */
-  final case class Wired[F[_]](subtopologies: List[Subtopology[F]], problems: List[TopologyError], steps: List[String], inputs: List[Topic])
+  final case class Wired[F[_]](
+      numbered: List[(Int, Subtopology[F])],
+      globals: List[(Int, GlobalStore[F])],
+      problems: List[TopologyError],
+      steps: List[String],
+      inputs: List[Topic]
+  ):
+    def subtopologies: List[Subtopology[F]] = numbered.map(_._2)
 
   /** Where a node's records have come from, as far as the walk has followed them: a topic of its sub-topology; the node they came out of; the topics
     * a join copartitions for these records, which Java's streams and tables pass on from step to step, the sides' or parents' together after a join
@@ -161,6 +168,7 @@ private[xkafka] object Wiring:
       joins: Vector[List[Source]],
       unsure: Vector[List[Source]],
       unstartable: Vector[List[Source]],
+      globals: Vector[GlobalStore[F]],
       problems: Vector[TopologyError],
       steps: Vector[String]
   ):
@@ -228,29 +236,39 @@ private[xkafka] object Wiring:
         Vector.empty,
         Vector.empty,
         Vector.empty,
+        Vector.empty,
         Vector.empty
       )
     val walked                                          = own.foldLeft(start)((walk, entry) => entered(entry, false, walk))
     val unfed                                           = walked.readers.keys.toList.sorted.map(TopologyError.UnfedTable(_))
     def of[A](found: Vector[(Source, A)], home: Source) = found.collect { case (source, value) if walked.homeOf(source) == home => value }.toList
     val inputs = (own ++ walked.found.map(_._1).filterNot(entry => own.exists(identified(_) == identified(entry)))).flatMap(_.origin.sources)
-      .collect { case Source.Input(topic) => topic }
-    val subtopologies =
-      walked.found.flatMap(_._1.origin.sources).map(walked.homeOf).distinct
-        .sortBy(home => walked.found.flatMap(_._1.origin.sources).filter(walked.homeOf(_) == home).map(walked.written.indexOf(_)).min).toList.map:
-          home =>
-            val (beside, entries) = walked.found.filter((entry, _) => walked.homeOf(entry.origin.sources.head) == home).toList.partition(_._2)
-            val inside            = (topics: List[Source]) => topics.headOption.exists(walked.homeOf(_) == home)
-            Subtopology(
-              (entries ++ beside).map(_._1),
-              groups(walked.joins.toList.filter(inside)),
-              walked.unsure.toList.filter(inside).distinct,
-              walked.unstartable.toList.filter(inside),
-              of(walked.kept, home),
-              of(walked.repartitions, home),
-              of(walked.nodes, home)
-            )
-    Wired(subtopologies, walked.problems.toList ++ unfed, walked.steps.toList, inputs)
+      .collect { case Source.Input(topic) => topic } ++ walked.globals.map(_.topic)
+    def subtopology(home: Source): Subtopology[F] =
+      val (beside, entries) = walked.found.filter((entry, _) => walked.homeOf(entry.origin.sources.head) == home).toList.partition(_._2)
+      val inside            = (topics: List[Source]) => topics.headOption.exists(walked.homeOf(_) == home)
+      Subtopology(
+        (entries ++ beside).map(_._1),
+        groups(walked.joins.toList.filter(inside)),
+        walked.unsure.toList.filter(inside).distinct,
+        walked.unstartable.toList.filter(inside),
+        of(walked.kept, home),
+        of(walked.repartitions, home),
+        of(walked.nodes, home)
+      )
+    val homes =
+      walked.found.flatMap(_._1.origin.sources).map(walked.homeOf).distinct.map: home =>
+        walked.found.flatMap(_._1.origin.sources).filter(walked.homeOf(_) == home).map(walked.written.indexOf(_)).min -> Left(home)
+    val tables = walked.globals.map(global => walked.written.indexOf(Source.Input(global.topic)) -> Right(global))
+    // A global table takes a number as Java's builder groups its source and processor, in the order it is made.
+    val placed = (homes ++ tables).sortBy(_._1).map(_._2).zipWithIndex.toList
+    Wired(
+      placed.collect { case (Left(home), id) => id -> subtopology(home) },
+      placed.collect { case (Right(global), id) => id -> global },
+      walked.problems.toList ++ unfed,
+      walked.steps.toList,
+      inputs
+    )
 
   /** The copartition groups each join's topics make, as Java makes them: a join's topics go in the group of the first it finds already in one, and
     * all of them then belong to that group; a group that has lost all its topics to another is gone.
@@ -288,7 +306,12 @@ private[xkafka] object Wiring:
     consumer match
       case Consumer.Then(named, step, next) =>
         val after = at.through(step).copy(last = List(named.value))
-        val made  = walk.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
+        // A global table is made where the program first joins it.
+        val tabled =
+          step.global.filterNot(global => walk.globals.exists(_.identity eq global.identity)).fold(walk): global =>
+            walk.copy(globals = walk.globals :+ global, steps = walk.steps ++ List(s"${global.named.value}-source", global.named.value))
+              .writing(List(Source.Input(global.topic)))
+        val made = tabled.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
         arrive(next, after, made.coming(named.value, after))
       case Consumer.Output(named, topic, _, _) => walk.making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
       case Consumer.Done()                     => walk

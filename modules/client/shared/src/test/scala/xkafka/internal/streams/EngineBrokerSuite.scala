@@ -34,8 +34,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, Flow, JoinWindows, KStream, KTable, Named, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store,
-  StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
+  ApplicationId, Flow, GlobalKTable, JoinWindows, KStream, KTable, Named, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows,
+  SlidingWindows, Store, StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -706,6 +706,87 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             streams.run.race(refused.timeout(2.minutes)).flatMap:
               case Left(_)  => IO.raiseError(new AssertionError("the application stopped"))
               case Right(_) => IO.unit
+
+    test(s"$release, $under: an engine reads a global table of another partition count to its end before its first record, then follows it"):
+      val keys = (0 until 12).toList.map(n => s"key-$n")
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-35"), orders, text, text)
+            .leftJoin(Named("join-35"), GlobalKTable(Named("table-35"), Topic.from(s"${orders.value}-table").orFail, text, text, Store("table-35")))(
+              (_, v) => v
+            )((order, name) => s"$order:${name.getOrElse("none")}").to(Named("write-35"), output, text, text)
+      ): app =>
+        val table = Topic.from(s"${app.input.value}-table").orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(table, 5, 1).orFail))) *>
+          produceValues(server, table, keys.map(k => k -> Some(s"name-$k"))) *> produceValues(server, app.input, keys.map(k => s"o-$k" -> Some(k))) *>
+          running(server, app):
+            latestValues(server, app.output, keys.map(k => s"o-$k" -> Some(s"$k:name-$k")).toMap) *>
+              produceValues(server, table, List("key-0" -> Some("renamed"), "key-1" -> None, "new" -> Some("added"))) *> IO.sleep(5.seconds) *>
+              produceValues(server, app.input, List("o-a" -> Some("key-0"), "o-b" -> Some("key-1"), "o-c" -> Some("new"), "o-d" -> Some("absent"))) *>
+              latestValues(
+                server,
+                app.output,
+                keys.map(k => s"o-$k" -> Some(s"$k:name-$k")).toMap ++
+                  Map("o-a" -> Some("key-0:renamed"), "o-b" -> Some("key-1:none"), "o-c" -> Some("new:added"), "o-d" -> Some("absent:none"))
+              )
+
+    test(s"$release, $under: an engine runs a sub-topology numbered after a global table, whose number no task takes"):
+      counting(
+        server,
+        (orders, output) =>
+          val table = Topic.from(s"${orders.value}-table").orFail
+          val more  = Topic.from(s"${orders.value}-more").orFail
+          KStream(Named("read-38"), orders, text, text).join(Named("join-38"), GlobalKTable(Named("table-38"), table, text, text, Store("table-38")))(
+            (_, v) => v
+          )((order, name) => s"$order:$name").to(Named("write-38"), output, text, text) ++ KStream(Named("read-39"), more, text, text)
+            .to(Named("write-39"), output, text, text)
+      ): app =>
+        val table = Topic.from(s"${app.input.value}-table").orFail
+        val more  = Topic.from(s"${app.input.value}-more").orFail
+        assertEquals(app.topology.numbered.map(_._1), List(0, 2))
+        admin(server).use(_.createTopics(NonEmptySet.of(NewTopic.from(table, 1, 1).orFail, NewTopic.from(more, 2, 1).orFail))) *>
+          produceValues(server, table, List("x" -> Some("name"))) *> produceValues(server, app.input, List("a" -> Some("x"))) *>
+          produceValues(server, more, List("b" -> Some("plain"))) *>
+          running(server, app)(latestValues(server, app.output, Map("a" -> Some("x:name"), "b" -> Some("plain"))))
+
+    test(s"$release, $under: an engine does not start without its global table's topic"):
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-36"), orders, text, text)
+            .join(Named("join-36"), GlobalKTable(Named("table-36"), Topic.from(s"${orders.value}-absent").orFail, text, text, Store("table-36")))(
+              (_, v) => v
+            )(_ + _).to(Named("write-36"), output, text, text)
+      ): app =>
+        val settings = StreamsSettings.from(client(server), ApplicationId.from(app.application).orFail, under).orFail
+        PlatformKafkaClient().streams(settings, app.topology).use(_ => IO.unit).attempt.map(result => assert(result.isLeft, s"it started: $result"))
+
+    test(s"$release, $under: an engine fails on a global table's record it cannot read once it has caught up, not on one it read to catch up"):
+      val refusing =
+        Serde(
+          text.serializer,
+          Deserializer.instance[IO, String]((read, headers, value) =>
+            if value.exists(bytes => new String(bytes.toArray) == "bad") then IO.raiseError(new IllegalArgumentException("unreadable"))
+            else text.deserializer.deserialize(read, headers, value)
+          )
+        )
+      counting(
+        server,
+        (orders, output) =>
+          KStream(Named("read-37"), orders, text, text).leftJoin(
+            Named("join-37"),
+            GlobalKTable(Named("table-37"), Topic.from(s"${orders.value}-table").orFail, text, refusing, Store("table-37"))
+          )((_, v) => v)((order, name) => s"$order:${name.getOrElse("none")}").to(Named("write-37"), output, text, text)
+      ): app =>
+        val table    = Topic.from(s"${app.input.value}-table").orFail
+        val settings = StreamsSettings.from(client(server), ApplicationId.from(app.application).orFail, under).orFail
+        admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(table, 1, 1).orFail))) *>
+          produceValues(server, table, List("early" -> Some("bad"))) *> PlatformKafkaClient().streams(settings, app.topology).use: streams =>
+            streams.run.background.use: outcome =>
+              IO.sleep(5.seconds) *> produceValues(server, table, List("late" -> Some("bad"))) *>
+                outcome.flatMap(_.embedError).attempt.timeout(2.minutes)
+                  .map(result => assertEquals(result.left.toOption.map(_.getMessage), Some("unreadable")))
 
     test(s"$release, $under: an engine started after another left goes on from the offsets it committed and the counts its store holds"):
       counting(server): app =>

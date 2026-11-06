@@ -46,7 +46,16 @@ private[xkafka] object Describing:
       source match
         case Source.Input(read)            => read.value
         case Source.Repartitioned(written) => topic(written)
-    TopologyDescription(topology.subtopologies.zipWithIndex.map((subtopology, id) => described(id, subtopology.nodes.toVector, named)))
+    TopologyDescription(
+      topology.numbered.map((id, subtopology) => described(id, subtopology.nodes.toVector, named)),
+      topology.globals.map: (id, global) =>
+        val source = s"${global.named.value}-source"
+        TopologyDescription.GlobalStore(
+          id,
+          TopologyDescription.Node.Source(source, List(global.topic.value), List(global.named.value)),
+          TopologyDescription.Node.Processor(global.named.value, List(global.store.value), Nil, List(source))
+        )
+    )
 
   /** The node a topic's source makes, and its name. */
   def source[F[_], K, V](origin: Origin[F, K, V]): (Made, String) =

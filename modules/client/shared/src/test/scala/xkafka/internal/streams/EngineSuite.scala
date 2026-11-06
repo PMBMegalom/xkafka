@@ -37,8 +37,8 @@ import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  BufferLimit, KafkaStreams, KStream, KTable, Named, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState,
-  Suppressed, TimeWindows, Topology
+  BufferLimit, GlobalKTable, KafkaStreams, KStream, KTable, Named, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem,
+  StreamsState, Suppressed, TimeWindows, Topology
 }
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
@@ -424,6 +424,22 @@ final class EngineSuite extends CatsEffectSuite:
             StreamsProblem
               .JavaMembersMayBeRefused("Java Streams cannot start a cogroup of app-r-repartition, b, since a group goes through a repartition topic")
           ))
+        )
+
+  test("an application joining a global table says in its state that Java numbers sub-topologies by where its program builds it"):
+    val joined =
+      Topology.of(
+        KStream(Named("in"), Topic.from("in").orFail, text, text)
+          .join(Named("j"), GlobalKTable(Named("g"), Topic.from("g").orFail, text, text, Store("gs")))((_, v) => v)(_ + _)
+          .to(Named("w"), Topic.from("out").orFail, text, text)
+      ).orFail
+    watchedOf(joined): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(StreamsProblem.JavaMembersMayBeRefused(
+            "Java Streams numbers the sub-topologies around the global table of g otherwise unless it builds it after the stream that first joins it"
+          )))
         )
 
   test("an application can stop itself on a state it sees, giving back its tasks as it leaves"):

@@ -34,7 +34,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  JoinWindows, KStream, KTable, Named, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows, Topology
+  GlobalKTable, JoinWindows, KStream, KTable, Named, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows,
+  Topology
 }
 
 /** Java Streams and xkafka members in one application while records keep coming, as members join, leave, restart and are killed: counting records by
@@ -75,6 +76,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     /** Joining each order with each user record of its key at most an hour apart, two streams in windows. */
     case Pairs extends Program("pairs")
 
+    /** Joining each order with its user, from a global table every member reads whole. */
+    case Globals extends Program("globals")
+
   private val windowKinds = List("tumbling", "sliding", "sessions")
 
   /** An application of the fleet's own. */
@@ -99,6 +103,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         case Program.Joins   => List(inputOf("users"), inputOf("orders"), output)
         case Program.Tables  => List(inputOf("users"), inputOf("plans"), output)
         case Program.Pairs   => List(inputOf("users"), inputOf("orders"), output)
+        case Program.Globals => List(inputOf("users"), inputOf("orders"), output)
 
     val topology: Topology[IO] =
       program match
@@ -138,6 +143,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
               text,
               text
             )((order, user) => s"$order:$user").to(Named("write-7"), output, text, text)
+          ).orFail
+        case Program.Globals => Topology.of(
+            KStream(Named("orders"), inputOf("orders"), text, text)
+              .join(Named("join-global"), GlobalKTable(Named("users"), inputOf("users"), text, text, Store("users")))((key, _) => key)(
+                (order, user) => s"$order:$user"
+              ).to(Named("write-8"), output, text, text)
           ).orFail
 
     private def command(text: String): IO[Unit] =
@@ -329,22 +340,25 @@ final class FleetBrokerSuite extends CatsEffectSuite:
   /** Writes a user for each of ten keys, waiting until the changelog of the store `users` names holds them, then records to `topic` while it lasts,
     * `o<n>`, keyed in turn over the ten keys. What it gives stops the writing and then gives each record's key, every record written by then.
     */
-  private def joinsLoad(fleet: Fleet, topic: String, users: String = "users"): Resource[IO, IO[Map[String, String]]] =
-    val producer  = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
-    val records   = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
+  private def joinsLoad(fleet: Fleet, topic: String, users: Option[String] = Some("users")): Resource[IO, IO[Map[String, String]]] =
+    val producer = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
+    val records  = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
+    // A global table has no changelog to watch: a member that is running follows its topic, and one that starts later reads it all first.
     val changelog =
-      Names.fresh:
-        val settings =
-          ConsumerSettings.from(
-            client(fleet.server),
-            ConsumerGroup.from(summon[Names]("xkafka-fleet-reader")).orFail,
-            Deserializer.utf8[IO],
-            Deserializer.utf8[IO],
-            AutoOffsetReset.Earliest
-          ).orFail
-        PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(Topic.from(s"${fleet.application}-$users-changelog").orFail))).use:
-          _.records.map(_.record.key).scan(Set.empty[String])(_ + _).find(_.size == 10).compile.drain
-            .timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"the store $users never held every user")))
+      users.fold(IO.sleep(settle)): store =>
+        Names.fresh:
+          val settings =
+            ConsumerSettings.from(
+              client(fleet.server),
+              ConsumerGroup.from(summon[Names]("xkafka-fleet-reader")).orFail,
+              Deserializer.utf8[IO],
+              Deserializer.utf8[IO],
+              AutoOffsetReset.Earliest
+            ).orFail
+          PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(Topic.from(s"${fleet.application}-$store-changelog").orFail)))
+            .use:
+              _.records.map(_.record.key).scan(Set.empty[String])(_ + _).find(_.size == 10).compile.drain
+                .timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"the store $store never held every user")))
     for
       written <- Resource.eval(IO.ref(Map.empty[String, String]))
       writer  <- producer
@@ -394,7 +408,8 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       // Each plan joins the user the table already holds for its key, so it comes out as an order joined with its user does.
       case Program.Tables => joinsLoad(fleet, "plans").map(_.flatMap(joined(fleet, _)))
       // Each order joins the one user record of its key, which is at most an hour before it, as the table's user would be joined.
-      case Program.Pairs => joinsLoad(fleet, "orders", "pairs-other-join-store").map(_.flatMap(joined(fleet, _)))
+      case Program.Pairs   => joinsLoad(fleet, "orders", Some("pairs-other-join-store")).map(_.flatMap(joined(fleet, _)))
+      case Program.Globals => joinsLoad(fleet, "orders", None).map(_.flatMap(joined(fleet, _)))
 
   private def recording = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
 
@@ -440,13 +455,15 @@ final class FleetBrokerSuite extends CatsEffectSuite:
             app.java(s"j1-${app.application}").allocated.flatMap: (j1, _) =>
               loaded(app).use(stop => IO.sleep(settle) *> app.kill(j1) *> IO.sleep(10.seconds) *> stop)
 
-    test(s"$named: an xkafka member standing by for a Java member restores only what it had not read once the Java member stops"):
-      fleet(broker, guarantee, program): app =>
-        recording.flatMap: (restores, follows) =>
-          app.java(s"j1-${app.application}").allocated.flatMap: (_, stopJ1) =>
-            loaded(app).use: stop =>
-              IO.sleep(settle) *> app.xkafka(restores, follows).surround:
-                eventually("the xkafka member standing by for a task")(follows.get.map(_.exists(_.nonEmpty))) *> IO.sleep(settle) *> stopJ1 *>
-                  eventually("the xkafka member restoring a task from where its standby read to")(
-                    restores.get.map(_.exists(from => from.values.exists(_ > 0)))
-                  ) *> IO.sleep(settle) *> stop
+    // A global table has no changelog, so a program with only that has no store for a member to stand by with.
+    if program != Program.Globals then
+      test(s"$named: an xkafka member standing by for a Java member restores only what it had not read once the Java member stops"):
+        fleet(broker, guarantee, program): app =>
+          recording.flatMap: (restores, follows) =>
+            app.java(s"j1-${app.application}").allocated.flatMap: (_, stopJ1) =>
+              loaded(app).use: stop =>
+                IO.sleep(settle) *> app.xkafka(restores, follows).surround:
+                  eventually("the xkafka member standing by for a task")(follows.get.map(_.exists(_.nonEmpty))) *> IO.sleep(settle) *> stopJ1 *>
+                    eventually("the xkafka member restoring a task from where its standby read to")(
+                      restores.get.map(_.exists(from => from.values.exists(_ > 0)))
+                    ) *> IO.sleep(settle) *> stop

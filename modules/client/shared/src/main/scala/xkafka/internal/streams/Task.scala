@@ -76,7 +76,8 @@ private[xkafka] final case class TaskState(
     buffers: Map[String, Buffered] = Map.empty,
     sequences: Map[String, Int] = Map.empty,
     joinTimes: Map[String, JoinTime] = Map.empty,
-    reading: Option[TaskInput] = None
+    reading: Option[TaskInput] = None,
+    globals: Map[String, Map[Chunk[Byte], Stored]] = Map.empty
 ):
   def store(name: String): Map[Chunk[Byte], Stored] = stores.getOrElse(name, Map.empty)
 
@@ -490,6 +491,20 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
     valueOf(step.view, record.key, state)
       .map(table => (state, step.join(record.value, table.map(_._1)).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
 
+  /** The record with what `step` makes of it and the value its global table holds for the key it selects, read as the table stands when the record
+    * comes. A key its serde writes as none finds nothing, as Java's finds nothing for a null key.
+    */
+  private def globallyJoined[K, V, GK, GV, R](
+      step: Step.GlobalJoin[F, K, V, GK, GV, R],
+      record: Travelling[K, V],
+      state: TaskState
+  ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
+    import step.table
+    table.key.serializer.serialize(table.topic, Headers.empty, step.select(record.key, record.value)).flatMap: written =>
+      written.flatMap(state.globals.getOrElse(table.store.value, Map.empty).get)
+        .traverse(held => table.value.deserializer.deserialize(table.topic, Headers.empty, Some(held.value)))
+        .map(found => (state, step.join(record.value, found).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
+
   /** The other side's value for `key` and its time, where its view finds one; a windowed table has no view, and its joins are refused. */
   private def lookup[K, V](view: Option[TableView[F, K, V]], key: K, state: TaskState): F[Option[(V, Long)]] =
     view.flatTraverse(valueOf(_, key, state))
@@ -524,6 +539,7 @@ private[xkafka] final class Task[F[_]](application: String, subtopology: Subtopo
       case Step.Cogrouped(side, folding)                                 => this.step(folding, record, state, now, asked, Some(side))
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
+      case joining @ Step.GlobalJoin(_, _, _)                            => globallyJoined(joining, record, state)
       case filtering @ Step.TableFilter(_, _, _)                         => tableFiltered(filtering, record, state)
       case mapping @ Step.TableMapValues(_, _, _, _)                     => tableMapped(mapping, record, state, asked)
       case Step.ToTable(lift, store, key, value)                         => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>

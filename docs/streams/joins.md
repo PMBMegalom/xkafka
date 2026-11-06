@@ -214,3 +214,47 @@ is otherwise dropped.
 The two streams are processed together, so their topics must have the same
 number of partitions. To join a stream with itself, see
 [Joining a stream or a table with itself](branching.md#joining-a-stream-or-a-table-with-itself).
+
+## Joining a global table
+
+A `GlobalKTable` holds the latest value of each key of a topic, and every member
+of the application keeps all of it, as with Java Kafka Streams' `GlobalKTable`. It
+suits reference data small enough for each member to hold. A stream joins it by a
+key taken from each record, so the two need not share a key or a number of
+partitions. Here each order is joined with the product named in its value:
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def ordersWithProducts(orders: Topic, products: Topic, output: Topic): Pipeline[IO] =
+  val text    = Serde.utf8[IO]
+  val catalog = GlobalKTable(Named("products"), products, text, text, Store("products"))
+  KStream(Named("orders"), orders, text, text)
+    .join(Named("with-product"), catalog)((_, product) => product)((product, details) => s"$product: $details")
+    .to(Named("write-orders"), output, text, text)
+```
+
+The first function gives the table's key for each record, and the second makes the
+result. `join` drops a record whose key the table holds no value for, and `leftJoin`
+keeps it, passing `None`. The stream keeps its own key through the join, so what
+follows needs no repartition topic on account of it. Later changes to the table do
+not change records already joined.
+
+A member reads the table's topic to its end as it starts, before it joins the
+application, so acquiring the resource waits for that, and fails if the topic does
+not exist. It then follows the topic for as long as it runs. If it cannot read a
+record it finds there, `run` fails. The table's topic is all that backs it, so it has
+no changelog. `Topology.of` refuses a program that also reads that topic elsewhere.
+
+When some members run Java Kafka Streams, the Java program must build the table
+after the stream that first joins it, or the broker may refuse the Java members. The
+application's `state` lists `StreamsProblem.JavaMembersMayBeRefused` as a reminder:
+
+```java
+KStream<String, String> orders = builder.stream("orders");
+GlobalKTable<String, String> catalog = builder.globalTable("products");
+orders.join(catalog, (order, product) -> product, (product, details) -> product + ": " + details).to("out");
+```

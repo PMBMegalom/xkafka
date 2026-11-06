@@ -132,11 +132,26 @@ private[xkafka] object Engine:
           None,
           Option.when(topologyDescriptionPush)(Declaration.described(application, topology))
         )
+      admin  <- client.admin(settings)
+      counts <- Resource.eval(F.ref(Map.empty[Topic, Int]))
+      // Asked once for each topic, which the engine writes to for as long as it runs.
+      partitions =
+        (topic: Topic) =>
+          counts.get.map(_.get(topic)).flatMap:
+            case Some(count) => F.pure(count)
+            case None        => admin.describeTopics(NonEmptySet.one(topic)).flatMap: described =>
+                described(topic)
+                  .fold(F.raiseError[TopicDescription](new IllegalStateException(s"topic ${topic.value} was not described")))(_.liftTo[F])
+                  .map(_.partitions.length.toInt).flatTap(count => counts.update(_.updated(topic, count)))
+      isolation = if guarantee == ProcessingGuarantee.ExactlyOnce then "read_committed" else "read_uncommitted"
+      // As Java's, global tables are read to their ends before the member joins, in which time it would be given work it could not do.
+      globals <-
+        topology.globals.map(_._2) match
+          case Nil    => Resource.pure[F, Option[GlobalStores.Held[F]]](None)
+          case tables => consumer(isolation, reportEnds = true).flatMap(GlobalStores(driver, _, tables, partitions)).map(Some(_))
       member   <- GroupMember(connections.coordinator(application), identity, closeTimeout)
-      admin    <- client.admin(settings)
-      input    <- consumer(if guarantee == ProcessingGuarantee.ExactlyOnce then "read_committed" else "read_uncommitted", reportEnds = false)
+      input    <- consumer(isolation, reportEnds = false)
       follower <- consumer("read_committed", reportEnds = false)
-      counts   <- Resource.eval(F.ref(Map.empty[Topic, Int]))
       bytes = Serializer.bytes[F].option
       producer <-
         ProducerSettings.from(settings, bytes, bytes, ClientProperties.producer).toEither.leftMap(new KafkaException.InvalidSettings(_))
@@ -167,18 +182,9 @@ private[xkafka] object Engine:
           def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
           def purge(before: Map[TopicPartition, Offset]): F[Unit]                                             =
             NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
-      // Asked once for each topic, which the engine writes to for as long as it runs.
-      partitions =
-        (topic: Topic) =>
-          counts.get.map(_.get(topic)).flatMap:
-            case Some(count) => F.pure(count)
-            case None        => admin.describeTopics(NonEmptySet.one(topic)).flatMap: described =>
-                described(topic)
-                  .fold(F.raiseError[TopicDescription](new IllegalStateException(s"topic ${topic.value} was not described")))(_.liftTo[F])
-                  .map(_.partitions.length.toInt).flatTap(count => counts.update(_.updated(topic, count)))
       running <-
         val interval = commitInterval.getOrElse(Engine.commitInterval(guarantee))
-        running(application, topology, member, watch(plane), transactions, interval, concurrency, purgeInterval, closeTimeout, partitions)
+        running(application, topology, member, watch(plane), transactions, interval, concurrency, purgeInterval, closeTimeout, partitions, globals)
     yield running
 
   /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
@@ -239,9 +245,10 @@ private[xkafka] object Engine:
       concurrency: Int,
       purgeInterval: FiniteDuration,
       closeTimeout: FiniteDuration,
-      partitions: Topic => F[Int]
+      partitions: Topic => F[Int],
+      globals: Option[GlobalStores.Held[F]] = None
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
-    val subtopologies = topology.subtopologies.zipWithIndex.map((subtopology, id) => id.toString -> subtopology).toMap
+    val subtopologies = topology.numbered.map((id, subtopology) => id.toString -> subtopology).toMap
     val unordered     =
       Declaration.unordered(application, topology).map: topics =>
         StreamsProblem.JavaMembersMayBeRefused(s"Java Streams may list the joined topics ${topics.mkString(", ")} in another order")
@@ -255,6 +262,11 @@ private[xkafka] object Engine:
       topology.subtopologies.flatMap(_.unstartable).map: sources =>
         val topics = sources.map(Task.topicOf(application, _)).mkString(", ")
         StreamsProblem.JavaMembersMayBeRefused(s"Java Streams cannot start a cogroup of $topics, since a group goes through a repartition topic")
+    // Java numbers a global table by where its program makes it, which xkafka takes to be after the stream that first joins it.
+    val globalOrdered =
+      topology.globals.map: (_, global) =>
+        StreamsProblem.JavaMembersMayBeRefused(s"Java Streams numbers the sub-topologies around the global table of ${global.topic
+            .value} otherwise unless it builds it after the stream that first joins it")
     for
       changes  <- Resource.eval(Queue.unbounded[F, Either[Throwable, MemberAction]])
       _        <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
@@ -292,14 +304,16 @@ private[xkafka] object Engine:
           standing,
           read,
           following,
-          partitions
+          partitions,
+          globals.fold(F.pure(Map.empty[String, Map[Chunk[Byte], Stored]]))(_.contents)
         )
       running <-
         Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
     yield new KafkaStreams[F]:
-      def run: F[Unit]                   = running.joinWithNever
+      def run: F[Unit]                   = globals.fold(running.joinWithNever)(held => F.race(running.joinWithNever, held.failure).void)
       def state: Stream[F, StreamsState] =
-        (phase, member.reports).mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered ++ buildOrdered ++ unstartable)).discrete
+        (phase, member.reports)
+          .mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered ++ buildOrdered ++ unstartable ++ globalOrdered)).discrete
           .changes
 
   /** A task's records, taken partition by partition in the order each was read, as Java's partition group takes them: next the record with the
@@ -414,7 +428,8 @@ private[xkafka] object Engine:
       standing: Ref[F, Map[TaskId, Standby]],
       read: Queue[F, PolledRecord],
       following: Ref[F, Boolean],
-      partitions: Topic => F[Int]
+      partitions: Topic => F[Int],
+      globals: F[Map[String, Map[Chunk[Byte], Stored]]]
   )(using F: Async[F]):
     import MemberAction.*
 
@@ -659,15 +674,16 @@ private[xkafka] object Engine:
       F.realTime.flatMap: clock =>
         byTask.toList.parTraverseN(concurrency): (id, records) =>
           Engine.byTime(records).foldLeftM((running.tasks(id), Vector.empty[TaskOutput])):
-            case ((live, written), (partition, record)) => live.task.process(live.state, inputOf(record), clock.toMillis).map: (state, out) =>
-                val read =
-                  Input(
-                    record.offset + 1,
-                    Some((record.offset + 1, record.leaderEpoch)),
-                    live.inputs(partition).committed,
-                    live.inputs(partition).purged
-                  )
-                (live.copy(state = state, inputs = live.inputs.updated(partition, read)), written ++ out)
+            case ((live, written), (partition, record)) => globals
+                .flatMap(held => live.task.process(live.state.copy(globals = held), inputOf(record), clock.toMillis)).map: (state, out) =>
+                  val read =
+                    Input(
+                      record.offset + 1,
+                      Some((record.offset + 1, record.leaderEpoch)),
+                      live.inputs(partition).committed,
+                      live.inputs(partition).purged
+                    )
+                  (live.copy(state = state, inputs = live.inputs.updated(partition, read)), written ++ out)
           .map(id -> _)
       .flatMap: done =>
         val written = done.flatMap(_._2._2)

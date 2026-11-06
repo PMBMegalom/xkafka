@@ -24,15 +24,18 @@ package streams
 
 import cats.Show
 
-/** What a program runs: its sub-topologies and their nodes. `toString` writes the text that Java Kafka Streams' `Topology.describe` writes for the
-  * same program.
+/** What a program runs: its sub-topologies and global tables, and their nodes. `toString` writes the text that Java Kafka Streams'
+  * `Topology.describe` writes for the same program.
   */
-final case class TopologyDescription(subtopologies: List[TopologyDescription.Subtopology]):
+final case class TopologyDescription(subtopologies: List[TopologyDescription.Subtopology], globalStores: List[TopologyDescription.GlobalStore] = Nil):
   override def toString: String = TopologyDescription.text(this)
 
 object TopologyDescription:
   /** A part of the program that runs as tasks of its own, and its nodes. */
   final case class Subtopology(id: Int, nodes: List[Node])
+
+  /** A global table, numbered with the sub-topologies although it makes no tasks: the node that reads its topic and the node that keeps its store. */
+  final case class GlobalStore(id: Int, source: Node.Source, processor: Node.Processor)
 
   /** A node of a sub-topology, with the nodes it passes records to and gets them from, by name. */
   enum Node:
@@ -58,7 +61,11 @@ object TopologyDescription:
         s"Processor: $name (stores: ${stores.mkString("[", ", ", "]")})\n      --> ${names(successors)}\n      <-- ${names(predecessors)}"
       case Node.Sink(name, topic, predecessors) => s"Sink: $name (topic: $topic)\n      <-- ${names(predecessors)}"
 
-  /** Java's text: a header line, then each sub-topology with its nodes, each sub-topology ending with an empty line. */
+  /** Java's text: a header line, then each sub-topology and global table by number with its nodes, each sub-topology ending with an empty line. */
   private def text(description: TopologyDescription): String =
-    "Topologies:\n " + description.subtopologies.map(s => s"  Sub-topology: ${s.id}\n" + s.nodes.map(n => s"    ${line(n)}\n").mkString + "\n")
-      .mkString
+    val subtopologies =
+      description.subtopologies.map(s => s.id -> (s"  Sub-topology: ${s.id}\n" + s.nodes.map(n => s"    ${line(n)}\n").mkString + "\n"))
+    val stores =
+      description.globalStores.map: g =>
+        g.id -> (s"  Sub-topology: ${g.id} for global store (will not generate tasks)\n    ${line(g.source)}\n    ${line(g.processor)}\n")
+    "Topologies:\n " + (subtopologies ++ stores).sortBy(_._1).map(_._2).mkString
