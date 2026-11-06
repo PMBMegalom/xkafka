@@ -59,8 +59,18 @@ private[xkafka] final case class StoreContents(entries: TreeMap[Chunk[Byte], Sto
   def size: Int = entries.size
 
   /** The keys starting with `prefix` and what they hold, in order. */
-  def prefixed(prefix: Chunk[Byte]): Vector[(Chunk[Byte], Stored)] =
-    entries.iteratorFrom(prefix).takeWhile((key, _) => key.take(prefix.size) == prefix).toVector
+  def prefixed(prefix: Chunk[Byte]): Vector[(Chunk[Byte], Stored)] = StoreContents.starting(entries, prefix).toVector
+
+  /** What it holds once `changes` are made, a key with nothing to hold being removed. */
+  def after(changes: IterableOnce[(Chunk[Byte], Option[Stored])]): StoreContents =
+    StoreContents(
+      changes.iterator.foldLeft(entries):
+        case (held, (key, Some(stored))) => held.updated(key, stored)
+        case (held, (key, None))         => held - key
+    )
+
+/** Changes to a store by serialized key, in order: what a key is to hold, or nothing where it is removed. */
+private[xkafka] type StoreChanges = TreeMap[Chunk[Byte], Option[Stored]]
 
 private[xkafka] object StoreContents:
   /** Keys by their bytes taken as unsigned, a shorter key before a longer one it starts, as Java and a store on disk order them. */
@@ -76,5 +86,12 @@ private[xkafka] object StoreContents:
       from(0)
 
   val empty: StoreContents = StoreContents(TreeMap.empty(using keys))
+
+  /** No changes to a store. */
+  val unchanged: StoreChanges = TreeMap.empty(using keys)
+
+  /** The entries of `entries` whose keys start with `prefix`, in order. */
+  def starting[V](entries: TreeMap[Chunk[Byte], V], prefix: Chunk[Byte]): Iterator[(Chunk[Byte], V)] =
+    entries.iteratorFrom(prefix).takeWhile((key, _) => key.take(prefix.size) == prefix)
 
   def of(entries: Iterable[(Chunk[Byte], Stored)]): StoreContents = StoreContents(TreeMap.from(entries)(using keys))

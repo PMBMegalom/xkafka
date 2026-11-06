@@ -1521,10 +1521,11 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       size: Duration = Duration.ofSeconds(10)
   ): IO[Unit] =
     val changelog = s"app-$store-changelog"
-    ours(pipeline, inputs).flatMap: (written, state) =>
-      state.store(store).toVector.toList.traverse: (key, stored) =>
-        values.deserialize(in, Headers.empty, Some(stored.value)).map: value =>
-          (String(key.take(key.size - 12).toArray), internal.streams.WindowStore.startOf(key)) -> (value.toString, stored.timestamp)
+    ours(pipeline, inputs).flatMap: (written, held) =>
+      held(store).flatMap: entries =>
+        entries.toVector.toList.traverse: (key, stored) =>
+          values.deserialize(in, Headers.empty, Some(stored.value)).map: value =>
+            (String(key.take(key.size - 12).toArray), internal.streams.WindowStore.startOf(key)) -> (value.toString, stored.timestamp)
       .map: kept =>
         val memory  = run(java(name => Materialized.as[String, V](inMemory(name, retention, size))), Some(store), inputs)
         val rocksdb = run(java(name => Materialized.as[String, V, WindowStore[Bytes, Array[Byte]]](name).withRetention(retention)), None, inputs)
@@ -1536,15 +1537,21 @@ final class WindowGoldenSuite extends CatsEffectSuite:
         assertEquals(written.filter(_.topic.value == changelog).map(record), rocksdb.topic(changelog), "Java over RocksDB")
 
   /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, at the next offset of its topic, and each task
-    * committing after each input, as Java's test driver runs them; with the last segment's state, which holds the window store.
+    * committing after each input, as Java's test driver runs them; with what the last segment's stores hold, which include the window store.
     */
-  private def ours(pipeline: Pipeline[IO], inputs: List[(String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
+  private def ours(pipeline: Pipeline[IO], inputs: List[(String, String, Long)]): IO[(Vector[TaskOutput], String => IO[StoreContents])] =
     oursFrom(pipeline, inputs.map(("in", _, _, _)))
 
   /** As `ours`, for records of several topics, each going to the task whose sub-topology reads its topic, at the next offset of that topic. */
-  private def oursFrom(pipeline: Pipeline[IO], inputs: List[(String, String, String, Long)]): IO[(Vector[TaskOutput], TaskState)] =
-    val segments              = Topology.of(pipeline).orFail.subtopologies.toVector
-    val tasks                 = segments.map(Task[IO]("app", _, 0))
+  private def oursFrom(pipeline: Pipeline[IO], inputs: List[(String, String, String, Long)]): IO[(Vector[TaskOutput], String => IO[StoreContents])] =
+    val segments = Topology.of(pipeline).orFail.subtopologies.toVector
+    segments.traverse(Task.inMemory[IO]("app", _, 0)).flatMap(oursOver(segments, _, inputs))
+
+  private def oursOver(
+      segments: Vector[xkafka.streams.Subtopology[IO]],
+      tasks: Vector[Task[IO]],
+      inputs: List[(String, String, String, Long)]
+  ): IO[(Vector[TaskOutput], String => IO[StoreContents])] =
     def reader(topic: String) = segments.indexWhere(_.origins.exists(Task.topicOf("app", _) == topic))
     type Ran = (Vector[TaskOutput], Vector[TaskState], Map[String, Long])
     def go(topic: String, record: TaskOutput, states: Vector[TaskState], offsets: Map[String, Long], at: Long): IO[Ran] =
@@ -1568,9 +1575,10 @@ final class WindowGoldenSuite extends CatsEffectSuite:
             traced(index)
           )
         go(topic, record, states, offsets, wall(index)).flatMap: (more, after, moved) =>
-          after.zipWithIndex.traverse((state, task) => tasks(task).flush(state)).map: flushed =>
-            (done ++ more ++ flushed.flatMap(_._2), flushed.map(_._1), moved)
-    .map((written, states, _) => (written, states.last))
+          after.zipWithIndex.traverse((state, task) => tasks(task).flush(state).flatMap((flushed, out) => tasks(task).stored(flushed).map(_ -> out)))
+            .map: flushed =>
+              (done ++ more ++ flushed.flatMap(_._2), flushed.map(_._1), moved)
+    .map((written, states, _) => (written, tasks.last.contents(states.last, _)))
 
   /** What Java's test driver writes to each topic for `inputs`, and what the window store `kept` names holds after them. */
   private def run(build: StreamsBuilder => Unit, kept: Option[String], inputs: List[(String, String, Long)]): Ran =

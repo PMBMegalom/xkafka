@@ -186,6 +186,80 @@ final class EngineSuite extends CatsEffectSuite:
 
   private val exactlyOnce: Option[Int => Option[Throwable]] = Some(_ => None)
 
+  /** Stores in memory that record each batch written to them. */
+  private def recording(batches: Ref[IO, List[StoreChanges]]): TaskStore.Open[IO] =
+    (_, held) =>
+      TaskStore.inMemory[IO](held).map: store =>
+        new TaskStore[IO]:
+          def get(key: Chunk[Byte]): IO[Option[Stored]]                        = store.get(key)
+          def prefixed(prefix: Chunk[Byte]): IO[Vector[(Chunk[Byte], Stored)]] = store.prefixed(prefix)
+          def all: IO[StoreContents]                                           = store.all
+          def write(changes: StoreChanges): IO[Unit]                           = batches.update(_ :+ changes) *> store.write(changes)
+
+  private def storing(
+      commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]],
+      failing: Option[Int => Option[Throwable]]
+  )(check: (IO[List[StoreChanges]], World) => IO[Unit]): IO[Unit] =
+    IO.ref(List.empty[StoreChanges]).flatMap(batches => run(commit = commit, failing = failing, open = recording(batches))(check(batches.get, _)))
+
+  private val answered: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
+    (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0))))
+
+  test("at least once, what a task wrote reaches its store as one batch once the commit is answered, not before"):
+    storing(answered, None): (batches, world) =>
+      for
+        _      <- world.tell(assign(TaskId("0", 0)))
+        _      <- IO.sleep(100.millis)
+        _      <- world.records(record(0, 5L, "k", 1000L), record(0, 6L, "other", 1000L))
+        _      <- IO.sleep(500.millis)
+        before <- batches
+        _      <- IO.sleep(2.seconds)
+        after  <- batches
+        sent   <- world.commits.get
+      yield
+        assertEquals(before, Nil)
+        assert(sent.nonEmpty)
+        assertEquals(after.map(_.keySet.map(key => new String(key.toArray))), List(Set("k", "other")))
+
+  test("at least once, what a task wrote does not reach its store where the commit fails"):
+    val failed: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
+      (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 29))))
+    storing(failed, None): (batches, world) =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(3.seconds)
+        ended <- world.ended
+        after <- batches
+      yield
+        assert(ended.exists(_.isLeft), ended)
+        assertEquals(after, Nil)
+
+  test("exactly once, what a task wrote reaches its store as one batch once its transaction commits"):
+    storing(answered, exactlyOnce): (batches, world) =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(3.seconds)
+        after <- batches
+        log   <- world.log.get
+      yield
+        assertEquals(log.collect { case transaction: Event.Transaction => transaction }.size, 1)
+        assertEquals(after.map(_.keySet.map(key => new String(key.toArray))), List(Set("k")))
+
+  test("exactly once, what a task wrote does not reach its store where its transaction is refused"):
+    val refused = new KafkaException.BackendFailure("refused", Some(ErrorCode.UnknownMemberId), Some(false))
+    storing(answered, Some(n => Option.when(n == 0)(refused))): (batches, world) =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(3.seconds)
+        after <- batches
+      yield assertEquals(after, Nil)
+
   test(
     "exactly once, a transaction opens only once records arrive, and writes what the tasks wrote with the offsets they read, not through the member"
   ):
@@ -329,7 +403,19 @@ final class EngineSuite extends CatsEffectSuite:
   private def watchedOf(topology: Topology[IO])(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
-        Engine.running("app", topology, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use: streams =>
+        Engine.running(
+          "app",
+          topology,
+          world.member(),
+          world.plane,
+          None,
+          1.second,
+          1,
+          PurgeInterval,
+          CloseTimeout,
+          _ => IO.pure(4),
+          TaskStore.memory[IO]
+        ).use: streams =>
           streams.state.evalMap(state => world.states.update(_ :+ state)).compile.drain.start *> script(world, streams)
     TestControl.executeEmbed(program.timeout(1.minute))
 
@@ -447,10 +533,21 @@ final class EngineSuite extends CatsEffectSuite:
       World().flatMap: world =>
         val refused = world.report(_.copy(unauthorized = Some("denied"))).delayBy(2.seconds).start
         val stopped =
-          Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use:
-            streams =>
-              val unauthorized = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
-              refused *> IO.race(streams.run, unauthorized)
+          Engine.running(
+            "app",
+            counting,
+            world.member(),
+            world.plane,
+            None,
+            1.second,
+            1,
+            PurgeInterval,
+            CloseTimeout,
+            _ => IO.pure(4),
+            TaskStore.memory[IO]
+          ).use: streams =>
+            val unauthorized = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
+            refused *> IO.race(streams.run, unauthorized)
         stopped *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (at, log) =>
       // Leaving waits for the standby reader to finish its poll.
@@ -788,8 +885,19 @@ final class EngineSuite extends CatsEffectSuite:
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout and one poll of its standby reader"):
     val run =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4))
-          .use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
+        Engine.running(
+          "app",
+          counting,
+          world.member(leave = IO.never),
+          world.plane,
+          None,
+          1.second,
+          1,
+          PurgeInterval,
+          CloseTimeout,
+          _ => IO.pure(4),
+          TaskStore.memory[IO]
+        ).use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (released, log) =>
       assert(released >= CloseTimeout && released <= CloseTimeout + Engine.PollMillis.millis, s"released at $released")
       assertEquals(log, List(Event.Leave))
@@ -1044,12 +1152,14 @@ object EngineSuite:
         (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0)))),
       failing: Option[Int => Option[Throwable]] = None,
       topology: Topology[IO] = counting,
-      concurrency: Int = 1
+      concurrency: Int = 1,
+      open: TaskStore.Open[IO] = TaskStore.memory[IO]
   )(script: World => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
         val transactions = failing.map(world.transactions)
         val member       = world.member(committed, commit)
-        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout, _ => IO.pure(4)).use:
-          running => running.run.attempt.flatMap(world.finished).start *> script(world)
+        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout, _ => IO.pure(4), open)
+          .use: running =>
+            running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(15.minutes))

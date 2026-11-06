@@ -145,11 +145,12 @@ final class TaskGoldenSuite extends CatsEffectSuite:
   private def same(pipeline: Pipeline[IO], java: StreamsBuilder => Unit, stores: List[(String, Deserializer[IO, String])]): IO[Unit] =
     for
       ran <- ours(pipeline)
-      (written, states) = ran
+      (written, held) = ran
       kept <-
         stores.traverse: (name, values) =>
-          states.toList.flatMap(_.store(name).toVector.toList).traverse: (key, stored) =>
-            values.deserialize(in, Headers.empty, Some(stored.value)).map(v => String(key.toArray) -> (v, stored.timestamp))
+          held.toList.flatTraverse((task, state) => task.contents(state, name).map(_.toVector.toList)).flatMap: entries =>
+            entries.traverse: (key, stored) =>
+              values.deserialize(in, Headers.empty, Some(stored.value)).map(v => String(key.toArray) -> (v, stored.timestamp))
           .map(name -> _.toMap)
     yield
       val (javaOut, javaStores) = declaredRun(java, stores.map(_._1))
@@ -157,9 +158,13 @@ final class TaskGoldenSuite extends CatsEffectSuite:
       assertEquals(written.filter(_.topic == out).map(output), javaOut)
       assertEquals(kept.toMap, javaStores)
 
-  /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, as Java's test driver runs it. */
-  private def ours(pipeline: Pipeline[IO]): IO[(Vector[TaskOutput], Vector[TaskState])] =
-    val tasks = Topology.of(pipeline).orFail.subtopologies.toVector.map(Task[IO]("app", _, 0))
+  /** Each segment's task on partition 0, a repartitioned record going on to the next segment at once, and each task storing what it wrote after each
+    * input, as Java's test driver commits it, with each task and its state.
+    */
+  private def ours(pipeline: Pipeline[IO]): IO[(Vector[TaskOutput], Vector[(Task[IO], TaskState)])] =
+    Topology.of(pipeline).orFail.subtopologies.toVector.traverse(Task.inMemory[IO]("app", _, 0)).flatMap(oursOver)
+
+  private def oursOver(tasks: Vector[Task[IO]]): IO[(Vector[TaskOutput], Vector[(Task[IO], TaskState)])] =
     def run(index: Int, record: TaskInput, states: Vector[TaskState]): IO[(Vector[TaskOutput], Vector[TaskState])] =
       tasks(index).process(states(index), record, 0L).flatMap: (state, outputs) =>
         outputs.foldLeftM((Vector.empty[TaskOutput], states.updated(index, state))):
@@ -170,7 +175,8 @@ final class TaskGoldenSuite extends CatsEffectSuite:
       case ((done, states), input) =>
         val headers = Headers.fromVector(input.headers.map((k, v) => Header(k, Some(Chunk.array(v.getBytes)))).toVector)
         run(0, TaskInput(Some(Chunk.array(input.key.getBytes)), Some(Chunk.array(input.value.getBytes)), input.timestamp, headers), states)
-          .map((more, after) => (done ++ more, after))
+          .flatMap((more, after) => tasks.zip(after).traverse((task, state) => task.stored(state)).map(stored => (done ++ more, stored)))
+    .map((written, states) => (written, tasks.zip(states)))
 
   /** The output topic's records and the named stores' contents, as Java's test driver gives them for `inputs`. */
   private def declaredRun(build: StreamsBuilder => Unit, stores: List[String]): (Vector[Output], Map[String, Map[String, (String, Long)]]) =

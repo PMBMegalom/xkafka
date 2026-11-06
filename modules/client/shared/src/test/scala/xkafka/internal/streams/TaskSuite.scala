@@ -61,17 +61,16 @@ final class TaskSuite extends CatsEffectSuite:
     val latest = WindowStore.key(Chunk.array("other".getBytes), 30000L)
     // Restoring drops the windows the store's clock has expired, as the engine and Java's store do.
     val restored =
-      TaskState(
-        WindowStore.prunedAll(
-          Map("windows" -> StoreContents.of(Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L)))),
-          Map("windows" -> 15000L)
-        ),
-        Map("in" -> 30000L)
+      WindowStore.prunedAll(
+        Map("windows" -> StoreContents.of(Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L)))),
+        Map("windows" -> 15000L)
       )
-    task(windowed, 0).process(restored, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L).map: (state, written) =>
-      assertEquals(written.head, TaskOutput(Topic.from("app-windows-changelog").orFail, Some(0), Some(old), long(1), 2000L, Headers.empty))
-      assertEquals(written(1).value, long(1))
-      assertEquals(state.store("windows").keySet, Set(latest))
+    Task.inMemory[IO]("app", Topology.of(windowed).orFail.subtopologies.head, 0, restored).flatMap: running =>
+      running.process(TaskState(Map.empty, Map("in" -> 30000L)), TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L).flatMap:
+        (state, written) =>
+          assertEquals(written.head, TaskOutput(Topic.from("app-windows-changelog").orFail, Some(0), Some(old), long(1), 2000L, Headers.empty))
+          assertEquals(written(1).value, long(1))
+          running.contents(state, "windows").map(held => assertEquals(held.keySet, Set(latest)))
 
   // Read in Java's AbstractKStreamTimeWindowAggregateProcessor and KStreamWindowAggregate: an emission ends at the window starting at the close
   // time less the size, the next starts just after it, and a look that would end at the same windows emits nothing and keeps the close time.

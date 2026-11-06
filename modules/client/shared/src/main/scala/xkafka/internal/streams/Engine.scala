@@ -25,6 +25,7 @@ package streams
 
 import scala.concurrent.duration.*
 
+import cats.Functor
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{Async, Ref, Resource}
 import cats.effect.std.{Queue, UUIDGen}
@@ -184,7 +185,20 @@ private[xkafka] object Engine:
             NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
       running <-
         val interval = commitInterval.getOrElse(Engine.commitInterval(guarantee))
-        running(application, topology, member, watch(plane), transactions, interval, concurrency, purgeInterval, closeTimeout, partitions, globals)
+        running(
+          application,
+          topology,
+          member,
+          watch(plane),
+          transactions,
+          interval,
+          concurrency,
+          purgeInterval,
+          closeTimeout,
+          partitions,
+          TaskStore.memory[F],
+          globals
+        )
     yield running
 
   /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
@@ -246,6 +260,7 @@ private[xkafka] object Engine:
       purgeInterval: FiniteDuration,
       closeTimeout: FiniteDuration,
       partitions: Topic => F[Int],
+      open: TaskStore.Open[F],
       globals: Option[GlobalStores.Held[F]] = None
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val subtopologies = topology.numbered.map((id, subtopology) => id.toString -> subtopology).toMap
@@ -305,7 +320,8 @@ private[xkafka] object Engine:
           read,
           following,
           partitions,
-          globals.fold(F.pure(Map.empty[String, StoreContents]))(_.contents)
+          globals.fold(F.pure(Map.empty[String, StoreContents]))(_.contents),
+          open
         )
       running <-
         Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
@@ -395,6 +411,9 @@ private[xkafka] object Engine:
     /** Committed where it read to. */
     def settled: Live[F] = copy(inputs = inputs.view.mapValues(_.settled).toMap)
 
+    /** With what it wrote since its last commit in its stores. */
+    def stored(using F: Functor[F]): F[Live[F]] = task.stored(state).map(after => copy(state = after))
+
     /** Whether it read anything since its last commit. */
     def read: Boolean = inputs.values.exists(_.read.nonEmpty)
 
@@ -425,7 +444,8 @@ private[xkafka] object Engine:
       read: Queue[F, PolledRecord],
       following: Ref[F, Boolean],
       partitions: Topic => F[Int],
-      globals: F[Map[String, StoreContents]]
+      globals: F[Map[String, StoreContents]],
+      open: TaskStore.Open[F]
   )(using F: Async[F]):
     import MemberAction.*
 
@@ -486,9 +506,11 @@ private[xkafka] object Engine:
                   else poll(after).flatMap(process(after, _, write)).flatMap(more(_, write))
               transaction(write =>
                 process(running, polled, write).flatMap(more(_, write)).flatMap(flushed(_, write)).map(after => (after, offsetsOf(after)))
-              ).flatMap(after => F.monotonic.map(now => after.copy(tasks = after.tasks.view.mapValues(_.settled).toMap, committed = now)))
-                .recoverWith:
-                  case refused: KafkaException.BackendFailure if refused.code.exists(Refused) => restart(running)
+              ).flatMap(after =>
+                (after.tasks.toList.traverse((id, live) => live.stored.map(id -> _.settled)), F.monotonic)
+                  .mapN((tasks, now) => after.copy(tasks = tasks.toMap, committed = now))
+              ).recoverWith:
+                case refused: KafkaException.BackendFailure if refused.code.exists(Refused) => restart(running)
 
     /** Once the purge interval has passed since the last purge, deletes the records of each repartition topic partition before where its task last
       * committed, where that moved since. Java Streams only logs a purge that fails, and tries those records again at the next.
@@ -598,9 +620,9 @@ private[xkafka] object Engine:
               val emitted = PartitionTime.merged(found.flatMap(_._2.flatMap(_.metadata)))
               val read    = subtopologies(id.subtopology)
               val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), read.retentions, read.sessionStores)
-              val state   = TaskState(kept, times.toMap, lastEmitted = emitted)
+              val state   = TaskState(Map.empty, times.toMap, lastEmitted = emitted)
               val reads   = found.map((partition, at) => partition -> Input(at.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)))
-              F.pure(id -> Live(new Task[F](application, read, id.partition), state, reads.toMap))
+              Task.over[F](application, read, id.partition, kept, open).map(task => id -> Live(task, state, reads.toMap))
             .map(_.toMap)
 
     /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */
@@ -653,7 +675,8 @@ private[xkafka] object Engine:
             case Some(code) if Gone(code) => F.pure(Some(()))
             case Some(code)               => F.raiseError(failure("committing", code))
             case None                     => F.pure(Option.when(answers.forall(_.errorCode == 0))(()))
-      if topics.isEmpty then F.pure(running) else sent.as(running.copy(tasks = running.tasks ++ due.map((id, live) => id -> live.settled)))
+      if topics.isEmpty then F.pure(running)
+      else sent *> due.traverse((id, live) => live.stored.map(id -> _.settled)).map(done => running.copy(tasks = running.tasks ++ done))
 
     /** The next records, or none after a wait while no task runs, since the Java consumer refuses to poll with nothing assigned. */
     private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
