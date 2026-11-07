@@ -249,7 +249,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   javas = List(JavaSpec.temurin("17")),
   matrixAdds = Map("platform" -> List("jvm", "js", "native")),
   matrixFailFast = Some(true),
-  timeoutMinutes = Some(45)
+  timeoutMinutes = Some(60)
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
