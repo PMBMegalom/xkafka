@@ -787,6 +787,24 @@ private[xkafka] final class Task[F[_]](
         def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
           working.get.flatMap((state, _) => storedUnder(state, store, prefix)).map(_.map((key, held) => (key, held.value)))
 
+        def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit] =
+          working.access.flatMap:
+            case ((state, logged), set) => Task.this.windowPut(state, store, retention, changelog, key, start, value, timestamp).flatMap:
+                (after, log) => set((after, logged :+ log)).flatMap(done => if done then F.unit else windowPut(key, start, value, retention))
+
+        def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): F[Vector[(Long, Chunk[Byte])]] =
+          working.get.flatMap((state, _) => Task.this.windowsOf(state, store, retention, key, from, to))
+            .map(_.map((start, held) => (start, held.value)))
+
+        def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]] =
+          working.get.flatMap((state, _) => contents(state, store)).map: held =>
+            def spanned(key: Chunk[Byte]) = keys.forall((first, last) => StoreContents.keys.gteq(key, first) && StoreContents.keys.lteq(key, last))
+            held.toVector.flatMap: (windowed, stored) =>
+              val key   = windowed.take(windowed.size - 12)
+              val start = WindowStore.startOf(windowed)
+              Option.when(start >= from && start <= to && spanned(key))((key, start, stored.value))
+            .sortBy((key, start, _) => (start, key))(using Ordering.Tuple2(using Ordering.Long, StoreContents.keys))
+
   /** What Java's table filter makes of a change: its value where `keep` keeps it, and otherwise none, with the old value filtered too; a change from
     * no value to no value goes no further. Java's filter always asks for old values, which every table here can give. Kept in no store, the old value
     * comes from the change.

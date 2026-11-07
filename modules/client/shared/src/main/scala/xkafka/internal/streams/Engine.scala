@@ -175,9 +175,10 @@ private[xkafka] object Engine:
               changelogs: Map[TopicPartition, String],
               from: Map[TopicPartition, Long],
               held: Map[String, StoreContents]
-          ): F[Map[String, StoreContents]]             = consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, held))
-          def follow(starts: Vector[StartAt]): F[Unit] = driver.assign(follower, starts.map(_.partition), starts)
-          def followed: F[List[PolledRecord]]          = driver.poll(follower, PollMillis).map(_.records)
+          ): F[Map[String, StoreContents]] =
+            consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, held, WindowStore.timesOf(topology.subtopologies)))
+          def follow(starts: Vector[StartAt]): F[Unit]                               = driver.assign(follower, starts.map(_.partition), starts)
+          def followed: F[List[PolledRecord]]                                        = driver.poll(follower, PollMillis).map(_.records)
           def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]] =
             partitions.traverse(partition => driver.watermarks(follower, partition, 30000).map(marks => partition -> marks._2)).map(_.toMap)
           def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
@@ -459,6 +460,7 @@ private[xkafka] object Engine:
       if running.standbys.isEmpty then F.pure(running)
       else
         read.tryTakeN(None).flatMap: records =>
+          val times  = WindowStore.timesOf(subtopologies.values)
           val owners =
             running.standbys.toList.flatMap((id, standby) =>
               standby.changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> (id, partition, store))
@@ -472,7 +474,7 @@ private[xkafka] object Engine:
                   standbys.updated(
                     id,
                     standby.copy(
-                      stores = Restore.applied(standby.stores, store, record),
+                      stores = Restore.applied(standby.stores, store, record, times),
                       positions = standby.positions.updated(partition, record.offset + 1)
                     )
                   )

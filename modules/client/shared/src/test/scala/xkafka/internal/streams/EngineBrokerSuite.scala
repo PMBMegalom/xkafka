@@ -517,6 +517,48 @@ final class EngineBrokerSuite extends CatsEffectSuite:
           produce(server, app.input, Map("a" -> 2, "c" -> 1)) *>
           running(server, app)(latest(server, app.output, Map("a" -> 5L, "b" -> 2L, "c" -> 1L)))
 
+    test(s"$release, $under: a window store comes back for an engine started later, without what its latest write expired"):
+      val program =
+        (input: Topic, output: Topic) =>
+          val windows = xkafka.streams.WindowStore.of(Store("windows"), text, Serde.long[IO], size = 1.minute, retention = 1.hour)
+          KStream(Named("read-43"), input, text, text).process(
+            Named("processor-43"),
+            xkafka.streams.Processor.withStore(windows): kept =>
+              xkafka.streams.Processor.onRecord: record =>
+                kept.put(record.key, 1L, record.timestamp) *> kept.all.compile.count.map(found => List(record.withValue(found)))
+          ).to(Named("write-43"), output, text, Serde.long[IO])
+      counting(server, program): app =>
+        IO.realTime.map(_.toMillis).flatMap: now =>
+          produceAt(server, app.input, List(("a", now - 2.hours.toMillis), ("a", now - 1.minute.toMillis))) *>
+            running(server, app)(read(server, app.output, 2, Serde.long[IO]).void) *> produceAt(server, app.input, List(("a", now))) *>
+            running(server, app):
+              // The second write expires the first, and the third finds the second restored and no sign of the first.
+              read(server, app.output, 3, Serde.long[IO]).map(seen => assertEquals(seen.map(_._2), List(1L, 1L, 2L)))
+
+    test(s"$release, $under: a delete of a window store's latest window still counts after a restart, so what it expired stays expired"):
+      IO.realTime.map(_.toMillis).flatMap: now =>
+        val written = now - 2.hours.toMillis
+        val deleted = now
+        val program =
+          (input: Topic, output: Topic) =>
+            val windows = xkafka.streams.WindowStore.of(Store("windows"), text, Serde.long[IO], size = 1.minute, retention = 1.hour)
+            KStream(Named("read-44"), input, text, text).process(
+              Named("processor-44"),
+              xkafka.streams.Processor.withStore(windows): kept =>
+                xkafka.streams.Processor.onRecord: record =>
+                  val at     = record.timestamp.epochMillis
+                  val change =
+                    if at == written then kept.put(record.key, 1L, record.timestamp)
+                    else if at == deleted then kept.delete(record.key, record.timestamp)
+                    else IO.unit
+                  change *> kept.all.compile.count.map(found => List(record.withValue(found)))
+            ).to(Named("write-44"), output, text, Serde.long[IO])
+        counting(server, program): app =>
+          produceAt(server, app.input, List(("a", written), ("a", deleted))) *>
+            running(server, app)(read(server, app.output, 2, Serde.long[IO]).void) *> produceAt(server, app.input, List(("a", now - 1L))) *>
+            running(server, app):
+              read(server, app.output, 3, Serde.long[IO]).map(seen => assertEquals(seen.map(_._2), List(1L, 0L, 0L)))
+
     test(s"$release, $under: a wall-clock punctuator runs in tasks that read nothing, and what it wrote is there for an engine started later"):
       val program =
         (input: Topic, output: Topic) =>

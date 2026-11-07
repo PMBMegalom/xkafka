@@ -121,13 +121,131 @@ object KeyValueStore:
             _.liftTo[F](new IllegalArgumentException(s"a prefix for the store '${store.value}' serialized to nothing"))
         entries(bytes.flatMap(access.prefixed), identity)
 
+/** A store a processor reads and writes by key and window start, as Java's `WindowStore`, each key holding one value for each window. A window has
+  * expired once the latest window start written is a whole retention past its start: reads do not find it, and writing to it keeps nothing. Reads
+  * over several keys go by window start and then by the order of the keys' serialized bytes. The processor reads what it has written since the last
+  * commit; a commit makes those writes durable, and a failed one discards them.
+  */
+sealed trait WindowStore[F[_], K, V]:
+  /** Writes `value` as the key's window starting at `windowStart`. */
+  def put(key: K, value: V, windowStart: Timestamp): F[Unit]
+
+  /** Removes the key's window starting at `windowStart`. */
+  def delete(key: K, windowStart: Timestamp): F[Unit]
+
+  /** The key's window starting at `windowStart`. */
+  def fetch(key: K, windowStart: Timestamp): F[Option[V]]
+
+  /** The key's windows starting from `from` to `to`, both included, earliest first, with their starts. */
+  def fetch(key: K, from: Timestamp, to: Timestamp): Stream[F, (Timestamp, V)]
+
+  /** The key's windows starting from `from` to `to`, both included, latest first, with their starts. */
+  def reverseFetch(key: K, from: Timestamp, to: Timestamp): Stream[F, (Timestamp, V)]
+
+  /** The windows starting from `from` to `to` of the keys from `keyFrom` to `keyTo`, all included. */
+  def fetchRange(keyFrom: K, keyTo: K, from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The windows starting from `from` to `to` of the keys from `keyFrom` to `keyTo`, all included, last first. */
+  def reverseFetchRange(keyFrom: K, keyTo: K, from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The windows of every key starting from `from` to `to`, both included. */
+  def fetchAll(from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The windows of every key starting from `from` to `to`, both included, last first. */
+  def reverseFetchAll(from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** Every window. */
+  def all: Stream[F, (Windowed[K], V)]
+
+  /** Every window, last first. */
+  def reverseAll: Stream[F, (Windowed[K], V)]
+
+object WindowStore:
+  /** A window store for a processor to declare, which `Processor.withStore` opens. `size` gives each window read over several keys its end, and
+    * `retention` how long a window lasts. Processors given the same value share one store, and so run in one sub-topology, as Java's do.
+    */
+  def of[F[_]: cats.MonadThrow, K, V](
+      store: Store,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      size: FiniteDuration,
+      retention: FiniteDuration
+  ): DeclaredStore[F, WindowStore[F, K, V]] =
+    val problems =
+      List(
+        Option.when(size < 1.milli)(s"its window size of $size is less than a millisecond"),
+        Option.when(retention < size)(s"its retention of $retention is less than its window size of $size")
+      ).flatten
+    new DeclaredStore(
+      store,
+      access => opened(store, access, key, value, size.toMillis, retention.toMillis),
+      StoreAccess.idle(store),
+      Some(retention.toMillis),
+      problems
+    )
+
+  private def opened[F[_], K, V](store: Store, access: StoreAccess[F], key: Serde[F, K], value: Serde[F, V], size: Long, retention: Long)(using
+      F: cats.MonadThrow[F]
+  ): WindowStore[F, K, V] =
+    new WindowStore[F, K, V]:
+      private def keyBytes(written: K): F[Chunk[Byte]] =
+        key.serializer.serialize(access.topic, Headers.empty, written).flatMap:
+          _.liftTo[F](new IllegalArgumentException(s"a key of the store '${store.value}' serialized to nothing"))
+
+      private def read(bytes: Chunk[Byte]): F[V] = value.deserializer.deserialize(access.topic, Headers.empty, Some(bytes))
+
+      private def single(found: F[Vector[(Long, Chunk[Byte])]]): Stream[F, (Timestamp, V)] =
+        Stream.eval(found).flatMap(Stream.emits).evalMap((start, held) => read(held).map(Timestamp.fromEpochMillis(start) -> _))
+
+      private def many(found: F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]): Stream[F, (Windowed[K], V)] =
+        Stream.eval(found).flatMap(Stream.emits).evalMap: (k, start, held) =>
+          // As Java, a window ending past the largest time ends at the largest time.
+          val end = if start + size < 0 then Long.MaxValue else start + size
+          (key.deserializer.deserialize(access.topic, Headers.empty, Some(k)), read(held))
+            .mapN((keyRead, v) => Windowed(keyRead, Window(start, end)) -> v)
+
+      private def between(keyFrom: K, keyTo: K, from: Timestamp, to: Timestamp) =
+        (keyBytes(keyFrom), keyBytes(keyTo)).tupled.flatMap(keys => access.windows(from.epochMillis, to.epochMillis, Some(keys)))
+
+      def put(k: K, v: V, windowStart: Timestamp): F[Unit] =
+        (keyBytes(k), value.serializer.serialize(access.topic, Headers.empty, v)).tupled
+          .flatMap(access.windowPut(_, windowStart.epochMillis, _, retention))
+
+      def delete(k: K, windowStart: Timestamp): F[Unit] = keyBytes(k).flatMap(access.windowPut(_, windowStart.epochMillis, None, retention))
+
+      def fetch(k: K, windowStart: Timestamp): F[Option[V]] =
+        keyBytes(k).flatMap(access.windowsOf(_, windowStart.epochMillis, windowStart.epochMillis, retention))
+          .flatMap(_.headOption.traverse(held => read(held._2)))
+
+      def fetch(k: K, from: Timestamp, to: Timestamp): Stream[F, (Timestamp, V)] =
+        single(keyBytes(k).flatMap(access.windowsOf(_, from.epochMillis, to.epochMillis, retention)))
+
+      def reverseFetch(k: K, from: Timestamp, to: Timestamp): Stream[F, (Timestamp, V)] =
+        single(keyBytes(k).flatMap(access.windowsOf(_, from.epochMillis, to.epochMillis, retention)).map(_.reverse))
+
+      def fetchRange(keyFrom: K, keyTo: K, from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)] = many(between(keyFrom, keyTo, from, to))
+
+      def reverseFetchRange(keyFrom: K, keyTo: K, from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)] =
+        many(between(keyFrom, keyTo, from, to).map(_.reverse))
+
+      def fetchAll(from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)] = many(access.windows(from.epochMillis, to.epochMillis, None))
+
+      def reverseFetchAll(from: Timestamp, to: Timestamp): Stream[F, (Windowed[K], V)] =
+        many(access.windows(from.epochMillis, to.epochMillis, None).map(_.reverse))
+
+      def all: Stream[F, (Windowed[K], V)] = many(access.windows(Long.MinValue, Long.MaxValue, None))
+
+      def reverseAll: Stream[F, (Windowed[K], V)] = many(access.windows(Long.MinValue, Long.MaxValue, None).map(_.reverse))
+
 /** A store a processor declares, which it uses as an `H`. */
 final class DeclaredStore[F[_], H] private[xkafka] (
     val store: Store,
     private[xkafka] val open: StoreAccess[F] => H,
-    private[xkafka] val idle: StoreAccess[F]
+    private[xkafka] val idle: StoreAccess[F],
+    retention: Option[Long] = None,
+    problems: List[String] = Nil
 ):
-  private[xkafka] val kept: KeptStore = KeptStore(store, shared = Some(this))
+  private[xkafka] val kept: KeptStore = KeptStore(store, retention = retention, shared = Some(this), problems = problems)
 
 /** A store as bytes, for a task to give a processor, with what the processor wrote since its last commit in it. */
 private[xkafka] trait StoreAccess[F[_]]:
@@ -145,27 +263,45 @@ private[xkafka] trait StoreAccess[F[_]]:
 
   def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]
 
+  /** Writes `value` as the window of `key` starting at `start`, or removes it if there is none, in a window store keeping windows for `retention`. */
+  def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit]
+
+  /** The windows of `key` starting from `from` to `to`, earliest first, with their starts. */
+  def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): F[Vector[(Long, Chunk[Byte])]]
+
+  /** The windows starting from `from` to `to` of the keys `keys` spans, or of every key, by start and then key, each with its key and start. */
+  def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]
+
   final def imapK[G[_]](fk: FunctionK[F, G]): StoreAccess[G] =
     val self = this
     new StoreAccess[G]:
-      def topic: Topic                                                                       = self.topic
-      def get(key: Chunk[Byte]): G[Option[Chunk[Byte]]]                                      = fk(self.get(key))
-      def put(key: Chunk[Byte], value: Option[Chunk[Byte]]): G[Unit]                         = fk(self.put(key, value))
-      def between(from: Chunk[Byte], to: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]] = fk(self.between(from, to))
-      def all: G[Vector[(Chunk[Byte], Chunk[Byte])]]                                         = fk(self.all)
-      def prefixed(prefix: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]]               = fk(self.prefixed(prefix))
+      def topic: Topic                                                                                   = self.topic
+      def get(key: Chunk[Byte]): G[Option[Chunk[Byte]]]                                                  = fk(self.get(key))
+      def put(key: Chunk[Byte], value: Option[Chunk[Byte]]): G[Unit]                                     = fk(self.put(key, value))
+      def between(from: Chunk[Byte], to: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]]             = fk(self.between(from, to))
+      def all: G[Vector[(Chunk[Byte], Chunk[Byte])]]                                                     = fk(self.all)
+      def prefixed(prefix: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]]                           = fk(self.prefixed(prefix))
+      def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): G[Unit] =
+        fk(self.windowPut(key, start, value, retention))
+      def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): G[Vector[(Long, Chunk[Byte])]] =
+        fk(self.windowsOf(key, from, to, retention))
+      def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): G[Vector[(Chunk[Byte], Long, Chunk[Byte])]] =
+        fk(self.windows(from, to, keys))
 
 private[xkafka] object StoreAccess:
   /** Access to `store` that refuses every use, for seeing what a processor declares without running it. */
   def idle[F[_]](store: Store)(using F: cats.ApplicativeThrow[F]): StoreAccess[F] =
     def refused[A]: F[A] = F.raiseError(new IllegalStateException(s"the store '${store.value}' was used while its processor was being declared"))
     new StoreAccess[F]:
-      val topic: Topic                                                                       = Topic.from("idle").toOption.get
-      def get(key: Chunk[Byte]): F[Option[Chunk[Byte]]]                                      = refused
-      def put(key: Chunk[Byte], value: Option[Chunk[Byte]]): F[Unit]                         = refused
-      def between(from: Chunk[Byte], to: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] = refused
-      def all: F[Vector[(Chunk[Byte], Chunk[Byte])]]                                         = refused
-      def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]               = refused
+      val topic: Topic                                                                                       = Topic.from("idle").toOption.get
+      def get(key: Chunk[Byte]): F[Option[Chunk[Byte]]]                                                      = refused
+      def put(key: Chunk[Byte], value: Option[Chunk[Byte]]): F[Unit]                                         = refused
+      def between(from: Chunk[Byte], to: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]                 = refused
+      def all: F[Vector[(Chunk[Byte], Chunk[Byte])]]                                                         = refused
+      def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]                               = refused
+      def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit]     = refused
+      def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): F[Vector[(Long, Chunk[Byte])]] = refused
+      def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]] = refused
 
 /** When a punctuator runs. */
 final class Punctuation private (private[xkafka] val wallClock: Boolean, val interval: FiniteDuration):

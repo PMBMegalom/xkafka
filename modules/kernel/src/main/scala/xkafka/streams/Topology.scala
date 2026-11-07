@@ -63,6 +63,9 @@ enum TopologyError derives CanEqual:
   /** A punctuator that cannot be used, such as one with an interval below a millisecond. */
   case InvalidPunctuation(step: String, reason: String)
 
+  /** A window store that cannot be used, such as one whose retention is less than its window size. */
+  case InvalidWindowStore(store: String, reason: String)
+
   /** A windowed table joined with a stream or a table, which xkafka does not join yet. */
   case WindowedJoin
 
@@ -82,10 +85,11 @@ enum TopologyError derives CanEqual:
         s"topic '${topic.value}' is read twice; to send a stream down several paths, use into or fork, and to read it again, make one stream of it"
       case UnusedRepartition(name) =>
         s"the records repartitioned as '$name' are keyed as they were read and need no repartition; group them with groupByKey(key, value), join them without serdes, or start the flow with Flow.asRead"
-      case InvalidWindows(store, reason)    => s"the windows of store '$store' cannot be used: $reason"
-      case InvalidSuppression(name, reason) => s"the suppression '$name' cannot be used: $reason"
-      case InvalidPunctuation(step, reason) => s"a punctuator of step '$step' cannot be used: $reason"
-      case WindowedJoin                     => "a windowed table cannot be joined yet"
+      case InvalidWindows(store, reason)     => s"the windows of store '$store' cannot be used: $reason"
+      case InvalidSuppression(name, reason)  => s"the suppression '$name' cannot be used: $reason"
+      case InvalidPunctuation(step, reason)  => s"a punctuator of step '$step' cannot be used: $reason"
+      case InvalidWindowStore(store, reason) => s"the window store '$store' cannot be used: $reason"
+      case WindowedJoin                      => "a windowed table cannot be joined yet"
       case UnfedTable(step) => s"a join reads the table made in step '$step', but no records reach that step; send them to it with into or fork"
       case SuppressedWithoutSerde(name) =>
         s"the suppression '$name' holds a table whose values have no serde; pass a Store and a Serde to the join or mapValues that makes it"
@@ -374,7 +378,8 @@ private[xkafka] final case class KeptStore(
     session: Boolean = false,
     buffer: Boolean = false,
     duplicates: Boolean = false,
-    shared: Option[AnyRef] = None
+    shared: Option[AnyRef] = None,
+    problems: List[String] = Nil
 )
 
 /** One side of a table-table join: `present` gives each of its changes' value, or none for a delete, and `view` where the other side reads the

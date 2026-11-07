@@ -320,6 +320,7 @@ private[xkafka] object Wiring:
         val made =
           tabled.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
             .refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
+            .refusing(step.kept.flatMap(held => held.problems.map(TopologyError.InvalidWindowStore(held.store.value, _))))
         arrive(next, after, made.coming(named.value, after))
       case Consumer.Output(named, topic, _, _) => walk.making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
       case Consumer.Done()                     => walk

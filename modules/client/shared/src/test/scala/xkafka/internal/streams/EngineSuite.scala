@@ -843,6 +843,20 @@ final class EngineSuite extends CatsEffectSuite:
         from <- world.restoredFrom.get
       yield assertEquals(from.map(_._2("windows").keySet), List(Set(window("other", 30000L))))
 
+  test("a removal a standby window store reads counts towards its clock, so what it expired is gone though the removed window left nothing"):
+    def windowLogged(key: String, start: Long, offset: Long, value: Option[Chunk[Byte]]) =
+      PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), value, Headers.empty)
+    run(topology = windowing): world =>
+      for
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(windowLogged("k", 0L, 0L, Some(counted(1L).value)), windowLogged("other", 30000L, 1L, None))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield assertEquals(from.map(_._2("windows").keySet), List(Set.empty[Chunk[Byte]]))
+
   /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
   private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
     for

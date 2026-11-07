@@ -501,6 +501,106 @@ final class ProcessorSuite extends CatsEffectSuite:
     val program = stream.to(Named("write"), out, text, count)
     assertEquals(Topology.of(program).orFail.subtopologies.flatMap(_.punctuating.map(_.named)), List("proc"))
 
+  private val windows = WindowStore.of(Store("tally"), text, count, size = 1.second, retention = 10.seconds)
+
+  private def windowed(logic: (WindowStore[IO, String, Long], Record[String, String]) => IO[List[Record[String, Long]]]) =
+    pipeline(Processor.withStore(windows)(kept => Processor.onRecord(record => logic(kept, record))), text, count)
+
+  test("a window store whose size is under a millisecond, or whose retention is less than its size, is refused with every reason"):
+    def refused(size: FiniteDuration, retention: FiniteDuration) =
+      val store = WindowStore.of(Store("tally"), text, count, size = size, retention = retention)
+      Topology.of(pipeline(Processor.withStore(store)(_ => Processor.onRecord(_ => IO.pure(List.empty[Record[String, Long]]))), text, count)).swap
+        .toOption.toList.flatMap(_.toList)
+    assertEquals(refused(1.milli, 1.milli), Nil)
+    assertEquals(
+      refused(1.second, 999.millis).map(_.message),
+      List("the window store 'tally' cannot be used: its retention of 999 milliseconds is less than its window size of 1 second")
+    )
+    assertEquals(
+      refused(1.micro, 1.milli).map(_.message),
+      List("the window store 'tally' cannot be used: its window size of 1 microsecond is less than a millisecond")
+    )
+    assertEquals(refused(0.millis, 0.millis).size, 1)
+    assertEquals(refused((-1).second, (-2).seconds).size, 2)
+
+  test("a window store's retention sets its changelog's, so a store restored loses what has expired"):
+    assertEquals(Topology.of(windowed((_, _) => IO.pure(Nil))).orFail.subtopologies.head.retentions, Map("tally" -> 10000L))
+
+  test("a window store's writes reach its changelog under the key, the window's start and a sequence number, at the record's time"):
+    for
+      task <- taskOf(windowed((kept, record) => kept.put(record.key, 5L, Timestamp.fromEpochMillis(16L)).as(Nil)))
+      read <- task.process(TaskState.empty, input("a", "x", 2000L), 0L)
+    yield
+      val written = changelog(read._2)
+      assertEquals(written.flatMap(_.key.map(_.toVector)), Vector("a".getBytes.toVector ++ Vector[Byte](0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0)))
+      assertEquals(written.map(_.timestamp), Vector(2000L))
+
+  test("writes to a window store at the same moment are all kept"):
+    val starts = (1 to 50).toList.map(n => Timestamp.fromEpochMillis(n * 100L))
+    for
+      task <-
+        taskOf(windowed((kept, record) =>
+          starts.parTraverse_(start => kept.put(record.key, start.epochMillis, start)) *>
+            kept.all.compile.count.map(found => List(record.withValue(found)))
+        ))
+      read <- task.process(TaskState.empty, input("a", "x"), 0L)
+    yield
+      assertEquals(read._2.filter(_.topic == out).flatMap(_.value.map(_.size)), Vector(8))
+      assertEquals(changelog(read._2).size, 50)
+      assertEquals(read._2.filter(_.topic == out).flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong), Vector(50L))
+
+  test("a handler that fails keeps nothing it wrote to a window store"):
+    val boom  = new RuntimeException("boom")
+    val logic =
+      (kept: WindowStore[IO, String, Long], record: Record[String, String]) =>
+        if record.value == "fail" then kept.put(record.key, 1L, record.timestamp) *> IO.raiseError(boom)
+        else kept.fetch(record.key, Timestamp.fromEpochMillis(5000L)).map(held => List(record.withValue(held.getOrElse(-1L))))
+    for
+      task   <- taskOf(windowed(logic))
+      failed <- task.process(TaskState.empty, input("a", "fail", 5000L), 0L).attempt
+      read   <- task.process(TaskState.empty, input("a", "read", 5000L), 0L)
+    yield
+      assertEquals(failed.left.toOption, Some(boom))
+      assertEquals(read._2.filter(_.topic == out).flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong), Vector(-1L))
+      assertEquals(changelog(read._2), Vector.empty)
+
+  test("a key a window store cannot write fails the record, naming the store, and a value written as none removes the window"):
+    val nothing = Serde.utf8[IO].option
+    val store   = WindowStore.of(Store("tally"), nothing, nothing, size = 1.second, retention = 10.seconds)
+    val logic   =
+      Processor.withStore(store): (kept: WindowStore[IO, Option[String], Option[String]]) =>
+        Processor.onRecord[IO, String, String, String, String]: record =>
+          record.value match
+            case "no-key" => kept.put(None, Some("v"), record.timestamp).as(Nil)
+            case _        => kept.put(Some("k"), Some("v"), record.timestamp) *> kept.put(Some("k"), None, record.timestamp) *>
+                kept.all.compile.count.map(found => List(record.withValue(found.toString)))
+    for
+      task   <- taskOf(pipeline(logic, text, text))
+      failed <- task.process(TaskState.empty, input("a", "no-key"), 0L).attempt
+      read   <- task.process(TaskState.empty, input("a", "gone"), 0L)
+    yield
+      assertEquals(failed.left.toOption.map(_.getMessage), Some("a key of the store 'tally' serialized to nothing"))
+      assertEquals(read._2.filter(_.topic == out).flatMap(_.value.map(value => String(value.toArray))), Vector("0"))
+
+  test("a window store works in a processor that keeps the key, beside a key-value store, shared between processors, and through imapK"):
+    val latest                                               = KeyValueStore.of(Store("latest"), text, count)
+    val first: FixedKeyProcessor[IO, String, String, String] =
+      FixedKeyProcessor.withStores(windows, latest): (kept, last) =>
+        FixedKeyProcessor.onRecord: record =>
+          kept.put(record.key, 1L, record.timestamp) *> last.put(record.key, 1L).as(List(record.withValue(record.value)))
+    val second =
+      Processor.withStore(windows): kept =>
+        Processor.onRecord: (record: Record[String, String]) =>
+          kept.fetchAll(Timestamp.fromEpochMillis(0L), record.timestamp).compile.count.map(found => List(record.withValue(found)))
+    val program =
+      KStream(Named("read"), in, text, text).processValues(Named("first"), first).process(Named("second"), second)
+        .to(Named("write"), out, text, count)
+    val mapped = Topology.of(program.imapK(FunctionK.id[IO])(FunctionK.id[IO])).orFail
+    assertEquals(mapped.subtopologies.head.retentions, Map("tally" -> 10000L))
+    Task.inMemory[IO]("app", mapped.subtopologies.head, 0).flatMap(_.process(TaskState.empty, input("a", "x", 2000L), 0L)).map: (_, written) =>
+      assertEquals(written.filter(_.topic == out).flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong), Vector(1L))
+      assertEquals(written.filter(_.topic != out).map(_.topic.value).toSet, Set("app-tally-changelog", "app-latest-changelog"))
+
   test("a punctuator behind many forks that merge back is found once, mapped or not, however many paths lead to it"):
     val depth = 40
     val tail  = Flow.asRead[IO, String, String].process(Named("proc"), ticking(Punctuation.wallClock(1.second))).to(Named("write"), out, text, text)

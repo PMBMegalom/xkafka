@@ -23,6 +23,7 @@ package xkafka
 package internal
 package streams
 
+import driver.PolledRecord
 import fs2.Chunk
 import munit.FunSuite
 
@@ -38,6 +39,21 @@ final class WindowStoreSuite extends FunSuite:
   test("a store's clock is its latest window start, or none for an empty store"):
     assertEquals(WindowStore.clockOf(StoreContents.empty), WindowStore.NoTime)
     assertEquals(WindowStore.clockOf(StoreContents.of(Map(stored("a", 5000L), stored("b", 20000L), stored("a", 10000L)))), 20000L)
+
+  test("a removal counts towards a window or session store's clock, whatever happens to what it holds after, and towards no other store's"):
+    val window  = WindowStore.key(Chunk.array("a".getBytes), 50000L)
+    val session = SessionStore.key(Chunk.array("a".getBytes), 1000L, 60000L)
+    val older   = Map(stored("a", 5000L))
+    val times   = Map("w" -> ((key: Chunk[Byte]) => WindowStore.startOf(key)), "s" -> ((key: Chunk[Byte]) => SessionStore.endOf(key)))
+    def removing(store: String, key: Chunk[Byte], held: StoreContents) =
+      Restore.applied(Map(store -> held), store, PolledRecord("c", 0, 0L, Some(1L), 0, 0, Some(key), None, Headers.empty), times)(store)
+    val windows = removing("w", window, StoreContents.of(older))
+    assertEquals(WindowStore.clockOf(windows), 50000L)
+    assertEquals(WindowStore.prunedAll(Map("w" -> windows), Map("w" -> 15000L))("w").size, 0)
+    assertEquals(WindowStore.clockOf(WindowStore.prunedAll(Map("w" -> windows), Map("w" -> 15000L))("w")), 50000L)
+    assertEquals(WindowStore.clockOf(windows.updated(window, Stored(Chunk.empty, 1L)).after(Map(window -> None))), 50000L)
+    assertEquals(SessionStore.clockOf(removing("s", session, StoreContents.empty)), 60000L)
+    assertEquals(removing("kv", window, StoreContents.of(older)).latestRemoved, WindowStore.NoTime)
 
   test("a window expires once the clock is a whole retention past its start"):
     val entries = StoreContents.of(Map(stored("a", 4999L), stored("a", 5000L), stored("a", 5001L)))

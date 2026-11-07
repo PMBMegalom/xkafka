@@ -98,6 +98,67 @@ record is saved.
 Anything else your handler does, such as calling another service, runs again for
 records that are processed again after a crash or when another member takes over.
 
+## Window stores
+
+A `WindowStore` holds one value for each key and window, and forgets windows once
+they are old enough. You choose each window's start, usually by rounding a record's
+time down. This one counts each user's failed logins per minute, and sends on the
+total for the last ten minutes once it passes five:
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def repeatedFailures(input: Topic, output: Topic): Pipeline[IO] =
+  val user     = Serde.utf8[IO]
+  val count    = Serde.long[IO]
+  val failures = WindowStore.of(Store("failures"), user, count, size = 1.minute, retention = 1.hour)
+  KStream(Named("failed-logins"), input, user, Serde.utf8[IO])
+    .process(
+      Named("flag-repeats"),
+      Processor.withStore(failures): kept =>
+        Processor.onRecord: record =>
+          val now    = record.timestamp.epochMillis
+          val minute = Timestamp.fromEpochMillis(now - now % 60000)
+          for
+            seen   <- kept.fetch(record.key, minute)
+            _      <- kept.put(record.key, seen.getOrElse(0L) + 1, minute)
+            recent <- kept.fetch(record.key, Timestamp.fromEpochMillis(now - 600000), record.timestamp).map(_._2).compile.foldMonoid
+          yield if recent > 5 then List(record.withValue(recent)) else Nil
+    )
+    .to(Named("write-flags"), output, user, count)
+```
+
+| To read | Use | You get |
+| --- | --- | --- |
+| One key's window | `fetch(key, start)` | an `Option` of its value |
+| One key's windows between two starts | `fetch(key, from, to)`, `reverseFetch` | each window's start and value |
+| A range of keys between two starts | `fetchRange(first, last, from, to)`, `reverseFetchRange` | each `Windowed` key and value |
+| Every key between two starts | `fetchAll(from, to)`, `reverseFetchAll` | each `Windowed` key and value |
+| Everything | `all`, `reverseAll` | each `Windowed` key and value |
+
+Both ends of a range are included. Reads over several keys go by window start, then
+by the order of the keys' serialized bytes, and the `reverse` reads give the exact
+opposite order. `delete(key, start)` removes one window.
+
+`retention` decides how long a window lasts. A window has expired once the latest
+start written to the store, by a `put` or a `delete`, is a whole retention past its
+own start. Reads do not find an expired window, and a `put` to one keeps nothing and
+raises no error, so choose a retention at least as long as the oldest window you
+still write to or read.
+
+`size` is only what the `end` of a `Windowed` key says: a `put` does not check that
+starts are a size apart. A size under a millisecond, or a retention shorter than the
+size, is refused when you call `Topology.of`.
+
+Writes are saved and restored as for a `KeyValueStore`, to the topic
+`<application id>-<store>-changelog`, which keeps records for the retention plus a
+day.
+
 ## Running on a schedule
 
 A punctuator is code a processor runs on a schedule, between records. Wrap the

@@ -28,6 +28,7 @@ import java.nio.ByteBuffer
 import scala.annotation.tailrec
 
 import fs2.Chunk
+import xkafka.streams.Subtopology
 
 /** A window store as Java's in-memory window store keeps one. Its contents are keyed as its changelog is: the serialized key, the window's start as
   * eight big-endian bytes, and a sequence number of four, which stays 0 for a store that keeps one value per key and window. Its clock is the latest
@@ -52,8 +53,14 @@ private[xkafka] object WindowStore:
   /** The start of the window a key names. */
   def startOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.drop(key.size - 12).take(8).toArray).getLong
 
-  /** The clock of a store holding `entries`: the latest window start among them. */
-  def clockOf(entries: StoreContents): Long = entries.keysIterator.map(startOf).maxOption.getOrElse(NoTime)
+  /** The clock of a store holding `entries`: the latest window start among them, or a removal named. */
+  def clockOf(entries: StoreContents): Long = math.max(entries.keysIterator.map(startOf).maxOption.getOrElse(NoTime), entries.latestRemoved)
+
+  /** How to read the time that counts towards its clock from a key of each window and session store of `subtopologies`. */
+  def timesOf[F[_]](subtopologies: Iterable[Subtopology[F]]): Map[String, Chunk[Byte] => Long] =
+    subtopologies.flatMap: subtopology =>
+      subtopology.retentions.keys.map(store => store -> (if subtopology.sessionStores(store) then SessionStore.endOf else startOf))
+    .toMap
 
   /** Whether a window starting at `start` has expired by `clock`. */
   def expired(start: Long, clock: Long, retention: Long): Boolean = start <= clock - retention
@@ -86,8 +93,8 @@ private[xkafka] object SessionStore:
   /** The start of the session a key names. */
   def startOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.drop(key.size - 8).toArray).getLong
 
-  /** The clock of a store holding `entries`: the latest session end among them. */
-  def clockOf(entries: StoreContents): Long = entries.keysIterator.map(endOf).maxOption.getOrElse(WindowStore.NoTime)
+  /** The clock of a store holding `entries`: the latest session end among them, or a removal named. */
+  def clockOf(entries: StoreContents): Long = math.max(entries.keysIterator.map(endOf).maxOption.getOrElse(WindowStore.NoTime), entries.latestRemoved)
 
   /** The sessions of `entries` that have not expired by `clock`. */
   def pruned(entries: StoreContents, clock: Long, retention: Long): StoreContents =

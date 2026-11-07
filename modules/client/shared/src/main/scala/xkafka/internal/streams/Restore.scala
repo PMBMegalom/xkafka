@@ -28,6 +28,7 @@ import scala.concurrent.duration.*
 import cats.effect.Temporal
 import cats.syntax.all.*
 import driver.{KafkaDriver, PartitionEnd, PolledRecord, StartAt}
+import fs2.Chunk
 
 /** Refills stores from their changelogs. */
 private[xkafka] object Restore:
@@ -49,7 +50,8 @@ private[xkafka] object Restore:
       consumer: driver.Client,
       changelogs: Map[TopicPartition, String],
       from: Map[TopicPartition, Long] = Map.empty,
-      held: Map[String, StoreContents] = Map.empty
+      held: Map[String, StoreContents] = Map.empty,
+      times: Map[String, Chunk[Byte] => Long] = Map.empty
   )(using F: Temporal[F]): F[Map[String, StoreContents]] =
     val stores   = changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> store)
     val starting = changelogs.keys.toVector
@@ -58,7 +60,7 @@ private[xkafka] object Restore:
       else
         driver.poll(consumer, PollMillis).flatMap: polled =>
           val after =
-            polled.records.foldLeft(restored)((now, record) => stores.get((record.topic, record.partition)).fold(now)(applied(now, _, record)))
+            polled.records.foldLeft(restored)((now, record) => stores.get((record.topic, record.partition)).fold(now)(applied(now, _, record, times)))
           read(unfinished(left, polled.ends, ends), ends, after)
     driver.assign(consumer, starting, starting.map(partition => StartAt(partition, from.getOrElse(partition, 0L), -1))) *>
       endsOf(driver, consumer, starting).flatMap: ends =>
@@ -91,8 +93,14 @@ private[xkafka] object Restore:
   def unfinished(left: Set[(String, Int)], reached: List[PartitionEnd], ends: Ends): Set[(String, Int)] =
     left -- reached.collect { case end if end.offset >= ends.getOrElse((end.topic, end.partition), 0L) => (end.topic, end.partition) }
 
-  /** The stores with one changelog record applied to `store`. */
-  def applied(restored: Map[String, StoreContents], store: String, record: PolledRecord): Map[String, StoreContents] =
+  /** The stores with one changelog record applied to `store`. A removal from a store `times` can read a time from counts towards its clock. */
+  def applied(
+      restored: Map[String, StoreContents],
+      store: String,
+      record: PolledRecord,
+      times: Map[String, Chunk[Byte] => Long] = Map.empty
+  ): Map[String, StoreContents] =
     record.key.fold(restored): key =>
       val contents = restored.getOrElse(store, StoreContents.empty)
-      restored.updated(store, record.value.fold(contents - key)(value => contents.updated(key, Stored(value, record.timestamp.getOrElse(-1L)))))
+      def removed  = times.get(store).fold(contents)(time => contents.removedAt(time(key))) - key
+      restored.updated(store, record.value.fold(removed)(value => contents.updated(key, Stored(value, record.timestamp.getOrElse(-1L)))))
