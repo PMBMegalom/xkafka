@@ -322,6 +322,93 @@ final class ProcessorGoldenSuite extends CatsEffectSuite:
       List("kept")
     )
 
+  /** Java's processor that keeps the key and uses no store. */
+  private def javaKeeping(handle: (JavaFixedKeyRecord[String, String], FixedKeyProcessorContext[String, String]) => Unit) =
+    new FixedKeyProcessorSupplier[String, String, String]:
+      override def get =
+        new JavaFixedKeyProcessor[String, String, String]:
+          private val context                                                       = AtomicReference[FixedKeyProcessorContext[String, String]]()
+          override def init(opened: FixedKeyProcessorContext[String, String]): Unit = context.set(opened)
+          override def process(record: JavaFixedKeyRecord[String, String]): Unit    = handle(record, context.get)
+
+  /** Java's processor that can change the key and uses no store. */
+  private def javaChanging(
+      handle: (JavaRecord[String, String], ProcessorContext[String, String]) => Unit
+  ): ProcessorSupplier[String, String, String, String] =
+    () =>
+      new JavaProcessor[String, String, String, String]:
+        private val context                                               = AtomicReference[ProcessorContext[String, String]]()
+        override def init(opened: ProcessorContext[String, String]): Unit = context.set(opened)
+        override def process(record: JavaRecord[String, String]): Unit    = handle(record, context.get)
+
+  /** `headers` with one named `key` in place of any it had, as `Headers.set` does. */
+  private def javaSet(headers: org.apache.kafka.common.header.Headers, key: String, value: String) =
+    val copy = RecordHeaders(headers.toArray)
+    copy.remove(key)
+    copy.add(key, value.getBytes)
+
+  private def javaRemoved(headers: org.apache.kafka.common.header.Headers, key: String) =
+    val copy = RecordHeaders(headers.toArray)
+    copy.remove(key)
+    copy
+
+  private def source(builder: StreamsBuilder) = builder.stream[String, String]("in", org.apache.kafka.streams.kstream.Consumed.as("read"))
+
+  test("the steps that keep the key write what Java's processors that keep the key write, and are described alike"):
+    same(
+      KStream(Named("read"), in, text, text).filterRecord(Named("traced"))(_.headers.getAll("trace").nonEmpty)
+        .evalFilterRecord(Named("early"))(record => IO.pure(record.timestamp.epochMillis < 2500L)).peekRecord(Named("look"))(_ => IO.unit)
+        .mapRecordValue(Named("change")): record =>
+          record.withValue(record.value + "!").withTimestamp(Timestamp.fromEpochMillis(record.timestamp.epochMillis + 1))
+            .withHeaders(record.headers.set("trace", "new").append("extra", "e"))
+        .evalMapRecordValue(Named("again"))(record => IO.pure(record.withValue(record.value + "?")))
+        .flatMapRecordValue(Named("split"))(record => List(record, record.withValue("second").withHeaders(record.headers.remove("trace"))))
+        .to(Named("write"), out, text, text),
+      builder =>
+        def step(name: String)(handle: (JavaFixedKeyRecord[String, String], FixedKeyProcessorContext[String, String]) => Unit) =
+          javaKeeping(handle) -> JavaNamed.as(name)
+        val (traced, tracedName) = step("traced")((record, context) => if record.headers.lastHeader("trace") != null then context.forward(record))
+        val (early, earlyName)   = step("early")((record, context) => if record.timestamp < 2500L then context.forward(record))
+        val (look, lookName)     = step("look")((record, context) => context.forward(record))
+        val (change, changeName) =
+          step("change"): (record, context) =>
+            val headers = javaSet(record.headers, "trace", "new").add("extra", "e".getBytes)
+            context.forward(record.withValue(record.value + "!").withTimestamp(record.timestamp + 1).withHeaders(headers))
+        val (again, againName) = step("again")((record, context) => context.forward(record.withValue(record.value + "?")))
+        val (split, splitName) =
+          step("split"): (record, context) =>
+            context.forward(record)
+            context.forward(record.withValue("second").withHeaders(javaRemoved(record.headers, "trace")))
+        source(builder).processValues[String](traced, tracedName).processValues[String](early, earlyName).processValues[String](look, lookName)
+          .processValues[String](change, changeName).processValues[String](again, againName).processValues[String](split, splitName)
+          .to("out", Produced.as[String, String]("write"))
+      ,
+      Nil
+    )
+
+  test("the steps that can change the key write what Java's processors write, and are described alike"):
+    same(
+      KStream(Named("read"), in, text, text).mapRecord(Named("swap"))(record => record.withKey(record.value).withValue(record.key))
+        .evalMapRecord(Named("mark"))(record => IO.pure(record.withKey(record.key + "m").withHeaders(record.headers.set("mark", "m"))))
+        .flatMapRecord(Named("split")): record =>
+          if record.key == "m" then Nil
+          else List(record, record.withKey("other").withTimestamp(Timestamp.fromEpochMillis(record.timestamp.epochMillis - 1)))
+        .to(Named("write"), out, text, text),
+      builder =>
+        val swap = javaChanging((record, context) => context.forward(record.withKey(record.value).withValue(record.key)))
+        val mark =
+          javaChanging((record, context) => context.forward(record.withKey(record.key + "m").withHeaders(javaSet(record.headers, "mark", "m"))))
+        val split =
+          javaChanging: (record, context) =>
+            if record.key != "m" then
+              context.forward(record)
+              context.forward(record.withKey("other").withTimestamp(record.timestamp - 1))
+        source(builder).process[String, String](swap, JavaNamed.as("swap")).process[String, String](mark, JavaNamed.as("mark"))
+          .process[String, String](split, JavaNamed.as("split")).to("out", Produced.as[String, String]("write"))
+      ,
+      Nil
+    )
+
   test("grouping what a processor that keeps the key gave is described as Java's is, with a repartition topic only after the key was changed"):
     val store                                               = KeyValueStore.of(Store("kept"), text, bytes)
     def fixed(kept: KeyValueStore[IO, String, Array[Byte]]) =

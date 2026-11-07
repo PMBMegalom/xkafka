@@ -114,7 +114,7 @@ producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
 ## Records
 
 A `ProducerRecord` names its topic, key, and value, and optionally a partition,
-a timestamp, and headers. A key or value of `None`, through the `.option`
+a timestamp, and [headers](headers.md). A key or value of `None`, through the `.option`
 codecs, represents a Kafka null. Tombstones are produced this way.
 
 ## Partitions
@@ -246,7 +246,7 @@ def withCloseTimeout[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[Produc
   settings.withCloseTimeout(10.seconds).liftTo[IO]
 ```
 
-Like every duration wither, it revalidates and returns
+Like every method that sets a duration, it validates the settings again and returns
 `ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. See
 [Settings](settings.md).
 

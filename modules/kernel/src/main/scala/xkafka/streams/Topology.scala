@@ -106,15 +106,20 @@ final class InvalidTopology(val errors: NonEmptyList[TopologyError]) extends Run
 
 /** What a pipeline does to a record keyed `K` with a value `V`, giving records keyed `K2` with values `V2`. */
 private[xkafka] enum Step[F[_], K, V, K2, V2]:
-  case Filter[F[_], K, V](keep: (K, V) => Boolean)                       extends Step[F, K, V, K, V]
-  case Map[F[_], K, V, K2, V2](change: (K, V) => (K2, V2))               extends Step[F, K, V, K2, V2]
-  case MapValues[F[_], K, V, V2](change: V => V2)                        extends Step[F, K, V, K, V2]
-  case FlatMap[F[_], K, V, K2, V2](change: (K, V) => Iterable[(K2, V2)]) extends Step[F, K, V, K2, V2]
-  case FlatMapValues[F[_], K, V, V2](change: V => Iterable[V2])          extends Step[F, K, V, K, V2]
-  case Peek[F[_], K, V](effect: (K, V) => F[Unit])                       extends Step[F, K, V, K, V]
-  case EvalMapValues[F[_], K, V, V2](change: V => F[V2])                 extends Step[F, K, V, K, V2]
-  case EvalFilter[F[_], K, V](keep: (K, V) => F[Boolean])                extends Step[F, K, V, K, V]
-  case EvalMap[F[_], K, V, K2, V2](change: (K, V) => F[(K2, V2)])        extends Step[F, K, V, K2, V2]
+  case Filter[F[_], K, V](keep: (K, V) => Boolean)                                                     extends Step[F, K, V, K, V]
+  case Map[F[_], K, V, K2, V2](change: (K, V) => (K2, V2))                                             extends Step[F, K, V, K2, V2]
+  case MapValues[F[_], K, V, V2](change: V => V2)                                                      extends Step[F, K, V, K, V2]
+  case FlatMap[F[_], K, V, K2, V2](change: (K, V) => Iterable[(K2, V2)])                               extends Step[F, K, V, K2, V2]
+  case FlatMapValues[F[_], K, V, V2](change: V => Iterable[V2])                                        extends Step[F, K, V, K, V2]
+  case Peek[F[_], K, V](effect: (K, V) => F[Unit])                                                     extends Step[F, K, V, K, V]
+  case EvalMapValues[F[_], K, V, V2](change: V => F[V2])                                               extends Step[F, K, V, K, V2]
+  case EvalFilter[F[_], K, V](keep: (K, V) => F[Boolean])                                              extends Step[F, K, V, K, V]
+  case EvalMap[F[_], K, V, K2, V2](change: (K, V) => F[(K2, V2)])                                      extends Step[F, K, V, K2, V2]
+  case RecordFilter[F[_], K, V](keep: Record[K, V] => Boolean)                                         extends Step[F, K, V, K, V]
+  case RecordPeek[F[_], K, V](effect: Record[K, V] => F[Unit])                                         extends Step[F, K, V, K, V]
+  case EvalRecordFilter[F[_], K, V](keep: Record[K, V] => F[Boolean])                                  extends Step[F, K, V, K, V]
+  case RecordMap[F[_], K, V, K2, V2](change: Record[K, V] => Iterable[Record[K2, V2]])                 extends Step[F, K, V, K2, V2]
+  case EvalRecordMap[F[_], K, V, A, K2, V2](change: Record[K, V] => F[A], result: A => Record[K2, V2]) extends Step[F, K, V, K2, V2]
 
   /** Keeps each key's latest value in `store`, as Java's table read from a topic does: none deletes the key, and a record without a key is skipped.
     * Each change goes on with the value it replaced.
@@ -247,6 +252,11 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case EvalMapValues(change)                                   => EvalMapValues(value => fk(change(value)))
       case EvalFilter(keep)                                        => EvalFilter((key, value) => fk(keep(key, value)))
       case EvalMap(change)                                         => EvalMap((key, value) => fk(change(key, value)))
+      case RecordFilter(keep)                                      => RecordFilter(keep)
+      case RecordPeek(effect)                                      => RecordPeek(record => fk(effect(record)))
+      case EvalRecordFilter(keep)                                  => EvalRecordFilter(record => fk(keep(record)))
+      case RecordMap(change)                                       => RecordMap(change)
+      case EvalRecordMap(change, result)                           => EvalRecordMap(record => fk(change(record)), result)
       case Aggregate(store, key, value, initial, start, add)       => Aggregate(store, key.mapK(fk), value.mapK(fk), initial, start, add)
       case TableGroupBy(grouped)                                   => TableGroupBy(grouped)
       case TableAggregate(store, key, value, start, add, subtract) => TableAggregate(store, key.mapK(fk), value.mapK(fk), start, add, subtract)
@@ -904,6 +914,42 @@ sealed trait KStream[F[_], K, V]:
     * replayed after a crash or a fencing.
     */
   def evalMap[K2, V2](named: Named)(change: (K, V) => F[(K2, V2)]): Rekeyed[K2, V2] = rekeyed(named, Step.EvalMap(change))
+
+  /** Keeps the records `keep` gives true for, given each whole record with its time and headers. */
+  def filterRecord(named: Named)(keep: Record[K, V] => Boolean): Kept[K, V] = kept(named, Step.RecordFilter(keep))
+
+  /** Replaces each record with what `change` gives, which can change anything about it. */
+  def mapRecord[K2, V2](named: Named)(change: Record[K, V] => Record[K2, V2]): Rekeyed[K2, V2] =
+    rekeyed(named, Step.RecordMap(record => List(change(record))))
+
+  /** Replaces each record with what `change` gives, which can change its value, time and headers but not its key. */
+  def mapRecordValue[V2](named: Named)(change: FixedKeyRecord[K, V] => FixedKeyRecord[K, V2]): Kept[K, V2] =
+    kept(named, Step.RecordMap(record => List(change(new FixedKeyRecord(record)).record)))
+
+  /** Replaces each record with the records `change` gives, in order, each of which can change anything about it. */
+  def flatMapRecord[K2, V2](named: Named)(change: Record[K, V] => Iterable[Record[K2, V2]]): Rekeyed[K2, V2] = rekeyed(named, Step.RecordMap(change))
+
+  /** Replaces each record with the records `change` gives, in order, each of which can change its value, time and headers but not its key. */
+  def flatMapRecordValue[V2](named: Named)(change: FixedKeyRecord[K, V] => Iterable[FixedKeyRecord[K, V2]]): Kept[K, V2] =
+    kept(named, Step.RecordMap(record => change(new FixedKeyRecord(record)).map(_.record)))
+
+  /** Runs `effect` for each whole record, leaving it as it is. The effect runs again for records replayed after a crash or a fencing. */
+  def peekRecord(named: Named)(effect: Record[K, V] => F[Unit]): Kept[K, V] = kept(named, Step.RecordPeek(effect))
+
+  /** As `filterRecord`, running an effect, which runs again for records replayed after a crash or a fencing. */
+  def evalFilterRecord(named: Named)(keep: Record[K, V] => F[Boolean]): Kept[K, V] = kept(named, Step.EvalRecordFilter(keep))
+
+  /** As `mapRecord`, running an effect. Its output is written once under exactly-once processing, but the effect runs again for records replayed
+    * after a crash or a fencing.
+    */
+  def evalMapRecord[K2, V2](named: Named)(change: Record[K, V] => F[Record[K2, V2]]): Rekeyed[K2, V2] =
+    rekeyed(named, Step.EvalRecordMap(change, identity))
+
+  /** As `mapRecordValue`, running an effect. Its output is written once under exactly-once processing, but the effect runs again for records replayed
+    * after a crash or a fencing.
+    */
+  def evalMapRecordValue[V2](named: Named)(change: FixedKeyRecord[K, V] => F[FixedKeyRecord[K, V2]]): Kept[K, V2] =
+    kept(named, Step.EvalRecordMap(record => change(new FixedKeyRecord(record)), _.record))
 
   /** Groups records by a new key, through the repartition topic `repartition` names, which also names the step that gives them the key, as Java's
     * `Grouped` names both.

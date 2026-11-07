@@ -91,12 +91,12 @@ settings, such as `bootstrap.servers`, `group.id`, `acks`, `linger.ms`, and the
 TLS and SASL names. Supplying one of them through the map is a `SettingsError`;
 use the typed setting instead.
 
-## Withers
+## Changing settings
 
 Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
-duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
+one that sets a duration: `withMetadataRefreshInterval`, `withCloseTimeout`,
 `withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
 `withRequestTimeout`, `withLinger`, `withEnqueueTimeout`, `withSessionTimeout`,
 `withHeartbeatInterval`, `withMaxPollInterval`, `withRebalanceSafeCommits`, and

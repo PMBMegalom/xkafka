@@ -93,15 +93,15 @@ import xkafka.streams.*
 
 def reviewed(orders: Topic, refunds: Topic, all: Topic, review: Topic) =
   val text     = Serde.utf8[IO]
-  // A flow that writes to the topic all
+  // A flow that writes to the topic "all"
   val toAll    = Flow.asRead[IO, String, String].merged(Named("all")).to(Named("write-all"), all, text, text)
-  // A flow that writes to the topic review
+  // A flow that writes to the topic "review"
   val toReview = Flow.asRead[IO, String, String].merged(Named("review")).to(Named("write-review"), review, text, text)
   // A flow that keeps large amounts, and sends them to both of the above
   val large    = Flow.asRead[IO, String, String].filter(Named("large"))((_, amount) => amount.length > 3).into(toAll, toReview)
   Topology.of(
     KStream(Named("orders"), orders, text, text).into(large),             // Orders go through the flow that keeps large amounts
-    KStream(Named("refunds"), refunds, text, text).into(toAll, toReview)  // Every refund goes straight to both topics' flows
+    KStream(Named("refunds"), refunds, text, text).into(toAll, toReview)  // Every refund goes straight to the flows for both topics
   )
 ```
 

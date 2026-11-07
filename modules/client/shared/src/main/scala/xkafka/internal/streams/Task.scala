@@ -231,7 +231,7 @@ private[xkafka] final class Task[F[_]](
       access  <- node.stores.traverse(store => accessTo(store, at, working).map(store -> _))
       results <- node.punctuators(access.toMap)(index).run(Timestamp.fromEpochMillis(at))
       ended   <- working.get
-      going = results.toVector.map(result => Travelling(result.key, result.value, result.timestamp.epochMillis, result.headers))
+      going = results.toVector.map(travelling)
       pushed <- allPushed(node.next, going, ended._1, ended._2, now)
     yield pushed
 
@@ -654,7 +654,12 @@ private[xkafka] final class Task[F[_]](
       case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
-      case Step.ToStream()                                               => passing(Vector(record))
+      case Step.RecordFilter(keep)            => passing(if keep(asRead(record, state)) then Vector(record) else Vector.empty)
+      case Step.RecordPeek(effect)            => effect(asRead(record, state)) *> passing(Vector(record))
+      case Step.EvalRecordFilter(keep)        => keep(asRead(record, state)).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
+      case Step.RecordMap(change)             => passing(change(asRead(record, state)).iterator.map(travelling).toVector)
+      case Step.EvalRecordMap(change, result) => change(asRead(record, state)).flatMap(made => passing(Vector(travelling(result(made)))))
+      case Step.ToStream()                    => passing(Vector(record))
       case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _, _)   => windowed(folding, record, state, now, clock)
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
@@ -753,15 +758,22 @@ private[xkafka] final class Task[F[_]](
       record: Travelling[K, V],
       state: TaskState
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
-    def origin(input: TaskInput) =
-      (Topic.from(input.topic).toOption, Partition.from(input.partition).toOption, Offset.from(input.offset).toOption).mapN(RecordOrigin(_, _, _))
-    val read = Record(record.key, record.value, Timestamp.fromEpochMillis(record.timestamp), record.headers, state.reading.flatMap(origin))
     for
       working <- Ref.of[F, (TaskState, Vector[TaskOutput])]((state, Vector.empty))
       access  <- processor.kept.traverse(kept => accessTo(kept.store.value, record.timestamp, working).map(kept.store.value -> _))
-      results <- processor.handling(access.toMap).onRecord(read)
+      results <- processor.handling(access.toMap).onRecord(asRead(record, state))
       ended   <- working.get
-    yield (ended._1, results.toVector.map(result => Travelling(result.key, result.value, result.timestamp.epochMillis, result.headers)), ended._2)
+    yield (ended._1, results.toVector.map(travelling), ended._2)
+
+  /** `record` as a program's own code reads it, with where it came from. */
+  private def asRead[K, V](record: Travelling[K, V], state: TaskState): Record[K, V] =
+    def origin(input: TaskInput) =
+      (Topic.from(input.topic).toOption, Partition.from(input.partition).toOption, Offset.from(input.offset).toOption).mapN(RecordOrigin(_, _, _))
+    Record(record.key, record.value, Timestamp.fromEpochMillis(record.timestamp), record.headers, state.reading.flatMap(origin))
+
+  /** What a program's own code returned, going on to the next step. */
+  private def travelling[K, V](result: Record[K, V]): Travelling[K, V] =
+    Travelling(result.key, result.value, result.timestamp.epochMillis, result.headers)
 
   /** `store` as a processor reads and writes it, through `working`, each write at `timestamp`. */
   private def accessTo(store: String, timestamp: Long, working: Ref[F, (TaskState, Vector[TaskOutput])]): F[StoreAccess[F]] =

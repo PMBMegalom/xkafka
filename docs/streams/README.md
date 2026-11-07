@@ -27,9 +27,9 @@ val program =
                   // Key each view by its page, through a repartition topic
                   .groupBy(Repartition("views-by-page"), page, page)((_, viewed) => viewed)
                   .count(Named("count-views"), Store("views-per-page"))  // Keep each page's count in a store
-                  .toStream(Named("view-counts"))                        // Every change to a count
+                  .toStream(Named("view-counts"))                        // Turn each change to a count into a record
                   .to(Named("write-view-counts"), output, page, views)   // Write each change to the output topic
-    topology <- Topology.of(pipeline).liftTo[IO]                         // Check the program
+    topology <- Topology.of(pipeline).liftTo[IO]                         // Check the program for problems
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     id       <- ApplicationId.from("page-view-counter").liftTo[IO]
     settings <- StreamsSettings.from(client, id).liftTo[IO]
@@ -54,6 +54,8 @@ A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as
 - `filter`, `filterNot`, `map`, `mapValues`, `flatMap`, `flatMapValues`,
   `selectKey` and `peek`;
 - `evalFilter`, `evalMap` and `evalMapValues`, which run an effect;
+- `filterRecord`, `mapRecord`, `mapRecordValue` and others like them, which also
+  see each record's time and headers (see [Steps that see the whole record](#steps-that-see-the-whole-record));
 - `repartition`, which sends records through a repartition topic you name;
 - `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
   named `Store`. This gives a `KTable`, and its `toStream` is every change to it.
@@ -155,6 +157,53 @@ A `Serde` holds the serializer and deserializer of one type, since a streams
 application both reads and writes its topics. `Serde.utf8`, `Serde.long` and
 `Serde.bytes` write the same bytes as Java's `Serdes.String()`, `Serdes.Long()`
 and `Serdes.ByteArray()`.
+
+### Steps that see the whole record
+
+`filter`, `mapValues` and the steps like them see a record's key and value. To read
+or change its headers or time, or see where it was read from, use a step that is
+given the whole record:
+
+```scala mdoc:compile-only
+// Drop test orders, and put the tenant named in a header into each order's value
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def tenantOrders(orders: Topic, output: Topic): Pipeline[IO] =
+  val id   = Serde.utf8[IO]
+  val item = Serde.utf8[IO]
+  KStream(Named("orders"), orders, id, item)
+    .filterRecord(Named("real-orders"))(_.headers.getAll("x-test").isEmpty)  // Test orders carry an x-test header
+    .mapRecordValue(Named("with-tenant")): record =>
+      val tenant = record.headers.get[String]("tenant").flatMap(_.toOption).getOrElse("unknown")  // Read the tenant header, or use unknown if it is missing or unreadable
+      record.withValue(s"$tenant: ${record.value}").withHeaders(record.headers.remove("tenant"))  // Change the value and headers
+    .to(Named("write-orders"), output, id, item)
+```
+
+| To | Use | With an effect |
+| --- | --- | --- |
+| Keep some records | `filterRecord` | `evalFilterRecord` |
+| Act on each record and leave it as it is | | `peekRecord` |
+| Change the value, time or headers | `mapRecordValue` | `evalMapRecordValue` |
+| Change those or the key | `mapRecord` | `evalMapRecord` |
+| Make any number of records, keeping the key | `flatMapRecordValue` | |
+| Make any number of records, with any key | `flatMapRecord` | |
+
+Each is given a `Record`, or a `FixedKeyRecord` where the key cannot change, as a
+[processor](processors.md) is. `withValue` and `withKey` keep the record's time and
+headers, and `withTimestamp` and `withHeaders` change them. `record.origin` gives the
+topic, partition and offset the record was read from. See
+[Headers](../headers.md) for reading and changing headers.
+
+Grouping or joining after `mapRecord`, `evalMapRecord` or `flatMapRecord` needs a
+repartition topic, as it does after `map`. The other steps keep the key.
+
+To make any number of records with an effect, or to use a store, write a
+[processor](processors.md). If some members run Java Kafka Streams, write these steps
+in the Java program as `process` where the key can change and `processValues` where
+it cannot, under the same names.
 
 ### Describing a program
 

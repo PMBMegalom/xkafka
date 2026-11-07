@@ -25,40 +25,9 @@ val value = Deserializer.utf8[IO].option
 
 A tombstone is a record whose value is `None`.
 
-## Header values
+## Headers
 
-A header value is bytes. `HeaderSerializer` and `HeaderDeserializer` encode and
-decode them, so a call site does not have to name a charset or a byte order:
-
-```scala mdoc:compile-only
-// Add two headers, then read one back as a String
-import xkafka.*
-
-val headers = Headers.empty.append("trace", "abc").append("attempt", 2)  // Each value is encoded by its type
-
-val trace = headers.values.head.as[String]  // Gives an Either, in case the value cannot be read
-```
-
-| type | encoding |
-| --- | --- |
-| `String` | UTF-8 |
-| `Int` | four bytes, most significant first |
-| `Long` | eight bytes, most significant first |
-| `Chunk[Byte]` | the bytes themselves |
-
-Reading returns `Either[ValidationError, A]`. A header with no value fails as
-`MissingHeaderValue`, and a numeric value of the wrong width fails as
-`InvalidHeaderLength` rather than being truncated.
-
-Kafka permits a header to have no value, represented as `Header(name, None)`.
-Every platform preserves it, and `Header(name, Some(Chunk.empty))` stays a
-distinct empty value.
-
-`contramap` and `map` adapt a codec to another type, and `emap` rejects values
-the bytes can carry but the type cannot.
-
-Header codecs are plain functions, not effects. A header value is already in
-memory by the time one is applied.
+A record's headers have codecs of their own. See [Headers](headers.md).
 
 ## Instances
 

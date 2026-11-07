@@ -77,7 +77,7 @@ def ordersByUser(orders: Topic, users: KTable.Of[IO, String, String, Option], ou
   val item = Serde.utf8[IO]
   KStream(Named("orders"), orders, id, item)
     .selectKey(Named("by-user"))((order, _) => order.takeWhile(_ != '/'))  // The key changes here
-    // So the join takes serdes for a repartition topic
+    // So the join takes serdes to write a repartition topic
     .join(Named("orders-by-user"), users, id, item)((bought, buyer) => s"$bought for $buyer")
     .to(Named("write-orders"), output, id, Serde.utf8[IO])
 ```
@@ -135,7 +135,7 @@ with `suppress` needs this:
 names
   // Keep the result in the store named accounts
   .join(Named("accounts"), paid, Store("accounts"), Serde.utf8[IO])((who, tier) => s"$who on $tier")
-  .suppress(Suppressed.untilTimeLimit("accounts-calm", 1.second))  // This needs the result kept in a store
+  .suppress(Suppressed.untilTimeLimit("accounts-calm", 1.second))  // Holding back updates needs the result kept in a store
 ```
 
 Like a stream and a table, two joined tables are processed together, so their

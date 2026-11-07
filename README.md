@@ -67,7 +67,7 @@ val words =
   KStream(Named("read"), input, text, text)
     .groupByKey(text, text)
     .count(Named("count"), Store("counts"))            // Keep each key's count in a store
-    .toStream(Named("changes"))                        // Every change to a count
+    .toStream(Named("changes"))                        // Turn each change to a count into a record
     .to(Named("write"), output, text, Serde.long[IO])  // Write each change to the output topic
 
 Topology.of(words).liftTo[IO].flatMap: topology =>
@@ -83,7 +83,7 @@ The full documentation lives at
 [pmbmegalom.github.io/xkafka](https://pmbmegalom.github.io/xkafka/), covering
 settings and validation, producing and consuming, offsets and commits,
 transactions, streams, topic administration, transport security, the error
-model, serialization, and the subtle differences between the three runtimes.
+model, headers, serialization, and the subtle differences between the three runtimes.
 
 ## Versioning
 

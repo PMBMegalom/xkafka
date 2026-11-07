@@ -27,7 +27,7 @@ val program =
 
 ## What a record carries
 
-Besides its topic-partition, offset, key, value and headers, a `ConsumerRecord`
+Besides its topic-partition, offset, key, value and [headers](headers.md), a `ConsumerRecord`
 has:
 
 | field | meaning |
@@ -111,11 +111,11 @@ import cats.effect.IO
 import xkafka.*
 
 def staticMember[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
-  // Each with call validates the settings again
+  // Each of these calls validates the settings again
   settings.withGroupInstanceId("orders-1").andThen(_.withSessionTimeout(2.minutes)).andThen(_.withMaxPollInterval(5.minutes)).liftTo[IO]
 ```
 
-Each wither revalidates the settings as a whole, so raising the session timeout
+Each `with` method validates the settings again as a whole, so raising the session timeout
 above the maximum poll interval fails unless the poll interval is raised first.
 
 ### Static members
@@ -212,7 +212,7 @@ Run it alongside the stream:
 // Consume until a shutdown is requested, then finish what was already fetched
 // Handle and commit each record
 val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain
-val stop    = shutdownRequested.get *> consumer.stopConsuming  // Stop fetching when asked
+val stop    = shutdownRequested.get *> consumer.stopConsuming  // Stop fetching when a shutdown is requested
 
 (consume, stop).parTupled  // Run both side by side
 ```

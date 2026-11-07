@@ -52,7 +52,7 @@ By default a suppression holds as much as it needs to. To limit it, pass a
 `BufferLimit`:
 
 ```scala
-// Hold at most 10000 keys. Past that, the earliest updates go on early
+// Hold at most 10000 keys. Past that, the earliest updates are sent early
 Suppressed.untilTimeLimit("calm-views", 1.minute, BufferLimit.records(10000))
 ```
 

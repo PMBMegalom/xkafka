@@ -70,7 +70,7 @@ def numbered(input: Topic, output: Topic): Pipeline[IO] =
             val number = last.getOrElse(0L) + 1
             store.put(record.key, number).as(List(record.withValue(number)))  // This record has no withKey, so the key cannot change
     )
-    .groupByKey(user, amount)  // The key stayed, so no repartition topic
+    .groupByKey(user, amount)  // The key did not change, so this needs no repartition topic
     .count(Named("count-payments"), Store("counts"))
     .toStream(Named("counts-stream"))
     .to(Named("write-counts"), output, user, Serde.long[IO])

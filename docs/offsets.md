@@ -232,7 +232,7 @@ def withCommitTimeout[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[Consu
   settings.withCommitTimeout(5.seconds).liftTo[IO]
 ```
 
-Like every duration wither, it revalidates and returns
+Like every method that sets a duration, it validates the settings again and returns
 `ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]`. See
 [Settings](settings.md).
 

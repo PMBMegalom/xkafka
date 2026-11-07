@@ -1,6 +1,7 @@
 # Platform notes
 
-The API is the same everywhere. These are the places the runtimes differ.
+The API is the same everywhere. These notes cover what each platform needs, and
+how the API carries across platforms and effects.
 
 ## Record delivery
 
@@ -27,7 +28,7 @@ sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-clients.gpg
 echo "deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/confluent-clients.list
 sudo apt-get update
-sudo apt-get install librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cflt~ubu24  # Name the exact release
+sudo apt-get install librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cflt~ubu24  # Install exactly this release
 ```
 
 Use a librdkafka built with TLS, SASL SCRAM and
