@@ -8,6 +8,7 @@ goes on with what the last one held.
 To send only each window's final result, use `Suppressed.untilWindowCloses`:
 
 ```scala mdoc:compile-only
+// Count each user's views per minute, and write only each window's final count
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -22,7 +23,7 @@ def finalViews(input: Topic, output: Topic): Pipeline[IO] =
     .groupByKey(user, page)
     .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
     .count(Named("count-views"), Store("views-per-minute"))
-    .suppress(Suppressed.untilWindowCloses("final-views"))
+    .suppress(Suppressed.untilWindowCloses("final-views"))  // Hold each window's updates until it closes
     .toStream(Named("view-counts"))
     .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
 ```
@@ -36,6 +37,7 @@ To send each key's latest value at most once in a while, use
 `Suppressed.untilTimeLimit`, on any table:
 
 ```scala
+// Send each page's latest count at most once a minute
 .count(Named("count-views"), Store("views-per-page"))
 .suppress(Suppressed.untilTimeLimit("calm-views", 1.minute))
 ```
@@ -50,6 +52,7 @@ By default a suppression holds as much as it needs to. To limit it, pass a
 `BufferLimit`:
 
 ```scala
+// Hold at most 10000 keys. Past that, the earliest updates go on early
 Suppressed.untilTimeLimit("calm-views", 1.minute, BufferLimit.records(10000))
 ```
 

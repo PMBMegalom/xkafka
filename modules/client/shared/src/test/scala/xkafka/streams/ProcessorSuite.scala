@@ -514,11 +514,11 @@ final class ProcessorSuite extends CatsEffectSuite:
     assertEquals(refused(1.milli, 1.milli), Nil)
     assertEquals(
       refused(1.second, 999.millis).map(_.message),
-      List("the window store 'tally' cannot be used: its retention of 999 milliseconds is less than its window size of 1 second")
+      List("the store 'tally' cannot be used: its retention of 999 milliseconds is less than its window size of 1 second")
     )
     assertEquals(
       refused(1.micro, 1.milli).map(_.message),
-      List("the window store 'tally' cannot be used: its window size of 1 microsecond is less than a millisecond")
+      List("the store 'tally' cannot be used: its window size of 1 microsecond is less than a millisecond")
     )
     assertEquals(refused(0.millis, 0.millis).size, 1)
     assertEquals(refused((-1).second, (-2).seconds).size, 2)
@@ -600,6 +600,117 @@ final class ProcessorSuite extends CatsEffectSuite:
     Task.inMemory[IO]("app", mapped.subtopologies.head, 0).flatMap(_.process(TaskState.empty, input("a", "x", 2000L), 0L)).map: (_, written) =>
       assertEquals(written.filter(_.topic == out).flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong), Vector(1L))
       assertEquals(written.filter(_.topic != out).map(_.topic.value).toSet, Set("app-tally-changelog", "app-latest-changelog"))
+
+  private val visits = SessionStore.of(Store("tally"), text, count, retention = 10.seconds)
+
+  private def sessioned(logic: (SessionStore[IO, String, Long], Record[String, String]) => IO[List[Record[String, Long]]]) =
+    pipeline(Processor.withStore(visits)(kept => Processor.onRecord(record => logic(kept, record))), text, count)
+
+  private def counted(written: Vector[TaskOutput]) =
+    written.filter(_.topic == out).flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong)
+
+  private def visit(key: String, start: Long, end: Long) = Windowed(key, Window(start, end))
+
+  test("a session store whose retention is under a millisecond is refused, and one of a millisecond is not"):
+    def refused(retention: FiniteDuration) =
+      val store = SessionStore.of(Store("tally"), text, count, retention = retention)
+      Topology.of(pipeline(Processor.withStore(store)(_ => Processor.onRecord(_ => IO.pure(List.empty[Record[String, Long]]))), text, count)).swap
+        .toOption.toList.flatMap(_.toList)
+    assertEquals(refused(1.milli), Nil)
+    assertEquals(
+      refused(0.millis).map(_.message),
+      List("the store 'tally' cannot be used: its retention of 0 milliseconds is less than a millisecond")
+    )
+
+  test("a session store is declared as one, so its changelog keeps sessions for its retention and a store restored loses what has expired"):
+    val subtopology = Topology.of(sessioned((_, _) => IO.pure(Nil))).orFail.subtopologies.head
+    assertEquals(subtopology.retentions, Map("tally" -> 10000L))
+    assertEquals(subtopology.sessionStores, Set("tally"))
+
+  test("a session store's writes reach its changelog under the key, the session's end and its start, at the record's time"):
+    for
+      task <- taskOf(sessioned((kept, record) => kept.put(visit(record.key, 16L, 32L), 5L).as(Nil)))
+      read <- task.process(TaskState.empty, input("a", "x", 2000L), 0L)
+    yield
+      val written = changelog(read._2)
+      assertEquals(
+        written.flatMap(_.key.map(_.toVector)),
+        Vector("a".getBytes.toVector ++ Vector[Byte](0, 0, 0, 0, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0, 16))
+      )
+      assertEquals(written.map(_.timestamp), Vector(2000L))
+
+  test("a session that ends before it starts fails the record, by a put or a remove, naming the store, and is not written"):
+    def failing(use: SessionStore[IO, String, Long] => IO[Unit]) =
+      taskOf(sessioned((kept, _) => use(kept).as(Nil))).flatMap(_.process(TaskState.empty, input("a", "x"), 0L).attempt)
+        .map(_.left.toOption.map(_.getMessage))
+    val problem = Some("a session of the store 'tally' ends at 1, before its start at 2")
+    (failing(_.put(visit("a", 2L, 1L), 1L)), failing(_.remove(visit("a", 2L, 1L)))).tupled.map: (put, removed) =>
+      assertEquals(put, problem)
+      assertEquals(removed, problem)
+
+  test("a range the wrong way round finds no sessions, by keys or by ends"):
+    val logic =
+      (kept: SessionStore[IO, String, Long], record: Record[String, String]) =>
+        val whenever = Timestamp.fromEpochMillis(0L)
+        val later    = Timestamp.fromEpochMillis(5000L)
+        kept.put(visit("a", 1000L, 2000L), 1L) *> kept.put(visit("b", 1000L, 2000L), 1L) *>
+          (
+            kept.fetchRange("b", "a").compile.count,
+            kept.reverseFetchRange("b", "a").compile.count,
+            kept.findSessionsRange("b", "a", whenever, later).compile.count,
+            kept.findSessionsEnding(later, whenever).compile.count,
+            kept.fetchRange("a", "b").compile.count
+          ).mapN((first, second, third, fourth, all) => List(record.withValue(first + second + third + fourth), record.withValue(all)))
+    taskOf(sessioned(logic)).flatMap(_.process(TaskState.empty, input("a", "x"), 0L))
+      .map((_, written) => assertEquals(counted(written), Vector(0L, 2L)))
+
+  test("writes to a session store at the same moment are all kept"):
+    val ends = (1 to 50).toList.map(_ * 100L)
+    for
+      task <-
+        taskOf(sessioned((kept, record) =>
+          ends.parTraverse_(end => kept.put(visit(record.key, end, end), end)) *>
+            kept.fetch(record.key).compile.count.map(found => List(record.withValue(found)))
+        ))
+      read <- task.process(TaskState.empty, input("a", "x"), 0L)
+    yield
+      assertEquals(counted(read._2), Vector(50L))
+      assertEquals(changelog(read._2).size, 50)
+
+  test("a handler that fails keeps nothing it wrote to a session store"):
+    val boom  = new RuntimeException("boom")
+    val logic =
+      (kept: SessionStore[IO, String, Long], record: Record[String, String]) =>
+        val at = record.timestamp.epochMillis
+        if record.value == "fail" then kept.put(visit(record.key, at, at), 1L) *> IO.raiseError(boom)
+        else kept.fetchSession(record.key, record.timestamp, record.timestamp).map(held => List(record.withValue(held.getOrElse(-1L))))
+    for
+      task   <- taskOf(sessioned(logic))
+      failed <- task.process(TaskState.empty, input("a", "fail", 5000L), 0L).attempt
+      read   <- task.process(TaskState.empty, input("a", "read", 5000L), 0L)
+    yield
+      assertEquals(failed.left.toOption, Some(boom))
+      assertEquals(counted(read._2), Vector(-1L))
+      assertEquals(changelog(read._2), Vector.empty)
+
+  test("a session store works in a processor that keeps the key, beside a window store, shared between processors, and through imapK"):
+    val first: FixedKeyProcessor[IO, String, String, String] =
+      FixedKeyProcessor.withStores(visits, WindowStore.of(Store("minutes"), text, count, size = 1.second, retention = 10.seconds)): (kept, minutes) =>
+        FixedKeyProcessor.onRecord: record =>
+          val at = record.timestamp.epochMillis
+          kept.put(visit(record.key, at, at), 1L) *> minutes.put(record.key, 1L, record.timestamp).as(List(record.withValue(record.value)))
+    val second =
+      Processor.withStore(visits): kept =>
+        Processor.onRecord: (record: Record[String, String]) =>
+          kept.fetch(record.key).compile.count.map(found => List(record.withValue(found)))
+    val program =
+      KStream(Named("read"), in, text, text).processValues(Named("first"), first).process(Named("second"), second)
+        .to(Named("write"), out, text, count)
+    val mapped = Topology.of(program.imapK(FunctionK.id[IO])(FunctionK.id[IO])).orFail
+    assertEquals(mapped.subtopologies.head.sessionStores, Set("tally"))
+    Task.inMemory[IO]("app", mapped.subtopologies.head, 0).flatMap(_.process(TaskState.empty, input("a", "x", 2000L), 0L)).map: (_, written) =>
+      assertEquals(counted(written), Vector(1L))
+      assertEquals(written.filter(_.topic != out).map(_.topic.value).toSet, Set("app-tally-changelog", "app-minutes-changelog"))
 
   test("a punctuator behind many forks that merge back is found once, mapped or not, however many paths lead to it"):
     val depth = 40

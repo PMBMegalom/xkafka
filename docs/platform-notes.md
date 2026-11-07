@@ -16,25 +16,26 @@ On the JVM each consumer uses one thread of its own.
 
 ## Scala Native
 
-The Native backend needs librdkafka 2.16.0, the release xkafka is built and
-tested with. Older releases lack calls xkafka makes, so an application linked
-against one, such as Ubuntu 24.04's own librdkafka 2.3.0, does not compile.
+Scala Native needs librdkafka 2.16.0, the release xkafka is built and tested
+with. An application does not compile against an older one, such as Ubuntu
+24.04's own librdkafka 2.3.0.
 Confluent publishes each release for Debian and Ubuntu. On Ubuntu 24.04:
 
 ```sh
+# Install librdkafka 2.16.0 from Confluent's packages on Ubuntu 24.04
 sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-clients.gpg
 echo "deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/confluent-clients.list
 sudo apt-get update
-sudo apt-get install librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cflt~ubu24
+sudo apt-get install librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cflt~ubu24  # Name the exact release
 ```
 
-The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
+Use a librdkafka built with TLS, SASL SCRAM and
 OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
 and read and write records in any compression.
 
-librdkafka links these against system libraries, so any application linking the
-Native backend needs OpenSSL, zlib, and zstd available:
+librdkafka links these against system libraries, so a Scala Native application
+needs OpenSSL, zlib, and zstd available:
 `libssl-dev`, `zlib1g-dev`, and `libzstd-dev` on Debian and Ubuntu, or
 `brew install openssl@3 zstd zlib` on macOS. Homebrew keeps them keg-only, so
 on macOS their locations have to be named when linking.
@@ -47,6 +48,7 @@ compiler and linker look by default, no further settings are needed. For an
 installation elsewhere:
 
 ```scala
+// Tell the compiler and the linker where librdkafka is installed
 nativeConfig := nativeConfig.value
   .withCompileOptions(_ :+ "-I/path/to/librdkafka/include")
   .withLinkingOptions(_ :+ "-L/path/to/librdkafka/lib")
@@ -56,6 +58,7 @@ Linking the static `librdkafka.a` also needs the libraries it was built
 against, named in this order:
 
 ```scala
+// Link the static librdkafka, with the libraries it was built against, in this order
 nativeConfig := nativeConfig.value
   .withCompileOptions(_ :+ "-I/path/to/librdkafka/include")
   .withLinkingOptions(_ ++ Seq(
@@ -67,7 +70,7 @@ On macOS add a `-L` for the OpenSSL installation as well.
 
 ## Scala.js
 
-The backend is librdkafka, the same release Scala Native uses. It runs on
+xkafka uses librdkafka here, the same release as on Scala Native. It runs on
 Node.js, not in browsers.
 
 The library comes from npm as `@xkafka/librdkafka`, which sbt-scalajs-bundler

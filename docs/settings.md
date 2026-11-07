@@ -7,6 +7,7 @@
 and is [described below](#streams-settings).
 
 ```scala mdoc:compile-only
+// Validate the connection, then build producer settings on it
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -15,7 +16,7 @@ import xkafka.*
 val utf8 = Serializer.utf8[IO]
 
 val settings =
-  ClientSettings.from(NonEmptyList.one("localhost:9092")).andThen: client =>
+  ClientSettings.from(NonEmptyList.one("localhost:9092")).andThen: client =>  // Runs only if the connection settings are valid
     ProducerSettings.from(client, utf8, utf8)
 ```
 
@@ -28,6 +29,7 @@ can be constructed.
 `liftTo` carries the failure into the effect:
 
 ```scala mdoc:compile-only
+// Turn invalid values or settings into a failure of the effect
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -35,8 +37,8 @@ import xkafka.*
 
 val program =
   for
-    client <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
-    topic  <- Topic.from("events").liftTo[IO]
+    client <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]  // Fails with InvalidSettings
+    topic  <- Topic.from("events").liftTo[IO]                                     // Fails with InvalidValue
   yield (client, topic)
 ```
 
@@ -60,6 +62,7 @@ Each settings type accepts an immutable `properties` map for Kafka client
 properties that have no typed setting:
 
 ```scala mdoc:compile-only
+// Pass Kafka properties that have no typed setting
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -70,8 +73,9 @@ val utf8 = Serializer.utf8[IO]
 val settings =
   ClientSettings.from(
     bootstrapServers = NonEmptyList.one("localhost:9092"),
-    properties = Map("client.rack" -> "eu-west-1a")
+    properties = Map("client.rack" -> "eu-west-1a")  // For everything built on this client
   ).andThen: client =>
+    // For this producer only, and overrides the client's
     ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 

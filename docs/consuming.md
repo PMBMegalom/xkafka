@@ -4,6 +4,7 @@ A consumer is a `Resource` and exposes an FS2 stream of
 `CommittableConsumerRecord`.
 
 ```scala mdoc:compile-only
+// Read ten records from "events" as a member of the group "workers"
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
@@ -15,11 +16,12 @@ val program =
   for
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     group    <- ConsumerGroup.from("workers").liftTo[IO]
+    // Start at the first record where the group has no committed offset
     settings <- ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
     records  <-
-      KafkaClient[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic)))
-        .use(_.records.take(10).compile.toList)
+      KafkaClient[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic)))  // Read the partitions of this topic that the group assigns to this consumer
+        .use(_.records.take(10).compile.toList)                                     // Stop after ten records, then release the consumer
   yield records
 ```
 
@@ -80,7 +82,7 @@ committed. Set `isolationLevel` to change that. See
 
 A consumer that joins a group stays in it while it keeps in touch with the
 group. Four settings govern that, and each is checked when the settings are
-built, so a combination either backend would refuse is a `SettingsError`:
+built, so a combination that would be refused on any platform is a `SettingsError`:
 
 - `sessionTimeout` is how long the group waits to hear from the consumer before
   handing its partitions to the others. The broker also bounds it, through its
@@ -101,6 +103,7 @@ leave them unset: a consumer with either one set fails as
 `ErrorCode.InvalidConfiguration`.
 
 ```scala mdoc:compile-only
+// Make a consumer a static member, with an identity of its own and a longer session timeout
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -108,6 +111,7 @@ import cats.effect.IO
 import xkafka.*
 
 def staticMember[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
+  // Each with call validates the settings again
   settings.withGroupInstanceId("orders-1").andThen(_.withSessionTimeout(2.minutes)).andThen(_.withMaxPollInterval(5.minutes)).liftTo[IO]
 ```
 
@@ -179,8 +183,9 @@ it can be `None`.
 once the function returns:
 
 ```scala
+// Handle each chunk of records, then commit it
 consumer.consumeChunk: records =>
-  records.traverse_(handle).as(CommitNow)
+  records.traverse_(handle).as(CommitNow)  // CommitNow is what commits the chunk
 ```
 
 Partitions are processed concurrently, so a slow chunk holds back only the
@@ -204,10 +209,12 @@ and offsets remain committable.
 Run it alongside the stream:
 
 ```scala
+// Consume until a shutdown is requested, then finish what was already fetched
+// Handle and commit each record
 val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain
-val stop    = shutdownRequested.get *> consumer.stopConsuming
+val stop    = shutdownRequested.get *> consumer.stopConsuming  // Stop fetching when asked
 
-(consume, stop).parTupled
+(consume, stop).parTupled  // Run both side by side
 ```
 
 `stopConsuming` returns as soon as fetching has been told to stop, without
@@ -225,18 +232,19 @@ resumes the group reads those offsets again.
 and ends that stream after the partition is revoked.
 
 ```scala
-consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>
+// Give each assigned partition its own stream of records, and handle them
+consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>  // Pause a partition once 256 of its records are waiting
   partition.records.evalMap(handle)
-}.parJoinUnbounded
+}.parJoinUnbounded  // Consume every partition's stream at once
 ```
 
 Every emitted stream must be consumed concurrently. `maxQueuedRecords` is the
-point at which the backend pauses a partition. Records already in flight can
+point at which the consumer pauses a partition. Records already in flight can
 temporarily take its buffer past that threshold.
 
 @:callout(warning)
 A consumer that subscribes to a topic before that topic exists sees it once the
-backend refreshes its metadata. `metadataRefreshInterval` sets how long that
+consumer refreshes its metadata. `metadataRefreshInterval` sets how long that
 takes and defaults to five minutes. Lower it if a consumer must discover a topic
 promptly.
 @:@

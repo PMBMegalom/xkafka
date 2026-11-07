@@ -8,6 +8,7 @@ take it over from each other as they start and stop.
 Streams applications need brokers of Kafka 4.2 or newer.
 
 ```scala mdoc:compile-only
+// Count each page's views across all users, and write every new count to a topic
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -23,15 +24,16 @@ val program =
     input    <- Topic.from("page-views").liftTo[IO]
     output   <- Topic.from("views-per-page").liftTo[IO]
     pipeline  = KStream(Named("page-views"), input, user, page)
+                  // Key each view by its page, through a repartition topic
                   .groupBy(Repartition("views-by-page"), page, page)((_, viewed) => viewed)
-                  .count(Named("count-views"), Store("views-per-page"))
-                  .toStream(Named("view-counts"))
-                  .to(Named("write-view-counts"), output, page, views)
-    topology <- Topology.of(pipeline).liftTo[IO]
+                  .count(Named("count-views"), Store("views-per-page"))  // Keep each page's count in a store
+                  .toStream(Named("view-counts"))                        // Every change to a count
+                  .to(Named("write-view-counts"), output, page, views)   // Write each change to the output topic
+    topology <- Topology.of(pipeline).liftTo[IO]                         // Check the program
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     id       <- ApplicationId.from("page-view-counter").liftTo[IO]
     settings <- StreamsSettings.from(client, id).liftTo[IO]
-    _        <- KafkaClient[IO].streams(settings, topology).use(_.run)
+    _        <- KafkaClient[IO].streams(settings, topology).use(_.run)  // Join the application and keep processing
   yield ()
 ```
 
@@ -93,6 +95,7 @@ with `selectKey` gives the same counts, with `groupByKey` naming the
 repartition:
 
 ```scala mdoc:compile-only
+// The same counts, choosing the key first and naming the repartition when grouping
 import cats.effect.IO
 
 import xkafka.*
@@ -102,8 +105,8 @@ def viewsPerPage(input: Topic, output: Topic): Pipeline[IO] =
   val user  = Serde.utf8[IO]
   val page  = Serde.utf8[IO]
   KStream(Named("page-views"), input, user, page)
-    .selectKey(Named("by-page"))((_, viewed) => viewed)
-    .groupByKey(Repartition("views-by-page"), page, page)
+    .selectKey(Named("by-page"))((_, viewed) => viewed)    // Key each view by its page
+    .groupByKey(Repartition("views-by-page"), page, page)  // The key changed, so this takes a Repartition
     .count(Named("count-views"), Store("views-per-page"))
     .toStream(Named("view-counts"))
     .to(Named("write-view-counts"), output, page, Serde.long[IO])
@@ -161,6 +164,7 @@ it. It needs no broker, so a program can be printed or checked in a test before
 it runs. Here is the first example's:
 
 ```scala mdoc:silent
+// Build the first example's program, and describe it
 import cats.effect.IO
 
 import xkafka.*
@@ -177,10 +181,11 @@ val described =
                     .toStream(Named("view-counts"))
                     .to(Named("write-view-counts"), output, Serde.utf8[IO], Serde.long[IO])
                 ).toOption
-  yield topology.describe
+  yield topology.describe  // Describing a program needs no broker
 ```
 
 ```scala mdoc
+// Print the description
 described.foreach(println)
 ```
 

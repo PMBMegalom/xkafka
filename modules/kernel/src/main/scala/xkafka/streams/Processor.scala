@@ -237,15 +237,139 @@ object WindowStore:
 
       def reverseAll: Stream[F, (Windowed[K], V)] = many(access.windows(Long.MinValue, Long.MaxValue, None).map(_.reverse))
 
+/** A store a processor reads and writes by session, as Java's `SessionStore`: a key with a start and an end, each session holding one value. A
+  * session has expired once the latest end written is a whole retention past its end: reads do not find it, and writing to it keeps nothing. A
+  * `remove` does not move that latest end, but once restored the store counts it. Reads over several sessions go by end, then by the order of the
+  * keys' serialized bytes, then the latest start first, and `reverse` reads the exact opposite. The processor reads what it has written since the
+  * last commit; a commit makes those writes durable, and a failed one discards them.
+  */
+sealed trait SessionStore[F[_], K, V]:
+  /** Writes `value` as the session, which fails if it ends before it starts. */
+  def put(session: Windowed[K], value: V): F[Unit]
+
+  /** Removes the session, which fails if it ends before it starts. */
+  def remove(session: Windowed[K]): F[Unit]
+
+  /** The value of the key's session from exactly `start` to exactly `end`. */
+  def fetchSession(key: K, start: Timestamp, end: Timestamp): F[Option[V]]
+
+  /** Every session of the key. */
+  def fetch(key: K): Stream[F, (Windowed[K], V)]
+
+  /** Every session of the key, last first. */
+  def reverseFetch(key: K): Stream[F, (Windowed[K], V)]
+
+  /** Every session of the keys from `keyFrom` to `keyTo`, both included. */
+  def fetchRange(keyFrom: K, keyTo: K): Stream[F, (Windowed[K], V)]
+
+  /** Every session of the keys from `keyFrom` to `keyTo`, both included, last first. */
+  def reverseFetchRange(keyFrom: K, keyTo: K): Stream[F, (Windowed[K], V)]
+
+  /** The key's sessions ending at or after `earliestEnd` and starting at or before `latestStart`. */
+  def findSessions(key: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The key's sessions ending at or after `earliestEnd` and starting at or before `latestStart`, last first. */
+  def reverseFindSessions(key: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The sessions of the keys from `keyFrom` to `keyTo`, both included, ending at or after `earliestEnd` and starting at or before `latestStart`. */
+  def findSessionsRange(keyFrom: K, keyTo: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The sessions of the keys from `keyFrom` to `keyTo`, both included, ending at or after `earliestEnd` and starting at or before `latestStart`,
+    * last first.
+    */
+  def reverseFindSessionsRange(keyFrom: K, keyTo: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)]
+
+  /** The sessions of every key ending from `earliestEnd` to `latestEnd`, both included. */
+  def findSessionsEnding(earliestEnd: Timestamp, latestEnd: Timestamp): Stream[F, (Windowed[K], V)]
+
+object SessionStore:
+  /** A session store for a processor to declare, which `Processor.withStore` opens. `retention` is how long a session lasts. Processors given the
+    * same value share one store, and so run in one sub-topology, as Java's do.
+    */
+  def of[F[_]: cats.MonadThrow, K, V](
+      store: Store,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      retention: FiniteDuration
+  ): DeclaredStore[F, SessionStore[F, K, V]] =
+    new DeclaredStore(
+      store,
+      access => opened(store, access, key, value, retention.toMillis),
+      StoreAccess.idle(store),
+      Some(retention.toMillis),
+      Option.when(retention < 1.milli)(s"its retention of $retention is less than a millisecond").toList,
+      session = true
+    )
+
+  private def opened[F[_], K, V](store: Store, access: StoreAccess[F], key: Serde[F, K], value: Serde[F, V], retention: Long)(using
+      F: cats.MonadThrow[F]
+  ): SessionStore[F, K, V] =
+    new SessionStore[F, K, V]:
+      private def keyBytes(written: K): F[Chunk[Byte]] =
+        key.serializer.serialize(access.topic, Headers.empty, written).flatMap:
+          _.liftTo[F](new IllegalArgumentException(s"a key of the store '${store.value}' serialized to nothing"))
+
+      private def read(bytes: Chunk[Byte]): F[V] = value.deserializer.deserialize(access.topic, Headers.empty, Some(bytes))
+
+      private def valid(session: Windowed[K]): F[Chunk[Byte]] =
+        if session.window.end < session.window.start then
+          F.raiseError(new IllegalArgumentException(s"a session of the store '${store.value}' ends at ${session.window
+              .end}, before its start at ${session.window.start}"))
+        else keyBytes(session.key)
+
+      private def many(found: F[Vector[(Chunk[Byte], Long, Long, Chunk[Byte])]]): Stream[F, (Windowed[K], V)] =
+        Stream.eval(found).flatMap(Stream.emits).evalMap: (k, start, end, held) =>
+          (key.deserializer.deserialize(access.topic, Headers.empty, Some(k)), read(held))
+            .mapN((keyRead, v) => Windowed(keyRead, Window(start, end)) -> v)
+
+      private def ofKeys(keyFrom: K, keyTo: K, earliestEnd: Long, latestStart: Long) =
+        (keyBytes(keyFrom), keyBytes(keyTo)).tupled.flatMap(keys => access.sessions(Some(keys), earliestEnd, Long.MaxValue, latestStart))
+
+      def put(session: Windowed[K], v: V): F[Unit] =
+        (valid(session), value.serializer.serialize(access.topic, Headers.empty, v)).tupled.flatMap: (k, written) =>
+          access.sessionWrite(k, session.window.start, session.window.end, written, moving = true, retention)
+
+      def remove(session: Windowed[K]): F[Unit] =
+        valid(session).flatMap(access.sessionWrite(_, session.window.start, session.window.end, None, moving = false, retention))
+
+      def fetchSession(k: K, start: Timestamp, end: Timestamp): F[Option[V]] =
+        keyBytes(k).flatMap(bytes => access.sessions(Some((bytes, bytes)), end.epochMillis, end.epochMillis, start.epochMillis)).flatMap:
+          _.collectFirst { case (_, found, _, held) if found == start.epochMillis => held }.traverse(read)
+
+      def fetch(k: K): Stream[F, (Windowed[K], V)] = fetchRange(k, k)
+
+      def reverseFetch(k: K): Stream[F, (Windowed[K], V)] = reverseFetchRange(k, k)
+
+      def fetchRange(keyFrom: K, keyTo: K): Stream[F, (Windowed[K], V)] = many(ofKeys(keyFrom, keyTo, Long.MinValue, Long.MaxValue))
+
+      def reverseFetchRange(keyFrom: K, keyTo: K): Stream[F, (Windowed[K], V)] =
+        many(ofKeys(keyFrom, keyTo, Long.MinValue, Long.MaxValue).map(_.reverse))
+
+      def findSessions(k: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)] =
+        findSessionsRange(k, k, earliestEnd, latestStart)
+
+      def reverseFindSessions(k: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)] =
+        reverseFindSessionsRange(k, k, earliestEnd, latestStart)
+
+      def findSessionsRange(keyFrom: K, keyTo: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)] =
+        many(ofKeys(keyFrom, keyTo, earliestEnd.epochMillis, latestStart.epochMillis))
+
+      def reverseFindSessionsRange(keyFrom: K, keyTo: K, earliestEnd: Timestamp, latestStart: Timestamp): Stream[F, (Windowed[K], V)] =
+        many(ofKeys(keyFrom, keyTo, earliestEnd.epochMillis, latestStart.epochMillis).map(_.reverse))
+
+      def findSessionsEnding(earliestEnd: Timestamp, latestEnd: Timestamp): Stream[F, (Windowed[K], V)] =
+        many(access.sessions(None, earliestEnd.epochMillis, latestEnd.epochMillis, Long.MaxValue))
+
 /** A store a processor declares, which it uses as an `H`. */
 final class DeclaredStore[F[_], H] private[xkafka] (
     val store: Store,
     private[xkafka] val open: StoreAccess[F] => H,
     private[xkafka] val idle: StoreAccess[F],
     retention: Option[Long] = None,
-    problems: List[String] = Nil
+    problems: List[String] = Nil,
+    session: Boolean = false
 ):
-  private[xkafka] val kept: KeptStore = KeptStore(store, retention = retention, shared = Some(this), problems = problems)
+  private[xkafka] val kept: KeptStore = KeptStore(store, retention = retention, session = session, shared = Some(this), problems = problems)
 
 /** A store as bytes, for a task to give a processor, with what the processor wrote since its last commit in it. */
 private[xkafka] trait StoreAccess[F[_]]:
@@ -272,6 +396,21 @@ private[xkafka] trait StoreAccess[F[_]]:
   /** The windows starting from `from` to `to` of the keys `keys` spans, or of every key, by start and then key, each with its key and start. */
   def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]
 
+  /** Writes `value` as the session of `key` from `start` to `end`, or removes it if there is none, in a session store keeping sessions for
+    * `retention`. Only if `moving` does the end count towards the store's clock.
+    */
+  def sessionWrite(key: Chunk[Byte], start: Long, end: Long, value: Option[Chunk[Byte]], moving: Boolean, retention: Long): F[Unit]
+
+  /** The sessions of the keys `keys` spans, or of every key, ending from `earliestEnd` to `latestEnd` and starting by `latestStart`, by end, then
+    * key, then the latest start first, each with its key, start and end.
+    */
+  def sessions(
+      keys: Option[(Chunk[Byte], Chunk[Byte])],
+      earliestEnd: Long,
+      latestEnd: Long,
+      latestStart: Long
+  ): F[Vector[(Chunk[Byte], Long, Long, Chunk[Byte])]]
+
   final def imapK[G[_]](fk: FunctionK[F, G]): StoreAccess[G] =
     val self = this
     new StoreAccess[G]:
@@ -287,6 +426,14 @@ private[xkafka] trait StoreAccess[F[_]]:
         fk(self.windowsOf(key, from, to, retention))
       def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): G[Vector[(Chunk[Byte], Long, Chunk[Byte])]] =
         fk(self.windows(from, to, keys))
+      def sessionWrite(key: Chunk[Byte], start: Long, end: Long, value: Option[Chunk[Byte]], moving: Boolean, retention: Long): G[Unit] =
+        fk(self.sessionWrite(key, start, end, value, moving, retention))
+      def sessions(
+          keys: Option[(Chunk[Byte], Chunk[Byte])],
+          earliestEnd: Long,
+          latestEnd: Long,
+          latestStart: Long
+      ): G[Vector[(Chunk[Byte], Long, Long, Chunk[Byte])]] = fk(self.sessions(keys, earliestEnd, latestEnd, latestStart))
 
 private[xkafka] object StoreAccess:
   /** Access to `store` that refuses every use, for seeing what a processor declares without running it. */
@@ -301,7 +448,14 @@ private[xkafka] object StoreAccess:
       def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]                               = refused
       def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit]     = refused
       def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): F[Vector[(Long, Chunk[Byte])]] = refused
-      def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]] = refused
+      def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]          = refused
+      def sessionWrite(key: Chunk[Byte], start: Long, end: Long, value: Option[Chunk[Byte]], moving: Boolean, retention: Long): F[Unit] = refused
+      def sessions(
+          keys: Option[(Chunk[Byte], Chunk[Byte])],
+          earliestEnd: Long,
+          latestEnd: Long,
+          latestStart: Long
+      ): F[Vector[(Chunk[Byte], Long, Long, Chunk[Byte])]] = refused
 
 /** When a punctuator runs. */
 final class Punctuation private (private[xkafka] val wallClock: Boolean, val interval: FiniteDuration):

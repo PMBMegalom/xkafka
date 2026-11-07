@@ -4,6 +4,7 @@ Windows split each key's records by time, so you can count, reduce or aggregate
 them per minute, per hour, and so on. Group the records, then window them:
 
 ```scala mdoc:compile-only
+// Count each user's page views per minute, and write every new count
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -16,9 +17,10 @@ def viewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
   val page = Serde.utf8[IO]
   KStream(Named("page-views"), input, user, page)
     .groupByKey(user, page)
-    .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
-    .count(Named("count-views"), Store("views-per-minute"))
+    .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))  // One-minute windows, which accept late records for 10 more seconds
+    .count(Named("count-views"), Store("views-per-minute"))          // Count per user and window
     .toStream(Named("view-counts"))
+    // Write each key together with its window
     .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
 ```
 
@@ -47,6 +49,7 @@ By default, every update to a window goes downstream. To send only each
 window's final result, once the window has closed, add `emitOnWindowClose`:
 
 ```scala mdoc:compile-only
+// Count each user's page views per minute, and write only each final count
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -60,8 +63,8 @@ def finalViewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
   KStream(Named("page-views"), input, user, page)
     .groupByKey(user, page)
     .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
-    .withRetention(10.minutes)
-    .emitOnWindowClose
+    .withRetention(10.minutes)  // Keep windows until their results have been sent
+    .emitOnWindowClose          // Send each result once its window closes
     .count(Named("count-views"), Store("final-views-per-minute"))
     .toStream(Named("view-counts"))
     .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
@@ -100,6 +103,7 @@ apart. Windows are made only where records are, so there are no empty
 windows:
 
 ```scala mdoc:compile-only
+// Count each user's failed logins within any five minutes
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -112,7 +116,7 @@ def failedLogins(input: Topic, output: Topic): Pipeline[IO] =
   val address = Serde.utf8[IO]
   KStream(Named("failed-logins"), input, user, address)
     .groupByKey(user, address)
-    .windowedBy(SlidingWindows(5.minutes, grace = 30.seconds))
+    .windowedBy(SlidingWindows(5.minutes, grace = 30.seconds))  // Records at most five minutes apart share a window
     .count(Named("count-failures"), Store("failures-within-five-minutes"))
     .toStream(Named("failure-counts"))
     .to(Named("write-failure-counts"), output, Serde.timeWindowed(user, 5.minutes), Serde.long[IO])
@@ -142,6 +146,7 @@ user's visits: a session lasts as long as records keep arriving within an
 inactivity gap of each other, and ends once the gap passes with none.
 
 ```scala mdoc:compile-only
+// Count each user's page views per visit
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -154,14 +159,15 @@ def visits(input: Topic, output: Topic): Pipeline[IO] =
   val page = Serde.utf8[IO]
   KStream(Named("page-views"), input, user, page)
     .groupByKey(user, page)
-    .windowedBy(SessionWindows(5.minutes, grace = 1.minute))
+    .windowedBy(SessionWindows(5.minutes, grace = 1.minute))  // A visit ends after five minutes with no views
     .count(Named("count-views"), Store("views-per-visit"))
     .toStream(Named("view-counts"))
+    // A replaced session is written as a tombstone
     .to(Named("write-view-counts"), output, Serde.sessionWindowed(user), Serde.long[IO].option)
 ```
 
-A new record can bridge sessions that were separate until then, merging them
-into one, so a session already sent downstream can be replaced. A table of
+A new record within the gap of two separate sessions merges them into one, so a
+session already sent downstream can be replaced. A table of
 sessions is therefore a table that can delete keys (see [Tables](tables.md)): its
 `toStream` gives `None` for each replaced session, then the merged session with
 its value. For example, with a five-minute gap, records of one key at 10:00 and
@@ -178,6 +184,7 @@ for it as well, given the two sessions' values. Over a stream of purchases in
 cents, keyed by user, this adds up what each user spends per visit:
 
 ```scala
+// Add up spending per visit. The last function combines two visits when they merge
 .aggregate(Named("add-spending"), Store("spending-per-visit"), Serde.long[IO])(0L)((_, cents, total) => total + cents)((_, first, second) => first + second)
 ```
 

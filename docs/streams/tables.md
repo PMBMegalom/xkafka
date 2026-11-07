@@ -5,6 +5,7 @@ A `KTable` holds the latest value of each key. Besides the tables that `count`,
 Kafka Streams' `StreamsBuilder.table` reads it:
 
 ```scala mdoc:compile-only
+// Read a table from a topic, and write every change to it
 import cats.effect.IO
 
 import xkafka.*
@@ -13,9 +14,9 @@ import xkafka.streams.*
 def userNames(users: Topic, output: Topic): Pipeline[IO] =
   val user = Serde.utf8[IO]
   val name = Serde.utf8[IO]
-  KTable(Named("users"), users, user, name, Store("users"))
+  KTable(Named("users"), users, user, name, Store("users"))  // Keep each key's latest value in this store
     .toStream(Named("user-changes"))
-    .to(Named("write-user-names"), output, user, name.option)
+    .to(Named("write-user-names"), output, user, name.option)  // A deleted key is None, which .option writes as a tombstone
 ```
 
 Each record's value replaces its key's, even a record timestamped earlier than
@@ -41,6 +42,7 @@ topic. For a stream of `Option` values, passing the serde of the values inside
 makes none delete the key:
 
 ```scala mdoc:compile-only
+// Keep each user's latest address as a table, and write every change to it
 import cats.effect.IO
 
 import xkafka.*
@@ -49,8 +51,8 @@ import xkafka.streams.*
 def latestAddress(moves: Topic, output: Topic): Pipeline[IO] =
   val user    = Serde.utf8[IO]
   val address = Serde.utf8[IO]
-  KStream(Named("moves"), moves, user, address.option)
-    .toTable(Named("latest-address"), Store("addresses"), user, address)
+  KStream(Named("moves"), moves, user, address.option)                    // A value of None will delete the user's address
+    .toTable(Named("latest-address"), Store("addresses"), user, address)  // Keep each key's latest value in a store
     .toStream(Named("address-changes"))
     .to(Named("write-address-changes"), output, user, address.option)
 ```
@@ -64,6 +66,7 @@ key that had no value in the result and still has none passes nothing on.
 `mapValues` passes a delete on as a delete:
 
 ```scala mdoc:compile-only
+// Join each order with the email of its user, unless their account is closed
 import cats.effect.IO
 
 import xkafka.*
@@ -74,10 +77,10 @@ def activeEmails(users: Topic, orders: Topic, output: Topic): Pipeline[IO] =
   val text = Serde.utf8[IO]
   val emails =
     KTable(Named("users"), users, id, text, Store("users"))
-      .filterNot(Named("not-closed"))((_, user) => user.startsWith("closed:"))
-      .mapValues(Named("email"))(_.split(' ').last)
+      .filterNot(Named("not-closed"))((_, user) => user.startsWith("closed:"))  // Leave closed accounts out of this table
+      .mapValues(Named("email"))(_.split(' ').last)                             // Keep only the email from each value
   KStream(Named("orders"), orders, id, text)
-    .join(Named("order-email"), emails)((order, email) => s"$order for $email")
+    .join(Named("order-email"), emails)((order, email) => s"$order for $email")  // An order whose user has no email here is dropped
     .to(Named("write-order-emails"), output, id, text)
 ```
 
@@ -98,6 +101,7 @@ it out. Here each user's balance counts towards their country's total, and movin
 to another country takes it out of one total and puts it in the other:
 
 ```scala mdoc:compile-only
+// Keep a total per country, moving a user's balance when they change country
 import cats.effect.IO
 
 import xkafka.*
@@ -107,12 +111,12 @@ def totals(balances: Topic, output: Topic): Pipeline[IO] =
   val text   = Serde.utf8[IO]
   val amount = Serde.long[IO]
   KTable(Named("balances"), balances, text, text, Store("balances"))
-    .groupBy(Repartition("by-country"), text, amount): (_, balance) =>
+    .groupBy(Repartition("by-country"), text, amount): (_, balance) =>  // Choose each value's new group
       val Array(country, money) = balance.split(':')
       (country, money.toLong)
-    .reduce(Named("total"), Store("totals"))(_ + _)(_ - _)
+    .reduce(Named("total"), Store("totals"))(_ + _)(_ - _)  // One function puts a value in, the other takes it out
     .toStream(Named("total-changes"))
-    .to(Named("write-totals"), output, text, amount.option)
+    .to(Named("write-totals"), output, text, amount.option)  // Each change is an Option, so write it with .option
 ```
 
 Each change goes through the repartition topic
@@ -133,6 +137,7 @@ type of value. Here orders and refunds, both keyed by the user, make one balance
 for each user:
 
 ```scala mdoc:compile-only
+// Fold orders and refunds into one balance per user
 import cats.effect.IO
 
 import xkafka.*
@@ -143,9 +148,10 @@ def balances(orders: Topic, refunds: Topic, output: Topic): Pipeline[IO] =
   val cents = Serde.long[IO]
   KStream(Named("orders"), orders, user, cents)
     .groupByKey(user, cents)
-    .cogroup[Long]((_, paid, balance) => balance + paid)
+    .cogroup[Long]((_, paid, balance) => balance + paid)        // An order adds to the balance
+    // A refund takes from the balance
     .cogroup(KStream(Named("refunds"), refunds, user, cents).groupByKey(user, cents))((_, refunded, balance) => balance - refunded)
-    .aggregate(Named("balance"), Store("balances"), cents)(0L)
+    .aggregate(Named("balance"), Store("balances"), cents)(0L)  // Start from 0, and keep the result in one store
     .toStream(Named("balance-changes"))
     .to(Named("write-balances"), output, user, cents)
 ```
@@ -174,8 +180,9 @@ Folding in windows works as for one group, with `windowedBy` before `aggregate`.
 A session's `aggregate` also takes a function to merge two sessions:
 
 ```scala
+// Fold the groups into one result per minute
 grouped
-  .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
+  .windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))  // Window the groups before aggregating them
   .aggregate(Named("balance"), Store("balances"), cents)(0L)
 ```
 

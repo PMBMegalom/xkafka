@@ -805,6 +805,32 @@ private[xkafka] final class Task[F[_]](
               Option.when(start >= from && start <= to && spanned(key))((key, start, stored.value))
             .sortBy((key, start, _) => (start, key))(using Ordering.Tuple2(using Ordering.Long, StoreContents.keys))
 
+        def sessionWrite(key: Chunk[Byte], start: Long, end: Long, value: Option[Chunk[Byte]], moving: Boolean, retention: Long): F[Unit] =
+          working.access.flatMap:
+            case ((state, logged), set) => Task.this.sessionWrite(state, store, retention, changelog, key, start, end, value, timestamp, Some(moving))
+                .flatMap: (after, log) =>
+                  set((after, logged :+ log)).flatMap(done => if done then F.unit else sessionWrite(key, start, end, value, moving, retention))
+
+        def sessions(
+            keys: Option[(Chunk[Byte], Chunk[Byte])],
+            earliestEnd: Long,
+            latestEnd: Long,
+            latestStart: Long
+        ): F[Vector[(Chunk[Byte], Long, Long, Chunk[Byte])]] =
+          val held =
+            working.get.flatMap: (state, _) =>
+              keys match
+                case Some((first, last)) if first == last => storedUnder(state, store, first)
+                case _                                    => contents(state, store).map(_.toVector)
+          held.map: entries =>
+            def spanned(key: Chunk[Byte]) = keys.forall((first, last) => StoreContents.keys.gteq(key, first) && StoreContents.keys.lteq(key, last))
+            entries.flatMap: (session, stored) =>
+              val key   = session.take(session.size - 16)
+              val start = SessionStore.startOf(session)
+              val end   = SessionStore.endOf(session)
+              Option.when(end >= earliestEnd && end <= latestEnd && start <= latestStart && spanned(key))((key, start, end, stored.value))
+            .sortBy((key, start, end, _) => (end, key, -start))(using Ordering.Tuple3(using Ordering.Long, StoreContents.keys, Ordering.Long))
+
   /** What Java's table filter makes of a change: its value where `keep` keeps it, and otherwise none, with the old value filtered too; a change from
     * no value to no value goes no further. Java's filter always asks for old values, which every table here can give. Kept in no store, the old value
     * comes from the change.
@@ -1001,11 +1027,12 @@ private[xkafka] final class Task[F[_]](
       start: Long,
       end: Long,
       written: Option[Chunk[Byte]],
-      timestamp: Long
+      timestamp: Long,
+      moving: Option[Boolean] = None
   ): F[(TaskState, TaskOutput)] =
     clockOf(state, store, SessionStore.clockOf).flatMap: clock =>
       val session = SessionStore.key(bytes, start, end)
-      val ticked  = written.fold(clock)(_ => math.max(clock, end))
+      val ticked  = if moving.getOrElse(written.isDefined) then math.max(clock, end) else clock
       val kept    =
         written match
           case None                                                   => state.written(store, session, None)

@@ -559,6 +559,29 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             running(server, app):
               read(server, app.output, 3, Serde.long[IO]).map(seen => assertEquals(seen.map(_._2), List(1L, 0L, 0L)))
 
+    test(s"$release, $under: a session store comes back for an engine started later, where a remove that expired nothing until then now has"):
+      IO.realTime.map(_.toMillis).flatMap: now =>
+        val written = now - 2.hours.toMillis
+        val removed = now
+        val program =
+          (input: Topic, output: Topic) =>
+            val sessions = xkafka.streams.SessionStore.of(Store("sessions"), text, Serde.long[IO], retention = 1.hour)
+            KStream(Named("read-45"), input, text, text).process(
+              Named("processor-45"),
+              xkafka.streams.Processor.withStore(sessions): kept =>
+                xkafka.streams.Processor.onRecord: record =>
+                  val at      = record.timestamp.epochMillis
+                  val session = xkafka.streams.Windowed(record.key, xkafka.streams.Window(at, at))
+                  val change  = if at == written then kept.put(session, 1L) else if at == removed then kept.remove(session) else IO.unit
+                  change *> kept.fetch(record.key).compile.count.map(found => List(record.withValue(found)))
+            ).to(Named("write-45"), output, text, Serde.long[IO])
+        counting(server, program): app =>
+          produceAt(server, app.input, List(("a", written), ("a", removed))) *>
+            running(server, app)(read(server, app.output, 2, Serde.long[IO]).void) *> produceAt(server, app.input, List(("a", now - 1L))) *>
+            running(server, app):
+              // Java's running store does not count a remove, and restoring it does.
+              read(server, app.output, 3, Serde.long[IO]).map(seen => assertEquals(seen.map(_._2), List(1L, 1L, 0L)))
+
     test(s"$release, $under: a wall-clock punctuator runs in tasks that read nothing, and what it wrote is there for an engine started later"):
       val program =
         (input: Topic, output: Topic) =>

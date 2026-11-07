@@ -14,6 +14,7 @@ The `.option` combinator represents Kafka null keys and values explicitly as
 `None`:
 
 ```scala mdoc:compile-only
+// Codecs that read and write a Kafka null as None
 import cats.effect.IO
 
 import xkafka.*
@@ -30,11 +31,12 @@ A header value is bytes. `HeaderSerializer` and `HeaderDeserializer` encode and
 decode them, so a call site does not have to name a charset or a byte order:
 
 ```scala mdoc:compile-only
+// Add two headers, then read one back as a String
 import xkafka.*
 
-val headers = Headers.empty.append("trace", "abc").append("attempt", 2)
+val headers = Headers.empty.append("trace", "abc").append("attempt", 2)  // Each value is encoded by its type
 
-val trace = headers.values.head.as[String]
+val trace = headers.values.head.as[String]  // Gives an Either, in case the value cannot be read
 ```
 
 | type | encoding |
@@ -49,7 +51,7 @@ Reading returns `Either[ValidationError, A]`. A header with no value fails as
 `InvalidHeaderLength` rather than being truncated.
 
 Kafka permits a header to have no value, represented as `Header(name, None)`.
-Every backend preserves it, and `Header(name, Some(Chunk.empty))` stays a
+Every platform preserves it, and `Header(name, Some(Chunk.empty))` stays a
 distinct empty value.
 
 `contramap` and `map` adapt a codec to another type, and `emap` rejects values

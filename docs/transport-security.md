@@ -1,9 +1,10 @@
 # Transport security
 
 TLS and SASL are part of `ClientSettings`, so the same code selects them on
-every backend.
+every platform.
 
 ```scala mdoc:compile-only
+// Connect over TLS, authenticating with a SCRAM username and password
 import cats.data.NonEmptyList
 import cats.syntax.all.*
 
@@ -11,10 +12,10 @@ import xkafka.*
 
 val password = "secret"
 
-val tls  = TlsSettings.from(CertificateAuthority.PemFile("/etc/kafka/ca.pem"))
-val sasl = SaslSettings.from(SaslMechanism.ScramSha256, "user", password)
+val tls  = TlsSettings.from(CertificateAuthority.PemFile("/etc/kafka/ca.pem"))  // The authority that signed the broker's certificate
+val sasl = SaslSettings.from(SaslMechanism.ScramSha256, "user", password)       // The credentials to log in with
 
-val client = (tls, sasl).mapN(SecuritySettings.SaslTls.apply).andThen: security =>
+val client = (tls, sasl).mapN(SecuritySettings.SaslTls.apply).andThen: security =>  // Combine both, reporting every problem at once
   ClientSettings.from(NonEmptyList.one("broker:9093"), security = security)
 ```
 
@@ -54,11 +55,13 @@ A broker can require each client to present a certificate of its own. Give
 | `Pem` | the certificate chain and the private key, as PEM text held in memory |
 
 ```scala mdoc:compile-only
+// Present a client certificate to a broker that requires one
 import xkafka.*
 
 val tls =
   TlsSettings.from(
     CertificateAuthority.PemFile("/etc/kafka/ca.pem"),
+    // The file holds the private key and the certificate chain
     clientCertificate = Some(ClientCertificate.PemFile("/etc/kafka/client.pem", keyPassword = None))
   )
 ```
@@ -72,7 +75,7 @@ password are kept out of `toString`.
 Java 17 can't read a key encrypted with PBES2, the scheme `openssl pkcs8`
 uses by default, so on the JVM with Java 17 acquiring the client fails with a
 `BackendFailure` whose code is `ErrorCode.InvalidConfiguration`. Encrypt the key with `openssl pkcs8 -topk8 -v1
-PBE-SHA1-3DES` instead, which every backend reads. Java 21 reads both.
+PBE-SHA1-3DES` instead, which every platform reads. Java 21 reads both.
 
 ## Credentials
 

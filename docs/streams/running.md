@@ -55,13 +55,15 @@ input topic or the application not being allowed to use its topics
 keeps going for as long as it can. To stop on a problem, watch for it:
 
 ```scala mdoc:compile-only
+// Run the application, and stop it if the broker says it may not use its topics
 import cats.effect.IO
 
 import xkafka.streams.*
 
 def runUntilRefused(streams: KafkaStreams[IO]): IO[Unit] =
+  // Ends once such a problem is reported
   val refused = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
-  IO.race(streams.run, refused).void
+  IO.race(streams.run, refused).void  // Whichever ends first stops the other
 ```
 
 Some brokers are configured to ask applications for a description of their
@@ -82,6 +84,6 @@ work moves to a member holding a copy, it only needs to catch up on what the
 copy has not yet read.
 
 @:callout(info)
-A copy that is no longer needed is kept for 10 minutes, like Java Kafka
-Streams' state directories, in case the work comes back.
+A copy that is no longer needed is kept for 10 minutes, in case the work comes
+back.
 @:@

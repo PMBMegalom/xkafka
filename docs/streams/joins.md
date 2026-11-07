@@ -5,6 +5,7 @@ Kafka Streams' stream-table join does. Here each order, keyed by the user who
 placed it, is joined with that user's name:
 
 ```scala mdoc:compile-only
+// Join each order with the name of the user who placed it
 import cats.effect.IO
 
 import xkafka.*
@@ -15,6 +16,7 @@ def ordersWithNames(orders: Topic, users: Topic, output: Topic): Pipeline[IO] =
   val item = Serde.utf8[IO]
   val name = Serde.utf8[IO]
   KStream(Named("orders"), orders, user, item)
+    // Look up each order's key in the table
     .join(Named("with-name"), KTable(Named("users"), users, user, name, Store("users")))((bought, buyer) => s"$bought for $buyer")
     .to(Named("write-orders"), output, user, Serde.utf8[IO])
 ```
@@ -49,6 +51,7 @@ build what `join` is called on first in the Java program, before anything of the
 other input:
 
 ```java
+// In the Java program: build the stream that join is called on first
 KStream<String, String> orders = builder.stream("orders");
 KTable<String, Long> visits = builder.<String, String>stream("visits")
     .groupBy((key, page) -> page, Grouped.as("by-page"))
@@ -63,6 +66,7 @@ only with a name. The topic is named after the join,
 `<application id>-<name>-repartition`, as Java names it after its `Joined` name:
 
 ```scala mdoc:compile-only
+// Key orders by user, then join them with the users table
 import cats.effect.IO
 
 import xkafka.*
@@ -72,7 +76,8 @@ def ordersByUser(orders: Topic, users: KTable.Of[IO, String, String, Option], ou
   val id   = Serde.utf8[IO]
   val item = Serde.utf8[IO]
   KStream(Named("orders"), orders, id, item)
-    .selectKey(Named("by-user"))((order, _) => order.takeWhile(_ != '/'))
+    .selectKey(Named("by-user"))((order, _) => order.takeWhile(_ != '/'))  // The key changes here
+    // So the join takes serdes for a repartition topic
     .join(Named("orders-by-user"), users, id, item)((bought, buyer) => s"$bought for $buyer")
     .to(Named("write-orders"), output, id, Serde.utf8[IO])
 ```
@@ -86,6 +91,7 @@ Two tables with the same key join into a table, as Java Kafka Streams' table-tab
 joins do. Every change to either table updates the result for its key:
 
 ```scala mdoc:compile-only
+// Join users and plans into one account per user, whichever of the two a user has
 import cats.data.Ior
 import cats.effect.IO
 
@@ -99,10 +105,10 @@ def accounts(users: Topic, plans: Topic, output: Topic): Pipeline[IO] =
   val names = KTable(Named("users"), users, user, name, Store("users"))
   val paid  = KTable(Named("plans"), plans, user, plan, Store("plans"))
   names
-    .outerJoin(Named("accounts"), paid) {
-      case Ior.Left(who)       => s"$who, no plan"
-      case Ior.Right(tier)     => s"unknown user on $tier"
-      case Ior.Both(who, tier) => s"$who on $tier"
+    .outerJoin(Named("accounts"), paid) {                   // Every change to either table updates the result
+      case Ior.Left(who)       => s"$who, no plan"          // A user with no plan
+      case Ior.Right(tier)     => s"unknown user on $tier"  // A plan with no user
+      case Ior.Both(who, tier) => s"$who on $tier"          // A user with a plan
     }
     .toStream(Named("account-changes"))
     .to(Named("write-accounts"), output, user, Serde.utf8[IO].option)
@@ -125,9 +131,11 @@ the store's name and a serde for its values; a table that holds the result back
 with `suppress` needs this:
 
 ```scala
+// Keep the joined table in a store, so that its updates can be held back
 names
+  // Keep the result in the store named accounts
   .join(Named("accounts"), paid, Store("accounts"), Serde.utf8[IO])((who, tier) => s"$who on $tier")
-  .suppress(Suppressed.untilTimeLimit("accounts-calm", 1.second))
+  .suppress(Suppressed.untilTimeLimit("accounts-calm", 1.second))  // This needs the result kept in a store
 ```
 
 Like a stream and a table, two joined tables are processed together, so their
@@ -143,6 +151,7 @@ payments are both keyed by the order, and each order should be paid within
 five minutes:
 
 ```scala mdoc:compile-only
+// Join orders with payments made within five minutes, and keep the unmatched ones too
 import scala.concurrent.duration.*
 
 import cats.data.Ior
@@ -159,15 +168,15 @@ def payments(orders: Topic, payments: Topic, output: Topic): Pipeline[IO] =
     .outerJoin(
       Named("pay"),
       KStream(Named("payments"), payments, order, cents),
-      JoinWindows(5.minutes, grace = 30.seconds),
-      Store("payments"),
+      JoinWindows(5.minutes, grace = 30.seconds),  // At most five minutes apart, either way
+      Store("payments"),                           // Names the stores that hold each stream's records
       order,
       item,
       cents
     ) {
-      case Ior.Left(bought)       => s"$bought, unpaid"
-      case Ior.Right(paid)        => s"$paid cents paid for no order"
-      case Ior.Both(bought, paid) => s"$bought, paid $paid cents"
+      case Ior.Left(bought)       => s"$bought, unpaid"                // An order with no payment, written once its window and grace have passed
+      case Ior.Right(paid)        => s"$paid cents paid for no order"  // A payment with no order, written once its window and grace have passed
+      case Ior.Both(bought, paid) => s"$bought, paid $paid cents"      // An order and a payment at most five minutes apart
     }
     .to(Named("write-payments"), output, order, Serde.utf8[IO])
 ```
@@ -225,6 +234,7 @@ key taken from each record, so the two need not share a key or a number of
 partitions. Here each order is joined with the product named in its value:
 
 ```scala mdoc:compile-only
+// Join each order with the product named in its value
 import cats.effect.IO
 
 import xkafka.*
@@ -232,8 +242,9 @@ import xkafka.streams.*
 
 def ordersWithProducts(orders: Topic, products: Topic, output: Topic): Pipeline[IO] =
   val text    = Serde.utf8[IO]
-  val catalog = GlobalKTable(Named("products"), products, text, text, Store("products"))
+  val catalog = GlobalKTable(Named("products"), products, text, text, Store("products"))  // Every running instance holds all of this table
   KStream(Named("orders"), orders, text, text)
+    // Find the table's key in each record, then make the result
     .join(Named("with-product"), catalog)((_, product) => product)((product, details) => s"$product: $details")
     .to(Named("write-orders"), output, text, text)
 ```
@@ -255,6 +266,7 @@ after the stream that first joins it, or the broker may refuse the Java members.
 application's `state` lists `StreamsProblem.JavaMembersMayBeRefused` as a reminder:
 
 ```java
+// In the Java program: build the global table after the stream that joins it
 KStream<String, String> orders = builder.stream("orders");
 GlobalKTable<String, String> catalog = builder.globalTable("products");
 orders.join(catalog, (order, product) -> product, (product, details) -> product + ": " + details).to("out");

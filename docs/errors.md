@@ -7,7 +7,7 @@ as a `maxQueuedRecords` that is not positive, raises `IllegalArgumentException`.
 
 | case | raised when |
 | --- | --- |
-| `BackendFailure` | the backend reported a failure |
+| `BackendFailure` | Kafka or the platform's client reported a failure |
 | `InvalidBackendResponse` | the client returned data xkafka cannot represent, which is a bug in xkafka worth reporting |
 | `InvalidValue` | a value did not meet the rules of the type it was to become |
 | `InvalidSettings` | settings could not be constructed |
@@ -38,6 +38,7 @@ it is the same on every platform, and `None` only where there is no code.
 does not report them. `fatal` is always `true` for `ErrorCode.Fenced`.
 
 ```scala
+// Retry only a failure that can clear on its own
 if failure.retriable.contains(true) then retry else give up
 ```
 
@@ -54,6 +55,7 @@ comes from the platform's client and can differ between the JVM and Scala.js or
 Native, so code meant for every platform should not match on it.
 
 ```scala
+// Choose what to do by the failure's code
 failure.code match
   case Some(ErrorCode.OffsetOutOfRange)        => resetPosition
   case Some(ErrorCode.SaslAuthenticationFailed) => refreshCredentials

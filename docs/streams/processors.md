@@ -5,6 +5,7 @@ express. It sees one record at a time with its time and headers, can read and
 write its own stores, and returns the records to send on.
 
 ```scala mdoc:compile-only
+// Keep a running total per user, and send on each new total
 import cats.effect.IO
 
 import xkafka.*
@@ -13,15 +14,15 @@ import xkafka.streams.*
 def runningTotals(input: Topic, output: Topic): Pipeline[IO] =
   val user   = Serde.utf8[IO]
   val amount = Serde.long[IO]
-  val totals = KeyValueStore.of(Store("totals"), user, amount)
+  val totals = KeyValueStore.of(Store("totals"), user, amount)  // Declare the store
   KStream(Named("payments"), input, user, amount)
     .process(
       Named("add-to-total"),
-      Processor.withStore(totals): kept =>
-        Processor.onRecord: record =>
-          kept.get(record.key).flatMap: total =>
+      Processor.withStore(totals): store =>        // Give the processor the store
+        Processor.onRecord: record =>              // Runs for each record
+          store.get(record.key).flatMap: total =>  // Read this user's total
             val updated = total.getOrElse(0L) + record.value
-            kept.put(record.key, updated).as(List(record.withValue(updated)))
+            store.put(record.key, updated).as(List(record.withValue(updated)))  // Save the new total, and send it on
     )
     .to(Named("write-totals"), output, user, amount)
 ```
@@ -50,6 +51,7 @@ If your processor never changes the key, use `processValues` with a
 `withHeaders` but no `withKey`, so a change of key does not compile.
 
 ```scala mdoc:compile-only
+// Number each user's payments, then count them, without ever changing the key
 import cats.effect.IO
 
 import xkafka.*
@@ -60,15 +62,15 @@ def numbered(input: Topic, output: Topic): Pipeline[IO] =
   val amount = Serde.long[IO]
   val seen   = KeyValueStore.of(Store("seen"), user, amount)
   KStream(Named("payments"), input, user, amount)
-    .processValues(
+    .processValues(  // A step that cannot change the key
       Named("number-payments"),
-      FixedKeyProcessor.withStore(seen): kept =>
+      FixedKeyProcessor.withStore(seen): store =>
         FixedKeyProcessor.onRecord: record =>
-          kept.get(record.key).flatMap: last =>
+          store.get(record.key).flatMap: last =>
             val number = last.getOrElse(0L) + 1
-            kept.put(record.key, number).as(List(record.withValue(number)))
+            store.put(record.key, number).as(List(record.withValue(number)))  // This record has no withKey, so the key cannot change
     )
-    .groupByKey(user, amount)
+    .groupByKey(user, amount)  // The key stayed, so no repartition topic
     .count(Named("count-payments"), Store("counts"))
     .toStream(Named("counts-stream"))
     .to(Named("write-counts"), output, user, Serde.long[IO])
@@ -106,6 +108,7 @@ time down. This one counts each user's failed logins per minute, and sends on th
 total for the last ten minutes once it passes five:
 
 ```scala mdoc:compile-only
+// Count failed logins per user and minute, and flag a user with over five in ten minutes
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -116,19 +119,21 @@ import xkafka.streams.*
 def repeatedFailures(input: Topic, output: Topic): Pipeline[IO] =
   val user     = Serde.utf8[IO]
   val count    = Serde.long[IO]
+  // Holds one count per user and minute, and keeps each for an hour
   val failures = WindowStore.of(Store("failures"), user, count, size = 1.minute, retention = 1.hour)
   KStream(Named("failed-logins"), input, user, Serde.utf8[IO])
     .process(
       Named("flag-repeats"),
-      Processor.withStore(failures): kept =>
+      Processor.withStore(failures): store =>
         Processor.onRecord: record =>
           val now    = record.timestamp.epochMillis
-          val minute = Timestamp.fromEpochMillis(now - now % 60000)
+          val minute = Timestamp.fromEpochMillis(now - now % 60000)  // Round down to the start of this minute's window
           for
-            seen   <- kept.fetch(record.key, minute)
-            _      <- kept.put(record.key, seen.getOrElse(0L) + 1, minute)
-            recent <- kept.fetch(record.key, Timestamp.fromEpochMillis(now - 600000), record.timestamp).map(_._2).compile.foldMonoid
-          yield if recent > 5 then List(record.withValue(recent)) else Nil
+            seen   <- store.fetch(record.key, minute)                        // This minute's count so far
+            _      <- store.put(record.key, seen.getOrElse(0L) + 1, minute)  // Save it under this minute's window
+            // Add up the counts of the last ten minutes
+            recent <- store.fetch(record.key, Timestamp.fromEpochMillis(now - 600000), record.timestamp).map(_._2).compile.foldMonoid
+          yield if recent > 5 then List(record.withValue(recent)) else Nil   // Send the total on only once it passes five
     )
     .to(Named("write-flags"), output, user, count)
 ```
@@ -159,6 +164,76 @@ Writes are saved and restored as for a `KeyValueStore`, to the topic
 `<application id>-<store>-changelog`, which keeps records for the retention plus a
 day.
 
+## Session stores
+
+A `SessionStore` holds one value for each session: a key with a start and an end.
+You decide what a session is, and how sessions merge. This one counts each user's
+page views per visit, where a visit ends after five minutes with no views. A view
+within five minutes of two visits joins them into one:
+
+```scala mdoc:compile-only
+// Count each user's page views per visit. A view within five minutes of two visits joins them into one
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+import cats.syntax.all.*
+
+import xkafka.*
+import xkafka.streams.*
+
+def viewsPerVisit(input: Topic, output: Topic): Pipeline[IO] =
+  val user   = Serde.utf8[IO]
+  val count  = Serde.long[IO]
+  val visits = SessionStore.of(Store("visits"), user, count, retention = 1.hour)  // Holds one count per user and visit, and keeps each visit for an hour
+  val gap    = 5.minutes.toMillis                                                 // A visit ends after five minutes with no views
+  KStream(Named("page-views"), input, user, Serde.utf8[IO])
+    .process(
+      Named("count-visits"),
+      Processor.withStore(visits): store =>
+        Processor.onRecord: record =>
+          val at = record.timestamp.epochMillis
+          for
+            // Find this user's visits within five minutes of this view
+            nearby <- store.findSessions(record.key, Timestamp.fromEpochMillis(at - gap), Timestamp.fromEpochMillis(at + gap)).compile.toList
+            _      <- nearby.traverse_((session, _) => store.remove(session))     // Remove those visits, because one merged visit replaces them
+            start   = (at :: nearby.map(_._1.window.start)).min                   // The merged visit starts at the earliest start
+            end     = (at :: nearby.map(_._1.window.end)).max                     // The merged visit ends at the latest end
+            total   = nearby.map(_._2).sum + 1                                    // Its count is their counts plus this view
+            _      <- store.put(Windowed(record.key, Window(start, end)), total)  // Save the merged visit
+          yield List(record.withValue(total))
+    )
+    .to(Named("write-visits"), output, user, count)
+```
+
+| To read | Use |
+| --- | --- |
+| One exact session | `fetchSession(key, start, end)` |
+| Every session of a key | `fetch(key)`, `reverseFetch` |
+| Every session of a range of keys | `fetchRange(first, last)`, `reverseFetchRange` |
+| A key's sessions overlapping a stretch of time | `findSessions(key, earliestEnd, latestStart)`, `reverseFindSessions` |
+| The same for a range of keys | `findSessionsRange(first, last, earliestEnd, latestStart)`, `reverseFindSessionsRange` |
+| Every key's sessions ending within a stretch of time | `findSessionsEnding(earliestEnd, latestEnd)` |
+
+Reads go by each session's end, then by the order of the keys' serialized bytes, then
+with the latest start first, and the `reverse` reads give the exact opposite order.
+Both ends of a range are included, and a range the wrong way round finds nothing. A
+`put` or `remove` of a session that ends before it starts fails your handler.
+
+`retention` decides how long a session lasts. A session has expired once the latest
+end written to the store is a whole retention past its own end. Reads do not find an
+expired session, and a `put` to one keeps nothing and raises no error, so choose a
+retention at least as long as the oldest session you still write to or read.
+
+A `remove` does not count towards the latest end while
+the store runs, but it does once the store is restored. So a restart can expire a
+session you could read just before it, if you removed a session ending later than
+any you have written. Java Kafka Streams' session stores do the same.
+
+A retention under a millisecond is refused when you call `Topology.of`. Writes are
+saved and restored as for a `KeyValueStore`, to the topic
+`<application id>-<store>-changelog`, which keeps records for the retention plus a
+day.
+
 ## Running on a schedule
 
 A punctuator is code a processor runs on a schedule, between records. Wrap the
@@ -167,6 +242,7 @@ time it runs at, and the records it returns go on to the next step, as a
 handler's do.
 
 ```scala mdoc:compile-only
+// Add up each user's payments, and send all the totals each time record timestamps pass another minute
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -181,13 +257,13 @@ def totalsEveryMinute(input: Topic, output: Topic): Pipeline[IO] =
   KStream(Named("payments"), input, user, amount)
     .process(
       Named("report-totals"),
-      Processor.withStore(totals): kept =>
-        Processor.every(Punctuation.streamTime(1.minute)): at =>
-          kept.all.compile.toList.map(_.map((name, total) => Record(name, total, at)))
+      Processor.withStore(totals): store =>
+        Processor.every(Punctuation.streamTime(1.minute)): at =>                         // The schedule, and what to do each time
+          store.all.compile.toList.map(_.map((name, total) => Record(name, total, at)))  // Send on every total in this task's part of the store
         .apply:
-          Processor.onRecord: record =>
-            kept.get(record.key).flatMap: total =>
-              kept.put(record.key, total.getOrElse(0L) + record.value).as(Nil)
+          Processor.onRecord: record =>  // Runs for each record
+            store.get(record.key).flatMap: total =>
+              store.put(record.key, total.getOrElse(0L) + record.value).as(Nil)  // Save the total, and send nothing on
     )
     .to(Named("write-totals"), output, user, amount)
 ```
@@ -208,8 +284,7 @@ clock time it runs at. An interval below a millisecond is refused when you call
 `Topology.of`.
 
 What a punctuator writes to a store is saved at the next commit, as a handler's
-writes are, and reaches the changelog with the time it was given. Under
-exactly-once processing, a wall-clock punctuator that runs while no records arrive
+writes are. Under exactly-once processing, a wall-clock punctuator that runs while no records arrive
 commits a transaction each time, so avoid very short intervals.
 
 Schedules are not saved. When a task starts again, here or on another member, a
@@ -225,5 +300,5 @@ write to its stores but cannot send records on. To send records on a schedule, u
 
 Give two processors the same `KeyValueStore.of` value and they share one store.
 One task then handles the same-numbered partition of both inputs, and both
-processors see the same part of the store. Two separate values with the same store name are refused when you call
-`Topology.of`.
+processors see the same part of the store. Two separate values with the same store
+name are refused when you call `Topology.of`.
