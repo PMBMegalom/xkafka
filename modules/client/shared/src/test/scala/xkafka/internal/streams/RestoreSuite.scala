@@ -119,6 +119,25 @@ final class RestoreSuite extends CatsEffectSuite:
         )
         assert(now - start >= Restore.EndsTimeoutMillis.millis && now - start < Restore.EndsTimeoutMillis.millis + 1.second, now - start)
 
+  test("asking where a partition ends is asked again while the client does not know the partition yet, as for a topic just made"):
+    TestControl.executeEmbed:
+      IO.ref(0).flatMap: asked =>
+        val ask = asked.updateAndGet(_ + 1).flatMap(n => if n < 3 then IO.raiseError(failing(ErrorCode.UnknownTopicOrPartition)) else IO.pure(n))
+        Restore.whileMoving(ask).map(assertEquals(_, 3))
+
+  test("asking where a partition ends gives up on a partition still unknown once the time is up"):
+    TestControl.executeEmbed:
+      for
+        start  <- IO.monotonic
+        failed <- Restore.whileMoving(IO.raiseError[Int](failing(ErrorCode.UnknownTopicOrPartition))).attempt
+        now    <- IO.monotonic
+      yield
+        assertEquals(
+          failed.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
+          Some(ErrorCode.UnknownTopicOrPartition)
+        )
+        assert(now - start >= Restore.EndsTimeoutMillis.millis && now - start < Restore.EndsTimeoutMillis.millis + 1.second, now - start)
+
   test("asking where a partition ends does not ask again after a failure that is not the broker moving"):
     IO.ref(0).flatMap: asked =>
       val ask = asked.update(_ + 1) *> IO.raiseError[Int](failing(ErrorCode.TopicAuthorizationFailed))

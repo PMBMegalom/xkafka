@@ -76,13 +76,14 @@ private[xkafka] object Restore:
         .map(marks => (partition.topic.value, partition.partition.value) -> marks._2)
     ).map(_.toMap)
 
-  /** The answer to `ask`, asked again while it fails because the broker is moving, as a partition without a leader yet does, which Java's client also
-    * waits out, until `EndsTimeoutMillis` have passed.
+  /** The answer to `ask`, asked again while it fails because the broker is moving, as a partition without a leader yet does, or because the client
+    * does not know the partition yet, as librdkafka's does not for a moment after the topic is made, both of which Java's client also waits out,
+    * until `EndsTimeoutMillis` have passed. A partition asked about here belongs to a topic already found to exist.
     */
   def whileMoving[F[_], A](ask: F[A])(using F: Temporal[F]): F[A] =
     def attempt(start: FiniteDuration): F[A] =
       ask.recoverWith:
-        case failure: KafkaException.BackendFailure if failure.retriable.contains(true) =>
+        case failure: KafkaException.BackendFailure if failure.retriable.contains(true) || failure.code.contains(ErrorCode.UnknownTopicOrPartition) =>
           F.monotonic.flatMap: now =>
             if now - start < EndsTimeoutMillis.millis then F.sleep(EndsBackoff) *> attempt(start) else F.raiseError(failure)
     F.monotonic.flatMap(attempt)
