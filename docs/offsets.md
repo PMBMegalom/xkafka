@@ -1,8 +1,8 @@
 # Offsets
 
 Every record arrives as a `CommittableConsumerRecord`, pairing the record with
-the offset that commits it. Commits are explicit, so processing and commit
-policy stay in the calling effect.
+the offset that commits it. Nothing is committed until your code asks, so you
+decide when.
 
 A successful `record.offset.commit` stores `record.offset.nextOffset`, the
 offset after the one just handled.

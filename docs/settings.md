@@ -56,8 +56,8 @@ and the group membership intervals are limited by
 
 ## Properties
 
-Each settings type accepts an immutable `properties` map for backend
-configuration the portable model does not describe:
+Each settings type accepts an immutable `properties` map for Kafka client
+properties that have no typed setting:
 
 ```scala mdoc:compile-only
 import cats.data.NonEmptyList
@@ -75,9 +75,10 @@ val settings =
     ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 
-Producer or consumer properties override client properties. Names and values are
-interpreted by the selected backend, so portable applications should use only
-properties supported with the same meaning by each one.
+Producer or consumer properties override client properties. Each platform's client reads
+the names and values itself: the Java client on the JVM, and librdkafka on Scala.js
+and Scala Native. For code that runs on more than one platform, use only properties
+that both accept with the same meaning.
 
 ## Managed properties
 

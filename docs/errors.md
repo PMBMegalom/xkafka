@@ -1,9 +1,9 @@
 # Errors
 
 Failures Kafka reports, and values or settings xkafka rejects, are
-`KafkaException` values, except for the [streams](#streams) ones below. User-supplied effects keep their own failures, and
-ordinary method precondition failures such as a non-positive partition-stream
-queue threshold use their usual exception type.
+`KafkaException` values, except for the [streams](#streams) ones below. A failure raised by your own
+serializer, handler or other effect stays as it is, and an invalid argument, such
+as a `maxQueuedRecords` that is not positive, raises `IllegalArgumentException`.
 
 | case | raised when |
 | --- | --- |

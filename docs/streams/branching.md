@@ -97,7 +97,8 @@ def reviewed(orders: Topic, refunds: Topic, all: Topic, review: Topic) =
 ```
 
 When a flow gets records from several places, they all go straight to its first
-step. `merged` adds a step of its own to receive them, as `merge` would.
+step. `merged` adds a step of its own to receive them, as `merge` would. Use it when the
+program's description must match a Java program that merges those paths.
 
 ## Joining a stream or a table with itself
 

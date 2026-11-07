@@ -41,10 +41,10 @@ on macOS their locations have to be named when linking.
 
 ### Linking an application
 
-Published Native artifacts contain the C glue code, which includes the headers
-of librdkafka and OpenSSL, and request `-lrdkafka` and `-lcrypto`. Applications
-with both installed in standard compiler and linker locations need no
-additional xkafka settings. For a nonstandard installation:
+Compiling an application needs the headers of librdkafka and OpenSSL, and xkafka
+asks the linker for `-lrdkafka` and `-lcrypto`. With both installed where the
+compiler and linker look by default, no further settings are needed. For an
+installation elsewhere:
 
 ```scala
 nativeConfig := nativeConfig.value

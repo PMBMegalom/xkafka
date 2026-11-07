@@ -187,8 +187,9 @@ in its window have already been dropped.
 
 Each pair takes the later timestamp of its two records. A record that matched
 nothing is held until its window and grace have passed, in case a match
-arrives, and is then written alone with its own timestamp. As in Java, xkafka
-looks for such records when a record arrives, and at most once a second.
+arrives, and is then written alone with its own timestamp. Such records are
+written when a later record arrives, at most once a second, so while no records
+arrive they wait.
 
 Each stream's records are kept in a store for the windows' size and grace, and
 a left or outer join keeps the records that matched nothing in a third store.
