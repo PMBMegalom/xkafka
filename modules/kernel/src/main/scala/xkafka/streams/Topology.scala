@@ -225,8 +225,8 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
     */
   case Cogrouped[F[_], K, V, K2, V2](side: Int, step: Step[F, K, V, K2, V2]) extends Step[F, K, V, K2, V2]
 
-  /** Each record with what `processor` makes of it, reading and writing the stores it declares. */
-  case Process[F[_], K, V, K2, V2](processor: Processor[F, K, V, K2, V2]) extends Step[F, K, V, K2, V2]
+  /** Each record with what `processor` makes of it, reading and writing the stores it declares, under a new key or, if `keepsKey`, under its own. */
+  case Process[F[_], K, V, K2, V2](processor: Processor[F, K, V, K2, V2], keepsKey: Boolean) extends Step[F, K, V, K2, V2]
 
   def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Step[G, K, V, K2, V2] =
     this match
@@ -258,7 +258,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case ToStream()                                => ToStream()
       case GlobalJoin(table, select, join)           => GlobalJoin(table.mapK(fk), select, join)
       case Cogrouped(side, step)                     => Cogrouped(side, step.imapK(fk)(gk))
-      case Process(processor)                        => Process(processor.imapK(fk)(gk))
+      case Process(processor, keepsKey)              => Process(processor.imapK(fk)(gk), keepsKey)
 
   /** The stores it keeps. */
   def kept: List[KeptStore] =
@@ -274,7 +274,7 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case SessionAggregate(store, _, retention, _, _, _, _, _, _, _) => List(KeptStore(store, Some(retention), session = true))
       case Suppress(suppressed, _, _, _)                              => List(KeptStore(Store(s"${suppressed.name}-store"), buffer = true))
       case Cogrouped(side, step)                                      => if side == 0 then step.kept else Nil
-      case Process(processor)                                         => processor.kept
+      case Process(processor, _)                                      => processor.kept
       case _                                                          => Nil
 
   /** The global table it reads, if any. */
@@ -286,8 +286,9 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** Whether it may give its records a new key. */
   def rekeys: Boolean =
     this match
-      case Map(_) | FlatMap(_) | EvalMap(_) | TableGroupBy(_) | Process(_) => true
-      case _                                                               => false
+      case Map(_) | FlatMap(_) | EvalMap(_) | TableGroupBy(_) => true
+      case Process(_, keepsKey)                               => !keepsKey
+      case _                                                  => false
 
   /** Whether it asks for the old values of the changes it reads, given whether what reads it asks: a suppression, a filter and a table's `groupBy`
     * always do, as Java's ask, and a `mapValues` kept in no store only for what reads it.
@@ -815,7 +816,14 @@ sealed trait KStream[F[_], K, V]:
   /** Replaces each record with what `processor` gives for it, under any key, reading and writing the stores it declares. Its results and store writes
     * are committed together, but other effects in its handler run again for records replayed after a crash or a fencing.
     */
-  def process[K2, V2](named: Named, processor: Processor[F, K, V, K2, V2]): Rekeyed[K2, V2] = rekeyed(named, Step.Process(processor))
+  def process[K2, V2](named: Named, processor: Processor[F, K, V, K2, V2]): Rekeyed[K2, V2] =
+    rekeyed(named, Step.Process(processor, keepsKey = false))
+
+  /** Replaces each value with what `processor` gives for its record, under the same key, reading and writing the stores it declares. Its results and
+    * store writes are committed together, but other effects in its handler run again for records replayed after a crash or a fencing.
+    */
+  def processValues[V2](named: Named, processor: FixedKeyProcessor[F, K, V, V2]): Kept[K, V2] =
+    kept(named, Step.Process(processor.processor, keepsKey = true))
 
   /** Keeps the records `keep` gives true for. The effect runs again for records replayed after a crash or a fencing. */
   def evalFilter(named: Named)(keep: (K, V) => F[Boolean]): Kept[K, V] = kept(named, Step.EvalFilter(keep))

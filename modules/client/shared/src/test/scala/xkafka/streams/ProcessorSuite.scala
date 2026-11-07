@@ -265,3 +265,122 @@ final class ProcessorSuite extends CatsEffectSuite:
     val store = KeyValueStore.of(Store("tally"), text, count)
     val shown = Topology.of(pipeline(tally(store), text, count)).orFail.describe.toString
     assert(shown.contains("Processor: proc (stores: [tally])"), shown)
+
+  private def fixedPipeline[V2](processor: FixedKeyProcessor[IO, String, String, V2], value: Serde[IO, V2]): Pipeline[IO] =
+    KStream(Named("read"), in, text, text).processValues(Named("proc"), processor).to(Named("write"), out, text, value)
+
+  test("a processor that keeps the key reads back what it wrote, and sends its results on under the record's key"):
+    val store = KeyValueStore.of(Store("tally"), text, count)
+    val tally =
+      FixedKeyProcessor.withStore(store): (counts: KeyValueStore[IO, String, Long]) =>
+        FixedKeyProcessor.onRecord: (record: FixedKeyRecord[String, String]) =>
+          counts.get(record.key).flatMap: seen =>
+            val total = seen.getOrElse(0L) + 1
+            counts.put(record.key, total).as(List(record.withValue(total)))
+    for
+      task   <- taskOf(fixedPipeline(tally, count))
+      first  <- task.process(TaskState.empty, input("a", "x"), 0L)
+      second <- task.process(first._1, input("a", "y", 1500L), 0L)
+    yield
+      assertEquals(second._2.filter(_.topic == out).flatMap(valueOf), Vector(2L))
+      assertEquals(second._2.filter(_.topic == out).flatMap(_.key), Vector(bytes("a")))
+      assertEquals(changelog(second._2).map(valueOf), Vector(Some(2L)))
+      assertEquals(changelog(second._2).map(_.timestamp), Vector(1500L))
+
+  test("a result of a processor that keeps the key has the record's time and headers unless it changes them, and the record says where it came from"):
+    val tagged = Headers.fromVector(Vector(Header("trace", Some(bytes("1")))))
+    val origin = RecordOrigin(in, Partition.from(3).orFail, Offset.from(7L).orFail)
+    val seeing =
+      FixedKeyProcessor.withoutStores(
+        FixedKeyProcessor.onRecord[IO, String, String, String]: record =>
+          val seen = (record.origin == Some(origin), record.timestamp.epochMillis, record.headers == tagged, record.value)
+          IO.pure(List(record.withValue(seen.toString), record.withTimestamp(Timestamp.fromEpochMillis(9L)).withHeaders(Headers.empty)))
+      )
+    for
+      task <- taskOf(fixedPipeline(seeing, text))
+      ran  <- task.process(TaskState.empty, input("a", "x", 1234L, tagged), 0L)
+    yield
+      val written = ran._2.filter(_.topic == out)
+      assertEquals(written.map(_.key), Vector(Some(bytes("a")), Some(bytes("a"))))
+      assertEquals(written.map(_.value), Vector(Some(bytes("(true,1234,true,x)")), Some(bytes("x"))))
+      assertEquals(written.map(_.timestamp), Vector(1234L, 9L))
+      assertEquals(written.map(_.headers), Vector(tagged, Headers.empty))
+
+  test("a processor that keeps the key can return nothing, and one that fails leaves nothing written"):
+    val store  = KeyValueStore.of(Store("tally"), text, count)
+    val broken =
+      FixedKeyProcessor.withStore(store): (counts: KeyValueStore[IO, String, Long]) =>
+        FixedKeyProcessor.onRecord: (record: FixedKeyRecord[String, String]) =>
+          counts.put(record.key, 1L) *>
+            (if record.value == "fail" then IO.raiseError(new RuntimeException("no")) else IO.pure(List.empty[FixedKeyRecord[String, Long]]))
+    for
+      task   <- taskOf(fixedPipeline(broken, count))
+      failed <- task.process(TaskState.empty, input("a", "fail"), 0L).attempt
+      ran    <- task.process(TaskState.empty, input("a", "x"), 0L)
+      held   <- task.contents(TaskState.empty, "tally")
+    yield
+      assert(failed.isLeft)
+      assertEquals(held.size, 0)
+      assertEquals(ran._2.filter(_.topic == out), Vector.empty)
+
+  test("a processor that keeps the key cannot change it, and grouping its results needs a repartition topic only where one was needed before"):
+    val same = FixedKeyProcessor.withoutStores(FixedKeyProcessor.onRecord[IO, String, String, String](record => IO.pure(List(record))))
+    assert(compileErrors("""FixedKeyProcessor.onRecord[IO, String, String, String](record => IO.pure(List(record.withKey("b"))))""").nonEmpty)
+    val kept = KStream(Named("read"), in, text, text).processValues(Named("proc"), same)
+    val _: KStream.Flowing[IO, String, String, KeyState.AsRead, Pipeline[IO]] = kept
+    val counted = kept.groupByKey(text, text).count(Named("counted"), Store("c")).toStream(Named("s")).to(Named("w"), out, text, count)
+    assertEquals(Topology.of(counted).orFail.subtopologies.size, 1)
+    val rekeyed = KStream(Named("read"), in, text, text).selectKey(Named("key"))((_, value) => value).processValues(Named("proc"), same)
+    val _: KStream.Flowing[IO, String, String, KeyState.Changed, Pipeline[IO]] = rekeyed
+    assertEquals(compileErrors("""rekeyed.groupByKey(text, text)""").nonEmpty, true)
+    val regrouped =
+      rekeyed.groupByKey(Repartition("by"), text, text).count(Named("counted"), Store("c")).toStream(Named("s")).to(Named("w"), out, text, count)
+    assertEquals(Topology.of(regrouped).orFail.subtopologies.size, 2)
+
+  test("a flow only through a processor that keeps the key has no use for a repartition topic, and one through a processor that may change it does"):
+    val same     = FixedKeyProcessor.withoutStores(FixedKeyProcessor.onRecord[IO, String, String, String](record => IO.pure(List(record))))
+    val changing = Processor.withoutStores(Processor.onRecord[IO, String, String, String, String](record => IO.pure(List(record))))
+    val read     = KStream(Named("read"), in, text, text)
+    val keeping  =
+      Flow[IO, String, String].processValues(Named("p"), same).groupByKey(Repartition("r"), text, text).count(Named("c"), Store("s")).consumer
+    val moving =
+      Flow[IO, String, String].process(Named("p"), changing).groupByKey(Repartition("r"), text, text).count(Named("c"), Store("s")).consumer
+    val id                              = FunctionK.id[IO]
+    def problems(program: Pipeline[IO]) = Topology.of(program).fold(_.toList, _ => Nil)
+    assertEquals(problems(read.into(keeping)), List(TopologyError.UnusedRepartition("r")))
+    assertEquals(problems(read.into(keeping).imapK(id)(id)), List(TopologyError.UnusedRepartition("r")))
+    assertEquals(problems(read.into(moving)), Nil)
+
+  test("a processor that keeps the key opens each of its stores under its own name, shares them, and survives imapK"):
+    val a                                                 = KeyValueStore.of(Store("a"), text, count)
+    val b                                                 = KeyValueStore.of(Store("b"), text, count)
+    val c                                                 = KeyValueStore.of(Store("c"), text, count)
+    def filling(stores: KeyValueStore[IO, String, Long]*) =
+      FixedKeyProcessor.onRecord: (record: FixedKeyRecord[String, String]) =>
+        stores.toList.zipWithIndex.traverse_((store, n) => store.put(record.key, n.toLong)).as(List(record))
+    val two   = FixedKeyProcessor.withStores(a, b)(filling(_, _))
+    val three = FixedKeyProcessor.withStores(a, b, c)(filling(_, _, _))
+    val id    = FunctionK.id[IO]
+    val first = KStream(Named("r1"), in, text, text).processValues(Named("p1"), two).to(Named("w1"), out, text, text)
+    val other = KStream(Named("r2"), Topic.from("in2").orFail, text, text).processValues(Named("p2"), three).to(Named("w2"), out, text, text)
+    val made  = Topology.of(first, other).orFail
+    assertEquals(made.subtopologies.size, 1)
+    for
+      task  <- Task.inMemory[IO]("app", made.imapK(id)(id).subtopologies.head, 0)
+      ran   <- task.process(TaskState.empty, input("k", "x"), 0L)
+      again <- task.process(ran._1, TaskInput(Some(bytes("k")), Some(bytes("x")), 1000L, Headers.empty, "in2", 3, 7L), 0L)
+      held  <-
+        List("a", "b", "c").traverse(name => task.contents(again._1, name).map(_.get(bytes("k")).map(stored => BigInt(stored.value.toArray).toLong)))
+    yield assertEquals(held, List(Some(0L), Some(1L), Some(2L)))
+
+  test("the types of a processor that keeps the key written in place come from its stream and what it returns"):
+    val store  = KeyValueStore.of(Store("tally"), text, count)
+    val stream =
+      KStream(Named("read"), in, text, text).processValues(
+        Named("proc"),
+        FixedKeyProcessor.withStore(store): counts =>
+          FixedKeyProcessor.onRecord: record =>
+            counts.put(record.key, 1L).as(List(record.withValue(1L)))
+      )
+    val program = stream.to(Named("write"), out, text, count)
+    assertEquals(Topology.of(program).orFail.subtopologies.flatMap(_.stores.map(_.value)), List("tally"))

@@ -22,6 +22,7 @@
 package xkafka
 package streams
 
+import cats.Functor
 import cats.arrow.FunctionK
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -188,3 +189,48 @@ object Processor:
       List(first.kept, second.kept, third.kept),
       access => logic(first.open(access(first.store.value)), second.open(access(second.store.value)), third.open(access(third.store.value)))
     )
+
+/** A record as a processor given to `processValues` reads and returns it, which can change its value, time and headers but not its key. A result
+  * keeps the time and headers of the record it was made from unless it changes them.
+  */
+final class FixedKeyRecord[K, V] private[xkafka] (private[xkafka] val record: Record[K, V]):
+  def key: K                       = record.key
+  def value: V                     = record.value
+  def timestamp: Timestamp         = record.timestamp
+  def headers: Headers             = record.headers
+  def origin: Option[RecordOrigin] = record.origin
+
+  def withValue[V2](value: V2): FixedKeyRecord[K, V2]           = new FixedKeyRecord(record.withValue(value))
+  def withTimestamp(timestamp: Timestamp): FixedKeyRecord[K, V] = new FixedKeyRecord(record.withTimestamp(timestamp))
+  def withHeaders(headers: Headers): FixedKeyRecord[K, V]       = new FixedKeyRecord(record.withHeaders(headers))
+
+/** What a processor given to `processValues` does with each record, given the stores it opened. */
+final class FixedKeyLogic[F[_], K, V, V2] private[xkafka] (private[xkafka] val logic: ProcessorLogic[F, K, V, K, V2])
+
+/** A step of a stream that a program writes itself and that keeps each record's key, as Java's `FixedKeyProcessor`, so that grouping or joining its
+  * results needs no repartition topic it would not have needed before. It declares its stores as a [[Processor]] does.
+  */
+final class FixedKeyProcessor[F[_], K, V, V2] private (private[xkafka] val processor: Processor[F, K, V, K, V2])
+
+object FixedKeyProcessor:
+  /** What to do with each record: the records it returns go on to the next step. */
+  def onRecord[F[_]: Functor, K, V, V2](handle: FixedKeyRecord[K, V] => F[List[FixedKeyRecord[K, V2]]]): FixedKeyLogic[F, K, V, V2] =
+    new FixedKeyLogic(Processor.onRecord(record => handle(new FixedKeyRecord(record)).map(_.map(_.record))))
+
+  /** A processor keeping no store. */
+  def withoutStores[F[_], K, V, V2](logic: FixedKeyLogic[F, K, V, V2]): FixedKeyProcessor[F, K, V, V2] =
+    new FixedKeyProcessor(Processor.withoutStores(logic.logic))
+
+  /** A processor keeping one store. */
+  def withStore[F[_], H, K, V, V2](store: DeclaredStore[F, H])(logic: H => FixedKeyLogic[F, K, V, V2]): FixedKeyProcessor[F, K, V, V2] =
+    new FixedKeyProcessor(Processor.withStore(store)(logic(_).logic))
+
+  /** A processor keeping two stores. */
+  def withStores[F[_], H1, H2, K, V, V2](first: DeclaredStore[F, H1], second: DeclaredStore[F, H2])(
+      logic: (H1, H2) => FixedKeyLogic[F, K, V, V2]
+  ): FixedKeyProcessor[F, K, V, V2] = new FixedKeyProcessor(Processor.withStores(first, second)(logic(_, _).logic))
+
+  /** A processor keeping three stores. */
+  def withStores[F[_], H1, H2, H3, K, V, V2](first: DeclaredStore[F, H1], second: DeclaredStore[F, H2], third: DeclaredStore[F, H3])(
+      logic: (H1, H2, H3) => FixedKeyLogic[F, K, V, V2]
+  ): FixedKeyProcessor[F, K, V, V2] = new FixedKeyProcessor(Processor.withStores(first, second, third)(logic(_, _, _).logic))

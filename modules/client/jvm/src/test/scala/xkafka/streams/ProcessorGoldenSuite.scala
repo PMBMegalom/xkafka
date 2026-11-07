@@ -35,7 +35,10 @@ import org.apache.kafka.common.header.internals.{RecordHeader, RecordHeaders}
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, Serdes, StringSerializer}
 import org.apache.kafka.streams.{StreamsBuilder, StreamsConfig, TopologyTestDriver}
 import org.apache.kafka.streams.kstream.{Named as JavaNamed, Produced}
-import org.apache.kafka.streams.processor.api.{Processor as JavaProcessor, ProcessorContext, ProcessorSupplier, Record as JavaRecord}
+import org.apache.kafka.streams.processor.api.{
+  FixedKeyProcessor as JavaFixedKeyProcessor, FixedKeyProcessorContext, FixedKeyProcessorSupplier, FixedKeyRecord as JavaFixedKeyRecord,
+  Processor as JavaProcessor, ProcessorContext, ProcessorSupplier, Record as JavaRecord
+}
 import org.apache.kafka.streams.state.{KeyValueStore as JavaStore, Stores}
 import org.apache.kafka.streams.test.TestRecord
 import xkafka.internal.streams.{Task, TaskInput, TaskOutput, TaskState}
@@ -275,6 +278,82 @@ final class ProcessorGoldenSuite extends CatsEffectSuite:
     builder.stream[String, String]("in2", consumed("r2")).process[String, String](handler, JavaNamed.as("p2"), "kept")
       .to("out", Produced.as[String, String]("w2"))
     assertEquals(Topology.of(first, other, second).orFail.describe.toString, builder.build.describe.toString)
+
+  /** Java's processor that keeps the key, over one store of bytes. */
+  private def javaFixedKey(name: String)(
+      handle: (JavaFixedKeyRecord[String, String], FixedKeyProcessorContext[String, String], JavaStore[String, Array[Byte]]) => Unit
+  ): FixedKeyProcessorSupplier[String, String, String] =
+    () =>
+      new JavaFixedKeyProcessor[String, String, String]:
+        private val context                                                       = AtomicReference[FixedKeyProcessorContext[String, String]]()
+        override def init(opened: FixedKeyProcessorContext[String, String]): Unit = context.set(opened)
+        override def process(record: JavaFixedKeyRecord[String, String]): Unit    =
+          handle(record, context.get, context.get.getStateStore[JavaStore[String, Array[Byte]]](name))
+
+  test("a processor that keeps the key, returning several results at changed times and headers, writes, logs and keeps what Java does"):
+    val store  = KeyValueStore.of(Store("kept"), text, bytes)
+    val marked = Headers.fromVector(Vector(Header("mark", Some(Chunk.array("m".getBytes)))))
+    same(
+      KStream(Named("read"), in, text, text).processValues(
+        Named("proc"),
+        FixedKeyProcessor.withStore(store): (kept: KeyValueStore[IO, String, Array[Byte]]) =>
+          FixedKeyProcessor.onRecord: (record: FixedKeyRecord[String, String]) =>
+            kept.get(record.key).flatMap: seen =>
+              val now  = seen.fold("")(String(_)) + record.value
+              val gone = if record.value == "z" then kept.delete(record.key).void else kept.put(record.key, now.getBytes)
+              gone.as(List(
+                record.withValue(now),
+                record.withValue(record.value).withTimestamp(Timestamp.fromEpochMillis(record.timestamp.epochMillis + 1)),
+                record.withHeaders(marked)
+              ))
+      ).to(Named("write"), out, text, text),
+      builder =>
+        builder.addStateStore(logged("kept"))
+        val handler =
+          javaFixedKey("kept"): (record, context, kept) =>
+            val now = Option(kept.get(record.key)).fold("")(String(_)) + record.value
+            if record.value == "z" then kept.delete(record.key) else kept.put(record.key, now.getBytes)
+            context.forward(record.withValue(now))
+            context.forward(record.withValue(record.value).withTimestamp(record.timestamp + 1))
+            context.forward(record.withHeaders(RecordHeaders(List[org.apache.kafka.common.header.Header](RecordHeader("mark", "m".getBytes)).asJava)))
+        builder.stream[String, String]("in", org.apache.kafka.streams.kstream.Consumed.as("read"))
+          .processValues[String](handler, JavaNamed.as("proc"), "kept").to("out", Produced.as[String, String]("write"))
+      ,
+      List("kept")
+    )
+
+  test("grouping what a processor that keeps the key gave is described as Java's is, with a repartition topic only after the key was changed"):
+    val store                                               = KeyValueStore.of(Store("kept"), text, bytes)
+    def fixed(kept: KeyValueStore[IO, String, Array[Byte]]) =
+      FixedKeyProcessor.onRecord: (record: FixedKeyRecord[String, String]) =>
+        kept.put(record.key, record.value.getBytes).as(List(record))
+    val count  = Serde.long[IO]
+    val direct =
+      KStream(Named("r1"), in, text, text).processValues(Named("p1"), FixedKeyProcessor.withStore(store)(fixed)).groupByKey(text, text)
+        .count(Named("c1"), Store("s1")).toStream(Named("t1")).to(Named("w1"), out, text, count)
+    val rekeyed =
+      KStream(Named("r2"), Topic.from("in2").orFail, text, text).selectKey(Named("k2"))((_, value) => value)
+        .processValues(Named("p2"), FixedKeyProcessor.withStore(store)(fixed)).groupByKey(Repartition("by"), text, text)
+        .count(Named("c2"), Store("s2")).toStream(Named("t2")).to(Named("w2"), out, text, count)
+    val builder = StreamsBuilder()
+    builder.addStateStore(logged("kept"))
+    def handler =
+      javaFixedKey("kept")((record, context, kept) =>
+        kept.put(record.key, record.value.getBytes); context.forward(record)
+      )
+    val consumed = (name: String) => org.apache.kafka.streams.kstream.Consumed.as[String, String](name)
+    val counted  =
+      (name: String) =>
+        org.apache.kafka.streams.kstream.Materialized
+          .as[String, java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[org.apache.kafka.common.utils.Bytes, Array[Byte]]](name)
+          .withKeySerde(Serdes.String).withValueSerde(Serdes.Long)
+    val longs = Produced.`with`(Serdes.String, Serdes.Long)
+    builder.stream[String, String]("in", consumed("r1")).processValues[String](handler, JavaNamed.as("p1"), "kept").groupByKey()
+      .count(JavaNamed.as("c1"), counted("s1")).toStream(JavaNamed.as("t1")).to("out", longs.withName("w1"))
+    builder.stream[String, String]("in2", consumed("r2")).selectKey[String]((_: String, value: String) => value, JavaNamed.as("k2"))
+      .processValues[String](handler, JavaNamed.as("p2"), "kept").groupByKey(org.apache.kafka.streams.kstream.Grouped.as("by"))
+      .count(JavaNamed.as("c2"), counted("s2")).toStream(JavaNamed.as("t2")).to("out", longs.withName("w2"))
+    assertEquals(Topology.of(direct, rekeyed).orFail.describe.toString, builder.build.describe.toString)
 
 object ProcessorGoldenSuite:
   final case class Input(key: String, value: String, timestamp: Long, headers: List[(String, String)])

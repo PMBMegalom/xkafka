@@ -43,6 +43,42 @@ topic, partition and offset.
 Since a processor can give a record any key, grouping its results needs a
 repartition topic, so `groupByKey` asks you to name one.
 
+## Keeping the key
+
+If your processor never changes the key, use `processValues` with a
+`FixedKeyProcessor`. Its records have `withValue`, `withTimestamp` and
+`withHeaders` but no `withKey`, so a change of key does not compile.
+
+```scala mdoc:compile-only
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def numbered(input: Topic, output: Topic): Pipeline[IO] =
+  val user   = Serde.utf8[IO]
+  val amount = Serde.long[IO]
+  val seen   = KeyValueStore.of(Store("seen"), user, amount)
+  KStream(Named("payments"), input, user, amount)
+    .processValues(
+      Named("number-payments"),
+      FixedKeyProcessor.withStore(seen): kept =>
+        FixedKeyProcessor.onRecord: record =>
+          kept.get(record.key).flatMap: last =>
+            val number = last.getOrElse(0L) + 1
+            kept.put(record.key, number).as(List(record.withValue(number)))
+    )
+    .groupByKey(user, amount)
+    .count(Named("count-payments"), Store("counts"))
+    .toStream(Named("counts-stream"))
+    .to(Named("write-counts"), output, user, Serde.long[IO])
+```
+
+Since the key stays, `groupByKey` needs no repartition topic here, unless an
+earlier step changed the key. `FixedKeyProcessor` declares its stores with
+`withStore`, `withStores` and `withoutStores`, and its stores work as described
+above.
+
 ## Stores
 
 A `KeyValueStore` has `get`, `put`, `putIfAbsent`, `putAll` and `delete`, and

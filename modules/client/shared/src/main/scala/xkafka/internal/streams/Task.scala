@@ -563,7 +563,7 @@ private[xkafka] final class Task[F[_]](
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
       case Step.Cogrouped(side, folding)                                 => this.step(folding, record, state, now, asked, Some(side))
-      case Step.Process(processor)                                       => processed(processor, record, state)
+      case Step.Process(processor, _)                                    => processed(processor, record, state)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
       case joining @ Step.GlobalJoin(_, _, _)                            => globallyJoined(joining, record, state)
