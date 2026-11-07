@@ -29,8 +29,8 @@ import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
 import xkafka.streams.{
-  Consumer, Entry, Joiner, Origin, Processor, Punctuating, Punctuation, Record, RecordOrigin, Release, Source, Step, Store, StoreAccess, StreamJoin,
-  StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue, TableView, Window, Windowed
+  Consumer, Entry, ForeignKeyJoined, Joiner, Origin, Processor, Punctuating, Punctuation, Record, RecordOrigin, Release, Source, Step, Store,
+  StoreAccess, StreamJoin, StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue, TableView, Window, Windowed
 }
 
 /** A record as a topic holds it, read by a task. */
@@ -288,6 +288,7 @@ private[xkafka] final class Task[F[_]](
     origin match
       case Origin.Input(_, topics, key, value)              => from(F.pure(topics.find(_.value == input.topic).getOrElse(topics.head)), key, value)
       case Origin.Repartitioned(repartition, key, value, _) => from(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
+      case Origin.Exchanged(_, _)                           => F.pure(Travelling(input.key, input.value, input.timestamp, input.headers))
 
   /** `record` through `consumer` and all that reads what it gives, each record a step gives going all the way through before the next, as Java
     * forwards them, and what it writes in the order it writes it.
@@ -322,6 +323,10 @@ private[xkafka] final class Task[F[_]](
         )
       case Consumer.LeftStream(join)         => streamsJoined(join, leftSide(join), record, state, now)
       case Consumer.RightStream(join)        => streamsJoined(join, rightSide(join), record, state, now)
+      case Consumer.ForeignLeft(join)        => foreignSent(join, record, state)
+      case Consumer.ForeignRight(join)       => foreignChanged(join, record, state)
+      case Consumer.ForeignSubscribed(join)  => foreignSubscribed(join, record, state)
+      case Consumer.ForeignAnswered(join)    => foreignAnswered(join, record, state, now)
       case Consumer.Done()                   => F.pure((state, Vector.empty))
       case mapped @ Consumer.Mapped(_, _, _) => pushed(mapped.expanded, record, state, now)
 
@@ -360,6 +365,187 @@ private[xkafka] final class Task[F[_]](
                   case (Some(bytes), written) =>
                     val log = TaskOutput(changelog, Some(partition), Some(bytes), written, timestamp, Headers.empty)
                     allPushed(join.next, Vector(result), state.written(named.value, bytes, written.map(Stored(_, timestamp))), Vector(log), now)
+
+  /** A change to a foreign-key join's left table: the subscriptions it sends, as Java's `SubscriptionSendProcessorSupplier` sends them. Moving to
+    * another key first deletes the subscription to the old one, on what may be another task. A row answers with a result only where its join needs
+    * one.
+    */
+  private def foreignSent[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      record: Travelling[K, C1],
+      state: TaskState
+  ): F[(TaskState, Vector[TaskOutput])] =
+    import ForeignKeyWire.*
+    val row                                    = join.left.present(record.value)
+    val old                                    = record.old.flatMap(join.left.present)
+    def keyOf(value: Option[V])                = value.flatMap(join.foreignKey(record.key, _))
+    def bytesOf(key: Option[KO], topic: Topic) = key.flatTraverse(join.otherKeys.serializer.serialize(topic, record.headers, _))
+    val (before, now)                          = (keyOf(old), keyOf(row))
+    (
+      topicNamed(s"$application-${join.subscriptions}"),
+      topicNamed(s"$application-${join.subscriptions}-fk"),
+      topicNamed(s"$application-${join.subscriptions}-pk"),
+      topicNamed(s"$application-${join.subscriptions}-vh")
+    ).tupled.flatMap: (topic, keyTopic, primaryTopic, valueTopic) =>
+      for
+        moved <- (bytesOf(before, keyTopic), bytesOf(now, keyTopic)).mapN(_ != _)
+        sends =
+          if join.keepsUnmatched then
+            if old.isEmpty && row.isEmpty then Nil
+            else (if before.isDefined && moved then List(before -> DeleteNoPropagate) else Nil) :+ (now -> PropagateNullIfMissing)
+          else
+            (row, now, before) match
+              case (None, _, Some(_))                   => List(before -> DeleteAndPropagate)
+              case (None, _, None)                      => Nil
+              case (Some(_), None, Some(_))             => List(before -> DeleteAndPropagate)
+              case (Some(_), None, None)                => Nil
+              case (Some(_), Some(_), Some(_)) if moved => List(before -> DeleteNoPropagate, now -> PropagateNullIfMissing)
+              case (Some(_), Some(_), _)                => List(now -> PropagateOnlyIfFound)
+        hash    <- row.flatTraverse(join.values.serializer.serialize(valueTopic, record.headers, _)).map(_.map(Murmur3.hash128))
+        primary <- join.keys.serializer.serialize(primaryTopic, record.headers, record.key)
+        out     <-
+          primary.toVector.flatMap(key => sends.map(_ -> key)).traverse:
+            case ((target, instruction), key) => bytesOf(target, topic).map: bytes =>
+                val value = Subscription(hash, instruction, key, partition).encoded
+                TaskOutput(topic, None, bytes, Some(value), record.timestamp, record.headers)
+      yield (state, out)
+
+  /** A change to a foreign-key join's other table: an answer to each subscription to its key, at its time and with its headers, as Java's
+    * `ForeignTableJoinProcessorSupplier` answers them.
+    */
+  private def foreignChanged[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      record: Travelling[KO, C2],
+      state: TaskState
+  ): F[(TaskState, Vector[TaskOutput])] =
+    import ForeignKeyWire.*
+    (topicNamed(s"$application-${join.subscriptions}-fk"), topicNamed(s"$application-${join.responses}")).tupled.flatMap: (keyTopic, topic) =>
+      join.otherKeys.serializer.serialize(keyTopic, record.headers, record.key).flatMap:
+        case None        => F.pure((state, Vector.empty))
+        case Some(bytes) =>
+          for
+            found <- join.right.present(record.value).flatTraverse(join.otherValues.serializer.serialize(topic, record.headers, _))
+            held  <- storedUnder(state, join.subscribed.value, prefixOf(bytes))
+          yield
+            val answers =
+              held.flatMap: (combined, stored) =>
+                Subscription.decoded(stored.value).map: subscription =>
+                  val answer = Response(subscription.hash, found).encoded
+                  TaskOutput(
+                    topic,
+                    Some(subscription.primaryPartition),
+                    Some(primaryOf(combined, bytes)),
+                    Some(answer),
+                    record.timestamp,
+                    record.headers
+                  )
+            (state, answers)
+
+  /** A subscription as it reaches the other table's side: kept or deleted, and answered as it asks, as Java's `SubscriptionReceiveProcessorSupplier`
+    * and `SubscriptionJoinProcessorSupplier` do.
+    */
+  private def foreignSubscribed[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      record: Travelling[Option[Chunk[Byte]], Option[Chunk[Byte]]],
+      state: TaskState
+  ): F[(TaskState, Vector[TaskOutput])] =
+    import ForeignKeyWire.*
+    def unreadable = new IllegalStateException(s"the foreign-key join '${join.named.value}' read a subscription it cannot read")
+    val store      = join.subscribed.value
+    record.value.flatMap(Subscription.decoded).liftTo[F](unreadable).flatMap: subscription =>
+      val deleting = subscription.instruction == DeleteAndPropagate || subscription.instruction == DeleteNoPropagate
+      (topicNamed(s"$application-$store-changelog"), topicNamed(s"$application-${join.subscriptions}"), topicNamed(s"$application-${join.responses}"))
+        .tupled.flatMap: (changelog, topic, responses) =>
+          // Java drops a subscription without a foreign key unless it needs an answer, which that key then finds nothing for.
+          record.key match
+            case None if subscription.instruction != PropagateNullIfMissing => F.pure((state, Vector.empty))
+            case key                                                        =>
+              val kept            = key.map(combinedOf(_, subscription.primaryKey))
+              val (after, logged) =
+                kept.fold((state, Vector.empty[TaskOutput])): combined =>
+                  val value = Option.when(!deleting)(record.value).flatten
+                  (
+                    state.written(store, combined, value.map(Stored(_, record.timestamp))),
+                    Vector(TaskOutput(changelog, Some(partition), Some(combined), value, record.timestamp, record.headers))
+                  )
+              for
+                foreign <-
+                  key.flatTraverse(bytes =>
+                    join.otherKeys.deserializer.deserialize(topic, record.headers, Some(bytes)).flatMap(lookup(join.right.view, _, after))
+                  )
+                bytes <- foreign.flatTraverse(found => join.otherValues.serializer.serialize(responses, record.headers, found._1))
+              yield
+                def answer(found: Option[Chunk[Byte]]) =
+                  val at = foreign.fold(record.timestamp)(found => math.max(record.timestamp, found._2))
+                  Vector(TaskOutput(
+                    responses,
+                    Some(subscription.primaryPartition),
+                    Some(subscription.primaryKey),
+                    Some(Response(subscription.hash, found).encoded),
+                    at,
+                    record.headers
+                  ))
+                val answered =
+                  subscription.instruction match
+                    case DeleteAndPropagate     => answer(None)
+                    case PropagateNullIfMissing => answer(bytes)
+                    case PropagateOnlyIfFound   => if foreign.isDefined then answer(bytes) else Vector.empty
+                    case _                      => Vector.empty
+                (after, logged ++ answered)
+
+  /** An answer as it reaches the left table's side: dropped where the row has changed since it was asked for, and otherwise made into a result, as
+    * Java's `ResponseJoinProcessorSupplier` does.
+    */
+  private def foreignAnswered[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      record: Travelling[Option[Chunk[Byte]], Option[Chunk[Byte]]],
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[TaskOutput])] =
+    import ForeignKeyWire.*
+    def unreadable = new IllegalStateException(s"the foreign-key join '${join.named.value}' read an answer it cannot read")
+    (record.key, record.value.flatMap(Response.decoded)).tupled.liftTo[F](unreadable).flatMap: (primary, response) =>
+      (topicNamed(s"$application-${join.responses}"), topicNamed(s"$application-${join.subscriptions}-vh")).tupled.flatMap: (topic, valueTopic) =>
+        for
+          key     <- join.keys.deserializer.deserialize(topic, record.headers, Some(primary))
+          current <- lookup(join.left.view, key, state)
+          hash    <- current.flatTraverse(row => join.values.serializer.serialize(valueTopic, record.headers, row._1)).map(_.map(Murmur3.hash128))
+          done    <-
+            if hash != response.hash then F.pure((state, Vector.empty[TaskOutput]))
+            else
+              response.foreign.traverse(bytes => join.otherValues.deserializer.deserialize(topic, record.headers, Some(bytes))).flatMap: found =>
+                val made = current.flatMap(row => join.joiner(row._1, found))
+                foreignResult(join, key, made, primary, record, state, now)
+        yield done
+
+  /** A foreign-key join's result going on, kept in its store where it has one, with the value it replaces. */
+  private def foreignResult[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      key: K,
+      made: Option[R],
+      primary: Chunk[Byte],
+      record: Travelling[Option[Chunk[Byte]], Option[Chunk[Byte]]],
+      state: TaskState,
+      now: Long
+  ): F[(TaskState, Vector[TaskOutput])] =
+    def result(old: Option[R]) = Travelling[K, Option[R]](key, made, record.timestamp, record.headers, Some(old))
+    join.store match
+      case None                  => pushed(join.next, result(None), state, now)
+      case Some((named, values)) => topicNamed(s"$application-${named.value}-changelog").flatMap: changelog =>
+          for
+            held    <- storedAt(state, named.value, primary)
+            old     <- held.traverse(stored => values.deserializer.deserialize(changelog, Headers.empty, Some(stored.value)))
+            written <- made.flatTraverse(values.serializer.serialize(changelog, Headers.empty, _))
+            log = TaskOutput(changelog, Some(partition), Some(primary), written, record.timestamp, Headers.empty)
+            done <-
+              allPushed(
+                join.next,
+                Vector(result(old)),
+                state.written(named.value, primary, written.map(Stored(_, record.timestamp))),
+                Vector(log),
+                now
+              )
+          yield done
 
   /** One side of a stream-stream join as Java's processor for it sees it: its own window store and the other side's, the serdes of their values, how
     * far before and after a record's time it looks in the other side's store, whether its records that match nothing go on, whether it is the left
@@ -1470,6 +1656,7 @@ private[xkafka] object Task:
     source match
       case Source.Input(topic)         => topic.value
       case Source.Repartitioned(named) => s"$application-${named.value}-repartition"
+      case Source.Exchanged(topic)     => s"$application-$topic"
 
   /** The serde a table view's values are written with, which the result of joining tables kept in no store does not have. */
   def valuesOf[F[_], K, V](view: TableView[F, K, V]): Option[xkafka.streams.Serde[F, V]] =

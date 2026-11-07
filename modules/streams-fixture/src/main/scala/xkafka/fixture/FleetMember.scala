@@ -29,7 +29,7 @@ import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.common.utils.Bytes
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, StreamsConfig}
 import org.apache.kafka.streams.kstream.{
-  Grouped, JoinWindows, Materialized, Produced, SessionWindows, SlidingWindows, StreamJoined, TimeWindows, WindowedSerdes
+  Grouped, JoinWindows, Materialized, Produced, SessionWindows, SlidingWindows, StreamJoined, TableJoined, TimeWindows, WindowedSerdes
 }
 import org.apache.kafka.streams.state.KeyValueStore
 
@@ -71,6 +71,16 @@ object FleetMember:
         val users = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
         builder.stream[String, String](s"$application-input-orders").join(users, (order: String, user: String) => s"$order:$user")
           .to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
+      case "foreign-keys" =>
+        // The table of orders is built first, which is how xkafka numbers the sub-topologies around the join.
+        val orders = builder.table[String, String](s"$application-input-orders", Materialized.as("orders"))
+        val users  = builder.table[String, String](s"$application-input-users", Materialized.as("users"))
+        orders.join[String, String, String](
+          users,
+          (order: String) => order.dropWhile(_ != ':').drop(1),
+          (order: String, user: String) => s"${order.takeWhile(_ != ':')}:$user",
+          TableJoined.as[String, String]("fk")
+        ).toStream.to(s"$application-output", Produced.`with`(Serdes.String, Serdes.String))
       case "globals" =>
         // Built after the stream that joins it, which is how xkafka numbers the sub-topologies around it.
         val orders = builder.stream[String, String](s"$application-input-orders")

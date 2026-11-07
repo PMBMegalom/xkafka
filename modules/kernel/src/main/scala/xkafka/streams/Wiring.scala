@@ -119,6 +119,10 @@ private[xkafka] object Wiring:
         case Consumer.RightTable(join)                       => onward(join.id, join.kept, join.next)
         case Consumer.LeftStream(join)                       => onward(join.id, join.kept, join.next)
         case Consumer.RightStream(join)                      => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignLeft(join)                      => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignRight(join)                     => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignSubscribed(_)                   => added
+        case Consumer.ForeignAnswered(_)                     => added
         case _                                               => added
 
   /** Whether `entry` only reads into a store the program's own topics keep from the same topic, as the table a join reads does where the program also
@@ -164,7 +168,7 @@ private[xkafka] object Wiring:
       found: Vector[(Entry[F], Boolean)],
       nodes: Vector[(Source, Describing.Made)],
       kept: Vector[(Source, KeptStore)],
-      repartitions: Vector[(Source, Repartition)],
+      repartitions: Vector[(Source, Source)],
       joins: Vector[List[Source]],
       unsure: Vector[List[Source]],
       unstartable: Vector[List[Source]],
@@ -337,7 +341,7 @@ private[xkafka] object Wiring:
                 .making(at, Describing.Made(sink, Describing.Kind.Writes(source), List(filter)), named = false)
         val closed =
           written.copy(
-            repartitions = walk.repartitions :+ (at.home, repartition),
+            repartitions = walk.repartitions :+ (at.home, source),
             found = walk.found :+ (read, at.pulled),
             entered = walk.entered + identified(read),
             steps = written.steps ++ read.origin.names.map(_.value)
@@ -384,6 +388,10 @@ private[xkafka] object Wiring:
       case Consumer.RightTable(join)         => reached(join.id, false, at, walk)(tablesJoined(join, _, _, _))
       case Consumer.LeftStream(join)         => reached(join.id, true, at, walk)(streamsJoined(join, _, _, _))
       case Consumer.RightStream(join)        => reached(join.id, false, at, walk)(streamsJoined(join, _, _, _))
+      case Consumer.ForeignLeft(join)        => reached(join.id, true, at, walk)(foreignKeyJoined(join, _, _, _))
+      case Consumer.ForeignRight(join)       => reached(join.id, false, at, walk)(foreignKeyJoined(join, _, _, _))
+      case Consumer.ForeignSubscribed(_)     => walk
+      case Consumer.ForeignAnswered(_)       => walk
       case mapped @ Consumer.Mapped(_, _, _) => followed(mapped.expanded, at, walk)
 
   /** A side reaching the join `id`, its left where `left` says: it waits if the other has not reached it yet, and otherwise `next` goes on from the
@@ -409,6 +417,48 @@ private[xkafka] object Wiring:
     val merge         = Made(named, Kind.Processor(join.store.toList.map(_._1.value)), List(joinThis.name, joinOther.name))
     val made = met.making(after, joinThis, named = false).making(after, joinOther, named = false).making(after, merge).keeping(after, join.kept)
     arrive(join.next, after, made.coming(named, after))
+
+  /** A foreign-key join: the left table's side sends subscriptions to the other table's side, which keeps them and answers, and the answers come back
+    * to the left table's side, which makes the results. Each side's topics are copartitioned with the topic it reads from the other.
+    */
+  private def foreignKeyJoined[F[_], K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      left: Path,
+      right: Path,
+      walk: Walk[F]
+  ): Walk[F] =
+    import Describing.{Kind, Made}
+    val named        = join.named.value
+    val subscription = Source.Exchanged(join.subscriptions)
+    val response     = Source.Exchanged(join.responses)
+    val subscribed   = Entry(Origin.Exchanged[F](join.subscriptions, s"$named-subscription-registration-source"), Consumer.ForeignSubscribed(join))
+    val answered     = Entry(Origin.Exchanged[F](join.responses, s"$named-subscription-response-source"), Consumer.ForeignAnswered(join))
+    val store        = join.subscribed.value
+    val after        = left.copy(last = List(s"$named-result"), sources = left.sources :+ response, unwritten = Nil, rekeyed = false)
+    val send         = Made(s"$named-subscription-registration-processor", Kind.Processor(Nil), left.last)
+    val sink         = Made(s"$named-subscription-registration-sink", Kind.Writes(subscription), List(send.name))
+    val readRequest  = Made(s"$named-subscription-registration-source", Kind.Reads(List(subscription)), Nil)
+    val receive      = Made(s"$named-subscription-receive", Kind.Processor(List(store)), List(readRequest.name))
+    val lookup       = Made(s"$named-subscription-join-foreign", Kind.Processor(join.right.view.fold(Nil)(Describing.stores)), List(receive.name))
+    val changed      = Made(s"$named-foreign-join-subscription", Kind.Processor(List(store)), right.last)
+    val answer       = Made(s"$named-subscription-response-sink", Kind.Writes(response), List(lookup.name, changed.name))
+    val readAnswer   = Made(s"$named-subscription-response-source", Kind.Reads(List(response)), Nil)
+    val resolve = Made(s"$named-subscription-response-resolver", Kind.Processor(join.left.view.fold(Nil)(Describing.stores)), List(readAnswer.name))
+    val result  = Made(s"$named-result", Kind.Processor(join.store.toList.map(_._1.value)), List(resolve.name))
+    val unkept  = Option.when(join.store.isEmpty && join.next.requests)(TopologyError.UnkeptForeignKeyJoin(named)).toList
+    val placed  =
+      walk.writing(left.unwritten ++ right.unwritten ++ List(subscription, response)).united(subscription, right.home).united(response, left.home)
+        .copy(
+          entered = walk.entered + identified(subscribed) + identified(answered),
+          found = walk.found :+ (subscribed, false) :+ (answered, false),
+          repartitions = walk.repartitions :+ (left.home, subscription) :+ (right.home, response),
+          joins = walk.joins :+ (right.sources :+ subscription) :+ (left.sources :+ response),
+          kept = walk.kept :+ (right.home, KeptStore(join.subscribed))
+        )
+    val onRight = List(readRequest, receive, lookup, changed, answer).foldLeft(placed)(_.making(right, _, named = false))
+    val onLeft  = List(send, sink, readAnswer, resolve).foldLeft(onRight)(_.making(left, _, named = false))
+    val made    = onLeft.making(after, result).keeping(after, join.store.toList.map((stored, _) => KeptStore(stored))).refusing(unkept)
+    arrive(join.next, after, made.coming(result.name, after))
 
   /** Streams joined: each side's records are kept in its window store, then joined with the other side's, and the merge passes on what either makes.
     */

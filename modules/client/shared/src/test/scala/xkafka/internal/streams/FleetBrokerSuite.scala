@@ -78,6 +78,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     /** Joining each order with its user, from a global table every member reads whole. */
     case Globals extends Program("globals")
 
+    /** Keeping each order, in a table of orders, joined with the user its value names, in a table keyed by user. */
+    case ForeignKeys extends Program("foreign-keys")
+
   private val windowKinds = List("tumbling", "sliding", "sessions")
 
   /** An application of the fleet's own. */
@@ -97,12 +100,13 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     /** The topics the program reads and writes. */
     def topics: List[Topic] =
       program match
-        case Program.Letters => List(input, output)
-        case Program.Windows => windowKinds.flatMap(kind => List(inputOf(kind), outputOf(kind)))
-        case Program.Joins   => List(inputOf("users"), inputOf("orders"), output)
-        case Program.Tables  => List(inputOf("users"), inputOf("plans"), output)
-        case Program.Pairs   => List(inputOf("users"), inputOf("orders"), output)
-        case Program.Globals => List(inputOf("users"), inputOf("orders"), output)
+        case Program.Letters     => List(input, output)
+        case Program.Windows     => windowKinds.flatMap(kind => List(inputOf(kind), outputOf(kind)))
+        case Program.Joins       => List(inputOf("users"), inputOf("orders"), output)
+        case Program.Tables      => List(inputOf("users"), inputOf("plans"), output)
+        case Program.Pairs       => List(inputOf("users"), inputOf("orders"), output)
+        case Program.Globals     => List(inputOf("users"), inputOf("orders"), output)
+        case Program.ForeignKeys => List(inputOf("users"), inputOf("orders"), output)
 
     val topology: Topology[IO] =
       program match
@@ -120,6 +124,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
             KStream(Named("sessions"), inputOf("sessions"), text, text).groupByKey(text, text).windowedBy(SessionWindows(1500.millis, grace = 1.hour))
               .count(Named("count-4"), Store("sessions")).toStream(Named("to-stream-4"))
               .to(Named("write-4"), outputOf("sessions"), Serde.sessionWindowed(text), Serde.long[IO].option)
+          ).orFail
+        case Program.ForeignKeys => Topology.of(
+            KTable(Named("orders"), inputOf("orders"), text, text, Store("orders"))
+              .joinOnForeignKey(Named("fk"), KTable(Named("users"), inputOf("users"), text, text, Store("users")), text, text, text)((_, order) =>
+                Some(order.dropWhile(_ != ':').drop(1))
+              )((order, user) => s"${order.takeWhile(_ != ':')}:$user").toStream(Named("changes")).to(Named("write-9"), output, text, text.option)
           ).orFail
         case Program.Joins => Topology.of(
             KStream(Named("orders"), inputOf("orders"), text, text)
@@ -339,7 +349,12 @@ final class FleetBrokerSuite extends CatsEffectSuite:
   /** Writes a user for each of ten keys, waiting until the changelog of the store `users` names holds them, then records to `topic` while it lasts,
     * `o<n>`, keyed in turn over the ten keys. What it gives stops the writing and then gives each record's key, every record written by then.
     */
-  private def joinsLoad(fleet: Fleet, topic: String, users: Option[String] = Some("users")): Resource[IO, IO[Map[String, String]]] =
+  private def joinsLoad(
+      fleet: Fleet,
+      topic: String,
+      users: Option[String] = Some("users"),
+      byOrder: Boolean = false
+  ): Resource[IO, IO[Map[String, String]]] =
     val producer = PlatformKafkaClient().producer(ProducerSettings.from(client(fleet.server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
     val records  = (0 until 10).toList.map(n => ProducerRecord(fleet.inputOf("users"), s"k$n", s"user$n"))
     // A global table has no changelog to watch: a member that is running follows its topic, and one that starts later reads it all first.
@@ -364,16 +379,17 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       _       <- Resource.eval(writer.produceAndAwait(NonEmptyList.fromListUnsafe(records)) *> changelog)
       writing <-
         Resource.make(fs2.Stream.iterate(0L)(_ + 1).evalMap: n =>
-          val key = s"k${n % 10}"
-          (writer.produceAndAwait(NonEmptyList.one(ProducerRecord(fleet.inputOf(topic), key, s"o$n"))) *> written.update(_.updated(s"o$n", key)))
-            .uncancelable *> IO.sleep(20.millis)
+          val key    = s"k${n % 10}"
+          val record =
+            if byOrder then ProducerRecord(fleet.inputOf(topic), s"o$n", s"o$n:$key") else ProducerRecord(fleet.inputOf(topic), key, s"o$n")
+          (writer.produceAndAwait(NonEmptyList.one(record)) *> written.update(_.updated(s"o$n", key))).uncancelable *> IO.sleep(20.millis)
         .compile.drain.start)(_.cancel)
     yield writing.cancel *> written.get
 
   /** Reads the output from its start until every record written is there, joined with its key's user, and nothing else: once under exactly once, at
     * least once under at least once, failing after three minutes.
     */
-  private def joined(fleet: Fleet, written: Map[String, String]): IO[Unit] =
+  private def joined(fleet: Fleet, written: Map[String, String], byOrder: Boolean = false): IO[Unit] =
     Names.fresh:
       val exactly  = fleet.guarantee == ProcessingGuarantee.ExactlyOnce
       val settings =
@@ -385,7 +401,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
           AutoOffsetReset.Earliest,
           isolationLevel = if exactly then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
         ).orFail
-      val expected                                = written.map((order, key) => s"$order:user${key.drop(1)}" -> key)
+      val expected                                = written.map((order, key) => s"$order:user${key.drop(1)}" -> (if byOrder then order else key))
       def wrong(seen: Map[String, (String, Int)]) =
         expected.toList.sorted.collect { case (value, _) if !seen.get(value).exists((_, n) => if exactly then n == 1 else n >= 1) => value } ++
           seen.toList.sorted.collect { case (value, (key, _)) if !expected.get(value).contains(key) => s"$value under $key" }
@@ -409,6 +425,8 @@ final class FleetBrokerSuite extends CatsEffectSuite:
       // Each order joins the one user record of its key, which is at most an hour before it, as the table's user would be joined.
       case Program.Pairs   => joinsLoad(fleet, "orders", Some("pairs-other-join-store")).map(_.flatMap(joined(fleet, _)))
       case Program.Globals => joinsLoad(fleet, "orders", None).map(_.flatMap(joined(fleet, _)))
+      // Each order is a row of its own, keyed by itself, whose value names its user.
+      case Program.ForeignKeys => joinsLoad(fleet, "orders", byOrder = true).map(_.flatMap(joined(fleet, _, byOrder = true)))
 
   private def recording = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
 

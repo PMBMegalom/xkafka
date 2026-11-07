@@ -38,7 +38,8 @@ final class StreamJoinsSuite extends FunSuite:
   private def refused(pipeline: Pipeline[IO])  = Topology.of(pipeline).left.toOption.map(_.toList)
 
   /** The repartitionings its segments write to, by name. */
-  private def repartitions(pipeline: Pipeline[IO]) = segments(pipeline).flatMap(_.repartitions.map(_.value))
+  private def repartitions(pipeline: Pipeline[IO]) =
+    segments(pipeline).flatMap(_.repartitions.collect { case Source.Repartitioned(named) => named.value })
 
   test("join windows reach the time difference either way, or as far as each side is set to"):
     val windows = JoinWindows(5.seconds, grace = 1.second)

@@ -582,6 +582,50 @@ final class EngineBrokerSuite extends CatsEffectSuite:
               // Java's running store does not count a remove, and restoring it does.
               read(server, app.output, 3, Serde.long[IO]).map(seen => assertEquals(seen.map(_._2), List(1L, 1L, 0L)))
 
+    test(
+      s"$release, $under: a foreign-key join follows both tables across their different partition counts, and an engine started later goes on from its stores"
+    ):
+      Names.fresh:
+        val users   = Topic.from(summon[Names]("xkafka-engine-users")).orFail
+        val program =
+          (input: Topic, output: Topic) =>
+            KTable(Named("rows-46"), input, text, text, Store("rows"))
+              .joinOnForeignKey(Named("fk-46"), KTable(Named("users-46"), users, text, text, Store("users")), text, text, text)((_, user) =>
+                Option.when(user != "nobody")(user)
+              )((row, name) => s"$row+$name").toStream(Named("changes-46")).to(Named("write-46"), output, text, text.option)
+        counting(server, program): app =>
+          admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 3, 1).orFail))) *>
+            produceValues(server, users, List("a" -> Some("A"), "b" -> Some("B"))) *> produceValues(
+              server,
+              app.input,
+              List("k1" -> Some("a"), "k2" -> Some("b"), "k3" -> Some("a"), "k4" -> Some("missing"), "k5" -> Some("nobody"))
+            ) *> running(server, app):
+              latestValues(server, app.output, Map("k1" -> Some("a+A"), "k2" -> Some("b+B"), "k3" -> Some("a+A"))) *>
+                // Both topics are the application's own, read once, and so purged as a repartition topic is.
+                purgedTo(server, app.application, Topic.from(s"${app.application}-fk-46-subscription-registration-topic").orFail) *>
+                purgedTo(server, app.application, Topic.from(s"${app.application}-fk-46-subscription-response-topic").orFail) *>
+                produceValues(server, users, List("a" -> Some("A2"))) *> produceValues(server, app.input, List("k2" -> Some("a"), "k3" -> None)) *>
+                latestValues(server, app.output, Map("k1" -> Some("a+A2"), "k2" -> Some("a+A2"), "k3" -> None))
+            *> produceValues(server, users, List("a" -> Some("A3"), "b" -> Some("B3"))) *> running(server, app):
+              // No row has changed since the first engine, so only the subscriptions restored from the store's changelog can answer this.
+              latestValues(server, app.output, Map("k1" -> Some("a+A3"), "k2" -> Some("a+A3"), "k3" -> None))
+
+    test(s"$release, $under: a left foreign-key join keeps a row whose key finds nothing, and updates it when its row comes and goes"):
+      Names.fresh:
+        val users   = Topic.from(summon[Names]("xkafka-engine-users")).orFail
+        val program =
+          (input: Topic, output: Topic) =>
+            KTable(Named("rows-47"), input, text, text, Store("rows"))
+              .leftJoinOnForeignKey(Named("fk-47"), KTable(Named("users-47"), users, text, text, Store("users")), text, text, text)((_, user) =>
+                Some(user)
+              )((row, name) => s"$row+${name.getOrElse("?")}").toStream(Named("changes-47")).to(Named("write-47"), output, text, text.option)
+        counting(server, program): app =>
+          admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 3, 1).orFail))) *>
+            produceValues(server, app.input, List("k1" -> Some("a"))) *> running(server, app):
+              latestValues(server, app.output, Map("k1" -> Some("a+?"))) *> produceValues(server, users, List("a" -> Some("A"))) *>
+                latestValues(server, app.output, Map("k1" -> Some("a+A"))) *> produceValues(server, users, List("a" -> None)) *>
+                latestValues(server, app.output, Map("k1" -> Some("a+?")))
+
     test(s"$release, $under: a wall-clock punctuator runs in tasks that read nothing, and what it wrote is there for an engine started later"):
       val program =
         (input: Topic, output: Topic) =>

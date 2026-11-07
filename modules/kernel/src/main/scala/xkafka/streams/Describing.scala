@@ -40,12 +40,13 @@ private[xkafka] object Describing:
   /** A node as Java's builder makes it: its name, what it is, and the nodes it reads from, in the order the builder is given them. */
   final case class Made(name: String, kind: Kind, predecessors: List[String])
 
-  /** The program's description, each repartition topic named as `topic` names it. */
-  def apply[F[_]](topology: Topology[F], topic: Repartition => String): TopologyDescription =
+  /** The program's description, the application's own topics named as `topic` gives their names. */
+  def apply[F[_]](topology: Topology[F], topic: String => String): TopologyDescription =
     def named(source: Source): String =
       source match
         case Source.Input(read)            => read.value
-        case Source.Repartitioned(written) => topic(written)
+        case Source.Repartitioned(written) => topic(s"${written.value}-repartition")
+        case Source.Exchanged(written)     => topic(written)
     TopologyDescription(
       topology.numbered.map((id, subtopology) => described(id, subtopology.nodes.toVector, named)),
       topology.globals.map: (id, global) =>
@@ -64,6 +65,7 @@ private[xkafka] object Describing:
       case Origin.Repartitioned(repartition, _, _, aggregate) =>
         val name = aggregate.fold(s"${repartition.value}-repartition-source")(named => s"${named.value}-source")
         (Made(name, Kind.Reads(origin.sources), Nil), name)
+      case Origin.Exchanged(_, node) => (Made(node, Kind.Reads(origin.sources), Nil), node)
 
   /** The stores a step's processor keeps, or reads for a join. */
   def kept[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): List[String] =

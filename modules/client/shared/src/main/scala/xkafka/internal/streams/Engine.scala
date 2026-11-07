@@ -539,8 +539,8 @@ private[xkafka] object Engine:
 
     private def repartitioned(partition: TopicPartition): Boolean =
       subtopologies.values.flatMap(_.origins).exists:
-        case Source.Repartitioned(named) => partition.topic.value == s"$application-${named.value}-repartition"
-        case _                           => false
+        case Source.Input(_) => false
+        case internal        => partition.topic.value == Task.topicOf(application, internal)
 
     /** The offset after the last record each task read since the last commit, with that record's leader epoch and the task's partition time. */
     private def offsetsOf(running: Running[F]): Map[TopicPartition, OffsetAndMetadata] =

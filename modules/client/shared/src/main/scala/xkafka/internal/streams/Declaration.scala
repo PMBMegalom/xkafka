@@ -66,7 +66,7 @@ private[xkafka] object Declaration:
     * successors, topics and stores sorted by name, and repartition topics named with the application id.
     */
   def described[F[_]](application: String, topology: Topology[F]): StreamsGroup.Description =
-    val description = Describing(topology, repartition => s"$application-${repartition.value}-repartition")
+    val description = Describing(topology, name => s"$application-$name")
     StreamsGroup.Description(
       description.subtopologies.map: subtopology =>
         StreamsGroup.DescribedSubtopology(
@@ -86,11 +86,14 @@ private[xkafka] object Declaration:
     )
 
   def apply[F[_]](application: String, topology: Topology[F], replicationFactor: Short = BrokerReplication): StreamsGroup.Topology =
-    def repartitionTopic(name: String) = s"$application-$name-repartition"
-    val subtopologies                  =
+    def internal(source: Source) =
+      source match
+        case Source.Input(_) => false
+        case _               => true
+    val subtopologies =
       topology.numbered.map: (id, subtopology) =>
         val sources      = subtopology.origins.collect { case Source.Input(topic) => topic.value }.sorted
-        val repartitions = subtopology.origins.collect { case Source.Repartitioned(named) => repartitionTopic(named.value) }.sorted
+        val repartitions = subtopology.origins.filter(internal).map(Task.topicOf(application, _)).sorted
         // Java keeps each copartition group as a HashSet of its topics' names, and its groups in a HashSet of those, and sends each as indices into the
         // sorted lists of the sub-topology's topics, in the order those sets iterate.
         val copartitioned =
@@ -110,7 +113,7 @@ private[xkafka] object Declaration:
             subtopology.stores.map(store =>
               changelog(application, store.value, subtopology.retentions.get(store.value), subtopology.duplicates(store.value), replicationFactor)
             ).sortBy(_.name),
-          repartitionSinkTopics = subtopology.repartitions.map(named => repartitionTopic(named.value)).sorted,
+          repartitionSinkTopics = subtopology.repartitions.map(Task.topicOf(application, _)).sorted,
           repartitionSourceTopics = repartitions.map(StreamsGroup.TopicInfo(_, 0, replicationFactor, RepartitionConfigs)),
           copartitionGroups = copartitioned
         )

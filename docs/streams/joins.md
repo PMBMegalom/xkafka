@@ -142,6 +142,78 @@ Like a stream and a table, two joined tables are processed together, so their
 topics must have the same number of partitions. To join a table with itself, see
 [Joining a stream or a table with itself](branching.md#joining-a-stream-or-a-table-with-itself).
 
+## Joining on a foreign key
+
+The tables above share a key. Often a row instead names a row of another table in
+its value: an order names its customer. `joinOnForeignKey` joins them, and keeps the
+result up to date when either table changes. The tables can have different keys and
+different numbers of partitions.
+
+```scala mdoc:compile-only
+// Keep each order joined with the name of the customer it belongs to, updated whenever the order or the customer changes.
+// Orders are keyed by order id, with values such as "c42:3 books": the customer's id, a colon, then what was ordered.
+// Customers are keyed by customer id, with the customer's name as the value.
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def ordersWithCustomers(orders: Topic, customers: Topic, output: Topic): Pipeline[IO] =
+  val text          = Serde.utf8[IO]
+  val customerNames = KTable(Named("customers"), customers, text, text, Store("customers"))
+  KTable(Named("orders"), orders, text, text, Store("orders"))
+    // Name the join, then give the serdes for the orders' values, the customers' keys and the customers' values
+    .joinOnForeignKey(Named("order-customer"), customerNames, text, text, text)(
+      (_, order) => Option.when(order.contains(':'))(order.takeWhile(_ != ':'))  // Find the customer's id, or none if there is no colon
+    )((order, name) => s"$order for $name")                                      // Make the result, kept under the order's id
+    .toStream(Named("order-changes"))
+    .to(Named("write-orders"), output, text, text.option)                       // Write each change; a deleted result becomes a tombstone
+```
+
+The result is keyed as the table `joinOnForeignKey` is called on, here by order id,
+and changes in these cases:
+
+| What happens | `joinOnForeignKey` | `leftJoinOnForeignKey` |
+| --- | --- | --- |
+| An order names a customer that exists | The order gets a result | The order gets a result |
+| An order names no customer, or one that does not exist | The order has no result, and loses any it had | The order gets a result, with `None` for the customer |
+| A customer changes | Each order naming the customer gets a new result | The same |
+| A customer is deleted | Each order naming the customer loses its result | Each order naming the customer gets a result with `None` |
+| An order is deleted | Its result is deleted | Its result is deleted |
+
+When an order changes, its result takes the later timestamp of the order and the
+customer. When a customer changes, the results take the time of that change. If an
+order changes again before the answer for its previous value arrives, that answer
+is dropped.
+
+The result is kept in no store. To group it, or to join it with something else, keep
+it in one, by passing the store's name and a serde for its values:
+`joinOnForeignKey(named, other, value, otherKey, otherValue, Store("results"), serde)`.
+`Topology.of` refuses a program that needs this and does not do it.
+
+With the name `order-customer`, the join adds these to the application:
+
+| What | Name |
+| --- | --- |
+| A topic | `<application id>-order-customer-subscription-registration-topic` |
+| A topic | `<application id>-order-customer-subscription-response-topic` |
+| A store | `order-customer-subscription-store`, with its changelog |
+
+Windowed tables cannot join on a foreign key, and there is no outer version. Both
+tables' topics must be partitioned by key the way Kafka producers do by default: a
+custom partitioner is not supported yet.
+
+If some members run Java Kafka Streams, name the join with `TableJoined.as` and build
+the left table first, or the broker may refuse the Java members:
+
+```java
+// In the Java program: build the left table first, and name the join as the xkafka program does
+KTable<String, String> orders = builder.table("orders");
+KTable<String, String> customers = builder.table("customers");
+orders.join(customers, order -> order.contains(":") ? order.split(":")[0] : null, (order, customer) -> order + " for " + customer,
+    TableJoined.as("order-customer")).toStream().to("out");
+```
+
 ## Joining streams
 
 Two streams with the same key join within windows of time, as Java Kafka

@@ -66,8 +66,11 @@ enum TopologyError derives CanEqual:
   /** A window or session store that cannot be used, such as one whose retention is less than its window size. */
   case InvalidStore(store: String, reason: String)
 
-  /** A windowed table joined with a stream or a table, which xkafka does not join yet. */
+  /** A windowed table joined with a stream or a table, which xkafka does not join yet, or a foreign-key join's result kept in no store joined. */
   case WindowedJoin
+
+  /** The result of the foreign-key join `join`, kept in no store, read by a step that needs the value each change replaces. */
+  case UnkeptForeignKeyJoin(join: String)
 
   /** A join reading a table that nothing sends records to: one made from a flow, whose flow goes nowhere. `step` is the step that makes the table. */
   case UnfedTable(step: String)
@@ -89,7 +92,8 @@ enum TopologyError derives CanEqual:
       case InvalidSuppression(name, reason) => s"the suppression '$name' cannot be used: $reason"
       case InvalidPunctuation(step, reason) => s"a punctuator of step '$step' cannot be used: $reason"
       case InvalidStore(store, reason)      => s"the store '$store' cannot be used: $reason"
-      case WindowedJoin                     => "a windowed table cannot be joined yet"
+      case WindowedJoin                     => "a windowed table, or a foreign-key join's result kept in no store, cannot be joined"
+      case UnkeptForeignKeyJoin(join)       => s"the result of the foreign-key join '$join' must be kept in a store for what reads it"
       case UnfedTable(step) => s"a join reads the table made in step '$step', but no records reach that step; send them to it with into or fork"
       case SuppressedWithoutSerde(name) =>
         s"the suppression '$name' holds a table whose values have no serde; pass a Store and a Serde to the join or mapValues that makes it"
@@ -357,27 +361,36 @@ private[xkafka] enum Source derives CanEqual:
   case Input(topic: Topic)
   case Repartitioned(repartition: Repartition)
 
+  /** A topic a foreign-key join's two sides send each other records through, by its name without the application's id. */
+  case Exchanged(topic: String)
+
 /** A topic's records as they come into a sub-topology: from an input topic, or from the repartition topic an earlier sub-topology writes. */
 private[xkafka] enum Origin[F[_], K, V]:
   case Input(named: Named, topics: NonEmptyList[Topic], key: Serde[F, K], value: Serde[F, V])
   case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], aggregate: Option[Named] = None)
 
+  /** A topic a foreign-key join's two sides send each other records through, read as the bytes they are, by the source node `node`. */
+  case Exchanged[F[_]](topic: String, node: String) extends Origin[F, Option[Chunk[Byte]], Option[Chunk[Byte]]]
+
   def mapK[G[_]](fk: FunctionK[F, G]): Origin[G, K, V] =
     this match
       case Input(named, topics, key, value)                  => Input(named, topics, key.mapK(fk), value.mapK(fk))
       case Repartitioned(repartition, key, value, aggregate) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk), aggregate)
+      case Exchanged(topic, node)                            => Exchanged(topic, node)
 
   /** The topics it reads, as one source. */
   def sources: List[Source] =
     this match
       case Input(_, topics, _, _)              => topics.toList.distinct.map(Source.Input(_))
       case Repartitioned(repartition, _, _, _) => List(Source.Repartitioned(repartition))
+      case Exchanged(topic, _)                 => List(Source.Exchanged(topic))
 
   /** The name the program gives its step, where it gives one. */
   def names: List[Named] =
     this match
       case Input(named, _, _, _)             => List(named)
       case Repartitioned(_, _, _, aggregate) => aggregate.map(named => Named(s"${named.value}-source")).toList
+      case Exchanged(_, _)                   => Nil
 
 /** A store a sub-topology keeps: how long it keeps a window, if it keeps windows, whether it holds a session's values, a suppression's held changes,
   * or as a stream-stream join's window store does, every record, and where processors may share it, what says it is the same store.
@@ -424,6 +437,53 @@ private[xkafka] final class TablesJoined[F[_], K, A, B, R, C1, C2](
 
   /** Its store, if any. */
   def kept: List[KeptStore] = store.toList.map((stored, _, _) => KeptStore(stored))
+
+/** A table joined with the table `right` by a key `foreignKey` takes from each of its rows, as Java's foreign-key join: each side in its own
+  * sub-topology, sending the other records through two topics. `joiner` makes each result, or none to delete it, and the result is kept in `store`
+  * where one is given. `keepsUnmatched` says a row whose key finds nothing still has a result. `id` is the join, whatever effect it is mapped to.
+  */
+private[xkafka] final class ForeignKeyJoined[F[_], K, V, KO, VO, R, C1, C2](
+    val named: Named,
+    val left: Side[F, K, V, C1],
+    val right: Side[F, KO, VO, C2],
+    val keys: Serde[F, K],
+    val values: Serde[F, V],
+    val otherKeys: Serde[F, KO],
+    val otherValues: Serde[F, VO],
+    val foreignKey: (K, V) => Option[KO],
+    val keepsUnmatched: Boolean,
+    val joiner: (V, Option[VO]) => Option[R],
+    val store: Option[(Store, Serde[F, R])],
+    val next: Consumer[F, K, Option[R]],
+    val id: AnyRef = new Object
+):
+  def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): ForeignKeyJoined[G, K, V, KO, VO, R, C1, C2] =
+    ForeignKeyJoined(
+      named,
+      left.mapK(fk),
+      right.mapK(fk),
+      keys.mapK(fk),
+      values.mapK(fk),
+      otherKeys.mapK(fk),
+      otherValues.mapK(fk),
+      foreignKey,
+      keepsUnmatched,
+      joiner,
+      store.map((stored, value) => (stored, value.mapK(fk))),
+      next.imapK(fk)(gk),
+      id
+    )
+
+  /** The topic each subscription goes through, read beside the other table. */
+  def subscriptions: String = s"${named.value}-subscription-registration-topic"
+
+  /** The topic each answer to a subscription goes through, read beside this table. */
+  def responses: String = s"${named.value}-subscription-response-topic"
+
+  /** The store of each row's subscription, kept beside the other table. */
+  def subscribed: Store = Store(s"${named.value}-subscription-store")
+
+  def kept: List[KeptStore] = KeptStore(subscribed) :: store.toList.map((stored, _) => KeptStore(stored))
 
 /** Two streams joined by `joiner` within `windows`, as Java's stream-stream join: each record kept in a window store of its side and joined with the
   * other side's records in its window, what they make going on to `next`, its stores named from `store` as [[StreamJoin]] names them, and written
@@ -567,6 +627,20 @@ private[xkafka] enum Consumer[F[_], K, V]:
   /** The right side of streams joined. */
   case RightStream[F[_], K, A, B, R](join: StreamsJoined[F, K, A, B, R]) extends Consumer[F, K, B]
 
+  /** The left table of a foreign-key join, each change to it sending subscriptions to the other table's side. */
+  case ForeignLeft[F[_], K, V, KO, VO, R, C1, C2](join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2]) extends Consumer[F, K, C1]
+
+  /** The other table of a foreign-key join, each change to it answering the subscriptions to its key. */
+  case ForeignRight[F[_], K, V, KO, VO, R, C1, C2](join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2]) extends Consumer[F, KO, C2]
+
+  /** A foreign-key join's subscriptions as they reach the other table's side, which keeps them and answers. */
+  case ForeignSubscribed[F[_], K, V, KO, VO, R, C1, C2](join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2])
+      extends Consumer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]]
+
+  /** A foreign-key join's answers as they reach the left table's side, which makes the results. */
+  case ForeignAnswered[F[_], K, V, KO, VO, R, C1, C2](join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2])
+      extends Consumer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]]
+
   /** `next`, in a program `Topology.of` refuses for `problem`. */
   case Refused(problem: TopologyError, next: Consumer[F, K, V])
 
@@ -613,6 +687,10 @@ private[xkafka] enum Consumer[F[_], K, V]:
       case RightTable(join)               => RightTable(join.imapK(fk)(gk))
       case LeftStream(join)               => LeftStream(join.imapK(fk)(gk))
       case RightStream(join)              => RightStream(join.imapK(fk)(gk))
+      case ForeignLeft(join)              => ForeignLeft(join.imapK(fk)(gk))
+      case ForeignRight(join)             => ForeignRight(join.imapK(fk)(gk))
+      case ForeignSubscribed(join)        => ForeignSubscribed(join.imapK(fk)(gk))
+      case ForeignAnswered(join)          => ForeignAnswered(join.imapK(fk)(gk))
       case Refused(problem, next)         => Refused(problem, next.imapK(fk)(gk))
       case Done()                         => Done()
       case mapped @ Mapped(_, _, _)       => mapped.expanded.mappedBy(fk)(gk)
@@ -626,6 +704,7 @@ private[xkafka] enum Consumer[F[_], K, V]:
       case Then(_, step, next)  => step.asks(next.requests)
       case LeftTable(join)      => join.joiner.outer._1 || join.next.requests
       case RightTable(join)     => join.joiner.outer._2 || join.next.requests
+      case ForeignLeft(_)       => true
       case Fan(children)        => children.exists(_.requests)
       case Mapped(origin, _, _) => origin.requests
       case _                    => false
@@ -692,7 +771,7 @@ private[xkafka] final case class Subtopology[F[_]](
     buildOrdered: List[List[Source]],
     unstartable: List[List[Source]],
     kept: List[KeptStore],
-    repartitions: List[Repartition],
+    repartitions: List[Source],
     nodes: List[Describing.Made]
 ):
   def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Subtopology[G] =
@@ -729,6 +808,7 @@ private[xkafka] final case class Subtopology[F[_]](
           case Consumer.RightTable(join)       => found(join.next, marked)
           case Consumer.LeftStream(join)       => found(join.next, marked)
           case Consumer.RightStream(join)      => found(join.next, marked)
+          case Consumer.ForeignAnswered(join)  => found(join.next, marked)
           case _                               => (Nil, marked)
     entries.foldLeft((List.empty[Punctuating[F]], Set.empty[AnyRef])):
       case ((so, seen), entry) =>
@@ -1889,6 +1969,96 @@ sealed trait KTable[F[_], K, V]:
   /** The table as one side of a join. */
   private def side: Side[F, K, V, Change[V]] = Side(kind.present(_), view)
 
+  /** The table joined with `other`, by a key `foreignKey` takes from each row, as Java's foreign-key joins join them. */
+  private def onForeignKey[KO, VO, R](
+      named: Named,
+      other: KTable.Ends[F, KO, VO, Out],
+      value: Serde[F, V],
+      otherKey: Serde[F, KO],
+      otherValue: Serde[F, VO],
+      foreignKey: (K, V) => Option[KO],
+      keepsUnmatched: Boolean,
+      joiner: (V, Option[VO]) => Option[R],
+      store: Option[(Store, Serde[F, R])]
+  ): Deleting[R] =
+    (view, other.view) match
+      case (Some(mine), Some(_)) =>
+        val feeding: Consumer[F, K, Option[R]] => Out =
+          next =>
+            val join =
+              ForeignKeyJoined(named, side, other.side, mine.keys, value, otherKey, otherValue, foreignKey, keepsUnmatched, joiner, store, next)
+            stream.ending.both(stream.feed(Consumer.ForeignLeft(join)), other.stream.feed(Consumer.ForeignRight(join)))
+        KTable.of[F, K, R, Option, Out](
+          KStream.of[F, K, Option[R], KeyState.AsRead, Out](feeding, s"${named.value}-result", false, stream.ending),
+          key,
+          store.map(_._2),
+          None,
+          store.map((stored, serde) => TableView.Stored(stored, mine.keys, serde)),
+          ChangeKind.Deleting
+        )
+      case _ =>
+        // The join is refused, so the step that stands in for it never runs.
+        val nothing: Consumer[F, K, Option[R]] => Out =
+          next =>
+            stream.feed(
+              Consumer.Refused(TopologyError.WindowedJoin, Consumer.Then(named, Step.FlatMap[F, K, Change[V], K, Option[R]]((_, _) => Nil), next))
+            )
+        KTable.of[F, K, R, Option, Out](
+          KStream.of[F, K, Option[R], KeyState.AsRead, Out](nothing, named.value, false, stream.ending),
+          key,
+          None,
+          None,
+          None,
+          ChangeKind.Deleting
+        )
+
+  /** Keeps a result for each row whose foreign key finds a row of `other`, as Java's foreign-key `join`, updated when either table changes. Each
+    * table can have its own number of partitions. The join adds the topics `<application id>-<named>-subscription-registration-topic` and
+    * `<application id>-<named>-subscription-response-topic`, and the store `<named>-subscription-store`.
+    */
+  def joinOnForeignKey[KO, VO, R](
+      named: Named,
+      other: KTable.Ends[F, KO, VO, Out],
+      value: Serde[F, V],
+      otherKey: Serde[F, KO],
+      otherValue: Serde[F, VO]
+  )(foreignKey: (K, V) => Option[KO])(join: (V, VO) => R): Deleting[R] =
+    onForeignKey(named, other, value, otherKey, otherValue, foreignKey, false, (row, found) => found.map(join(row, _)), None)
+
+  /** As `joinOnForeignKey`, the result kept in the store `store` names. */
+  def joinOnForeignKey[KO, VO, R](
+      named: Named,
+      other: KTable.Ends[F, KO, VO, Out],
+      value: Serde[F, V],
+      otherKey: Serde[F, KO],
+      otherValue: Serde[F, VO],
+      store: Store,
+      serde: Serde[F, R]
+  )(foreignKey: (K, V) => Option[KO])(join: (V, VO) => R): Deleting[R] =
+    onForeignKey(named, other, value, otherKey, otherValue, foreignKey, false, (row, found) => found.map(join(row, _)), Some((store, serde)))
+
+  /** As `joinOnForeignKey`, keeping a result for every row, with none where its foreign key finds nothing, as Java's foreign-key `leftJoin`. */
+  def leftJoinOnForeignKey[KO, VO, R](
+      named: Named,
+      other: KTable.Ends[F, KO, VO, Out],
+      value: Serde[F, V],
+      otherKey: Serde[F, KO],
+      otherValue: Serde[F, VO]
+  )(foreignKey: (K, V) => Option[KO])(join: (V, Option[VO]) => R): Deleting[R] =
+    onForeignKey(named, other, value, otherKey, otherValue, foreignKey, true, (row, found) => Some(join(row, found)), None)
+
+  /** As `leftJoinOnForeignKey`, the result kept in the store `store` names. */
+  def leftJoinOnForeignKey[KO, VO, R](
+      named: Named,
+      other: KTable.Ends[F, KO, VO, Out],
+      value: Serde[F, V],
+      otherKey: Serde[F, KO],
+      otherValue: Serde[F, VO],
+      store: Store,
+      serde: Serde[F, R]
+  )(foreignKey: (K, V) => Option[KO])(join: (V, Option[VO]) => R): Deleting[R] =
+    onForeignKey(named, other, value, otherKey, otherValue, foreignKey, true, (row, found) => Some(join(row, found)), Some((store, serde)))
+
   /** The table joined with `other` by `joiner`, as Java's table-table joins join them: in one sub-topology, their topics copartitioned, and each
     * change to either joined with the other's value for its key. The result is kept in the store `store` names where one is given.
     */
@@ -2048,7 +2218,7 @@ final class Topology[F[_]] private (
     new Topology(numbered.map((id, subtopology) => id -> subtopology.imapK(fk)(gk)), globals.map((id, global) => id -> global.mapK(fk)))
 
   /** What the program runs: its topics, steps, stores and repartitions, which `toString` writes as Java Kafka Streams' `Topology.describe` does. */
-  def describe: TopologyDescription = Describing(this, repartition => s"${repartition.value}-repartition")
+  def describe: TopologyDescription = Describing(this, identity)
 
 object Topology:
   given InvariantK[Topology] with

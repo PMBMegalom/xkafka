@@ -64,7 +64,8 @@ A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as
   (see [Folding streams together](tables.md#folding-streams-together));
 - `toTable`, which keeps each key's latest value as a `KTable`;
 - `join`, `leftJoin` and `outerJoin`, which combine it with a table or a stream,
-  and `join` and `leftJoin` with a global table (see [Joins](joins.md));
+  and `join` and `leftJoin` with a global table, and `joinOnForeignKey` and
+  `leftJoinOnForeignKey`, which join a table with the rows its values name (see [Joins](joins.md));
 - `fork`, `forkMerge`, `merge`, `split` and `into`, which send records down
   several paths or bring them together (see [Branching](branching.md));
 - `to`, which ends a path at an output topic, or `foreach` and `print`, which end
