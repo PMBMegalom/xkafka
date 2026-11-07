@@ -59,9 +59,9 @@ import org.apache.kafka.common.{
 import org.apache.kafka.common.config.ConfigResource as JavaConfigResource
 import org.apache.kafka.common.errors.{ElectionNotNeededException, TimeoutException as JavaTimeoutException, UnknownTopicOrPartitionException}
 import org.apache.kafka.common.header.Header as JavaHeader
-import org.apache.kafka.common.header.internals.RecordHeader
 import org.apache.kafka.common.record.TimestampType
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, ByteArraySerializer}
+import xkafka.interop.*
 import driver.{Delivery, EncodedRecord, Enqueued, KafkaDriver, PartitionEnd, Polled, PolledRecord, Rebalance, StartAt, StoredOffset}
 
 /** The Java client a driver makes each of its clients with, which a test replaces with the Java client's mocks. */
@@ -705,8 +705,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
     .toMap.asJava
 
   private def javaRecord(record: EncodedRecord): JavaProducerRecord[Array[Byte], Array[Byte]] =
-    val headers: java.lang.Iterable[JavaHeader] =
-      record.headers.values.map(header => new RecordHeader(header.key, header.value.map(_.toArray).orNull): JavaHeader).asJava
+    val headers: java.lang.Iterable[JavaHeader] = record.headers.toJava
     new JavaProducerRecord(
       record.topic.value,
       record.partition.map(value => Int.box(value.value)).orNull,
@@ -726,7 +725,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       leaderEpoch = record.leaderEpoch.map(_.intValue).orElse(-1),
       key = Option(record.key).map(Chunk.array),
       value = Option(record.value).map(Chunk.array),
-      headers = Headers.fromVector(record.headers.toArray.toVector.map(header => Header(header.key, Option(header.value).map(Chunk.array))))
+      headers = Headers.fromJava(record.headers)
     )
 
   /** Numbered as librdkafka numbers them, which is what the shared client reads. */

@@ -61,6 +61,23 @@ by cutting it short, and with `MissingHeaderValue` when the header has no value.
 Kafka allows a header to have no value, which is `Header(name, None)`. Every platform
 keeps it, and it stays different from an empty value, `Header(name, Some(Chunk.empty))`.
 
+## Java's headers (JVM only)
+
+On the JVM, `xkafka.interop` also converts headers to and from Kafka's Java client,
+for code that works with both:
+
+```scala mdoc:compile-only
+// Hand headers to Java code, and take them back
+import org.apache.kafka.common.header.Headers as JavaHeaders
+
+import xkafka.*
+import xkafka.interop.*
+
+def roundTrip(headers: Headers): Headers =
+  val java: JavaHeaders = headers.toJava                    // A copy, in the same order
+  Headers.fromJava(java)                                    // Back again, with a header with no value kept as one
+```
+
 ## Your own types
 
 `HeaderSerializer` and `HeaderDeserializer` write and read a type. `contramap` and
