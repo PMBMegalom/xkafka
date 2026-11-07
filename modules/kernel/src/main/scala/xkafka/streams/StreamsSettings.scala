@@ -94,6 +94,8 @@ final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError
   *   how many tasks process records at once, each its own records in order
   * @param closeTimeout
   *   how long releasing the application waits for its tasks to be given back and for the group to answer that it left
+  * @param topologyDescriptionPush
+  *   whether a member sends the program's description to the group's coordinator when it asks for one, as Java Streams does by default
   */
 sealed abstract case class StreamsSettings private (
     client: ClientSettings,
@@ -101,7 +103,8 @@ sealed abstract case class StreamsSettings private (
     guarantee: ProcessingGuarantee,
     commitInterval: Option[FiniteDuration],
     concurrency: Int,
-    closeTimeout: FiniteDuration
+    closeTimeout: FiniteDuration,
+    topologyDescriptionPush: Boolean
 ):
   def withClient(value: ClientSettings): StreamsSettings = copy(client = value)
 
@@ -121,14 +124,21 @@ sealed abstract case class StreamsSettings private (
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.positive(value)(StreamsSettingsError.NonPositiveCloseTimeout(_)).map(valid => copy(closeTimeout = valid))
 
+  /** Sends the program's description to the group's coordinator when it asks for one. */
+  def withTopologyDescriptionPush: StreamsSettings = copy(topologyDescriptionPush = true)
+
+  /** Sends no description of the program, so describing the group shows none. */
+  def withoutTopologyDescriptionPush: StreamsSettings = copy(topologyDescriptionPush = false)
+
   private def copy(
       client: ClientSettings = client,
       applicationId: ApplicationId = applicationId,
       guarantee: ProcessingGuarantee = guarantee,
       commitInterval: Option[FiniteDuration] = commitInterval,
       concurrency: Int = concurrency,
-      closeTimeout: FiniteDuration = closeTimeout
-  ): StreamsSettings = new StreamsSettings(client, applicationId, guarantee, commitInterval, concurrency, closeTimeout) {}
+      closeTimeout: FiniteDuration = closeTimeout,
+      topologyDescriptionPush: Boolean = topologyDescriptionPush
+  ): StreamsSettings = new StreamsSettings(client, applicationId, guarantee, commitInterval, concurrency, closeTimeout, topologyDescriptionPush) {}
 
 object StreamsSettings:
   val DefaultCloseTimeout: FiniteDuration = 30.seconds
@@ -139,13 +149,14 @@ object StreamsSettings:
       guarantee: ProcessingGuarantee = ProcessingGuarantee.AtLeastOnce,
       commitInterval: Option[FiniteDuration] = None,
       concurrency: Int = 1,
-      closeTimeout: FiniteDuration = DefaultCloseTimeout
+      closeTimeout: FiniteDuration = DefaultCloseTimeout,
+      topologyDescriptionPush: Boolean = true
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
       commitInterval.traverse(positive(_)(StreamsSettingsError.NonPositiveCommitInterval(_))),
       atLeastOne(concurrency),
       positive(closeTimeout)(StreamsSettingsError.NonPositiveCloseTimeout(_))
-    ).mapN((interval, tasks, timeout) => new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout) {})
+    ).mapN((interval, tasks, timeout) => new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush) {})
 
   private def positive(value: FiniteDuration)(error: FiniteDuration => StreamsSettingsError): ValidatedNel[StreamsSettingsError, FiniteDuration] =
     if value > Duration.Zero then value.validNel else error(value).invalidNel

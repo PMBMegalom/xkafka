@@ -28,7 +28,7 @@ import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet, Validated, ValidatedNel}
 import cats.effect.{Async, Concurrent, Temporal}
 import cats.syntax.all.*
-import cats.tagless.FunctorK
+import cats.tagless.{FunctorK, InvariantK}
 import fs2.{Chunk, Pipe, Stream}
 
 /** Kafka property names xkafka sets from the typed settings.
@@ -1576,6 +1576,11 @@ trait Transaction[F[_], K, V]:
 
       override def commitOffsets(batch: CommittableOffsetBatch[G]): G[Unit] = fk(self.commitOffsets(batch.mapK(gk)))
 
+object Transaction:
+  given [K, V]: InvariantK[[F[_]] =>> Transaction[F, K, V]] with
+    override def imapK[F[_], G[_]](transaction: Transaction[F, K, V])(fk: FunctionK[F, G])(gk: FunctionK[G, F]): Transaction[G, K, V] =
+      transaction.imapK(fk)(gk)
+
 trait KafkaTransactionalProducer[F[_], K, V]:
   self =>
 
@@ -1591,6 +1596,12 @@ trait KafkaTransactionalProducer[F[_], K, V]:
     new KafkaTransactionalProducer[G, K, V]:
       override def transactionally[A](use: Transaction[G, K, V] => G[A]): G[A] =
         fk(self.transactionally(transaction => gk(use(transaction.imapK(fk)(gk)))))
+
+object KafkaTransactionalProducer:
+  given [K, V]: InvariantK[[F[_]] =>> KafkaTransactionalProducer[F, K, V]] with
+    override def imapK[F[_], G[_]](producer: KafkaTransactionalProducer[F, K, V])(fk: FunctionK[F, G])(
+        gk: FunctionK[G, F]
+    ): KafkaTransactionalProducer[G, K, V] = producer.imapK(fk)(gk)
 
 /** What a `consumeChunk` handler returns once it has processed its chunk, after which the chunk's offsets are committed. */
 case object CommitNow

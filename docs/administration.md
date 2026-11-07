@@ -5,6 +5,7 @@ record deletion, topic configuration, and consumer groups. It neither produces n
 consumes.
 
 ```scala mdoc:compile-only
+// Create the topic "events" with six partitions, each on three brokers
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
@@ -14,7 +15,8 @@ val program =
   for
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
-    newTopic <- NewTopic.from(topic, partitions = 6, replicationFactor = 3).liftTo[IO]
+    newTopic <- NewTopic.from(topic, partitions = 6, replicationFactor = 3).liftTo[IO]  // Rejects counts that are not positive
+    // Acquire an admin client, create the topic, and release the client
     _        <- KafkaClient[IO].admin(client).use(_.createTopics(NonEmptySet.one(newTopic)))
   yield ()
 ```
@@ -63,6 +65,7 @@ partition's leader, replicas, and in-sync replicas, by `BrokerId`. Look a broker
 id up in `describeCluster`'s brokers for its host and port.
 
 ```scala mdoc:compile-only
+// Describe the topic "events", and print its partition count and id
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
@@ -72,10 +75,11 @@ val program =
   for
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic   <- Topic.from("events").liftTo[IO]
-    answers <- KafkaClient[IO].admin(client).use(_.describeTopics(NonEmptySet.one(topic)))
+    answers <- KafkaClient[IO].admin(client).use(_.describeTopics(NonEmptySet.one(topic)))  // The answer for each topic is separate
     _       <- answers(topic) match
-                 case Some(Right(description)) =>
+                 case Some(Right(description)) =>  // The topic's description
                    IO.println(s"${description.partitions.length} partitions, id ${description.id.value}")
+                 // Why this topic could not be described
                  case Some(Left(failure)) => IO.println(s"not described: ${failure.getMessage}")
                  case None                => IO.unit
   yield ()
@@ -99,6 +103,7 @@ answers on its own: with its new low watermark, the offset the partition now
 begins at, or with the failure that refused the cut.
 
 ```scala mdoc:compile-only
+// Delete the records below offset 1000 in partition 0 of "journal"
 import cats.data.{NonEmptyList, NonEmptyMap}
 import cats.effect.IO
 import cats.syntax.all.*
@@ -111,9 +116,12 @@ val program =
     topic     <- Topic.from("journal").liftTo[IO]
     partition <- Partition.from(0).liftTo[IO]
     cut       <- Offset.from(1000L).liftTo[IO]
+    // Delete the records, with a separate answer for each partition
     answers   <- KafkaClient[IO].admin(client).use(_.deleteRecords(NonEmptyMap.one(TopicPartition(topic, partition), cut)))
     _         <- answers.toSortedMap.toList.traverse_ :
+                   // The offset this partition now begins at
                    case (topicPartition, Right(lowWatermark)) => IO.println(s"${topicPartition.show} begins at ${lowWatermark.show}")
+                   // Why the records of this partition were not deleted
                    case (topicPartition, Left(failure))       => IO.println(s"${topicPartition.show} was refused: ${failure.getMessage}")
   yield ()
 ```
@@ -148,6 +156,7 @@ call fails as a whole only when no topic got an answer, such as when the cluster
 cannot be reached in time.
 
 ```scala mdoc:compile-only
+// Print the value of "cleanup.policy" on "journal", and where that value comes from
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
@@ -157,8 +166,9 @@ val program =
   for
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic   <- Topic.from("journal").liftTo[IO]
+    // Read the topic's effective configuration
     answers <- KafkaClient[IO].admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(topic)))
-    policy   = answers(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy"))
+    policy   = answers(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy"))  // Pick one property from the topic's answer
     _       <- IO.println(policy.fold("no cleanup.policy reported")(entry => s"${entry.value} from ${entry.source}"))
   yield ()
 ```
@@ -187,6 +197,7 @@ leaves every other property as it is. Each change is one of:
   `cleanup.policy`.
 
 ```scala mdoc:compile-only
+// Set the retention of "journal" to seven days, and add "compact" to its cleanup policy
 import cats.data.{NonEmptyList, NonEmptyMap}
 import cats.effect.IO
 
@@ -196,7 +207,9 @@ val program =
   for
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic   <- Topic.from("journal").liftTo[IO]
+    // Set one property, and append to a list property
     changes  = NonEmptyMap.of("retention.ms" -> ConfigurationChange.Set("604800000"), "cleanup.policy" -> ConfigurationChange.Append("compact"))
+    // Every other property stays as it is
     answers <- KafkaClient[IO].admin(client).use(_.alterTopicConfigurations(NonEmptyMap.one(topic, changes)))
     _       <- IO.println(answers(topic).fold("no answer")(_.fold(failure => s"not changed: ${failure.getMessage}", _ => "changed")))
   yield ()
@@ -217,6 +230,7 @@ Each partition has a preferred replica, the first of the replicas
 `electPreferredLeaders` makes the preferred one its leader again.
 
 ```scala mdoc:compile-only
+// Make the preferred replica the leader of partition 0 of "events"
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
@@ -227,6 +241,7 @@ val program =
     client    <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic     <- Topic.from("events").liftTo[IO]
     partition <- Partition.from(0).liftTo[IO]
+    // Run the election for this partition
     answers   <- KafkaClient[IO].admin(client).use(_.electPreferredLeaders(NonEmptySet.one(TopicPartition(topic, partition))))
   yield answers
 ```
@@ -247,6 +262,7 @@ committed offsets. `describeConsumerGroups` answers each requested group with
 its state, its members, and the partitions each member is assigned.
 
 ```scala mdoc:compile-only
+// Print the state and members of the consumer group "billing"
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.IO
 
@@ -256,6 +272,7 @@ val program =
   for
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     group   <- ConsumerGroup.from("billing").liftTo[IO]
+    // The answer for each group is separate
     answers <- KafkaClient[IO].admin(client).use(_.describeConsumerGroups(NonEmptySet.one(group)))
     _       <- answers(group) match
                  case Some(Right(description)) =>
@@ -299,5 +316,5 @@ partition on its own, and `deleteConsumerGroups` each group on its own:
 
 ## What it does not do
 
-Access control, quotas, changing configuration, delegation tokens, and log
+Access control, quotas, changing broker configuration, delegation tokens, and log
 directories are not covered.

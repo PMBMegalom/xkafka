@@ -24,6 +24,7 @@ package streams
 
 import cats.Eq
 import cats.arrow.FunctionK
+import cats.tagless.FunctorK
 import fs2.Stream
 
 /** A streams application running as one member of its group, until the resource that gave it is released. */
@@ -40,6 +41,10 @@ trait KafkaStreams[F[_]]:
     new KafkaStreams[G]:
       def run: G[Unit]                   = fk(self.run)
       def state: Stream[G, StreamsState] = self.state.translate(fk)
+
+object KafkaStreams:
+  given FunctorK[KafkaStreams] with
+    override def mapK[F[_], G[_]](streams: KafkaStreams[F])(fk: FunctionK[F, G]): KafkaStreams[G] = streams.mapK(fk)
 
 /** Where a streams application is, and what the group's coordinator reports wrong with the application as a whole. */
 final case class StreamsState(phase: StreamsPhase, problems: List[StreamsProblem])
@@ -85,6 +90,12 @@ enum StreamsProblem derives CanEqual:
 
   /** The application may not read or write some of its topics. */
   case TopicAuthorizationFailed(detail: String)
+
+  /** The application joins topics whose order xkafka cannot match exactly to a Java Streams application's, or joins inputs whose sub-topologies Java
+    * numbers by which input its program builds first, which xkafka takes to be the join's receiver; so the broker may refuse Java members of the same
+    * application. Members that all run xkafka are not affected. The detail names the topics.
+    */
+  case JavaMembersMayBeRefused(detail: String)
 
   /** A report this release does not know, by its code. */
   case Other(code: Int, detail: String)

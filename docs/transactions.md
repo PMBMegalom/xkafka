@@ -5,6 +5,7 @@ Everything it wrote becomes visible together when the transaction commits, and
 none of it becomes visible if the transaction aborts.
 
 ```scala mdoc:compile-only
+// Write a record in a transaction, which commits when the body succeeds
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -15,10 +16,11 @@ val utf8 = Serializer.utf8[IO]
 val program =
   for
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
-    id       <- TransactionalId.from("order-writer").liftTo[IO]
+    id       <- TransactionalId.from("order-writer").liftTo[IO]  // Give each producer running alongside another its own id
     settings <- TransactionalProducerSettings.from(client, id, utf8, utf8).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
     record    = ProducerRecord(topic, "key", "value")
+    // Commits if this succeeds, and aborts if it fails or is cancelled
     _        <- KafkaClient[IO].transactionalProducer(settings).use(_.transactionally(_.produce(NonEmptyList.one(record))))
   yield ()
 ```
@@ -46,6 +48,7 @@ delivers them by default. To read only committed records, set the isolation
 level:
 
 ```scala
+// Read only the records of committed transactions
 settings.withIsolationLevel(IsolationLevel.ReadCommitted)
 ```
 
@@ -60,10 +63,11 @@ the records produced and the position they were produced from are committed
 together:
 
 ```scala
+// Write each chunk's results and consumed offsets in one transaction
 consumer.records.chunks.evalMap: chunk =>
-  val batch = CommittableOffsetBatch.fromFoldable(chunk.map(_.offset))
+  val batch = CommittableOffsetBatch.fromFoldable(chunk.map(_.offset))  // The offsets to commit for these records
   producer.transactionally: transaction =>
-    transaction.produce(derive(chunk)) *> transaction.commitOffsets(batch)
+    transaction.produce(derive(chunk)) *> transaction.commitOffsets(batch)  // Both become visible together, or neither does
 ```
 
 The batch already identifies the consumer its offsets came from, so

@@ -93,8 +93,8 @@ final class GroupConnectionSuite extends CatsEffectSuite:
           yield
             val (listed, found) = answers
             assertEquals(listed.map(_.errorCode), every(Api.ApiVersions).as(0: Short))
-            // Which heartbeat versions a broker reads depends on its release, which the group member's tests check.
-            Api.values.filterNot(_ == Api.StreamsGroupHeartbeat).foreach: api =>
+            // Whether a broker reads the streams group's requests depends on its release and configuration, which the group member's tests check.
+            Api.values.filterNot(api => api == Api.StreamsGroupHeartbeat || api == Api.StreamsGroupTopologyDescriptionUpdate).foreach: api =>
               val offered = listed.head.apis.find(_.key == api.key)
               assert(offered.exists(range => range.min <= api.lowest && range.max >= api.highest), s"$api: the broker reads $offered")
             assertEquals(

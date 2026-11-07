@@ -4,10 +4,10 @@ xkafka is a functional Kafka client for Scala 3, Cats Effect, and FS2. It
 provides the same producer and consumer API on the JVM, Scala.js, and Scala
 Native while using the established Kafka client for each runtime.
 
-| Platform | Backend | Runtime |
+| Platform | Kafka client | Runtime |
 | --- | --- | --- |
 | JVM | [Apache Kafka Java client](https://kafka.apache.org/documentation/#api) | Java 17 or newer |
-| Scala.js | [librdkafka](https://github.com/confluentinc/librdkafka), called through [koffi](https://koffi.dev) | Node.js 24 |
+| Scala.js | [librdkafka](https://github.com/confluentinc/librdkafka) | Node.js 24 |
 | Scala Native | [librdkafka](https://github.com/confluentinc/librdkafka) | Scala Native 0.5 or newer |
 
 The API uses `Resource` for producer and consumer lifecycles, `Stream` for
@@ -19,6 +19,7 @@ commits. Scala.js targets Node.js rather than browsers.
 Construct the client the same way on every platform:
 
 ```scala
+// The same line gives you the client for whichever platform you build for
 KafkaClient[IO]
 ```
 
@@ -30,6 +31,7 @@ an installed librdkafka; see the
 what each platform needs. For example:
 
 ```scala
+// Write one record to the topic "events", and wait until it is delivered
 import cats.data.NonEmptyList
 import cats.effect.{IO, IOApp}
 
@@ -45,7 +47,8 @@ object ProduceExample extends IOApp.Simple:
   override def run: IO[Unit] =
     for
       topic    <- Topic.from("events").liftTo[IO]
-      producer <- settings.liftTo[IO]
+      producer <- settings.liftTo[IO]  // Raise invalid settings as a failure
+      // Acquire a producer, send the record, and release the producer
       _        <- KafkaClient[IO].producer(producer).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
     yield ()
 ```
@@ -53,20 +56,25 @@ object ProduceExample extends IOApp.Simple:
 ## Streams
 
 xkafka also runs Kafka Streams programs, written with its own DSL. An
-application can mix xkafka members with Java Kafka Streams instances, and
-processes each record at least once or exactly once. It needs brokers of Kafka
-4.2 or newer:
+application can run some instances on xkafka and others on Java Kafka Streams,
+and processes each record at least once or exactly once. It needs brokers of
+Kafka 4.2 or newer:
 
 ```scala
+// Count the records of each key, and write every new count to a topic
 val text = Serde.utf8[IO]
 val words =
-  KStream(input, text, text).groupByKey(text, text).count(Store("counts")).toStream.to(output, text, Serde.long[IO])
+  KStream(Named("read"), input, text, text)
+    .groupByKey(text, text)
+    .count(Named("count"), Store("counts"))            // Keep each key's count in a store
+    .toStream(Named("changes"))                        // Every change to a count
+    .to(Named("write"), output, text, Serde.long[IO])  // Write each change to the output topic
 
 Topology.of(words).liftTo[IO].flatMap: topology =>
-  KafkaClient[IO].streams(settings, topology).use(_.run)
+  KafkaClient[IO].streams(settings, topology).use(_.run)  // Join the application and keep processing
 ```
 
-See [Streams](https://pmbmegalom.github.io/xkafka/streams.html) for programs,
+See [Streams](https://pmbmegalom.github.io/xkafka/streams/index.html) for programs,
 guarantees, state and standby tasks.
 
 ## Documentation
@@ -92,10 +100,10 @@ To build xkafka or run its tests, see
 
 ## Modules
 
-- `xkafka-kernel` contains the data types and the producer, consumer, and
-  administration interfaces, with no backend.
-- `xkafka-client` contains `KafkaClient` and the JVM, Scala.js, and Scala Native
-  backends.
+- `xkafka-kernel` contains the data types, the producer, consumer, and
+  administration interfaces, and the streams DSL, and connects to nothing itself.
+- `xkafka-client` contains `KafkaClient`, which connects to Kafka on the JVM,
+  Scala.js, and Scala Native.
 
 ## License
 

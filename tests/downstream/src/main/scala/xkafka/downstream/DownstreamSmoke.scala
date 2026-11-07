@@ -28,7 +28,7 @@ import cats.data.{NonEmptyList, NonEmptyMap, ValidatedNel, NonEmptySet}
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
-import xkafka.streams.{ApplicationId, KStream, Serde, Store, StreamsSettings, Topology}
+import xkafka.streams.{ApplicationId, KStream, Named, Serde, Store, StreamsSettings, Topology}
 
 object DownstreamSmoke extends IOApp.Simple:
   private val bootstrapServer = sys.env.getOrElse(
@@ -81,7 +81,10 @@ object DownstreamSmoke extends IOApp.Simple:
         StreamsSettings.from(client, application).toEither.leftMap(errors => new IllegalArgumentException(errors.toList.map(_.message).mkString("; ")))
       )
       topology <- IO.fromEither(
-        Topology.of(KStream(topic, Serde.utf8[IO], Serde.utf8[IO]).groupByKey(Serde.utf8[IO], Serde.utf8[IO]).count(Store("counts")).toStream.to(counts, Serde.utf8[IO], Serde.long[IO]))
+        Topology.of(
+          KStream(Named("words"), topic, Serde.utf8[IO], Serde.utf8[IO]).groupByKey(Serde.utf8[IO], Serde.utf8[IO]).count(Named("count"), Store("counts"))
+            .toStream(Named("count-changes")).to(Named("write-counts"), counts, Serde.utf8[IO], Serde.long[IO])
+        )
           .leftMap(errors => new IllegalArgumentException(errors.toList.map(_.message).mkString("; ")))
       )
       counted <- KafkaClient[IO].streams(streamsSettings, topology).use: streams =>

@@ -1,13 +1,13 @@
 # Errors
 
 Failures Kafka reports, and values or settings xkafka rejects, are
-`KafkaException` values. User-supplied effects keep their own failures, and
-ordinary method precondition failures such as a non-positive partition-stream
-queue threshold use their usual exception type.
+`KafkaException` values, except for the [streams](#streams) ones below. A failure raised by your own
+serializer, handler or other effect stays as it is, and an invalid argument, such
+as a `maxQueuedRecords` that is not positive, raises `IllegalArgumentException`.
 
 | case | raised when |
 | --- | --- |
-| `BackendFailure` | the backend reported a failure |
+| `BackendFailure` | Kafka or the platform's client reported a failure |
 | `InvalidBackendResponse` | the client returned data xkafka cannot represent, which is a bug in xkafka worth reporting |
 | `InvalidValue` | a value did not meet the rules of the type it was to become |
 | `InvalidSettings` | settings could not be constructed |
@@ -20,6 +20,14 @@ queue threshold use their usual exception type.
 `InvalidSettings` carries every `SettingsError`, so accumulated validation
 survives being lifted into an effect.
 
+## Streams
+
+A streams program or its settings being refused raises an exception of its own,
+when `liftTo` carries the refusal into the effect:
+
+- `InvalidTopology` carries every `TopologyError` in `errors`.
+- `InvalidStreamsSettings` carries every `StreamsSettingsError` in `errors`.
+
 ## Backend failures
 
 `BackendFailure` keeps the original failure as its cause, where there is one,
@@ -30,6 +38,7 @@ it is the same on every platform, and `None` only where there is no code.
 does not report them. `fatal` is always `true` for `ErrorCode.Fenced`.
 
 ```scala
+// Retry only a failure that can clear on its own
 if failure.retriable.contains(true) then retry else give up
 ```
 
@@ -46,6 +55,7 @@ comes from the platform's client and can differ between the JVM and Scala.js or
 Native, so code meant for every platform should not match on it.
 
 ```scala
+// Choose what to do by the failure's code
 failure.code match
   case Some(ErrorCode.OffsetOutOfRange)        => resetPosition
   case Some(ErrorCode.SaslAuthenticationFailed) => refreshCredentials

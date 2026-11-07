@@ -25,9 +25,13 @@ import cats.arrow.FunctionK
 import cats.data.{EitherT, NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
+import cats.tagless.{FunctorK, InvariantK}
 import fs2.{Chunk, Stream}
+import internal.streams.{Task, TaskInput, TaskState}
 import munit.CatsEffectSuite
-import streams.{ApplicationId, KafkaStreams, KStream, Serde, StreamsPhase, StreamsSettings, StreamsState, Topology}
+import streams.{
+  ApplicationId, KafkaStreams, KeyValueStore, KStream, Named, Pipeline, Processor, Serde, Store, StreamsPhase, StreamsSettings, StreamsState, Topology
+}
 
 final class KafkaClientMapKSuite extends CatsEffectSuite:
   private type ErrorIO[A] = EitherT[IO, String, A]
@@ -39,6 +43,61 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
   private val errorIOToIO: FunctionK[ErrorIO, IO] =
     new FunctionK[ErrorIO, IO]:
       override def apply[A](value: ErrorIO[A]): IO[A] = value.value.flatMap(_.leftMap(new RuntimeException(_)).liftTo[IO])
+
+  test("a program with processors runs in another effect through its instance, its stores coming back to the effect its handlers were written in"):
+    val text    = Serde.utf8[IO]
+    val topic   = Topic.from("in").toOption.get
+    val tally   = KeyValueStore.of(Store("tally"), text, Serde.long[IO])
+    val program =
+      KStream(Named("read-1"), topic, text, text).process(
+        Named("proc-1"),
+        Processor.withStore(tally): kept =>
+          Processor.onRecord: record =>
+            kept.get(record.key).flatMap: seen =>
+              val total = seen.getOrElse(0L) + 1L
+              kept.put(record.key, total).as(List(record.withValue(total)))
+      ).to(Named("write-1"), topic, text, Serde.long[IO])
+    val mapped =
+      InvariantK[Topology]
+        .imapK(Topology.of(InvariantK[Pipeline].imapK(program)(FunctionK.id[IO])(FunctionK.id[IO])).orFail)(ioToErrorIO)(errorIOToIO)
+    val read = TaskInput(Some(Chunk.array("a".getBytes)), Some(Chunk.array("v".getBytes)), 1000L, Headers.empty, "in", 0, 0L)
+    val ran  =
+      for
+        task   <- Task.inMemory[ErrorIO]("app", mapped.subtopologies.head, 0)
+        first  <- task.process(TaskState.empty, read, 0L)
+        second <- task.process(first._1, read, 0L)
+      yield second._2.filter(_.topic == topic).flatMap(_.value).map(value => BigInt(value.toArray).toLong)
+    ran.value.map(assertEquals(_, Right(Vector(2L))))
+
+  test("a running application and a serde change effect through their instances"):
+    val streams =
+      new KafkaStreams[IO]:
+        def run: IO[Unit]                   = IO.unit
+        def state: Stream[IO, StreamsState] = Stream.empty
+    val text  = FunctorK[[F[_]] =>> Serde[F, String]].mapK(Serde.utf8[IO])(ioToErrorIO)
+    val topic = Topic.from("in").toOption.get
+    (FunctorK[KafkaStreams].mapK(streams)(ioToErrorIO).run.value, text.serializer.serialize(topic, Headers.empty, "a").value).tupled.map:
+      (ran, written) =>
+        assertEquals(ran, Right(()))
+        assertEquals(written, Right(Some(Chunk.array("a".getBytes))))
+
+  test("a transactional producer changes effect through its instance, its transaction going both ways"):
+    val topic  = Topic.from("in").toOption.get
+    val record = ProducerRecord(topic, "k", "v")
+    val inside =
+      new Transaction[IO, String, String]:
+        def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[NonEmptyList[Produced[String, String]]] =
+          IO.raiseError(new RuntimeException(s"produced ${records.size}"))
+        def commitOffsets(batch: CommittableOffsetBatch[IO]): IO[Unit] = IO.unit
+    val source =
+      new KafkaTransactionalProducer[IO, String, String]:
+        def transactionally[A](use: Transaction[IO, String, String] => IO[A]): IO[A] = use(inside)
+    val mapped      = InvariantK[[F[_]] =>> KafkaTransactionalProducer[F, String, String]].imapK(source)(ioToErrorIO)(errorIOToIO)
+    val transaction = InvariantK[[F[_]] =>> Transaction[F, String, String]].imapK(inside)(ioToErrorIO)(errorIOToIO)
+    val one         = NonEmptyList.one(record)
+    (mapped.transactionally(_.produce(one)).value.attempt, transaction.produce(one).value.attempt).tupled.map: (through, direct) =>
+      assertEquals(through.left.map(_.getMessage).map(_ => ()), Left("produced 1"))
+      assertEquals(direct.left.map(_.getMessage).map(_ => ()), Left("produced 1"))
 
   test("a transaction transformed between effects records offsets against the group they came from"):
     val topic           = Topic.from("events").toOption.get
@@ -86,21 +145,21 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
       override val nextOffset: Offset                  = Offset.from(1L).toOption.get
       override val committer: OffsetCommitter[ErrorIO] = from
 
-  private val refusing: List[(String, KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String])] =
+  private val refusing: List[(String, KStream.Unkeyed[ErrorIO, String, String] => KStream.Unkeyed[ErrorIO, String, String])] =
     List(
-      "evalMapValues" -> (_.evalMapValues(_ => EitherT.leftT[IO, String]("refused"))),
-      "evalFilter"    -> (_.evalFilter((_, _) => EitherT.leftT[IO, Boolean]("refused"))),
-      "evalMap"       -> (_.evalMap((_, _) => EitherT.leftT[IO, (String, String)]("refused")))
+      "evalMapValues" -> (_.evalMapValues(Named("eval-map-values-1"))(_ => EitherT.leftT[IO, String]("refused"))),
+      "evalFilter"    -> (_.evalFilter(Named("eval-filter-1"))((_, _) => EitherT.leftT[IO, Boolean]("refused"))),
+      "evalMap"       -> (_.evalMap(Named("eval-map-1"))((_, _) => EitherT.leftT[IO, (String, String)]("refused")))
     )
 
   for (name, refuse) <- refusing do
     test(s"a streams program transformed between effects runs its effects in the source effect, and its state comes back: $name"):
       streamsRefused(refuse)
 
-  private def streamsRefused(refuse: KStream[ErrorIO, String, String] => KStream[ErrorIO, String, String]) =
+  private def streamsRefused(refuse: KStream.Unkeyed[ErrorIO, String, String] => KStream.Unkeyed[ErrorIO, String, String]) =
     val text     = Serde.utf8[ErrorIO]
     val topic    = Topic.from("in").toOption.get
-    val program  = refuse(KStream(topic, text, text)).to(topic, text, text)
+    val program  = refuse(KStream(Named("read-1"), topic, text, text)).to(Named("write-1"), topic, text, text)
     val settings = StreamsSettings.from(ClientSettings.from(NonEmptyList.one("localhost:9092")).orFail, ApplicationId.from("app").orFail).orFail
     val running  = source.imapK(ioToErrorIO)(errorIOToIO).streams(settings, Topology.of(program).orFail)
     val observed =
@@ -216,9 +275,10 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
         Resource.pure:
           new KafkaStreams[IO]:
             override def run: IO[Unit] =
-              internal.streams.Task[IO](settings.applicationId.value, topology.pipelines.head.segments.head, 0).process(
+              internal.streams.Task[IO](settings.applicationId.value, topology.subtopologies.head, 0).process(
                 internal.streams.TaskState.empty,
-                internal.streams.TaskInput(Some(Chunk.array("k".getBytes)), Some(Chunk.array("v".getBytes)), 0L, Headers.empty)
+                internal.streams.TaskInput(Some(Chunk.array("k".getBytes)), Some(Chunk.array("v".getBytes)), 0L, Headers.empty),
+                0L
               ).void
             override def state: Stream[IO, StreamsState] = Stream.emit(StreamsState(StreamsPhase.Running, Nil))
 

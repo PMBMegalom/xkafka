@@ -27,6 +27,7 @@ import scala.concurrent.duration.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{IO, Resource}
+import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
@@ -66,6 +67,92 @@ final class RestoreSuite extends CatsEffectSuite:
         PlatformKafkaClient().admin(client)
           .use(_.createTopics(NonEmptySet.fromSetUnsafe(scala.collection.immutable.SortedSet.from(made)(using Ordering.by(_.topic.value)))))
     yield ()
+
+  for
+    broker    <- server.toList
+    isolation <- List("read_uncommitted", "read_committed")
+  do
+    test(s"a global table under $isolation has read its whole topic once acquired, however many polls that takes"):
+      Names.fresh:
+        val table    = topic("global")
+        val keys     = (0 until 2000).toList.map(n => s"key-$n")
+        val text     = xkafka.streams.Serde.utf8[IO]
+        val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> isolation), reportEnds = true)
+          )(driver.destroyConsumer)
+        create(broker, table) *> transactionally(broker)(
+          _.produce(NonEmptyList.fromListUnsafe(keys.zipWithIndex.map((key, n) => record(table, n % 2, key, Some("v"), 1000L)))).void
+        ) *> consumer.use: client =>
+          GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
+            held.contents.map(contents => assertEquals(contents("gs").keySet.map(key => new String(key.toArray)), keys.toSet))
+
+  test("a partition is finished by reaching where it was found to end, not by a report of an end before that"):
+    def end(partition: Int, offset: Long) = xkafka.internal.driver.PartitionEnd("t", partition, offset)
+    val left                              = Set(("t", 0), ("t", 1))
+    val ends                              = Map(("t", 0) -> 10L, ("t", 1) -> 0L)
+    assertEquals(Restore.unfinished(left, List(end(0, 0L)), ends), left)
+    assertEquals(Restore.unfinished(left, List(end(0, 9L)), ends), left)
+    assertEquals(Restore.unfinished(left, List(end(0, 10L)), ends), Set(("t", 1)))
+    assertEquals(Restore.unfinished(left, List(end(0, 11L), end(1, 0L)), ends), Set.empty)
+    assertEquals(Restore.unfinished(left, Nil, ends), left)
+
+  private def failing(code: ErrorCode) = new KafkaException.BackendFailure("no", Some(code), Some(code.retriable))
+
+  test("asking where a partition ends is asked again while the broker is moving, until it answers"):
+    TestControl.executeEmbed:
+      IO.ref(0).flatMap: asked =>
+        val ask = asked.updateAndGet(_ + 1).flatMap(n => if n < 4 then IO.raiseError(failing(ErrorCode.NotLeaderOrFollower)) else IO.pure(n))
+        Restore.whileMoving(ask).map(assertEquals(_, 4))
+
+  test("asking where a partition ends gives up on a broker that keeps moving once the time is up"):
+    TestControl.executeEmbed:
+      for
+        start  <- IO.monotonic
+        failed <- Restore.whileMoving(IO.raiseError[Int](failing(ErrorCode.LeaderNotAvailable))).attempt
+        now    <- IO.monotonic
+      yield
+        assertEquals(
+          failed.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten,
+          Some(ErrorCode.LeaderNotAvailable)
+        )
+        assert(now - start >= Restore.EndsTimeoutMillis.millis && now - start < Restore.EndsTimeoutMillis.millis + 1.second, now - start)
+
+  test("asking where a partition ends does not ask again after a failure that is not the broker moving"):
+    IO.ref(0).flatMap: asked =>
+      val ask = asked.update(_ + 1) *> IO.raiseError[Int](failing(ErrorCode.TopicAuthorizationFailed))
+      Restore.whileMoving(ask).attempt *> asked.get.map(assertEquals(_, 1))
+
+  for broker <- server.toList do
+    test("a global table acquired as soon as its topic is created waits for the topic's leaders"):
+      Names.fresh:
+        val text     = xkafka.streams.Serde.utf8[IO]
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
+          )(driver.destroyConsumer)
+        (0 until 20).toList.traverse_ : n =>
+          val table = topic(s"fresh-$n")
+          val read  = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
+          consumer.use: client =>
+            create(broker, table) *> GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
+              held.contents.map(contents => assertEquals(contents("gs").size, 0))
+
+    test("a global table under read_committed does not wait for a transaction still open, and does not hold what it wrote"):
+      Names.fresh:
+        val table    = topic("open")
+        val text     = xkafka.streams.Serde.utf8[IO]
+        val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
+          )(driver.destroyConsumer)
+        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "done", Some("v"), 1000L))).void) *>
+          transactionally(broker): open =>
+            open.produce(NonEmptyList.of(record(table, 0, "open", Some("v"), 1000L))).void *> consumer.use: client =>
+              GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
+                held.contents.map(contents => assertEquals(contents("gs").keySet.map(key => new String(key.toArray)), Set("done")))
 
   /** A consumer reading under read_committed and reporting the ends it reaches, as the engine's restore consumer does. */
   private def restoring(server: String): Resource[IO, driver.Client] =
@@ -120,11 +207,9 @@ final class RestoreSuite extends CatsEffectSuite:
         yield assertEquals(
           restored,
           Map(
-            "kept" -> Map(
-              text("k1") -> Stored(text("a2"), now + 500),
-              text("k3") -> Stored(text("c"), now + 400),
-              text("k5") -> Stored(text("e"), now + 200)
+            "kept" -> StoreContents.of(
+              Map(text("k1") -> Stored(text("a2"), now + 500), text("k3") -> Stored(text("c"), now + 400), text("k5") -> Stored(text("e"), now + 200))
             ),
-            "none" -> Map.empty
+            "none" -> StoreContents.empty
           )
         )

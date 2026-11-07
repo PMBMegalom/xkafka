@@ -36,7 +36,10 @@ import internal.driver.{KafkaDriver, PolledRecord, StartAt}
 import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KafkaStreams, KStream, Repartition, Serde, Store, StreamsPhase, StreamsProblem, StreamsState, Topology}
+import xkafka.streams.{
+  BufferLimit, GlobalKTable, KafkaStreams, KStream, KTable, Named, Repartition, Serde, SessionWindows, Store, StreamsPhase, StreamsProblem,
+  StreamsState, Suppressed, TimeWindows, Topology
+}
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
   * simulated time, on every platform.
@@ -183,6 +186,80 @@ final class EngineSuite extends CatsEffectSuite:
 
   private val exactlyOnce: Option[Int => Option[Throwable]] = Some(_ => None)
 
+  /** Stores in memory that record each batch written to them. */
+  private def recording(batches: Ref[IO, List[StoreChanges]]): TaskStore.Open[IO] =
+    (_, held) =>
+      TaskStore.inMemory[IO](held).map: store =>
+        new TaskStore[IO]:
+          def get(key: Chunk[Byte]): IO[Option[Stored]]                        = store.get(key)
+          def prefixed(prefix: Chunk[Byte]): IO[Vector[(Chunk[Byte], Stored)]] = store.prefixed(prefix)
+          def all: IO[StoreContents]                                           = store.all
+          def write(changes: StoreChanges): IO[Unit]                           = batches.update(_ :+ changes) *> store.write(changes)
+
+  private def storing(
+      commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]],
+      failing: Option[Int => Option[Throwable]]
+  )(check: (IO[List[StoreChanges]], World) => IO[Unit]): IO[Unit] =
+    IO.ref(List.empty[StoreChanges]).flatMap(batches => run(commit = commit, failing = failing, open = recording(batches))(check(batches.get, _)))
+
+  private val answered: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
+    (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0))))
+
+  test("at least once, what a task wrote reaches its store as one batch once the commit is answered, not before"):
+    storing(answered, None): (batches, world) =>
+      for
+        _      <- world.tell(assign(TaskId("0", 0)))
+        _      <- IO.sleep(100.millis)
+        _      <- world.records(record(0, 5L, "k", 1000L), record(0, 6L, "other", 1000L))
+        _      <- IO.sleep(500.millis)
+        before <- batches
+        _      <- IO.sleep(2.seconds)
+        after  <- batches
+        sent   <- world.commits.get
+      yield
+        assertEquals(before, Nil)
+        assert(sent.nonEmpty)
+        assertEquals(after.map(_.keySet.map(key => new String(key.toArray))), List(Set("k", "other")))
+
+  test("at least once, what a task wrote does not reach its store where the commit fails"):
+    val failed: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]] =
+      (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 29))))
+    storing(failed, None): (batches, world) =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(3.seconds)
+        ended <- world.ended
+        after <- batches
+      yield
+        assert(ended.exists(_.isLeft), ended)
+        assertEquals(after, Nil)
+
+  test("exactly once, what a task wrote reaches its store as one batch once its transaction commits"):
+    storing(answered, exactlyOnce): (batches, world) =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(3.seconds)
+        after <- batches
+        log   <- world.log.get
+      yield
+        assertEquals(log.collect { case transaction: Event.Transaction => transaction }.size, 1)
+        assertEquals(after.map(_.keySet.map(key => new String(key.toArray))), List(Set("k")))
+
+  test("exactly once, what a task wrote does not reach its store where its transaction is refused"):
+    val refused = new KafkaException.BackendFailure("refused", Some(ErrorCode.UnknownMemberId), Some(false))
+    storing(answered, Some(n => Option.when(n == 0)(refused))): (batches, world) =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(3.seconds)
+        after <- batches
+      yield assertEquals(after, Nil)
+
   test(
     "exactly once, a transaction opens only once records arrive, and writes what the tasks wrote with the offsets they read, not through the member"
   ):
@@ -321,10 +398,24 @@ final class EngineSuite extends CatsEffectSuite:
         assert(took.forall(t => t >= 3000L && t < 3200L), s"written after $took ms")
 
   /** Runs the counting program's engine while `script` runs with it, recording the states it reports. */
-  private def watched(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
+  private def watched(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] = watchedOf(counting)(script)
+
+  private def watchedOf(topology: Topology[IO])(script: (World, KafkaStreams[IO]) => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout).use: streams =>
+        Engine.running(
+          "app",
+          topology,
+          world.member(),
+          world.plane,
+          None,
+          1.second,
+          1,
+          PurgeInterval,
+          CloseTimeout,
+          _ => IO.pure(4),
+          TaskStore.memory[IO]
+        ).use: streams =>
           streams.state.evalMap(state => world.states.update(_ :+ state)).compile.drain.start *> script(world, streams)
     TestControl.executeEmbed(program.timeout(1.minute))
 
@@ -368,12 +459,93 @@ final class EngineSuite extends CatsEffectSuite:
         )
       )
 
+  // Java's set of "orders" and "owners" puts them in one bucket, whose order it takes from names xkafka does not know; "orders" and "users" it does not.
+  test("an application joining topics it cannot list in Java's order says so in its state, and one joining topics it can does not"):
+    def joined(table: String) =
+      Topology.of(
+        KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+          .join(Named("join-t"), KTable(Named("t"), Topic.from(table).orFail, text, text, Store("t")))(_ + _)
+          .to(Named("write-1"), Topic.from("out").orFail, text, text)
+      ).orFail
+    assertEquals(Declaration.unordered("app", joined("owners")), List(List("orders", "owners")))
+    assertEquals(Declaration.unordered("app", joined("users")), Nil)
+    watchedOf(joined("owners")): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(StreamsProblem.JavaMembersMayBeRefused("Java Streams may list the joined topics orders, owners in another order")))
+        )
+
+  test("an application joining an input that has sub-topologies of its own says in its state that Java numbers them by its program's build order"):
+    val counted =
+      KStream(Named("visits"), Topic.from("visits").orFail, text, text).groupBy(Repartition("by-page"), text, text)((_, v) => v)
+        .count(Named("count-1"), Store("visits"))
+    val joined =
+      Topology.of(
+        KStream(Named("orders"), Topic.from("orders").orFail, text, text).join(Named("join-1"), counted)((o, n) => s"$o$n")
+          .to(Named("write-2"), Topic.from("out").orFail, text, text)
+      ).orFail
+    watchedOf(joined): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(StreamsProblem.JavaMembersMayBeRefused(
+            "Java Streams numbers the sub-topologies of the join of orders, app-by-page-repartition otherwise unless it builds the receiver first"
+          )))
+        )
+
+  test("an application cogrouping through a repartition topic says in its state that Java cannot start it"):
+    def group(name: String) = KStream(Named(name), Topic.from(name).orFail, text, text)
+    val cogrouped           =
+      Topology.of(
+        group("a").groupBy(Repartition("r"), text, text)((_, v) => v).cogroup[String]((_, v, t) => t + v)
+          .cogroup(group("b").groupByKey(text, text))((_, v, t) => t + v).aggregate(Named("co"), Store("kept"), text)("").toStream(Named("c"))
+          .to(Named("w"), Topic.from("out").orFail, text, text)
+      ).orFail
+    watchedOf(cogrouped): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(
+            StreamsProblem
+              .JavaMembersMayBeRefused("Java Streams cannot start a cogroup of app-r-repartition, b, since a group goes through a repartition topic")
+          ))
+        )
+
+  test("an application joining a global table says in its state that Java numbers sub-topologies by where its program builds it"):
+    val joined =
+      Topology.of(
+        KStream(Named("in"), Topic.from("in").orFail, text, text)
+          .join(Named("j"), GlobalKTable(Named("g"), Topic.from("g").orFail, text, text, Store("gs")))((_, v) => v)(_ + _)
+          .to(Named("w"), Topic.from("out").orFail, text, text)
+      ).orFail
+    watchedOf(joined): (world, _) =>
+      IO.sleep(100.millis) *> world.states.get.map: states =>
+        assertEquals(
+          states.map(_.problems),
+          List(List(StreamsProblem.JavaMembersMayBeRefused(
+            "Java Streams numbers the sub-topologies around the global table of g otherwise unless it builds it after the stream that first joins it"
+          )))
+        )
+
   test("an application can stop itself on a state it sees, giving back its tasks as it leaves"):
     val run =
       World().flatMap: world =>
         val refused = world.report(_.copy(unauthorized = Some("denied"))).delayBy(2.seconds).start
         val stopped =
-          Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout).use: streams =>
+          Engine.running(
+            "app",
+            counting,
+            world.member(),
+            world.plane,
+            None,
+            1.second,
+            1,
+            PurgeInterval,
+            CloseTimeout,
+            _ => IO.pure(4),
+            TaskStore.memory[IO]
+          ).use: streams =>
             val unauthorized = streams.state.find(_.problems.exists(_.isInstanceOf[StreamsProblem.TopicAuthorizationFailed])).compile.drain
             refused *> IO.race(streams.run, unauthorized)
         stopped *> (IO.monotonic, world.log.get).tupled
@@ -446,6 +618,245 @@ final class EngineSuite extends CatsEffectSuite:
         val held = from.map(_._2("counts").values.map(stored => java.nio.ByteBuffer.wrap(stored.value.toArray).getLong).toList)
         assertEquals((from.map(_._1), held), (List(Map(changelog(1) -> 2L)), List(List(2L))))
 
+  test("a task that emits windows once they close commits the close time it last emitted for, as Java does"):
+    run(topology = emitting): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 1000L))
+        _       <- IO.sleep(2.seconds)
+        _       <- world.records(record(1, 1L, "k", 20000L))
+        _       <- IO.sleep(2.seconds)
+        log     <- world.log.get
+        written <- world.written.get
+      yield
+        assertEquals(written.count(_.topic.value == "out"), 1)
+        assertEquals(
+          log.collect { case Event.Committed(topics) => topics.flatMap(_.partitions).flatMap(_.metadata) }.flatten.last,
+          PartitionTime.encode(20000L, Map("windows" -> 15000L))
+        )
+
+  test("a task started where the group committed emitted windows does not emit them again"):
+    val fetched = OffsetFetchRequest.Answer(List(Fetched("in", 1, 1L, -1, Some(PartitionTime.encode(20000L, Map("windows" -> 15000L))), 0)), 0)
+    run(committed = _ => IO.pure(fetched), topology = emitting): world =>
+      for
+        _       <- world.restoredAlso.set(Map("windows" -> StoreContents.of(Map(window("k", 0L) -> counted(5L)))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 1L, "k", 20000L))
+        _       <- IO.sleep(2.seconds)
+        written <- world.written.get
+      yield assertEquals(written.count(_.topic.value == "out"), 0)
+
+  // Java partitions a windowed key by the key alone (WindowedStreamPartitioner), so every window of a key goes to one partition.
+  test("each window's result goes to the partition the Java producer picks for its key alone"):
+    run(topology = windowing): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 2000L), record(1, 1L, "k", 12000L), record(1, 2L, "other", 2000L))
+        _       <- IO.sleep(1.second)
+        written <- world.written.get
+      yield
+        val out = written.filter(_.topic.value == "out")
+        assertEquals(
+          out.map(record => record.key.map(key => new String(key.take(key.size - 8).toArray)) -> record.partition.map(_.value)),
+          List("k", "k", "other").map(key => Some(key) -> Some(Murmur2.partition(Chunk.array(key.getBytes), 4)))
+        )
+
+  test("at a commit, a suppression's buffer logs each key it changed since the last, what it holds or a tombstone once it holds it no more"):
+    run(topology = suppressing): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 1000L), record(1, 1L, "k", 2000L))
+        _       <- IO.sleep(1500.millis)
+        first   <- world.written.get
+        _       <- world.records(record(1, 2L, "k", 20000L))
+        _       <- IO.sleep(1500.millis)
+        written <- world.written.get
+      yield
+        val logged = written.filter(_.topic.value == "app-final-store-changelog")
+        assertEquals(first.count(_.topic.value == "app-final-store-changelog"), 1)
+        assertEquals(logged.map(_.partition.map(_.value)).distinct, List(Some(1)))
+        assertEquals(logged.map(_.timestamp), List(None, None, None))
+        val held = logged.head.value.flatMap(Held.decode)
+        assertEquals(held.map(h => (h.time, h.context.offset, h.context.topic, h.context.partition)), Some((10000L, 1L, "in", 1)))
+        assertEquals(logged.head.headers, Held.Version)
+        // The window [0, 10000) has gone on, and [20000, 30000) is held.
+        assertEquals(
+          logged.drop(1).map(r => (r.key.map(k => java.nio.ByteBuffer.wrap(k.toArray).getLong(k.size - 8)), r.value.isEmpty)).toSet,
+          Set((Some(0L), true), (Some(20000L), false))
+        )
+        assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => java.nio.ByteBuffer.wrap(v.toArray).getLong), List(2L))
+
+  test("a suppression's buffer logs what it changed before the offsets are committed"):
+    run(topology = suppressing, commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 1, 29)))): world =>
+      world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis) *> world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(1500.millis) *>
+        (world.ended, world.written.get).mapN: (ended, written) =>
+          assert(ended.exists(_.isLeft), ended)
+          assertEquals(written.count(_.topic.value == "app-final-store-changelog"), 1)
+
+  test("exactly once, what a suppression's buffer logs goes in the transaction with the offsets"):
+    run(topology = suppressing, failing = exactlyOnce): world =>
+      for
+        _   <- world.tell(assign(TaskId("0", 1)))
+        _   <- IO.sleep(100.millis)
+        _   <- world.records(record(1, 0L, "k", 1000L), record(1, 1L, "other", 1000L))
+        _   <- IO.sleep(2.seconds)
+        log <- world.log.get
+      // Two records to the window store's changelog, and two to the buffer's.
+      yield assertEquals(log.collect { case Event.Transaction(written, _) => written }, List(4))
+
+  test("a suppression's buffer set to shut down when full stops the engine with an error once it holds more"):
+    val full =
+      Topology.of(
+        KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text)
+          .windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Named("count-2"), Store("windows"))
+          .suppress(Suppressed.untilWindowCloses("final", BufferLimit.records(1).shutDownWhenFull)).toStream(Named("to-stream-1"))
+          .to(Named("write-3"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+      ).orFail
+    run(topology = full): world =>
+      world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis) *> world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(500.millis) *>
+        world.ended.flatMap: before =>
+          world.records(record(1, 1L, "other", 1000L)) *> IO.sleep(500.millis) *> world.ended.map: after =>
+            assertEquals(before, None)
+            assertEquals(
+              after.flatMap(_.left.toOption.map(_.getMessage)),
+              Some("the suppression 'final' buffer exceeded its limit: 2/1 records and 114/9223372036854775807 bytes")
+            )
+
+  test("a restored suppression's buffer sends on what it held once its window closes, with the time and headers it was held with"):
+    val context = HeldContext(4000L, 7L, "in", 1, Headers(Header("trace", Some(Chunk.array("held".getBytes)))))
+    val held    = Held(10000L, context, None, Some(counted(4L).value), Some(counted(5L).value))
+    run(topology = suppressing): world =>
+      for
+        _       <- world.restoredAlso.set(Map("final-store" -> StoreContents.of(Map(window("k", 0L) -> Stored(held.encode, 0L)))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 8L, "other", 15000L))
+        _       <- IO.sleep(1500.millis)
+        written <- world.written.get
+      yield
+        val out = written.filter(_.topic.value == "out")
+        assertEquals(
+          out.map(r => (r.key, r.value, r.timestamp.map(_.epochMillis), r.headers)),
+          List((Some(window("k", 0L)), Some(counted(5L).value), Some(4000L), context.headers))
+        )
+
+  test("a task of a stream joined with a table reads its partition of each topic from where the group committed it, and commits each with its time"):
+    val fetched =
+      OffsetFetchRequest.Answer(
+        List(Fetched("orders", 1, 4L, -1, Some(PartitionTime.encode(1500L)), 0), Fetched("users", 1, 7L, -1, Some(PartitionTime.encode(900L)), 0)),
+        0
+      )
+    run(committed = _ => IO.pure(fetched), topology = joining): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 7L, "u", 300L, value = "ann", topic = "users"))
+        _       <- IO.sleep(1500.millis)
+        log     <- world.log.get
+        fetches <- world.fetches.get
+      yield
+        assertEquals(fetches, List(List(OffsetFetchRequest.Topic("orders", List(1)), OffsetFetchRequest.Topic("users", List(1)))))
+        assertEquals(
+          log.collect { case Event.Read(read) => read.toSet }.head,
+          Set(StartAt(partition("orders", 1), 4L, -1), StartAt(partition("users", 1), 7L, -1))
+        )
+        // Only the partition read since commits, keeping its own partition time, which an older record leaves as it was.
+        assertEquals(
+          log.collect { case Event.Committed(topics) => topics.map(t => t.name -> t.partitions.map(p => (p.index, p.offset, p.metadata))) },
+          List(List("users" -> List((1, 8L, Some(PartitionTime.encode(900L))))))
+        )
+
+  test("a task takes the records of its partitions earliest first, so an order joins the user record read with it but timestamped before it"):
+    run(topology = joining): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "u", 2000L, value = "o1", topic = "orders"), record(1, 0L, "u", 1000L, value = "ann", topic = "users"))
+        _       <- IO.sleep(1500.millis)
+        written <- world.written.get
+      yield assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => new String(v.toArray)), List("o1:ann"))
+
+  test("records of a task's partitions go earliest first, the earliest read of those at one time, each partition in the order read"):
+    def polled(topic: String, offset: Long, at: Long) = record(0, offset, "k", at, topic = topic)
+    val records                                       =
+      List("a" -> polled("a", 0, 5L), "a" -> polled("a", 1, 1L), "b" -> polled("b", 0, 3L), "b" -> polled("b", 1, 9L), "c" -> polled("c", 0, 5L))
+    assertEquals(Engine.byTime(records).map((p, r) => (p, r.offset)), List(("b", 0L), ("a", 0L), ("a", 1L), ("c", 0L), ("b", 1L)))
+
+  test("a restored session store keeps the sessions its clock has not expired, which a record then joins"):
+    run(topology = sessioning): world =>
+      for
+        _ <-
+          world.restoredAlso
+            .set(Map("sessions" -> StoreContents.of(Map(session("k", 1000L, 9000L) -> counted(5L), session("other", 12000L, 12000L) -> counted(1L)))))
+        _       <- world.tell(assign(TaskId("0", 1)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(1, 0L, "k", 10000L))
+        _       <- IO.sleep(1.second)
+        written <- world.written.get
+      yield
+        val counts = written.filter(_.topic.value == "out").flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong)
+        assertEquals(counts, List(6L))
+
+  test("a standby session store loses the sessions its clock has expired as it follows its changelog"):
+    def sessionLogged(key: String, start: Long, end: Long, offset: Long) =
+      PolledRecord("app-sessions-changelog", 1, offset, Some(end), 1, -1, Some(session(key, start, end)), Some(counted(1L).value), Headers.empty)
+    run(topology = sessioning): world =>
+      for
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _ <- IO.sleep(500.millis)
+        // By its end, which a session store expires it by, [0, 25000] is not expired; read as a window's start, it would be.
+        _    <- world.changelogs(sessionLogged("k", 0L, 25000L, 0L), sessionLogged("gone", 0L, 5000L, 1L), sessionLogged("other", 30000L, 30000L, 2L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield assertEquals(from.map(_._2("sessions").keySet), List(Set(session("k", 0L, 25000L), session("other", 30000L, 30000L))))
+
+  test("a restored window store loses the windows its clock has expired, so a record for one starts it again"):
+    run(topology = windowing): world =>
+      for
+        _ <- world.restoredAlso.set(Map("windows" -> StoreContents.of(Map(window("k", 0L) -> counted(5L), window("other", 30000L) -> counted(1L)))))
+        _ <- world.tell(assign(TaskId("0", 1)))
+        _ <- IO.sleep(100.millis)
+        _ <- world.records(record(1, 0L, "k", 2000L))
+        _ <- IO.sleep(1.second)
+        written <- world.written.get
+      yield
+        val counts = written.filter(_.topic.value == "out").flatMap(_.value).map(value => java.nio.ByteBuffer.wrap(value.toArray).getLong)
+        assertEquals(counts, List(1L))
+
+  test("a standby window store loses the windows its clock has expired as it follows its changelog"):
+    def windowLogged(key: String, start: Long, offset: Long) =
+      PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), Some(counted(1L).value), Headers.empty)
+    run(topology = windowing): world =>
+      for
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(windowLogged("k", 0L, 0L), windowLogged("other", 30000L, 1L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield assertEquals(from.map(_._2("windows").keySet), List(Set(window("other", 30000L))))
+
+  test("a removal a standby window store reads counts towards its clock, so what it expired is gone though the removed window left nothing"):
+    def windowLogged(key: String, start: Long, offset: Long, value: Option[Chunk[Byte]]) =
+      PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), value, Headers.empty)
+    run(topology = windowing): world =>
+      for
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(windowLogged("k", 0L, 0L, Some(counted(1L).value)), windowLogged("other", 30000L, 1L, None))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield assertEquals(from.map(_._2("windows").keySet), List(Set.empty[Chunk[Byte]]))
+
   /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
   private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
     for
@@ -488,8 +899,19 @@ final class EngineSuite extends CatsEffectSuite:
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout and one poll of its standby reader"):
     val run =
       World().flatMap: world =>
-        Engine.running("app", counting, world.member(leave = IO.never), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout)
-          .use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
+        Engine.running(
+          "app",
+          counting,
+          world.member(leave = IO.never),
+          world.plane,
+          None,
+          1.second,
+          1,
+          PurgeInterval,
+          CloseTimeout,
+          _ => IO.pure(4),
+          TaskStore.memory[IO]
+        ).use(_ => IO.unit) *> (IO.monotonic, world.log.get).tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (released, log) =>
       assert(released >= CloseTimeout && released <= CloseTimeout + Engine.PollMillis.millis, s"released at $released")
       assertEquals(log, List(Event.Leave))
@@ -504,20 +926,67 @@ object EngineSuite:
   /** Counts by the value's first letter, through the repartition topic `app-by-letter-repartition`, read by the tasks of sub-topology 1. */
   private val byLetter: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1)).count(Store("counts"))
-        .toStream.to(Topic.from("out").orFail, text, Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupBy(Repartition("by-letter"), text, text)((_, value) => value.take(1))
+        .count(Named("count-3"), Store("counts")).toStream(Named("to-stream-2")).to(Named("write-4"), Topic.from("out").orFail, text, Serde.long[IO])
     ).orFail
 
   /** Waits a second over each value, then writes it unchanged. */
   private val slow: Topology[IO] =
-    Topology
-      .of(KStream(Topic.from("in").orFail, text, text).evalMapValues(value => IO.sleep(1.second).as(value)).to(Topic.from("out").orFail, text, text))
-      .orFail
+    Topology.of(
+      KStream(Named("in"), Topic.from("in").orFail, text, text).evalMapValues(Named("eval-map-values-1"))(value => IO.sleep(1.second).as(value))
+        .to(Named("write-5"), Topic.from("out").orFail, text, text)
+    ).orFail
+
+  /** Counts each key's records in tumbling windows of 10 s with 5 s of grace, in the window store `windows`. */
+  private val windowing: Topology[IO] =
+    Topology.of(
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-4"), Store("windows")).toStream(Named("to-stream-3"))
+        .to(Named("write-6"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  /** Counts as `windowing` does, keeping windows a minute and emitting each once it closes. */
+  private val emitting: Topology[IO] =
+    Topology.of(
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .withRetention(1.minute).emitOnWindowClose.count(Named("count-5"), Store("windows")).toStream(Named("to-stream-4"))
+        .to(Named("write-7"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  /** Counts as `windowing` does, passing on each window's final result once it closes. */
+  private val suppressing: Topology[IO] =
+    Topology.of(
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-6"), Store("windows")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-5"))
+        .to(Named("write-8"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), Serde.long[IO])
+    ).orFail
+
+  /** Joins each order with its user. */
+  private val joining: Topology[IO] =
+    Topology.of(
+      KStream(Named("orders"), Topic.from("orders").orFail, text, text)
+        .join(Named("join-users"), KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users")))((o, u) => s"$o:$u")
+        .to(Named("write-9"), Topic.from("out").orFail, text, text)
+    ).orFail
+
+  /** Counts each key's records in sessions with a gap of 5 s and 5 s of grace, in the session store `sessions`. */
+  private val sessioning: Topology[IO] =
+    Topology.of(
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 5.seconds))
+        .count(Named("count-7"), Store("sessions")).toStream(Named("to-stream-6"))
+        .to(Named("write-10"), Topic.from("out").orFail, Serde.sessionWindowed(text), Serde.long[IO].option)
+    ).orFail
+
+  private def session(key: String, start: Long, end: Long): Chunk[Byte] = SessionStore.key(Chunk.array(key.getBytes), start, end)
+
+  private def counted(n: Long): Stored = Stored(Chunk.array(java.nio.ByteBuffer.allocate(8).putLong(n).array), 0L)
+
+  private def window(key: String, start: Long): Chunk[Byte] = WindowStore.key(Chunk.array(key.getBytes), start)
 
   private val counting: Topology[IO] =
     Topology.of(
-      KStream(Topic.from("in").orFail, text, text).groupByKey(text, text).count(Store("counts")).toStream
-        .to(Topic.from("out").orFail, text, Serde.long[IO])
+      KStream(Named("in"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count-8"), Store("counts"))
+        .toStream(Named("to-stream-7")).to(Named("write-11"), Topic.from("out").orFail, text, Serde.long[IO])
     ).orFail
 
   def partition(topic: String, n: Int): TopicPartition = TopicPartition(Topic.from(topic).orFail, Partition.from(n).orFail)
@@ -577,8 +1046,9 @@ object EngineSuite:
       val states: Ref[IO, List[StreamsState]],
       standingBy: Queue[IO, PolledRecord],
       ending: Ref[IO, Map[TopicPartition, Long]],
-      val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]],
-      offsetsRead: Ref[IO, IO[TaskOffsets]]
+      val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, StoreContents])]],
+      offsetsRead: Ref[IO, IO[TaskOffsets]],
+      val restoredAlso: Ref[IO, Map[String, StoreContents]]
   ):
     /** Changelog records for the standby tasks to follow. */
     def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
@@ -646,9 +1116,10 @@ object EngineSuite:
         def restore(
             changelogs: Map[TopicPartition, String],
             from: Map[TopicPartition, Long],
-            held: Map[String, Map[Chunk[Byte], Stored]]
-        ): IO[Map[String, Map[Chunk[Byte], Stored]]] =
-          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)).as(held)
+            held: Map[String, StoreContents]
+        ): IO[Map[String, StoreContents]] =
+          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)) *>
+            restoredAlso.get.map(held ++ _)
         def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
         def followed: IO[List[PolledRecord]]          =
           standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
@@ -681,9 +1152,10 @@ object EngineSuite:
         IO.ref(List.empty[StreamsState]),
         Queue.unbounded[IO, PolledRecord],
         IO.ref(Map.empty[TopicPartition, Long]),
-        IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, Map[Chunk[Byte], Stored]])]),
-        IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets")))
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, StoreContents])]),
+        IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
+        IO.ref(Map.empty[String, StoreContents])
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.
@@ -694,12 +1166,14 @@ object EngineSuite:
         (_, topics) => IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 0)))),
       failing: Option[Int => Option[Throwable]] = None,
       topology: Topology[IO] = counting,
-      concurrency: Int = 1
+      concurrency: Int = 1,
+      open: TaskStore.Open[IO] = TaskStore.memory[IO]
   )(script: World => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
         val transactions = failing.map(world.transactions)
         val member       = world.member(committed, commit)
-        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout).use: running =>
-          running.run.attempt.flatMap(world.finished).start *> script(world)
+        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout, _ => IO.pure(4), open)
+          .use: running =>
+            running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(15.minutes))

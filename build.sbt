@@ -7,8 +7,8 @@ import scala.sys.process.ProcessLogger
 import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
-ThisBuild / scalaVersion     := "3.3.8"
-ThisBuild / tlBaseVersion    := "0.6"
+ThisBuild / scalaVersion     := "3.3.9"
+ThisBuild / tlBaseVersion    := "0.7"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
 ThisBuild / homepage         := Some(url("https://github.com/PMBMegalom/xkafka"))
@@ -32,8 +32,9 @@ val catsTaglessVersion     = "0.16.5"
 val fs2Version             = "3.14.0"
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
-val lz4JavaVersion         = "1.12.1" // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
-val nodeVersion            = "24"     // The Node.js release the JavaScript backend targets, matching .nvmrc.
+val lz4JavaVersion         = "1.12.1"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
+val snappyJavaVersion      = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which has security advisories fixed in 1.1.10.9.
+val nodeVersion            = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
 val librdkafkaVersion      = "2.16.0"
 val librdkafkaSha256       = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
 val munitVersion           = "1.3.6"
@@ -98,6 +99,9 @@ def cacheLibrdkafkaLibrary = Def.setting {
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
 )
+// Linking the Native tests takes more than sbt's default heap of 1 GB.
+ThisBuild / githubWorkflowEnv += "SBT_OPTS" -> "-Xmx4g"
+
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
 // A failure on one entry cancels the others, so nothing waits on a matrix that has already failed.
@@ -716,11 +720,12 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   )
   .jvmSettings(
     libraryDependencies ++= Seq(
-      "org.apache.kafka" % "kafka-clients"            % kafkaClientsVersion,
-      "at.yawk.lz4"      % "lz4-java"                 % lz4JavaVersion,
-      "org.slf4j"        % "slf4j-nop"                % slf4jVersion        % Test,
-      "org.apache.kafka" % "kafka-streams"            % kafkaClientsVersion % Test,
-      "org.apache.kafka" % "kafka-streams-test-utils" % kafkaClientsVersion % Test
+      "org.apache.kafka"  % "kafka-clients"            % kafkaClientsVersion,
+      "at.yawk.lz4"       % "lz4-java"                 % lz4JavaVersion,
+      "org.xerial.snappy" % "snappy-java"              % snappyJavaVersion,
+      "org.slf4j"         % "slf4j-nop"                % slf4jVersion        % Test,
+      "org.apache.kafka"  % "kafka-streams"            % kafkaClientsVersion % Test,
+      "org.apache.kafka"  % "kafka-streams-test-utils" % kafkaClientsVersion % Test
     )
   )
 

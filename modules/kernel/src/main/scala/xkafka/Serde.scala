@@ -33,17 +33,29 @@ trait Serializer[F[_], -A]:
 
   def serialize(topic: Topic, headers: Headers, value: A): F[Option[Chunk[Byte]]]
 
+  /** The bytes a record whose key is `value` is partitioned by, where they are not those it is written as, as Java partitions a windowed key by its
+    * key alone.
+    */
+  private[xkafka] def partitionedBy(topic: Topic, headers: Headers, value: A): Option[F[Option[Chunk[Byte]]]] = None
+
   final def mapK[G[_]](fk: FunctionK[F, G]): Serializer[G, A] =
-    Serializer.instance((topic, headers, value) => fk(self.serialize(topic, headers, value)))
+    new Serializer[G, A]:
+      override def serialize(topic: Topic, headers: Headers, value: A): G[Option[Chunk[Byte]]] = fk(self.serialize(topic, headers, value))
+      override private[xkafka] def partitionedBy(topic: Topic, headers: Headers, value: A): Option[G[Option[Chunk[Byte]]]] =
+        self.partitionedBy(topic, headers, value).map(fk(_))
 
   final def option(using F: Applicative[F]): Serializer[F, Option[A]] =
-    Serializer.instance:
-      case (topic, headers, Some(value)) => self.serialize(topic, headers, value)
-      case (_, _, None)                  => F.pure(None)
+    new Serializer[F, Option[A]]:
+      override def serialize(topic: Topic, headers: Headers, value: Option[A]): F[Option[Chunk[Byte]]] =
+        value.fold(F.pure(None))(self.serialize(topic, headers, _))
+      override private[xkafka] def partitionedBy(topic: Topic, headers: Headers, value: Option[A]): Option[F[Option[Chunk[Byte]]]] =
+        value.flatMap(self.partitionedBy(topic, headers, _))
 
   final def contramap[B](f: B => A): Serializer[F, B] =
     new Serializer[F, B]:
       override def serialize(topic: Topic, headers: Headers, value: B): F[Option[Chunk[Byte]]] = self.serialize(topic, headers, f(value))
+      override private[xkafka] def partitionedBy(topic: Topic, headers: Headers, value: B): Option[F[Option[Chunk[Byte]]]] =
+        self.partitionedBy(topic, headers, f(value))
 
 object Serializer:
   given [F[_]]: Contravariant[[A] =>> Serializer[F, A]] with
