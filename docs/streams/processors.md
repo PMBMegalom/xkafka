@@ -89,18 +89,80 @@ Those reads follow the order of the keys' serialized bytes, which is not always
 the order of the keys themselves. A number written as text, for example, sorts
 `"10"` before `"9"`.
 
-Your code reads what it has written straight away. The writes are kept when the
-task commits, together with the records you returned and the offsets read, and
-go to a changelog topic named `<application>-<store>-changelog`, which a member
-taking over the work restores the store from. If your handler fails, nothing it
-wrote for that record is kept.
+Your code reads what it has written straight away. The writes are saved at
+each commit, along with the records you returned and the offsets read, to a topic
+named `<application id>-<store>-changelog`. A member that takes over the work
+restores the store from it. If your handler fails, nothing it wrote for that
+record is saved.
 
 Anything else your handler does, such as calling another service, runs again for
-records replayed after a crash or a fencing.
+records that are processed again after a crash or when another member takes over.
+
+## Running on a schedule
+
+A punctuator is code a processor runs on a schedule, between records. Wrap the
+handler in `Processor.every` with a schedule and what to do. It is given the
+time it runs at, and the records it returns go on to the next step, as a
+handler's do.
+
+```scala mdoc:compile-only
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def totalsEveryMinute(input: Topic, output: Topic): Pipeline[IO] =
+  val user   = Serde.utf8[IO]
+  val amount = Serde.long[IO]
+  val totals = KeyValueStore.of(Store("totals"), user, amount)
+  KStream(Named("payments"), input, user, amount)
+    .process(
+      Named("report-totals"),
+      Processor.withStore(totals): kept =>
+        Processor.every(Punctuation.streamTime(1.minute)): at =>
+          kept.all.compile.toList.map(_.map((name, total) => Record(name, total, at)))
+        .apply:
+          Processor.onRecord: record =>
+            kept.get(record.key).flatMap: total =>
+              kept.put(record.key, total.getOrElse(0L) + record.value).as(Nil)
+    )
+    .to(Named("write-totals"), output, user, amount)
+```
+
+A punctuator runs separately in each [task](running.md#tasks), and reads only
+that task's part of the stores. Nest `every` to declare several. There are two
+schedules:
+
+| Schedule | Goes by | Runs |
+| --- | --- | --- |
+| `Punctuation.streamTime(interval)` | The latest record timestamp the task has read, its stream time | With the first record, then whenever stream time reaches the next multiple of the interval. Not while no records arrive |
+| `Punctuation.wallClock(interval)` | The clock | Each time the interval passes, from when the task starts, whether or not records arrive |
+
+With `Punctuation.streamTime(1.minute)` and a first record timestamped 12:00:30,
+it runs at 12:00:30, and next for the first record timestamped 12:01:00 or later.
+If several intervals have passed, it runs once. It is given the stream time or
+clock time it runs at. An interval below a millisecond is refused when you call
+`Topology.of`.
+
+What a punctuator writes to a store is saved at the next commit, as a handler's
+writes are, and reaches the changelog with the time it was given. Under
+exactly-once processing, a wall-clock punctuator that runs while no records arrive
+commits a transaction each time, so avoid very short intervals.
+
+Schedules are not saved. When a task starts again, here or on another member, a
+stream-time punctuator runs as soon as the task has a stream time, even if its
+interval has not passed, and a wall-clock interval starts afresh. To remember when
+something is due, keep it in a store.
+
+A `FixedKeyProcessor`'s punctuators, declared with `FixedKeyProcessor.every`, can
+write to its stores but cannot send records on. To send records on a schedule, use
+`Processor`.
 
 ## Sharing a store
 
 Give two processors the same `KeyValueStore.of` value and they share one store.
-They then run in one sub-topology, so a task handles the same partition of both
-inputs. Two separate values with the same store name are refused when you call
+One task then handles the same-numbered partition of both inputs, and both
+processors see the same part of the store. Two separate values with the same store name are refused when you call
 `Topology.of`.

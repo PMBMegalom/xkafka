@@ -22,6 +22,8 @@
 package xkafka
 package streams
 
+import scala.concurrent.duration.*
+
 import cats.Functor
 import cats.arrow.FunctionK
 import cats.syntax.all.*
@@ -76,7 +78,7 @@ object KeyValueStore:
     * one sub-topology, as Java's do.
     */
   def of[F[_]: cats.MonadThrow, K, V](store: Store, key: Serde[F, K], value: Serde[F, V]): DeclaredStore[F, KeyValueStore[F, K, V]] =
-    new DeclaredStore(store, access => opened(store, access, key, value))
+    new DeclaredStore(store, access => opened(store, access, key, value), StoreAccess.idle(store))
 
   private def opened[F[_], K, V](store: Store, access: StoreAccess[F], key: Serde[F, K], value: Serde[F, V])(using
       F: cats.MonadThrow[F]
@@ -120,7 +122,11 @@ object KeyValueStore:
         entries(bytes.flatMap(access.prefixed), identity)
 
 /** A store a processor declares, which it uses as an `H`. */
-final class DeclaredStore[F[_], H] private[xkafka] (val store: Store, private[xkafka] val open: StoreAccess[F] => H):
+final class DeclaredStore[F[_], H] private[xkafka] (
+    val store: Store,
+    private[xkafka] val open: StoreAccess[F] => H,
+    private[xkafka] val idle: StoreAccess[F]
+):
   private[xkafka] val kept: KeptStore = KeptStore(store, shared = Some(this))
 
 /** A store as bytes, for a task to give a processor, with what the processor wrote since its last commit in it. */
@@ -149,37 +155,95 @@ private[xkafka] trait StoreAccess[F[_]]:
       def all: G[Vector[(Chunk[Byte], Chunk[Byte])]]                                         = fk(self.all)
       def prefixed(prefix: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]]               = fk(self.prefixed(prefix))
 
-/** What a processor does with each record, given the stores it opened. */
-final class ProcessorLogic[F[_], K, V, K2, V2] private[xkafka] (private[xkafka] val onRecord: Record[K, V] => F[List[Record[K2, V2]]]):
-  private[xkafka] def mapK[G[_]](fk: FunctionK[F, G]): ProcessorLogic[G, K, V, K2, V2] = new ProcessorLogic(record => fk(onRecord(record)))
+private[xkafka] object StoreAccess:
+  /** Access to `store` that refuses every use, for seeing what a processor declares without running it. */
+  def idle[F[_]](store: Store)(using F: cats.ApplicativeThrow[F]): StoreAccess[F] =
+    def refused[A]: F[A] = F.raiseError(new IllegalStateException(s"the store '${store.value}' was used while its processor was being declared"))
+    new StoreAccess[F]:
+      val topic: Topic                                                                       = Topic.from("idle").toOption.get
+      def get(key: Chunk[Byte]): F[Option[Chunk[Byte]]]                                      = refused
+      def put(key: Chunk[Byte], value: Option[Chunk[Byte]]): F[Unit]                         = refused
+      def between(from: Chunk[Byte], to: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] = refused
+      def all: F[Vector[(Chunk[Byte], Chunk[Byte])]]                                         = refused
+      def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]               = refused
+
+/** When a punctuator runs. */
+final class Punctuation private (private[xkafka] val wallClock: Boolean, val interval: FiniteDuration):
+  /** Why it cannot be used, if it cannot. */
+  private[xkafka] def problem: Option[String] = Option.when(interval < 1.milli)(s"its interval of $interval is less than a millisecond")
+
+  /** The interval in milliseconds. */
+  private[xkafka] def millis: Long = interval.toMillis
+
+object Punctuation:
+  /** As the task's stream time, the latest time of a record it has read, passes each multiple of `interval`, and as soon as it has a stream time. It
+    * runs when records arrive, and once however many multiples they pass.
+    */
+  def streamTime(interval: FiniteDuration): Punctuation = new Punctuation(false, interval)
+
+  /** Each time `interval` has passed by the clock, from when the task starts, with or without records. It runs once however many intervals were
+    * missed.
+    */
+  def wallClock(interval: FiniteDuration): Punctuation = new Punctuation(true, interval)
+
+/** What runs on a schedule, given the time it runs at, and the records it returns. */
+private[xkafka] final class Punctuator[F[_], K2, V2](val schedule: Punctuation, val run: Timestamp => F[List[Record[K2, V2]]]):
+  def mapK[G[_]](fk: FunctionK[F, G]): Punctuator[G, K2, V2] = new Punctuator(schedule, at => fk(run(at)))
+
+/** What a processor does with each record and on its schedules, given the stores it opened. */
+final class ProcessorLogic[F[_], K, V, K2, V2] private[xkafka] (
+    private[xkafka] val onRecord: Record[K, V] => F[List[Record[K2, V2]]],
+    private[xkafka] val punctuators: List[Punctuator[F, K2, V2]] = Nil
+):
+  private[xkafka] def mapK[G[_]](fk: FunctionK[F, G]): ProcessorLogic[G, K, V, K2, V2] =
+    new ProcessorLogic(record => fk(onRecord(record)), punctuators.map(_.mapK(fk)))
+
+  private[xkafka] def punctuating(punctuator: Punctuator[F, K2, V2]): ProcessorLogic[F, K, V, K2, V2] =
+    new ProcessorLogic(onRecord, punctuator :: punctuators)
 
 /** A step of a stream that a program writes itself, as Java's `Processor`, with the stores it declares handed to it already typed, so that it cannot
   * read a store it did not declare. It runs once for each task, so what it reads and writes is the task's own part of each store.
   */
 final class Processor[F[_], K, V, K2, V2] private (
     private[xkafka] val kept: List[KeptStore],
+    private[xkafka] val idle: Map[String, StoreAccess[F]],
     private[xkafka] val handling: Map[String, StoreAccess[F]] => ProcessorLogic[F, K, V, K2, V2]
 ):
+  /** The schedules it declares, in order. */
+  private[xkafka] lazy val schedules: List[Punctuation] = handling(idle).punctuators.map(_.schedule)
+
   /** The same processor with its effects in `G`: its stores come from `G` and its handlers go to it. */
   private[xkafka] def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Processor[G, K, V, K2, V2] =
-    new Processor(kept, access => handling(access.view.mapValues(_.imapK(gk)).toMap).mapK(fk))
+    new Processor(kept, idle.view.mapValues(_.imapK(fk)).toMap, access => handling(access.view.mapValues(_.imapK(gk)).toMap).mapK(fk))
 
 object Processor:
   /** What to do with each record: the records it returns go on to the next step. */
   def onRecord[F[_], K, V, K2, V2](handle: Record[K, V] => F[List[Record[K2, V2]]]): ProcessorLogic[F, K, V, K2, V2] = new ProcessorLogic(handle)
 
+  /** `logic`, and `punctuate` run on `schedule`: the records it returns go on to the next step, and what it writes to the stores is kept as what a
+    * handler writes is, at the time it is given. Wrap `logic` in several to run several, in the order they are written.
+    */
+  def every[F[_], K, V, K2, V2](schedule: Punctuation)(punctuate: Timestamp => F[List[Record[K2, V2]]])(
+      logic: ProcessorLogic[F, K, V, K2, V2]
+  ): ProcessorLogic[F, K, V, K2, V2] = logic.punctuating(new Punctuator(schedule, punctuate))
+
   /** A processor keeping no store. */
-  def withoutStores[F[_], K, V, K2, V2](logic: ProcessorLogic[F, K, V, K2, V2]): Processor[F, K, V, K2, V2] = new Processor(Nil, _ => logic)
+  def withoutStores[F[_], K, V, K2, V2](logic: ProcessorLogic[F, K, V, K2, V2]): Processor[F, K, V, K2, V2] =
+    new Processor(Nil, Map.empty, _ => logic)
 
   /** A processor keeping one store. */
   def withStore[F[_], H, K, V, K2, V2](store: DeclaredStore[F, H])(logic: H => ProcessorLogic[F, K, V, K2, V2]): Processor[F, K, V, K2, V2] =
-    new Processor(List(store.kept), access => logic(store.open(access(store.store.value))))
+    new Processor(List(store.kept), Map(store.store.value -> store.idle), access => logic(store.open(access(store.store.value))))
 
   /** A processor keeping two stores. */
   def withStores[F[_], H1, H2, K, V, K2, V2](first: DeclaredStore[F, H1], second: DeclaredStore[F, H2])(
       logic: (H1, H2) => ProcessorLogic[F, K, V, K2, V2]
   ): Processor[F, K, V, K2, V2] =
-    new Processor(List(first.kept, second.kept), access => logic(first.open(access(first.store.value)), second.open(access(second.store.value))))
+    new Processor(
+      List(first.kept, second.kept),
+      Map(first.store.value -> first.idle, second.store.value -> second.idle),
+      access => logic(first.open(access(first.store.value)), second.open(access(second.store.value)))
+    )
 
   /** A processor keeping three stores. */
   def withStores[F[_], H1, H2, H3, K, V, K2, V2](first: DeclaredStore[F, H1], second: DeclaredStore[F, H2], third: DeclaredStore[F, H3])(
@@ -187,6 +251,7 @@ object Processor:
   ): Processor[F, K, V, K2, V2] =
     new Processor(
       List(first.kept, second.kept, third.kept),
+      Map(first.store.value -> first.idle, second.store.value -> second.idle, third.store.value -> third.idle),
       access => logic(first.open(access(first.store.value)), second.open(access(second.store.value)), third.open(access(third.store.value)))
     )
 
@@ -216,6 +281,14 @@ object FixedKeyProcessor:
   /** What to do with each record: the records it returns go on to the next step. */
   def onRecord[F[_]: Functor, K, V, V2](handle: FixedKeyRecord[K, V] => F[List[FixedKeyRecord[K, V2]]]): FixedKeyLogic[F, K, V, V2] =
     new FixedKeyLogic(Processor.onRecord(record => handle(new FixedKeyRecord(record)).map(_.map(_.record))))
+
+  /** `logic`, and `punctuate` run on `schedule`. What it writes to the stores is kept as what a handler writes is, at the time it is given. It sends
+    * nothing on, since a record that keeps its key can only be made from a record read. Wrap `logic` in several to run several, in the order they are
+    * written.
+    */
+  def every[F[_]: Functor, K, V, V2](schedule: Punctuation)(punctuate: Timestamp => F[Unit])(
+      logic: FixedKeyLogic[F, K, V, V2]
+  ): FixedKeyLogic[F, K, V, V2] = new FixedKeyLogic(Processor.every(schedule)(at => punctuate(at).as(List.empty[Record[K, V2]]))(logic.logic))
 
   /** A processor keeping no store. */
   def withoutStores[F[_], K, V, V2](logic: FixedKeyLogic[F, K, V, V2]): FixedKeyProcessor[F, K, V, V2] =

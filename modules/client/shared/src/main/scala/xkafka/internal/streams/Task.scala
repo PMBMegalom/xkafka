@@ -29,8 +29,8 @@ import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
 import xkafka.streams.{
-  Consumer, Entry, Joiner, Origin, Processor, Record, RecordOrigin, Release, Source, Step, Store, StoreAccess, StreamJoin, StreamsJoined, Subtopology,
-  TableKey, TablesJoined, TableValue, TableView, Window, Windowed
+  Consumer, Entry, Joiner, Origin, Processor, Punctuating, Punctuation, Record, RecordOrigin, Release, Source, Step, Store, StoreAccess, StreamJoin,
+  StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue, TableView, Window, Windowed
 }
 
 /** A record as a topic holds it, read by a task. */
@@ -64,7 +64,8 @@ private[xkafka] final case class Stored(value: Chunk[Byte], timestamp: Long)
   * it has read, and for each window store, the stream time its windowing steps have seen, each side of a cogroup its own, which starts again on each
   * member as Java's does, the store's clock (see [[WindowStore]]), taken from its contents where the task has not yet kept it, and where its step
   * emits windows once they close, the close time it last emitted for, committed with the task's offsets, and the wall-clock time before which it does
-  * not look for closed windows again.
+  * not look for closed windows again, and when each punctuator runs next, those going by the clock apart from those going by stream time, in memory
+  * only, as Java's schedules are.
   */
 private[xkafka] final case class TaskState(
     pending: Map[String, StoreChanges],
@@ -78,7 +79,8 @@ private[xkafka] final case class TaskState(
     sequences: Map[String, Int] = Map.empty,
     joinTimes: Map[String, JoinTime] = Map.empty,
     reading: Option[TaskInput] = None,
-    globals: Map[String, StoreContents] = Map.empty
+    globals: Map[String, StoreContents] = Map.empty,
+    punctuations: Map[Boolean, PunctuationQueue] = Map.empty
 ):
   /** The state with `change` written to `key` of `store`. */
   def written(store: String, key: Chunk[Byte], change: Option[Stored]): TaskState =
@@ -102,6 +104,34 @@ private[xkafka] object JoinTime:
 
   /** How long Java waits between looks, by the wall clock, by default (`__emit.interval.ms.kstreams.outer.join.spurious.results.fix__`). */
   val EmitInterval: Long = 1000L
+
+/** When punctuators run next, each named by its processor and its place in it, as a binary heap by time alone, as Java's `PriorityQueue` of them is,
+  * so that those due together run in the order Java's do.
+  */
+private[xkafka] final case class PunctuationQueue(heap: Vector[((String, Int), Long)]):
+  def next: Option[((String, Int), Long)] = heap.headOption
+
+  /** With `added`, moved up past each later parent, as `PriorityQueue.offer` moves it. */
+  def added(added: ((String, Int), Long)): PunctuationQueue =
+    @scala.annotation.tailrec
+    def up(placed: Vector[((String, Int), Long)], at: Int): Vector[((String, Int), Long)] =
+      val parent = (at - 1) / 2
+      if at == 0 || added._2 >= placed(parent)._2 then placed.updated(at, added) else up(placed.updated(at, placed(parent)), parent)
+    PunctuationQueue(up(heap :+ added, heap.size))
+
+  /** Without its first, the last moved down from there past each earlier child, the earlier child if tied the left, as `PriorityQueue.poll` moves it.
+    */
+  def polled: PunctuationQueue =
+    val last = heap.last
+    val left = heap.init
+    @scala.annotation.tailrec
+    def down(placed: Vector[((String, Int), Long)], at: Int): Vector[((String, Int), Long)] =
+      val first = 2 * at + 1
+      if first >= left.size then placed.updated(at, last)
+      else
+        val child = if first + 1 < left.size && placed(first)._2 > placed(first + 1)._2 then first + 1 else first
+        if last._2 <= placed(child)._2 then placed.updated(at, last) else down(placed.updated(at, placed(child)), child)
+    PunctuationQueue(if left.isEmpty then Vector.empty else down(left, 0))
 
 private[xkafka] object TaskState:
   /** Nothing is written yet, and no partition time is known. */
@@ -138,6 +168,72 @@ private[xkafka] final class Task[F[_]](
     val read  = state.copy(partitionTimes = times, reading = Some(input))
     // A record read outside the engine names no topic, and goes to the topic the sub-topology is named after.
     entered(readers.getOrElse(input.topic, subtopology.entries.head), read, input, now)
+
+  /** Each punctuator with its place among its processor's. */
+  private val scheduled: Map[(String, Int), (Punctuating[F], Int, Punctuation)] =
+    subtopology.punctuating.flatMap(node => node.schedules.zipWithIndex.map((schedule, index) => (node.named, index) -> (node, index, schedule)))
+      .toMap
+
+  /** The punctuators in the order Java's processors schedule them. */
+  private val declared: List[((String, Int), Punctuation)] =
+    subtopology.punctuating.flatMap(node => node.schedules.zipWithIndex.map((schedule, index) => (node.named, index) -> schedule))
+
+  /** Whether it has anything to run but what arrives. */
+  val punctuates: Boolean = declared.nonEmpty
+
+  /** The time a task's stream-time punctuators go by, the latest time of a record read from any of its topics, if it has read one. */
+  private def streamTime(state: TaskState): Option[Long] = state.partitionTimes.values.maxOption.filter(_ >= 0)
+
+  /** The state with its punctuators scheduled at wall-clock time `now`, unless they are, as Java schedules them when it starts a task: one going by
+    * stream time at 0, to run as soon as there is a stream time and at multiples of its interval after, and one going by the clock an interval away.
+    */
+  def started(state: TaskState, now: Long): TaskState =
+    def queued(wallClock: Boolean, first: Punctuation => Long) =
+      declared.filter(_._2.wallClock == wallClock)
+        .foldLeft(PunctuationQueue(Vector.empty))((queue, entry) => queue.added(entry._1 -> first(entry._2)))
+    if !punctuates || state.punctuations.nonEmpty then state
+    else state.copy(punctuations = Map(false -> queued(false, _ => 0L), true -> queued(true, now + _.millis)))
+
+  /** Whether a punctuator is due at wall-clock time `now`. */
+  def due(state: TaskState, now: Long): Boolean =
+    val ready                                   = started(state, now)
+    def reached(wallClock: Boolean, time: Long) = ready.punctuations.get(wallClock).flatMap(_.next).exists(_._2 <= time)
+    streamTime(ready).exists(reached(false, _)) || reached(true, now)
+
+  /** Runs the punctuators due at wall-clock time `now`, as Java's task does after a record and whenever it finds none: those going by stream time and
+    * then those going by the clock, each once, at the time now reached, and next at the first multiple of its interval from when it last ran that is
+    * later.
+    */
+  def punctuate(state: TaskState, now: Long): F[(TaskState, Vector[TaskOutput])] =
+    def run(ready: TaskState, written: Vector[TaskOutput], wallClock: Boolean, at: Long): F[(TaskState, Vector[TaskOutput])] =
+      (ready, written).tailRecM: (current, out) =>
+        val queue = current.punctuations(wallClock)
+        queue.next.filter(_._2 <= at) match
+          case None             => F.pure(Right((current, out)))
+          case Some((id, time)) =>
+            val (node, index, schedule) = scheduled(id)
+            val again                   = time + ((at - time) / schedule.millis + 1) * schedule.millis
+            val moved                   = current.copy(punctuations = current.punctuations.updated(wallClock, queue.polled))
+            fired(node, index, at, moved, now).map: (after, more) =>
+              Left((after.copy(punctuations = after.punctuations.updated(wallClock, after.punctuations(wallClock).added(id -> again))), out ++ more))
+    if !punctuates then F.pure((state, Vector.empty))
+    else
+      val ready = started(state, now)
+      streamTime(ready).fold(F.pure((ready, Vector.empty[TaskOutput])))(run(ready, Vector.empty, false, _)).flatMap: (after, written) =>
+        run(after, written, true, now)
+
+  /** What the punctuator at `index` of `node` makes at `at`: the records it returns, as it runs with what reads them, and what it wrote to its stores
+    * at that time. No record is being read, so nothing downstream sees one.
+    */
+  private def fired(node: Punctuating[F], index: Int, at: Long, state: TaskState, now: Long): F[(TaskState, Vector[TaskOutput])] =
+    for
+      working <- Ref.of[F, (TaskState, Vector[TaskOutput])]((state.copy(reading = None), Vector.empty))
+      access  <- node.stores.traverse(store => accessTo(store, at, working).map(store -> _))
+      results <- node.punctuators(access.toMap)(index).run(Timestamp.fromEpochMillis(at))
+      ended   <- working.get
+      going = results.toVector.map(result => Travelling(result.key, result.value, result.timestamp.epochMillis, result.headers))
+      pushed <- allPushed(node.next, going, ended._1, ended._2, now)
+    yield pushed
 
   /** Writes what the task wrote since it last did to its stores, once the group has committed it. */
   def stored(state: TaskState): F[TaskState] =

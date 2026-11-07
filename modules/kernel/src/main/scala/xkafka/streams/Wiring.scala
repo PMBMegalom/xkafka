@@ -195,6 +195,8 @@ private[xkafka] object Wiring:
         val same = walk.kept.collectFirst { case (home, held) if held.shared.exists(one => store.shared.exists(_ eq one)) => home }
         same.fold(walk.copy(kept = walk.kept :+ (at.home -> store)))(walk.united(at.home, _))
 
+    def refusing(found: List[TopologyError]): Walk[F] = copy(problems = problems ++ found)
+
     /** `first` and `second` meeting in one node, noting where that decides which Java numbers first. */
     def meeting(first: Path, second: Path): (Path, Walk[F]) =
       val all   = first.topics(second)
@@ -315,7 +317,9 @@ private[xkafka] object Wiring:
           step.global.filterNot(global => walk.globals.exists(_.identity eq global.identity)).fold(walk): global =>
             walk.copy(globals = walk.globals :+ global, steps = walk.steps ++ List(s"${global.named.value}-source", global.named.value))
               .writing(List(Source.Input(global.topic)))
-        val made = tabled.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
+        val made =
+          tabled.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
+            .refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
         arrive(next, after, made.coming(named.value, after))
       case Consumer.Output(named, topic, _, _) => walk.making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
       case Consumer.Done()                     => walk

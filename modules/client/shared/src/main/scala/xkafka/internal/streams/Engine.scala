@@ -497,8 +497,9 @@ private[xkafka] object Engine:
         case None => poll(running).flatMap(process(running, _, plane.write)).flatMap: after =>
             F.monotonic.flatMap: now =>
               if now - after.committed >= commitInterval then commit(after, after.tasks.keySet).map(_.copy(committed = now)) else F.pure(after)
-        case Some(transaction) => poll(running).flatMap: polled =>
-            if polled.isEmpty then F.pure(running)
+        case Some(transaction) => (poll(running), F.realTime).tupled.flatMap: (polled, clock) =>
+            // A punctuator that is due runs without records, in a transaction of its own that records no offsets.
+            if polled.isEmpty && !running.tasks.values.exists(live => live.task.due(live.state, clock.toMillis)) then F.pure(running)
             else
               def more(after: Running[F], write: Writer[F]): F[Running[F]] =
                 (F.monotonic, changes.size).tupled.flatMap: (now, waiting) =>
@@ -613,7 +614,7 @@ private[xkafka] object Engine:
         val asked = inputs.flatMap(_._2).groupMap(_.topic.value)(_.partition.value).toList.map(OffsetFetchRequest.Topic(_, _))
         if inputs.isEmpty then F.pure(Map.empty)
         else
-          (stored(asked), restore(tasks, standbys)).tupled.flatMap: (offsets, stores) =>
+          (stored(asked), restore(tasks, standbys), F.realTime).tupled.flatMap: (offsets, stores, clock) =>
             inputs.traverse: (id, partitions) =>
               val found   = partitions.map(partition => partition -> offsets.get((partition.topic.value, partition.partition.value)))
               val times   = found.flatMap((partition, at) => at.flatMap(_.metadata).flatMap(PartitionTime.decode).map(partition.topic.value -> _))
@@ -622,7 +623,8 @@ private[xkafka] object Engine:
               val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), read.retentions, read.sessionStores)
               val state   = TaskState(Map.empty, times.toMap, lastEmitted = emitted)
               val reads   = found.map((partition, at) => partition -> Input(at.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)))
-              Task.over[F](application, read, id.partition, kept, open).map(task => id -> Live(task, state, reads.toMap))
+              Task.over[F](application, read, id.partition, kept, open)
+                .map(task => id -> Live(task, task.started(state, clock.toMillis), reads.toMap))
             .map(_.toMap)
 
     /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */
@@ -661,7 +663,10 @@ private[xkafka] object Engine:
     private def flushed(running: Running[F], write: Writer[F]): F[Running[F]] = flushed(running, running.tasks.keySet, write)
 
     private def committed(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
-      val due    = running.tasks.view.filterKeys(tasks).toList.filter(_._2.read)
+      val named = running.tasks.view.filterKeys(tasks).toList
+      val due   = named.filter(_._2.read)
+      // A task that only punctuated has no offsets to commit, but what it wrote has gone to its changelogs.
+      val wrote  = named.filter((_, live) => live.read || live.state.pending.nonEmpty)
       val topics =
         due.flatMap((_, live) => live.inputs.toList.flatMap((partition, input) => input.read.map((live, partition, _)))).groupMap(_._2.topic.value):
           (live, partition, read) =>
@@ -675,14 +680,14 @@ private[xkafka] object Engine:
             case Some(code) if Gone(code) => F.pure(Some(()))
             case Some(code)               => F.raiseError(failure("committing", code))
             case None                     => F.pure(Option.when(answers.forall(_.errorCode == 0))(()))
-      if topics.isEmpty then F.pure(running)
-      else sent *> due.traverse((id, live) => live.stored.map(id -> _.settled)).map(done => running.copy(tasks = running.tasks ++ done))
+      sent.whenA(topics.nonEmpty) *> wrote.traverse((id, live) => live.stored.map(id -> _.settled))
+        .map(done => running.copy(tasks = running.tasks ++ done))
 
     /** The next records, or none after a wait while no task runs, since the Java consumer refuses to poll with nothing assigned. */
     private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
 
-    /** Runs each task's records through it in order, up to `concurrency` tasks at once, and writes what the tasks wrote, waiting until every record
-      * is delivered.
+    /** Runs each task's records through it in order, and its punctuators after each record and whether or not it has any, up to `concurrency` tasks
+      * at once, and writes what the tasks wrote, waiting until every record is delivered.
       */
     private def process(running: Running[F], polled: List[PolledRecord], write: Writer[F]): F[Running[F]] =
       val routes =
@@ -691,10 +696,15 @@ private[xkafka] object Engine:
       val byTask =
         polled.flatMap(record => routes.get((record.topic, record.partition)).map(_ -> record)).groupMap(_._1._1)(found => (found._1._2, found._2))
       F.realTime.flatMap: clock =>
-        byTask.toList.parTraverseN(concurrency): (id, records) =>
-          Engine.byTime(records).foldLeftM((running.tasks(id), Vector.empty[TaskOutput])):
+        def punctuated(live: Live[F]): F[(Live[F], Vector[TaskOutput])] =
+          if !live.task.punctuates then F.pure((live, Vector.empty))
+          else
+            globals.flatMap(held => live.task.punctuate(live.state.copy(globals = held), clock.toMillis))
+              .map((state, out) => (live.copy(state = state), out))
+        running.tasks.toList.filter((id, live) => byTask.contains(id) || live.task.punctuates).parTraverseN(concurrency): (id, live) =>
+          Engine.byTime(byTask.getOrElse(id, Nil)).foldLeftM((live, Vector.empty[TaskOutput])):
             case ((live, written), (partition, record)) => globals
-                .flatMap(held => live.task.process(live.state.copy(globals = held), inputOf(record), clock.toMillis)).map: (state, out) =>
+                .flatMap(held => live.task.process(live.state.copy(globals = held), inputOf(record), clock.toMillis)).flatMap: (state, out) =>
                   val read =
                     Input(
                       record.offset + 1,
@@ -702,8 +712,9 @@ private[xkafka] object Engine:
                       live.inputs(partition).committed,
                       live.inputs(partition).purged
                     )
-                  (live.copy(state = state, inputs = live.inputs.updated(partition, read)), written ++ out)
-          .map(id -> _)
+                  punctuated(live.copy(state = state, inputs = live.inputs.updated(partition, read)))
+                    .map((after, more) => (after, written ++ out ++ more))
+          .flatMap((after, written) => punctuated(after).map((done, more) => id -> (done, written ++ more)))
       .flatMap: done =>
         val written = done.flatMap(_._2._2)
         written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))

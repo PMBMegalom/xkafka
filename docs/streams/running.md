@@ -23,6 +23,14 @@ record, such as after a member stops without committing. Exactly once applies to
 what the application writes to Kafka, not to what its effects do elsewhere.
 @:@
 
+## Tasks
+
+A program's work is divided into tasks. Each
+[sub-topology](README.md#describing-a-program) has one task for each partition
+number of the topics it reads, and each member is given some of the tasks. A task
+keeps its own part of the program's stores. Tasks move between members as members
+start and stop.
+
 ## Concurrency
 
 By default a member processes one task at a time, like a single Java Kafka

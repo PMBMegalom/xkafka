@@ -22,6 +22,8 @@
 package xkafka
 package streams
 
+import scala.concurrent.duration.*
+
 import cats.arrow.FunctionK
 import cats.effect.IO
 import cats.syntax.all.*
@@ -384,3 +386,153 @@ final class ProcessorSuite extends CatsEffectSuite:
       )
     val program = stream.to(Named("write"), out, text, count)
     assertEquals(Topology.of(program).orFail.subtopologies.flatMap(_.stores.map(_.value)), List("tally"))
+
+  private def ticking(schedule: Punctuation) =
+    Processor.withoutStores(Processor.every(schedule)((at: Timestamp) => IO.pure(List(Record("tick", at.epochMillis.toString, at))))(
+      Processor.onRecord[IO, String, String, String, String](_ => IO.pure(Nil))
+    ))
+
+  test("a punctuator under a millisecond is refused, on any clock, and one of a millisecond is not"):
+    def problems(schedule: Punctuation) = Topology.of(pipeline(ticking(schedule), text, text)).left.toOption.map(_.toList).getOrElse(Nil)
+    val reason                          = "its interval of 999 microseconds is less than a millisecond"
+    assertEquals(problems(Punctuation.streamTime(999.micros)), List(TopologyError.InvalidPunctuation("proc", reason)))
+    assertEquals(problems(Punctuation.wallClock(999.micros)), List(TopologyError.InvalidPunctuation("proc", reason)))
+    assertEquals(problems(Punctuation.wallClock(Duration.Zero)).size, 1)
+    assertEquals(problems(Punctuation.wallClock((-1).second)).size, 1)
+    assertEquals(problems(Punctuation.streamTime(1.milli)), Nil)
+    assert(TopologyError.InvalidPunctuation("proc", reason).message.contains("step 'proc'"))
+
+  test("a task is due only when a punctuator is, by each clock, and a task without any never is"):
+    for
+      plain <- taskOf(pipeline(Processor.withoutStores(Processor.onRecord[IO, String, String, String, String](_ => IO.pure(Nil))), text, text))
+      wall  <- taskOf(pipeline(ticking(Punctuation.wallClock(100.millis)), text, text))
+      time  <- taskOf(pipeline(ticking(Punctuation.streamTime(100.millis)), text, text))
+      read  <- time.process(TaskState.empty, input("a", "x", 5L), 0L)
+      ran   <- time.punctuate(read._1, 0L)
+      none  <- plain.punctuate(TaskState.empty, 1000L)
+    yield
+      val started = wall.started(TaskState.empty, 1000L)
+      assert(!plain.punctuates)
+      assert(!plain.due(TaskState.empty, 1000L))
+      assertEquals(none._2, Vector.empty)
+      assert(wall.punctuates)
+      assert(!wall.due(started, 1099L))
+      assert(wall.due(started, 1100L))
+      assert(!time.due(time.started(TaskState.empty, 0L), 1000000L), "no record has been read")
+      assert(time.due(read._1, 0L))
+      assert(!time.due(ran._1, 0L))
+
+  test("restarting from a committed stream time runs a stream-time punctuator as soon as it is asked, before any record"):
+    for
+      task <- taskOf(pipeline(ticking(Punctuation.streamTime(100.millis)), text, text))
+      ran  <- task.punctuate(TaskState(Map.empty, Map("in" -> 250L)), 0L)
+    yield
+      val written = ran._2.filter(_.topic == out)
+      assertEquals(written.map(_.value), Vector(Some(bytes("250"))))
+      assertEquals(written.map(_.timestamp), Vector(250L))
+
+  test("a punctuator that fails leaves the state as it was, and what a punctuator sends on reads as no record's"):
+    val store  = KeyValueStore.of(Store("tally"), text, count)
+    val broken =
+      Processor.withStore(store): (counts: KeyValueStore[IO, String, Long]) =>
+        Processor.every(Punctuation.wallClock(1.milli)): (_: Timestamp) =>
+          counts.put("a", 1L) *> IO.raiseError[List[Record[String, Long]]](new RuntimeException("no"))
+        .apply(Processor.onRecord((_: Record[String, String]) => IO.pure(List.empty[Record[String, Long]])))
+    val seeing =
+      Processor
+        .withoutStores(Processor.onRecord[IO, String, String, String, String](record => IO.pure(List(record.withValue(record.origin.toString)))))
+    for
+      failing <- taskOf(pipeline(broken, text, count))
+      started = failing.started(TaskState.empty, 0L)
+      failed <- failing.punctuate(started, 10L).attempt
+      held   <- failing.contents(started, "tally")
+      task   <-
+        taskOf(
+          KStream(Named("read"), in, text, text).process(Named("proc"), ticking(Punctuation.streamTime(100.millis))).process(Named("see"), seeing)
+            .to(Named("write"), out, text, text)
+        )
+      read <- task.process(TaskState.empty, input("a", "x", 5L), 0L)
+      ran  <- task.punctuate(read._1, 0L)
+    yield
+      assertEquals(failed.left.toOption.map(_.getMessage), Some("no"))
+      assertEquals(held.size, 0)
+      assertEquals(ran._2.filter(_.topic == out).map(_.value), Vector(Some(bytes("None"))))
+
+  test("imapK keeps a processor's punctuators, those of one that keeps the key, and what they write"):
+    val store = KeyValueStore.of(Store("tally"), text, count)
+    val id    = FunctionK.id[IO]
+    val fixed =
+      FixedKeyProcessor.withStore(store): kept =>
+        FixedKeyProcessor.every(Punctuation.wallClock(1.second))(at => kept.put("last", at.epochMillis)):
+          FixedKeyProcessor.onRecord: (record: FixedKeyRecord[String, String]) =>
+            IO.pure(List(record))
+    for
+      plain <-
+        Task
+          .inMemory[IO]("app", Topology.of(pipeline(ticking(Punctuation.wallClock(1.second)), text, text).imapK(id)(id)).orFail.subtopologies.head, 0)
+      ticks <- plain.punctuate(plain.started(TaskState.empty, 0L), 1000L)
+      task  <-
+        Task.inMemory[IO](
+          "app",
+          Topology.of(KStream(Named("read"), in, text, text).processValues(Named("proc"), fixed).to(Named("write"), out, text, text)).orFail
+            .imapK(id)(id).subtopologies.head,
+          0
+        )
+      ran  <- task.punctuate(task.started(TaskState.empty, 0L), 1000L)
+      held <- task.contents(ran._1, "tally")
+    yield
+      assertEquals(ticks._2.filter(_.topic == out).map(_.value), Vector(Some(bytes("1000"))))
+      assertEquals(ran._2.filter(_.topic == out), Vector.empty)
+      assertEquals(changelog(ran._2).map(_.timestamp), Vector(1000L))
+      assertEquals(held.get(bytes("last")).map(_.timestamp), Some(1000L))
+
+  test("the types of a punctuator written in place come from its stream and what it returns"):
+    val store  = KeyValueStore.of(Store("tally"), text, count)
+    val stream =
+      KStream(Named("read"), in, text, text).process(
+        Named("proc"),
+        Processor.withStore(store): counts =>
+          Processor.every(Punctuation.streamTime(1.minute)): at =>
+            counts.all.compile.toList.map(_.map((user, total) => Record(user, total, at)))
+          .apply:
+            Processor.onRecord: record =>
+              counts.put(record.key, 1L).as(List(record.withValue(1L)))
+      )
+    val program = stream.to(Named("write"), out, text, count)
+    assertEquals(Topology.of(program).orFail.subtopologies.flatMap(_.punctuating.map(_.named)), List("proc"))
+
+  test("a punctuator behind many forks that merge back is found once, mapped or not, however many paths lead to it"):
+    val depth = 40
+    val tail  = Flow.asRead[IO, String, String].process(Named("proc"), ticking(Punctuation.wallClock(1.second))).to(Named("write"), out, text, text)
+    val chain = (1 to depth).foldLeft(tail): (next, n) =>
+      val back = Flow.asRead[IO, String, String].merged(Named(s"back-$n")).into(next)
+      Flow.asRead[IO, String, String].split(Named(s"s-$n-")).branch(Named("a"))((_, v) => v.startsWith("a"))(_.into(back))
+        .defaultBranch(Named("b"))(_.into(back))
+    val program = KStream(Named("read"), in, text, text).into(chain)
+    assertEquals(Topology.of(program).orFail.subtopologies.flatMap(_.punctuating.map(_.named)), List("proc"))
+    assertEquals(
+      Topology.of(program.imapK(FunctionK.id[IO])(FunctionK.id[IO])).orFail.subtopologies.flatMap(_.punctuating.map(_.named)),
+      List("proc")
+    )
+
+  test("a punctuator is found however its processor is reached, once, and only in its own sub-topology"):
+    val merged = Flow[IO, String, String].process(Named("after"), ticking(Punctuation.wallClock(1.second))).to(Named("write"), out, text, text)
+    val first  = KStream(Named("left"), in, text, text).mapValues(Named("m1"))(identity).into(merged)
+    val second = KStream(Named("right"), Topic.from("in2").orFail, text, text).mapValues(Named("m2"))(identity).into(merged)
+    val apart  =
+      KStream(Named("read3"), Topic.from("in3").orFail, text, text).selectKey(Named("sk"))((_, v) => v).repartition(Repartition("r"), text, text)
+        .process(Named("far"), ticking(Punctuation.wallClock(1.second))).to(Named("write3"), out, text, text)
+    val joined =
+      KStream(Named("left4"), Topic.from("in4").orFail, text, text).join(
+        Named("j"),
+        KStream(Named("right4"), Topic.from("in5").orFail, text, text),
+        JoinWindows.withNoGrace(1.minute),
+        Store("js"),
+        text,
+        text,
+        text
+      )(_ + _).process(Named("after-join"), ticking(Punctuation.wallClock(1.second))).to(Named("write4"), out, text, text)
+    assertEquals(Topology.of(joined).orFail.subtopologies.flatMap(_.punctuating.map(_.named)), List("after-join"))
+    val made = Topology.of(first, second, apart).orFail
+    assertEquals(made.subtopologies.flatMap(_.punctuating.map(_.named)).sorted, List("after", "far"))
+    assertEquals(made.imapK(FunctionK.id[IO])(FunctionK.id[IO]).subtopologies.flatMap(_.punctuating.map(_.named)).sorted, List("after", "far"))

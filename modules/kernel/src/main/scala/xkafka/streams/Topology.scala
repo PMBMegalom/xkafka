@@ -60,6 +60,9 @@ enum TopologyError derives CanEqual:
   /** A suppression that cannot be used, such as one with a negative time to wait. */
   case InvalidSuppression(name: String, reason: String)
 
+  /** A punctuator that cannot be used, such as one with an interval below a millisecond. */
+  case InvalidPunctuation(step: String, reason: String)
+
   /** A windowed table joined with a stream or a table, which xkafka does not join yet. */
   case WindowedJoin
 
@@ -81,6 +84,7 @@ enum TopologyError derives CanEqual:
         s"the records repartitioned as '$name' are keyed as they were read and need no repartition; group them with groupByKey(key, value), join them without serdes, or start the flow with Flow.asRead"
       case InvalidWindows(store, reason)    => s"the windows of store '$store' cannot be used: $reason"
       case InvalidSuppression(name, reason) => s"the suppression '$name' cannot be used: $reason"
+      case InvalidPunctuation(step, reason) => s"a punctuator of step '$step' cannot be used: $reason"
       case WindowedJoin                     => "a windowed table cannot be joined yet"
       case UnfedTable(step) => s"a join reads the table made in step '$step', but no records reach that step; send them to it with into or fork"
       case SuppressedWithoutSerde(name) =>
@@ -276,6 +280,12 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case Cogrouped(side, step)                                      => if side == 0 then step.kept else Nil
       case Process(processor, _)                                      => processor.kept
       case _                                                          => Nil
+
+  /** Why its punctuators cannot be used, if any cannot. */
+  def punctuationProblems: List[String] =
+    this match
+      case Process(processor, _) => processor.schedules.flatMap(_.problem)
+      case _                     => Nil
 
   /** The global table it reads, if any. */
   def global: Option[GlobalStore[F]] =
@@ -639,6 +649,28 @@ private[xkafka] object Entry:
   * read from before a repartition topic, in other sub-topologies; the stores it keeps and the repartition topics it writes; and its nodes as Java's
   * builder makes them.
   */
+/** A processor with punctuators, and what reads the records they return. */
+private[xkafka] trait Punctuating[F[_]]:
+  type Key
+  type Value
+
+  def named: String
+  def stores: List[String]
+  def schedules: List[Punctuation]
+  def punctuators(access: Map[String, StoreAccess[F]]): List[Punctuator[F, Key, Value]]
+  def next: Consumer[F, Key, Value]
+
+private[xkafka] object Punctuating:
+  def apply[F[_], K, V, K2, V2](name: String, processor: Processor[F, K, V, K2, V2], reader: Consumer[F, K2, V2]): Punctuating[F] =
+    new Punctuating[F]:
+      type Key   = K2
+      type Value = V2
+      val named: String                                                                 = name
+      val stores: List[String]                                                          = processor.kept.map(_.store.value)
+      val schedules: List[Punctuation]                                                  = processor.schedules
+      def punctuators(access: Map[String, StoreAccess[F]]): List[Punctuator[F, K2, V2]] = processor.handling(access).punctuators
+      val next: Consumer[F, K2, V2]                                                     = reader
+
 private[xkafka] final case class Subtopology[F[_]](
     entries: List[Entry[F]],
     copartitioned: List[List[Source]],
@@ -653,6 +685,41 @@ private[xkafka] final case class Subtopology[F[_]](
 
   /** The topics it reads, its own first. */
   def origins: List[Source] = entries.flatMap(_.origin.sources)
+
+  /** The processors in it with punctuators, in the order their records reach them, each node walked once however many paths lead through it. */
+  lazy val punctuating: List[Punctuating[F]] =
+    def found[K, V](consumer: Consumer[F, K, V], seen: Set[AnyRef]): (List[Punctuating[F]], Set[AnyRef]) =
+      val marked                                       = seen + consumer
+      def all[K2, V2](next: List[Consumer[F, K2, V2]]) =
+        next.foldLeft((List.empty[Punctuating[F]], marked)):
+          case ((so, inner), child) =>
+            val (more, after) = found(child, inner)
+            (so ++ more, after)
+      if seen(consumer) then (Nil, seen)
+      else
+        consumer.expanded match
+          case Consumer.Then(named, step, next) =>
+            val (more, after) = found(next, marked)
+            step match
+              case Step.Process(processor, _) if processor.schedules.nonEmpty => (Punctuating(named.value, processor, next) :: more, after)
+              case _                                                          => (more, after)
+          case Consumer.Beside(_, _, next)     => found(next, marked)
+          case Consumer.Fan(children)          => all(children)
+          case Consumer.Merged(_, next)        => found(next, marked)
+          case Consumer.Cogroup(_, _, next)    => found(next, marked)
+          case Consumer.Copartitioned(next)    => found(next, marked)
+          case Consumer.Splitting(_, branches) => all(branches.map(_.next))
+          case Consumer.Refused(_, next)       => found(next, marked)
+          case Consumer.LeftTable(join)        => found(join.next, marked)
+          case Consumer.RightTable(join)       => found(join.next, marked)
+          case Consumer.LeftStream(join)       => found(join.next, marked)
+          case Consumer.RightStream(join)      => found(join.next, marked)
+          case _                               => (Nil, marked)
+    entries.foldLeft((List.empty[Punctuating[F]], Set.empty[AnyRef])):
+      case ((so, seen), entry) =>
+        val (more, after) = found(entry.consumer, seen)
+        (so ++ more, after)
+    ._1
 
   /** Its stores. */
   def stores: List[Store] = kept.map(_.store)

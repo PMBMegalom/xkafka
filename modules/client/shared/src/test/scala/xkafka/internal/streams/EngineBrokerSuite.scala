@@ -110,6 +110,22 @@ final class EngineBrokerSuite extends CatsEffectSuite:
       PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
         consumer.records.take(count.toLong).compile.drain.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $count records")))
 
+  /** The first `count` records of `topic`, in up to two minutes. */
+  private def read[V](server: String, topic: Topic, count: Int, value: Serde[IO, V])(using guarantee: ProcessingGuarantee): IO[List[(String, V)]] =
+    Names.fresh:
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Deserializer.utf8[IO],
+          value.deserializer,
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.take(count.toLong).map(found => (found.record.key, found.record.value)).compile.toList
+          .timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $count records")))
+
   /** Counts by key in sliding windows of five seconds, taking records up to an hour late. */
   private def bySliding(input: Topic, output: Topic): Pipeline[IO] =
     KStream(Named("read-6"), input, text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.seconds, grace = 1.hour))
@@ -500,6 +516,44 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         produce(server, app.input, Map("a" -> 3, "b" -> 2)) *> running(server, app)(latest(server, app.output, Map("a" -> 3L, "b" -> 2L))) *>
           produce(server, app.input, Map("a" -> 2, "c" -> 1)) *>
           running(server, app)(latest(server, app.output, Map("a" -> 5L, "b" -> 2L, "c" -> 1L)))
+
+    test(s"$release, $under: a wall-clock punctuator runs in tasks that read nothing, and what it wrote is there for an engine started later"):
+      val program =
+        (input: Topic, output: Topic) =>
+          val ticks = xkafka.streams.KeyValueStore.of(Store("ticks"), text, Serde.long[IO])
+          KStream(Named("read-41"), input, text, text).process(
+            Named("processor-41"),
+            xkafka.streams.Processor.withStore(ticks): kept =>
+              xkafka.streams.Processor.every(xkafka.streams.Punctuation.wallClock(100.millis)): at =>
+                kept.get("tick").flatMap: seen =>
+                  val tick = seen.getOrElse(0L) + 1L
+                  kept.put("tick", tick).as(List(xkafka.streams.Record("tick", tick, at)))
+              .apply:
+                xkafka.streams.Processor.onRecord(_ => IO.pure(Nil))
+          ).to(Named("write-41"), output, text, Serde.long[IO])
+      counting(server, program): app =>
+        running(server, app)(read(server, app.output, 8, Serde.long[IO]).void) *> running(server, app):
+          read(server, app.output, 16, Serde.long[IO]).map: seen =>
+            // Each of the two tasks counts once from one; each started again would count from one again.
+            assertEquals(seen.count(_._2 == 1L), 2)
+
+    test(s"$release, $under: a stream-time punctuator runs as records arrive, at their time, and the steps after it take what it returns"):
+      val program =
+        (input: Topic, output: Topic) =>
+          KStream(Named("read-42"), input, text, text).process(
+            Named("processor-42"),
+            xkafka.streams.Processor.withoutStores(
+              xkafka.streams.Processor.every(xkafka.streams.Punctuation.streamTime(1.hour))(at =>
+                IO.pure(List(xkafka.streams.Record("punctuated", at.epochMillis.toString, at)))
+              ):
+                xkafka.streams.Processor.onRecord(record => IO.pure(List(record)))
+            )
+          ).mapValues(Named("mark-42"))(value => s"$value!").to(Named("write-42"), output, text, text)
+      counting(server, program): app =>
+        IO.realTime.map(_.toMillis).flatMap: now =>
+          produceAt(server, app.input, List(("a", now))) *> running(server, app):
+            read(server, app.output, 2, text).map: seen =>
+              assertEquals(seen.toSet, Set(("a", "a-value!"), ("punctuated", s"$now!")))
 
     test(s"$release, $under: an engine counts in windows, its window changelog made as Java declares it, and one started later goes on from it"):
       counting(server, byMinute): app =>
