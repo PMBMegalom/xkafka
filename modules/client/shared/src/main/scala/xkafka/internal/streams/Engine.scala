@@ -726,7 +726,15 @@ private[xkafka] object Engine:
       TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers, record.topic, record.partition, record.offset)
 
     private def recordOf(output: TaskOutput): F[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] =
-      val chosen = output.partitionBy.fold(F.pure(output.partition))(by => partitions(output.topic).map(count => Some(Murmur2.partition(by, count))))
+      def outside(chosen: Int, count: Int) =
+        new IllegalArgumentException(s"a partitioner chose partition $chosen of the topic '${output.topic.value}', which has $count partitions")
+      val chosen =
+        (output.choose, output.partitionBy) match
+          case (Some(choose), _) => partitions(output.topic).flatMap: count =>
+              val picked = choose(count)
+              if picked >= 0 && picked < count then F.pure(Some(picked)) else F.raiseError(outside(picked, count))
+          case (None, Some(by)) => partitions(output.topic).map(count => Some(Murmur2.partition(by, count)))
+          case (None, None)     => F.pure(output.partition)
       chosen.flatMap(_.traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F])).map: partition =>
         ProducerRecord(
           output.topic,

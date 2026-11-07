@@ -33,8 +33,8 @@ import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  ApplicationId, Flow, GlobalKTable, JoinWindows, KStream, KTable, Named, Pipeline, ProcessingGuarantee, Repartition, Serde, SessionWindows,
-  SlidingWindows, Store, StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
+  ApplicationId, Flow, GlobalKTable, JoinWindows, KStream, KTable, Named, Partitioner, Pipeline, ProcessingGuarantee, Repartition, Serde,
+  SessionWindows, SlidingWindows, Store, StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -164,6 +164,37 @@ final class EngineBrokerSuite extends CatsEffectSuite:
     val made = records.map((key, at) => ProducerRecord(topic, key, s"$key-value", timestamp = Some(Timestamp.fromEpochMillis(at))))
     PlatformKafkaClient().producer(ProducerSettings.from(client(server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
       .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(made))).void
+
+  /** Where each of `partitions` ends, by partition number, which purging its records does not move. */
+  private def endsOf(server: String, partitions: Set[TopicPartition]): IO[Map[Int, Long]] =
+    Names.fresh:
+      val settings =
+        ConsumerSettings
+          .from(client(server), ConsumerGroup.from(summon[Names]("xkafka-engine-ends")).orFail, Deserializer.utf8[IO], Deserializer.utf8[IO]).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptyList.fromListUnsafe(partitions.toList).toNes)).use: consumer =>
+        consumer.endOffsets(partitions).map(_.map((partition, end) => partition.partition.value -> end.value))
+
+  /** Writes each key's value to the partition given. */
+  private def produceTo(server: String, topic: Topic, records: List[(String, String, Int)]): IO[Unit] =
+    val made = records.map((key, value, partition) => ProducerRecord(topic, key, value, partition = Some(Partition.from(partition).orFail)))
+    PlatformKafkaClient().producer(ProducerSettings.from(client(server), Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
+      .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(made))).void
+
+  /** The first `count` records of `topic`, each with the partition it is in, in up to two minutes. */
+  private def placed(server: String, topic: Topic, count: Int)(using guarantee: ProcessingGuarantee): IO[List[(String, String, Int)]] =
+    Names.fresh:
+      val settings =
+        ConsumerSettings.from(
+          client(server),
+          ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
+          Deserializer.utf8[IO],
+          Deserializer.utf8[IO],
+          AutoOffsetReset.Earliest,
+          isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
+        ).orFail
+      PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+        consumer.records.take(count.toLong).map(found => (found.record.key, found.record.value, found.record.topicPartition.partition.value)).compile
+          .toList.timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$topic never held $count records")))
 
   /** Writes each key's value, or a tombstone. */
   private def produceValues(server: String, topic: Topic, records: List[(String, Option[String])]): IO[Unit] =
@@ -625,6 +656,99 @@ final class EngineBrokerSuite extends CatsEffectSuite:
               latestValues(server, app.output, Map("k1" -> Some("a+?"))) *> produceValues(server, users, List("a" -> Some("A"))) *>
                 latestValues(server, app.output, Map("k1" -> Some("a+A"))) *> produceValues(server, users, List("a" -> None)) *>
                 latestValues(server, app.output, Map("k1" -> Some("a+?")))
+
+    test(s"$release, $under: a partitioner chooses the partition of each record written to an output topic"):
+      val program =
+        (input: Topic, output: Topic) =>
+          val byValue = Partitioner[String, String]((_, value, _, count) => (if value.startsWith("x") then 0 else 1) % count)
+          KStream(Named("read-48"), input, text, text).to(Named("write-48"), output, text, text, Some(byValue))
+      counting(server, program): app =>
+        produceValues(server, app.input, List("a" -> Some("x1"), "b" -> Some("y1"), "c" -> Some("x2"), "d" -> Some("y2"))) *> running(server, app):
+          placed(server, app.output, 4).map: seen =>
+            assertEquals(seen.map((_, value, partition) => value -> partition).toMap, Map("x1" -> 0, "x2" -> 0, "y1" -> 1, "y2" -> 1))
+
+    test(
+      s"$release, $under: a repartition topic asked for with three partitions has three, its partitioner places each record, and what reads it counts them all"
+    ):
+      val program =
+        (input: Topic, output: Topic) =>
+          KStream(Named("read-49"), input, text, text).repartition(
+            Repartition("spread-49"),
+            text,
+            text,
+            partitions = Some(3),
+            partitioner = Some(Partitioner.byKey((key: String, count) => key.length % count))
+          ).groupByKey(text, text).count(Named("count-49"), Store("counts")).toStream(Named("changes-49"))
+            .to(Named("write-49"), output, text, Serde.long[IO])
+      counting(server, program): app =>
+        val spread     = Topic.from(s"${app.application}-spread-49-repartition").orFail
+        val partitions = Set(0, 1, 2).map(n => TopicPartition(spread, Partition.from(n).orFail))
+        // Keys one and two long go to partitions 1 and 2, and none to 0. The engine purges what it has read, so where the records went shows in where
+        // each partition ends, which purging does not move.
+        produce(server, app.input, Map("a" -> 2, "bb" -> 3)) *> running(server, app):
+          for
+            _     <- latest(server, app.output, Map("a" -> 2L, "bb" -> 3L))
+            found <- admin(server).use(_.describeTopics(NonEmptySet.one(spread)))
+            ends  <- endsOf(server, partitions)
+          yield
+            assertEquals(found(spread).flatMap(_.toOption).map(_.partitions.length), Some(3))
+            assertEquals(ends.get(0), Some(0L), ends.toString)
+            assert(ends.get(1).exists(_ > 0) && ends.get(2).exists(_ > 0), ends.toString)
+
+    test(
+      s"$release, $under: joins find the rows of a table whose topic another producer partitioned its own way, once the table is given that partitioner"
+    ):
+      Names.fresh:
+        val users   = Topic.from(summon[Names]("xkafka-engine-users")).orFail
+        val ownWay  = (key: String, count: Int) => key.last.asDigit % count
+        val keys    = (0 until 6).map(n => s"u$n").toList
+        val program =
+          (input: Topic, output: Topic) =>
+            val table = KTable(Named("users-50"), users, text, text, Store("users"), partitioner = Some(Partitioner.byKey(ownWay)))
+            KTable(Named("rows-50"), input, text, text, Store("rows"))
+              .joinOnForeignKey(Named("fk-50"), table, text, text, text)((_, user) => Some(user))((row, name) => s"$row+$name")
+              .toStream(Named("changes-50")).to(Named("write-50"), output, text, text.option)
+        // The test means something only if Kafka's own partitioning would put some of these keys elsewhere.
+        assert(keys.exists(key => Murmur2.partition(fs2.Chunk.array(key.getBytes), 3) != ownWay(key, 3)))
+        counting(server, program): app =>
+          admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 3, 1).orFail))) *>
+            produceTo(server, users, keys.map(key => (key, s"name-$key", ownWay(key, 3)))) *>
+            produceValues(server, app.input, keys.map(key => s"row-$key" -> Some(key))) *> running(server, app):
+              latestValues(server, app.output, keys.map(key => s"row-$key" -> Some(s"$key+name-$key")).toMap)
+
+    test(
+      s"$release, $under: a stream joined with such a table after its key changed is repartitioned the table's way, and every record finds its row"
+    ):
+      Names.fresh:
+        val users   = Topic.from(summon[Names]("xkafka-engine-users")).orFail
+        val ownWay  = (key: String, count: Int) => key.last.asDigit % count
+        val keys    = (0 until 6).map(n => s"u$n").toList
+        val program =
+          (input: Topic, output: Topic) =>
+            val table = KTable(Named("users-51"), users, text, text, Store("users"), partitioner = Some(Partitioner.byKey(ownWay)))
+            KStream(Named("orders-51"), input, text, text).selectKey(Named("by-user-51"))((_, user) => user)
+              .join(Named("with-user-51"), table, text, text)((order, name) => s"$order:$name").to(Named("write-51"), output, text, text)
+        counting(server, program): app =>
+          admin(server).use(_.createTopics(NonEmptySet.one(NewTopic.from(users, 3, 1).orFail))) *>
+            produceTo(server, users, keys.map(key => (key, s"name-$key", ownWay(key, 3)))) *> IO.sleep(2.seconds) *> running(server, app):
+              produceValues(server, app.input, keys.map(key => s"order-$key" -> Some(key))) *> read(server, app.output, keys.size, text)
+                .map(seen => assertEquals(seen.toSet, keys.map(key => key -> s"$key:name-$key").toSet))
+
+    test(s"$release, $under: a partitioner that chooses a partition the topic does not have stops the application, saying which"):
+      val program =
+        (input: Topic, output: Topic) =>
+          KStream(Named("read-52"), input, text, text).to(Named("write-52"), output, text, text, Some(Partitioner[String, String]((_, _, _, _) => 7)))
+      counting(server, program): app =>
+        produceValues(server, app.input, List("a" -> Some("x"))) *> Engine(
+          PlatformKafkaClient(),
+          KafkaClientPlatform.driver[IO],
+          client(server),
+          app.application,
+          app.topology,
+          summon[ProcessingGuarantee],
+          None
+        ).use(_.run.attempt.timeout(2.minutes))
+          .map(result => assert(result.left.toOption.exists(_.getMessage.contains("chose partition 7")), result.toString))
 
     test(s"$release, $under: a wall-clock punctuator runs in tasks that read nothing, and what it wrote is there for an engine started later"):
       val program =

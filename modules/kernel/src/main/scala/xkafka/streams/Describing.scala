@@ -61,8 +61,8 @@ private[xkafka] object Describing:
   /** The node a topic's source makes, and its name. */
   def source[F[_], K, V](origin: Origin[F, K, V]): (Made, String) =
     origin match
-      case Origin.Input(named, _, _, _)                       => (Made(named.value, Kind.Reads(origin.sources), Nil), named.value)
-      case Origin.Repartitioned(repartition, _, _, aggregate) =>
+      case Origin.Input(named, _, _, _)                          => (Made(named.value, Kind.Reads(origin.sources), Nil), named.value)
+      case Origin.Repartitioned(repartition, _, _, aggregate, _) =>
         val name = aggregate.fold(s"${repartition.value}-repartition-source")(named => s"${named.value}-source")
         (Made(name, Kind.Reads(origin.sources), Nil), name)
       case Origin.Exchanged(_, node) => (Made(node, Kind.Reads(origin.sources), Nil), node)

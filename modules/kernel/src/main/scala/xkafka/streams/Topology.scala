@@ -69,6 +69,9 @@ enum TopologyError derives CanEqual:
   /** A windowed table joined with a stream or a table, which xkafka does not join yet, or a foreign-key join's result kept in no store joined. */
   case WindowedJoin
 
+  /** A repartition topic asked for with fewer than one partition. */
+  case InvalidPartitionCount(repartition: String, count: Int)
+
   /** The result of the foreign-key join `join`, kept in no store, read by a step that needs the value each change replaces. */
   case UnkeptForeignKeyJoin(join: String)
 
@@ -93,6 +96,7 @@ enum TopologyError derives CanEqual:
       case InvalidPunctuation(step, reason) => s"a punctuator of step '$step' cannot be used: $reason"
       case InvalidStore(store, reason)      => s"the store '$store' cannot be used: $reason"
       case WindowedJoin                     => "a windowed table, or a foreign-key join's result kept in no store, cannot be joined"
+      case InvalidPartitionCount(name, n)   => s"the repartition topic '$name' cannot have $n partitions, as it needs at least one"
       case UnkeptForeignKeyJoin(join)       => s"the result of the foreign-key join '$join' must be kept in a store for what reads it"
       case UnfedTable(step) => s"a join reads the table made in step '$step', but no records reach that step; send them to it with into or fork"
       case SuppressedWithoutSerde(name) =>
@@ -367,30 +371,31 @@ private[xkafka] enum Source derives CanEqual:
 /** A topic's records as they come into a sub-topology: from an input topic, or from the repartition topic an earlier sub-topology writes. */
 private[xkafka] enum Origin[F[_], K, V]:
   case Input(named: Named, topics: NonEmptyList[Topic], key: Serde[F, K], value: Serde[F, V])
-  case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], aggregate: Option[Named] = None)
+  case Repartitioned(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], aggregate: Option[Named] = None, partitions: Option[Int] = None)
 
   /** A topic a foreign-key join's two sides send each other records through, read as the bytes they are, by the source node `node`. */
   case Exchanged[F[_]](topic: String, node: String) extends Origin[F, Option[Chunk[Byte]], Option[Chunk[Byte]]]
 
   def mapK[G[_]](fk: FunctionK[F, G]): Origin[G, K, V] =
     this match
-      case Input(named, topics, key, value)                  => Input(named, topics, key.mapK(fk), value.mapK(fk))
-      case Repartitioned(repartition, key, value, aggregate) => Repartitioned(repartition, key.mapK(fk), value.mapK(fk), aggregate)
-      case Exchanged(topic, node)                            => Exchanged(topic, node)
+      case Input(named, topics, key, value)                              => Input(named, topics, key.mapK(fk), value.mapK(fk))
+      case Repartitioned(repartition, key, value, aggregate, partitions) =>
+        Repartitioned(repartition, key.mapK(fk), value.mapK(fk), aggregate, partitions)
+      case Exchanged(topic, node) => Exchanged(topic, node)
 
   /** The topics it reads, as one source. */
   def sources: List[Source] =
     this match
-      case Input(_, topics, _, _)              => topics.toList.distinct.map(Source.Input(_))
-      case Repartitioned(repartition, _, _, _) => List(Source.Repartitioned(repartition))
-      case Exchanged(topic, _)                 => List(Source.Exchanged(topic))
+      case Input(_, topics, _, _)                 => topics.toList.distinct.map(Source.Input(_))
+      case Repartitioned(repartition, _, _, _, _) => List(Source.Repartitioned(repartition))
+      case Exchanged(topic, _)                    => List(Source.Exchanged(topic))
 
   /** The name the program gives its step, where it gives one. */
   def names: List[Named] =
     this match
-      case Input(named, _, _, _)             => List(named)
-      case Repartitioned(_, _, _, aggregate) => aggregate.map(named => Named(s"${named.value}-source")).toList
-      case Exchanged(_, _)                   => Nil
+      case Input(named, _, _, _)                => List(named)
+      case Repartitioned(_, _, _, aggregate, _) => aggregate.map(named => Named(s"${named.value}-source")).toList
+      case Exchanged(_, _)                      => Nil
 
 /** A store a sub-topology keeps: how long it keeps a window, if it keeps windows, whether it holds a session's values, a suppression's held changes,
   * or as a stream-stream join's window store does, every record, and where processors may share it, what says it is the same store.
@@ -450,6 +455,7 @@ private[xkafka] final class ForeignKeyJoined[F[_], K, V, KO, VO, R, C1, C2](
     val values: Serde[F, V],
     val otherKeys: Serde[F, KO],
     val otherValues: Serde[F, VO],
+    val otherPartitioner: Option[Partitioner[KO, Any]],
     val foreignKey: (K, V) => Option[KO],
     val keepsUnmatched: Boolean,
     val joiner: (V, Option[VO]) => Option[R],
@@ -466,6 +472,7 @@ private[xkafka] final class ForeignKeyJoined[F[_], K, V, KO, VO, R, C1, C2](
       values.mapK(fk),
       otherKeys.mapK(fk),
       otherValues.mapK(fk),
+      otherPartitioner,
       foreignKey,
       keepsUnmatched,
       joiner,
@@ -576,7 +583,7 @@ private[xkafka] enum Consumer[F[_], K, V]:
   case Then[F[_], K, V, K2, V2](named: Named, step: Step[F, K, V, K2, V2], next: Consumer[F, K2, V2]) extends Consumer[F, K, V]
 
   /** Writes each record to the program's output topic `topic`. */
-  case Output(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V])
+  case Output(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V], partitioner: Option[Partitioner[K, V]] = None)
 
   /** Writes each record to the repartition topic `repartition` names, whose records `next` reads, in another sub-topology. A join that repartitions a
     * side says so with `atJoin`, since Java makes that topic's source only when it makes the join, which decides how sub-topologies are numbered. It
@@ -590,7 +597,9 @@ private[xkafka] enum Consumer[F[_], K, V]:
       atJoin: Boolean,
       always: Boolean,
       next: Consumer[F, K, V],
-      aggregate: Option[Named] = None
+      aggregate: Option[Named] = None,
+      partitions: Option[Int] = None,
+      partitioner: Option[Partitioner[K, V]] = None
   )
 
   /** `next`, in the sub-topology of the table made in the node named `last`, as the table a stream-table join reads runs beside the stream. A table
@@ -673,10 +682,10 @@ private[xkafka] enum Consumer[F[_], K, V]:
 
   private def mappedBy[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Consumer[G, K, V] =
     expanded match
-      case Then(named, step, next)                                              => Then(named, step.imapK(fk)(gk), next.imapK(fk)(gk))
-      case Output(named, topic, key, value)                                     => Output(named, topic, key.mapK(fk), value.mapK(fk))
-      case Repartitioning(repartition, key, value, at, always, next, aggregate) =>
-        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.imapK(fk)(gk), aggregate)
+      case Then(named, step, next)                       => Then(named, step.imapK(fk)(gk), next.imapK(fk)(gk))
+      case Output(named, topic, key, value, partitioner) => Output(named, topic, key.mapK(fk), value.mapK(fk), partitioner)
+      case Repartitioning(repartition, key, value, at, always, next, aggregate, partitions, partitioner) =>
+        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.imapK(fk)(gk), aggregate, partitions, partitioner)
       case Beside(table, last, next)      => Beside(table.map(_.imapK(fk)(gk)), last, next.imapK(fk)(gk))
       case Fan(children)                  => Fan(children.map(_.imapK(fk)(gk)))
       case Merged(named, next)            => Merged(named, next.imapK(fk)(gk))
@@ -1066,7 +1075,9 @@ sealed trait KStream[F[_], K, V]:
     val feeding: Consumer[F, K, R] => Out =
       through match
         case None               => next => feed(reading(next))
-        case Some((key, value)) => next => feed(Consumer.Repartitioning(Repartition(named.value), key, value, true, false, reading(next)))
+        case Some((key, value)) =>
+          // Records go to the partition that holds their key in the table's topic, however that topic is partitioned.
+          next => feed(Consumer.Repartitioning(Repartition(named.value), key, value, true, false, reading(next), partitioner = table.partitioner))
     KStream.of(feeding, named.value, false, ending)
 
   /** Each record joined with its key's value in `table`, as Java's `join` of a stream with a table: a record whose key the table holds no value for
@@ -1164,13 +1175,28 @@ sealed trait KStream[F[_], K, V]:
   )(join: Ior[V, VO] => R): Settled[K, R] = windowJoined(named, other, windows, store, key, value, otherValue, Joiner.Outer(join))
 
   /** Sends every record through the repartition topic `repartition` names, written with `key` and `value`, whether or not its key has changed, as
-    * Java's `repartition` does. Afterwards the records are keyed as they were read from that topic.
+    * Java's `repartition` does. Afterwards the records are keyed as they were read from that topic. The topic has `partitions` partitions where
+    * given, and as many as the topics before it otherwise, and `partitioner` chooses each record's partition where given, as Java's `Repartitioned`
+    * says.
     */
-  def repartition(repartition: Repartition, key: Serde[F, K], value: Serde[F, V]): Settled[K, V] = through(repartition, key, value, true)
+  def repartition(
+      repartition: Repartition,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      partitions: Option[Int] = None,
+      partitioner: Option[Partitioner[K, V]] = None
+  ): Settled[K, V] = through(repartition, key, value, true, partitions, partitioner)
 
-  private def through(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], always: Boolean): Settled[K, V] =
+  private def through(
+      repartition: Repartition,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      always: Boolean,
+      partitions: Option[Int] = None,
+      partitioner: Option[Partitioner[K, V]] = None
+  ): Settled[K, V] =
     KStream.of(
-      next => feed(Consumer.Repartitioning(repartition, key, value, false, always, next)),
+      next => feed(Consumer.Repartitioning(repartition, key, value, false, always, next, None, partitions, partitioner)),
       s"${repartition.value}-repartition-source",
       false,
       ending
@@ -1204,8 +1230,9 @@ sealed trait KStream[F[_], K, V]:
   ): KTable.Flowing[F, K, A, Option, Out] =
     tabled(named, store, key, optional.flip.substituteCo[[X] =>> Serde[F, X]](value.option), value, optional(_))
 
-  /** Writes every record to `topic`, in the step `named`. */
-  def to(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V]): Out = feed(Consumer.Output(named, topic, key, value))
+  /** Writes every record to `topic`, in the step `named`, to the partition `partitioner` chooses where given, as Java's `Produced` says. */
+  def to(named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V], partitioner: Option[Partitioner[K, V]] = None): Out =
+    feed(Consumer.Output(named, topic, key, value, partitioner))
 
 object KStream:
   /** A stream read from a topic whose [[KStream.Keying]] is `P`, for annotating one without losing it. */
@@ -1730,13 +1757,13 @@ object GlobalKTable:
   * serdes write a windowed key.
   */
 private[xkafka] enum TableKey[F[_], K]:
-  case Plain[F[_], K](key: Serde[F, K])                    extends TableKey[F, K]
-  case TimeWindowed[F[_], K](key: Serde[F, K], size: Long) extends TableKey[F, Windowed[K]]
-  case SessionWindowed[F[_], K](key: Serde[F, K])          extends TableKey[F, Windowed[K]]
+  case Plain[F[_], K](key: Serde[F, K], partitioner: Option[Partitioner[K, Any]] = None) extends TableKey[F, K]
+  case TimeWindowed[F[_], K](key: Serde[F, K], size: Long)                               extends TableKey[F, Windowed[K]]
+  case SessionWindowed[F[_], K](key: Serde[F, K])                                        extends TableKey[F, Windowed[K]]
 
   def mapK[G[_]](fk: FunctionK[F, G]): TableKey[G, K] =
     this match
-      case Plain(key)              => Plain(key.mapK(fk))
+      case Plain(key, partitioner) => Plain(key.mapK(fk), partitioner)
       case TimeWindowed(key, size) => TimeWindowed(key.mapK(fk), size)
       case SessionWindowed(key)    => SessionWindowed(key.mapK(fk))
 
@@ -1833,6 +1860,12 @@ sealed trait KTable[F[_], K, V]:
   private[xkafka] def grace: Option[Long]
   private[xkafka] def view: Option[TableView[F, K, V]]
   private[xkafka] def kind: ChangeKind[Change]
+
+  /** How the topic the table was read from is partitioned, where it is not partitioned by key as Kafka partitions keys by default. */
+  private[xkafka] def partitioner: Option[Partitioner[K, Any]] =
+    key match
+      case TableKey.Plain(_, chosen) => chosen
+      case _                         => None
 
   /** The table on its own, for a join to read, if it reads topics of its own. */
   private[xkafka] lazy val origin: Option[Pipeline[F]] = stream.ending.pipeline(stream.feed(Consumer.Done()))
@@ -1986,7 +2019,21 @@ sealed trait KTable[F[_], K, V]:
         val feeding: Consumer[F, K, Option[R]] => Out =
           next =>
             val join =
-              ForeignKeyJoined(named, side, other.side, mine.keys, value, otherKey, otherValue, foreignKey, keepsUnmatched, joiner, store, next)
+              ForeignKeyJoined(
+                named,
+                side,
+                other.side,
+                mine.keys,
+                value,
+                otherKey,
+                otherValue,
+                other.partitioner,
+                foreignKey,
+                keepsUnmatched,
+                joiner,
+                store,
+                next
+              )
             stream.ending.both(stream.feed(Consumer.ForeignLeft(join)), other.stream.feed(Consumer.ForeignRight(join)))
         KTable.of[F, K, R, Option, Out](
           KStream.of[F, K, Option[R], KeyState.AsRead, Out](feeding, s"${named.value}-result", false, stream.ending),
@@ -2149,11 +2196,22 @@ object KTable:
     * record without a value deletes the key. A record without a key is skipped. Java names the table's source `<named>-source` and the step that
     * keeps it `named`, as its `Consumed` name names both.
     */
-  def apply[F[_], K, V](named: Named, topic: Topic, key: Serde[F, K], value: Serde[F, V], store: Store)(using
-      F: cats.Applicative[F]
-  ): Of[F, K, V, Option] =
+  def apply[F[_], K, V](
+      named: Named,
+      topic: Topic,
+      key: Serde[F, K],
+      value: Serde[F, V],
+      store: Store,
+      partitioner: Option[Partitioner[K, Any]] = None
+  )(using F: cats.Applicative[F]): Of[F, K, V, Option] =
     val read = KStream(Named(s"${named.value}-source"), topic, key.option, value.option)
-    deleting(read.kept(named, Step.TableSource(store, key, value)), TableKey.Plain(key), value, None, Some(TableView.Stored(store, key, value)))
+    deleting(
+      read.kept(named, Step.TableSource(store, key, value)),
+      TableKey.Plain(key, partitioner),
+      value,
+      None,
+      Some(TableView.Stored(store, key, value))
+    )
 
   private[xkafka] def updating[F[_], K, V, O](
       stream: KStream.Ends[F, K, V, O],

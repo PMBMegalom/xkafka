@@ -199,9 +199,9 @@ With the name `order-customer`, the join adds these to the application:
 | A topic | `<application id>-order-customer-subscription-response-topic` |
 | A store | `order-customer-subscription-store`, with its changelog |
 
-Windowed tables cannot join on a foreign key, and there is no outer version. Both
-tables' topics must be partitioned by key the way Kafka producers do by default: a
-custom partitioner is not supported yet.
+Windowed tables cannot join on a foreign key, and there is no outer version. If the
+other table's topic is partitioned some other way than by Kafka's default, give that
+table its partitioner (see [Choosing partitions](README.md#choosing-partitions)).
 
 If some members run Java Kafka Streams, name the join with `TableJoined.as` and build
 the left table first, or the broker may refuse the Java members:

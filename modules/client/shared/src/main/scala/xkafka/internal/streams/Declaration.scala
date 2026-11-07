@@ -25,7 +25,7 @@ package streams
 
 import protocol.StreamsGroup
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{Describing, JavaHashSet, Source, Topology, TopologyDescription}
+import xkafka.streams.{Describing, JavaHashSet, Origin, Source, Topology, TopologyDescription}
 
 /** The topology a member declares to the coordinator for a program, as Java Streams declares the same program: sub-topologies numbered as Java
   * numbers them, and every list sorted as Java's client sorts it before sending.
@@ -94,6 +94,13 @@ private[xkafka] object Declaration:
       topology.numbered.map: (id, subtopology) =>
         val sources      = subtopology.origins.collect { case Source.Input(topic) => topic.value }.sorted
         val repartitions = subtopology.origins.filter(internal).map(Task.topicOf(application, _)).sorted
+        // A repartition topic asked for with a number of partitions is made with that many; any other, with as many as the broker works out.
+        val counts =
+          subtopology.entries.flatMap: entry =>
+            entry.origin match
+              case Origin.Repartitioned(named, _, _, _, Some(count)) => List(s"$application-${named.value}-repartition" -> count)
+              case _                                                 => Nil
+          .toMap
         // Java keeps each copartition group as a HashSet of its topics' names, and its groups in a HashSet of those, and sends each as indices into the
         // sorted lists of the sub-topology's topics, in the order those sets iterate.
         val copartitioned =
@@ -114,7 +121,8 @@ private[xkafka] object Declaration:
               changelog(application, store.value, subtopology.retentions.get(store.value), subtopology.duplicates(store.value), replicationFactor)
             ).sortBy(_.name),
           repartitionSinkTopics = subtopology.repartitions.map(Task.topicOf(application, _)).sorted,
-          repartitionSourceTopics = repartitions.map(StreamsGroup.TopicInfo(_, 0, replicationFactor, RepartitionConfigs)),
+          repartitionSourceTopics =
+            repartitions.map(name => StreamsGroup.TopicInfo(name, counts.getOrElse(name, 0), replicationFactor, RepartitionConfigs)),
           copartitionGroups = copartitioned
         )
     StreamsGroup.Topology(0, subtopologies.sortBy(_.id))

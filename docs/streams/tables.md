@@ -23,7 +23,9 @@ Each record's value replaces its key's, even a record timestamped earlier than
 the one it replaces. A record without a value (a tombstone) deletes its key, and
 a record without a key is skipped. The table is kept in the named store, whose
 changelog is `<application id>-<store>-changelog`, here
-`<application id>-users-changelog`.
+`<application id>-users-changelog`. If the topic is partitioned some other way than
+by Kafka's default, give the table its partitioner (see
+[Choosing partitions](README.md#choosing-partitions)).
 
 A table read from a topic can delete keys, so its `toStream` gives `Option`
 values: `Some` for an update and `None` for a delete, which `Serde.option`

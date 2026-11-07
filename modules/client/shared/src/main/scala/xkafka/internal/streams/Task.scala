@@ -54,7 +54,8 @@ private[xkafka] final case class TaskOutput(
     value: Option[Chunk[Byte]],
     timestamp: Long,
     headers: Headers,
-    partitionBy: Option[Chunk[Byte]] = None
+    partitionBy: Option[Chunk[Byte]] = None,
+    choose: Option[Int => Int] = None
 )
 
 /** The latest value a store holds for a key, and its timestamp, as the bytes its changelog carries. */
@@ -286,9 +287,9 @@ private[xkafka] final class Task[F[_]](
         v      <- value.deserializer.deserialize(source, input.headers, input.value)
       yield Travelling(k, v, input.timestamp, input.headers)
     origin match
-      case Origin.Input(_, topics, key, value)              => from(F.pure(topics.find(_.value == input.topic).getOrElse(topics.head)), key, value)
-      case Origin.Repartitioned(repartition, key, value, _) => from(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
-      case Origin.Exchanged(_, _)                           => F.pure(Travelling(input.key, input.value, input.timestamp, input.headers))
+      case Origin.Input(_, topics, key, value)                 => from(F.pure(topics.find(_.value == input.topic).getOrElse(topics.head)), key, value)
+      case Origin.Repartitioned(repartition, key, value, _, _) => from(topicNamed(s"$application-${repartition.value}-repartition"), key, value)
+      case Origin.Exchanged(_, _)                              => F.pure(Travelling(input.key, input.value, input.timestamp, input.headers))
 
   /** `record` through `consumer` and all that reads what it gives, each record a step gives going all the way through before the next, as Java
     * forwards them, and what it writes in the order it writes it.
@@ -297,9 +298,9 @@ private[xkafka] final class Task[F[_]](
     consumer.expanded match
       case Consumer.Then(_, last, next) => step(last, record, state, now, next.requests).flatMap: (after, records, written) =>
           allPushed(next, records, after, written, now)
-      case Consumer.Output(_, topic, key, value)                                => written(F.pure(topic), key, value, false, record).map((state, _))
-      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate) =>
-        written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record)
+      case Consumer.Output(_, topic, key, value, partitioner) => written(F.pure(topic), key, value, false, record, partitioner).map((state, _))
+      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate, _, partitioner) =>
+        written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record, partitioner)
           // Java drops a value that is null before a grouped table's repartition topic, which here is a change its serializer writes as none.
           .map(out => (state, if aggregate.isDefined then out.filter(_.value.isDefined) else out))
       case Consumer.Beside(_, _, next)  => pushed(next, record, state, now)
@@ -407,7 +408,10 @@ private[xkafka] final class Task[F[_]](
           primary.toVector.flatMap(key => sends.map(_ -> key)).traverse:
             case ((target, instruction), key) => bytesOf(target, topic).map: bytes =>
                 val value = Subscription(hash, instruction, key, partition).encoded
-                TaskOutput(topic, None, bytes, Some(value), record.timestamp, record.headers)
+                // A subscription goes to the partition that holds its foreign key in the other table's topic, however that topic is partitioned.
+                val chosen =
+                  target.flatMap(foreign => join.otherPartitioner.map(chooser => (count: Int) => chooser.choose(foreign, (), record.headers, count)))
+                TaskOutput(topic, None, bytes, Some(value), record.timestamp, record.headers, choose = chosen)
       yield (state, out)
 
   /** A change to a foreign-key join's other table: an answer to each subscription to its key, at its time and with its headers, as Java's
@@ -1340,7 +1344,7 @@ private[xkafka] final class Task[F[_]](
   /** The serde a suppression's buffer writes a table's keys with: Java's windowed serdes for windowed tables. */
   private def bufferKey[K](key: TableKey[F, K]): xkafka.streams.Serde[F, K] =
     key match
-      case TableKey.Plain(plain)              => plain
+      case TableKey.Plain(plain, _)           => plain
       case TableKey.TimeWindowed(inner, size) => xkafka.streams.Serde.timeWindowed(inner, scala.concurrent.duration.FiniteDuration(size, "ms"))
       case TableKey.SessionWindowed(inner)    => xkafka.streams.Serde.sessionWindowed(inner)
 
@@ -1612,7 +1616,8 @@ private[xkafka] final class Task[F[_]](
       key: xkafka.streams.Serde[F, K],
       value: xkafka.streams.Serde[F, V],
       repartitioning: Boolean,
-      record: Travelling[K, V]
+      record: Travelling[K, V],
+      partitioner: Option[xkafka.streams.Partitioner[K, V]]
   ): F[Vector[TaskOutput]] =
     // Java partitions a windowed key by the key alone, whichever topic it goes to.
     def base(target: Topic): F[Option[Chunk[Byte]]] = key.serializer.partitionedBy(target, record.headers, record.key).sequence.map(_.flatten)
@@ -1622,7 +1627,9 @@ private[xkafka] final class Task[F[_]](
       v      <- value.serializer.serialize(target, record.headers, record.value)
       by     <- base(target)
     // Java drops a record with a null key before its repartition topic, which here is a key its serializer writes as none.
-    yield if repartitioning && k.isEmpty then Vector.empty else Vector(TaskOutput(target, None, k, v, record.timestamp, record.headers, by))
+    yield
+      val chosen = partitioner.map(chooser => (count: Int) => chooser.choose(record.key, record.value, record.headers, count))
+      if repartitioning && k.isEmpty then Vector.empty else Vector(TaskOutput(target, None, k, v, record.timestamp, record.headers, by, chosen))
 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 

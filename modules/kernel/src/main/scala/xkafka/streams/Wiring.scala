@@ -106,24 +106,24 @@ private[xkafka] object Wiring:
     if seen then added
     else
       consumer.expanded match
-        case Consumer.Then(_, step, next)                    => linked(next, added.keeping(step.kept))
-        case Consumer.Repartitioning(_, _, _, _, _, next, _) => linked(next, added)
-        case Consumer.Beside(table, _, next)                 => linked(next, added.copy(tables = added.tables ++ table))
-        case Consumer.Fan(children)                          => children.foldLeft(added)((graph, child) => linked(child, graph))
-        case Consumer.Merged(_, next)                        => linked(next, added)
-        case Consumer.Cogroup(_, _, next)                    => linked(next, added)
-        case Consumer.Copartitioned(next)                    => linked(next, added)
-        case Consumer.Splitting(_, branches)                 => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
-        case Consumer.Refused(_, next)                       => linked(next, added)
-        case Consumer.LeftTable(join)                        => onward(join.id, join.kept, join.next)
-        case Consumer.RightTable(join)                       => onward(join.id, join.kept, join.next)
-        case Consumer.LeftStream(join)                       => onward(join.id, join.kept, join.next)
-        case Consumer.RightStream(join)                      => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignLeft(join)                      => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignRight(join)                     => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignSubscribed(_)                   => added
-        case Consumer.ForeignAnswered(_)                     => added
-        case _                                               => added
+        case Consumer.Then(_, step, next)                          => linked(next, added.keeping(step.kept))
+        case Consumer.Repartitioning(_, _, _, _, _, next, _, _, _) => linked(next, added)
+        case Consumer.Beside(table, _, next)                       => linked(next, added.copy(tables = added.tables ++ table))
+        case Consumer.Fan(children)                                => children.foldLeft(added)((graph, child) => linked(child, graph))
+        case Consumer.Merged(_, next)                              => linked(next, added)
+        case Consumer.Cogroup(_, _, next)                          => linked(next, added)
+        case Consumer.Copartitioned(next)                          => linked(next, added)
+        case Consumer.Splitting(_, branches)                       => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
+        case Consumer.Refused(_, next)                             => linked(next, added)
+        case Consumer.LeftTable(join)                              => onward(join.id, join.kept, join.next)
+        case Consumer.RightTable(join)                             => onward(join.id, join.kept, join.next)
+        case Consumer.LeftStream(join)                             => onward(join.id, join.kept, join.next)
+        case Consumer.RightStream(join)                            => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignLeft(join)                            => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignRight(join)                           => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignSubscribed(_)                         => added
+        case Consumer.ForeignAnswered(_)                           => added
+        case _                                                     => added
 
   /** Whether `entry` only reads into a store the program's own topics keep from the same topic, as the table a join reads does where the program also
     * uses that table.
@@ -326,10 +326,12 @@ private[xkafka] object Wiring:
             .refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
             .refusing(step.kept.flatMap(held => held.problems.map(TopologyError.InvalidStore(held.store.value, _))))
         arrive(next, after, made.coming(named.value, after))
-      case Consumer.Output(named, topic, _, _) => walk.making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
-      case Consumer.Done()                     => walk
-      case Consumer.Repartitioning(repartition, key, value, atJoin, always, next, aggregate) =>
-        val read         = Entry(Origin.Repartitioned(repartition, key, value, aggregate), next)
+      case Consumer.Output(named, topic, _, _, _) => walk
+          .making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
+      case Consumer.Done()                                                                                  => walk
+      case Consumer.Repartitioning(repartition, key, value, atJoin, always, next, aggregate, partitions, _) =>
+        val read         = Entry(Origin.Repartitioned(repartition, key, value, aggregate, partitions), next)
+        val counted      = partitions.filter(_ < 1).map(TopologyError.InvalidPartitionCount(repartition.value, _)).toList
         val source       = Source.Repartitioned(repartition)
         val (node, name) = Describing.source(read.origin)
         val filter       = s"${repartition.value}-repartition-filter"
@@ -349,7 +351,7 @@ private[xkafka] object Wiring:
         val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil)
         val refused =
           if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(repartition.value))
-        val placed = (if atJoin then refused else refused.writing(List(source))).copy(nodes = refused.nodes :+ (source, node))
+        val placed = (if atJoin then refused else refused.writing(List(source))).copy(nodes = refused.nodes :+ (source, node)).refusing(counted)
         arrive(next, after, placed.coming(name, after))
       case Consumer.Beside(table, last, next) =>
         val pulled = table.fold(walk)(_.entries.foldLeft(walk)((walking, entry) => entered(entry, true, walking)))

@@ -56,7 +56,8 @@ A program is a `Topology` of pipelines. A pipeline starts by reading a topic, as
 - `evalFilter`, `evalMap` and `evalMapValues`, which run an effect;
 - `filterRecord`, `mapRecord`, `mapRecordValue` and others like them, which also
   see each record's time and headers (see [Steps that see the whole record](#steps-that-see-the-whole-record));
-- `repartition`, which sends records through a repartition topic you name;
+- `repartition`, which sends records through a repartition topic you name, with as
+  many partitions as you choose (see [Choosing partitions](#choosing-partitions));
 - `groupByKey` or `groupBy`, followed by `count`, `reduce` or `aggregate` into a
   named `Store`. This gives a `KTable`, and its `toStream` is every change to it.
   A table can be grouped too (see [Grouping a table](tables.md#grouping-a-table)),
@@ -205,6 +206,85 @@ To make any number of records with an effect, or to use a store, write a
 [processor](processors.md). If some members run Java Kafka Streams, write these steps
 in the Java program as `process` where the key can change and `processValues` where
 it cannot, under the same names.
+
+### Choosing partitions
+
+By default, each record goes to the partition Kafka's producers choose for its key,
+so all of a key's records are in one partition, in order. A `Partitioner` chooses
+some other way. You can give one in three places:
+
+| Where | What you can give |
+| --- | --- |
+| `to` | `partitioner`, which chooses each record's partition in the output topic |
+| `repartition` | `partitions`, how many the repartition topic has, and `partitioner` |
+| `KTable(...)`, read from a topic | `partitioner`, saying how that topic is partitioned |
+
+```scala mdoc:compile-only
+// Keep each region's orders together: through a repartition topic of twelve partitions, then to the output, both partitioned by region.
+// An order's key starts with its region, as in "eu-1042".
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def ordersByRegion(orders: Topic, output: Topic): Pipeline[IO] =
+  val text   = Serde.utf8[IO]
+  val region = Partitioner.byKey((key: String, count: Int) => Math.floorMod(key.takeWhile(_ != '-').hashCode, count))  // The same region, the same partition
+  KStream(Named("orders"), orders, text, text)
+    .repartition(Repartition("orders-by-region"), text, text, partitions = Some(12), partitioner = Some(region))      // Twelve partitions, by region
+    .to(Named("write-orders"), output, text, text, Some(region))                                                   // The output is partitioned by region too
+```
+
+Without `partitions`, the broker chooses how many partitions a repartition topic has,
+as it does for every repartition topic. A count under one is refused when you call
+`Topology.of`.
+
+#### Writing a partitioner
+
+A partitioner is given a record's key, value and headers, and how many partitions
+the topic has. It gives back a partition, from 0 up to one less than that number.
+Any other number stops the application, with an error naming the topic.
+
+```scala mdoc:compile-only
+// Two partitioners: one that goes by the key alone, and one that also reads a header
+import xkafka.*
+import xkafka.streams.*
+
+// Customers' ids are numbers after a letter, as in "c42": spread customers by that number, each customer always in the same partition
+val byCustomer = Partitioner.byKey((key: String, count: Int) => Math.floorMod(key.drop(1).toIntOption.getOrElse(0), count))
+
+// Records with the header priority=urgent go to partition 0, and the rest are spread by key over the other partitions
+val urgentFirst = Partitioner[String, String]: (key, _, headers, count) =>
+  val urgent = headers.get[String]("priority").contains(Right("urgent"))
+  if urgent || count == 1 then 0 else 1 + Math.floorMod(key.hashCode, count - 1)
+```
+
+- Use `Partitioner.byKey` when the key alone decides, and `Partitioner(...)` when the
+  value or headers do too.
+- Only records in the same partition stay in order, so a partitioner that does not
+  go by the key alone can put one key's records out of order.
+- Give the same answer for the same record every time. Records processed again, such
+  as after a crash, should land where they did before.
+- `hashCode` can be negative: `Math.floorMod`, unlike `%`, always gives a number
+  from 0 up.
+
+#### Tables whose topic is partitioned its own way
+
+A table's topic may be written by another application that partitions it its own
+way. Give the table that partitioner, made with `Partitioner.byKey`, since a table
+needs each key to stay in one partition whatever its value. xkafka then uses it
+whenever it sends records to be looked up in that table: a stream joined with the
+table after the stream's key changed, and a
+[foreign-key join](joins.md#joining-on-a-foreign-key) looking up the table's rows.
+Without it, those records go to partitions that do not hold their keys, and find
+nothing.
+
+#### With Java members
+
+If some members run Java Kafka Streams, give them a `StreamPartitioner` that chooses
+the same partitions, in `Produced`, `Repartitioned`, and a foreign-key join's
+`TableJoined`. Java has no way to repartition a stream joined with a table by the
+table's partitioner, so an application with Java members cannot rely on that.
 
 ### Describing a program
 
