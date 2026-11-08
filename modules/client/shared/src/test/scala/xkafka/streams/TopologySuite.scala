@@ -41,6 +41,24 @@ final class TopologySuite extends CatsEffectSuite:
     KStream(Named(s"$input-read"), topic(input), text, text).groupBy(Repartition(repartition), text, text)((_, v) => v)
       .count(Named(s"$input-count"), store).toStream(Named(s"$input-changes")).to(Named(s"$input-write"), topic(s"$input-out"), text, count)
 
+  test("a window store keeps the size of its windows: a tumbling window's, a sliding window's time difference, and a processor's store's"):
+    import scala.concurrent.duration.*
+    val read     = KStream(Named("read-w"), topic("w"), text, text).groupByKey(text, text)
+    val tumbling =
+      read.windowedBy(TimeWindows.tumbling(10.seconds, grace = 1.hour)).count(Named("count-t"), Store("tumbling")).toStream(Named("changes-t"))
+        .to(Named("write-t"), topic("out-t"), Serde.timeWindowed(text, 10.seconds), count)
+    val sliding =
+      KStream(Named("read-s"), topic("s"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(2500.millis, grace = 1.hour))
+        .count(Named("count-s"), Store("sliding")).toStream(Named("changes-s"))
+        .to(Named("write-s"), topic("out-s"), Serde.timeWindowed(text, 2500.millis), count)
+    val declared  = WindowStore.of(Store("processed"), text, count, 5.seconds, 1.hour)
+    val processed =
+      KStream(Named("read-p"), topic("p"), text, text)
+        .process(Named("keep"), Processor.withStore(declared)(_ => Processor.onRecord(record => cats.effect.IO.pure(List(record)))))
+        .to(Named("write-p"), topic("out-p"), text, text)
+    val sizes = Topology.of(tumbling, sliding, processed).orFail.subtopologies.flatMap(_.kept).map(kept => kept.store.value -> kept.windowSize).toMap
+    assertEquals((sizes("tumbling"), sizes("sliding"), sizes("processed")), (Some(10000L), Some(2500L), Some(5000L)))
+
   test("a store kept in memory keeps its name and its changelog, and cannot take a name another store has, however that one is kept"):
     val kept = Store("counts").inMemory
     assertEquals(

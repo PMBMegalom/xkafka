@@ -28,6 +28,7 @@ import java.util.Properties
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 import cats.data.{NonEmptyList, NonEmptySet}
 import cats.effect.{IO, Resource}
@@ -78,7 +79,7 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
       xkafka: String => Topology[IO],
       registered: JavaQueries => JavaQueries,
       answered: KafkaStreams[IO] => IO[Boolean],
-      javaAnswered: JavaQuerying => Boolean = _ => true,
+      javaAnswered: JavaQuerying => Boolean,
       inputs: List[String] = List("input")
   ): IO[Unit] =
     Names.fresh:
@@ -171,5 +172,19 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
               inWindows.map(_.map(_._2).sum) == Right(count.toLong) && inSessions.map(_.map(_._2).sum) == Right(count.toLong)
             )
           .map(_.forall(identity)),
+        // The Java member's own query of every key's windows, each 5 s long.
+        asking =>
+          val found =
+            asking.fetchAll(
+              "tumbling",
+              java.time.Instant.EPOCH,
+              java.time.Instant.ofEpochMilli(Long.MaxValue),
+              java.time.Duration.ofSeconds(5),
+              JavaSerdes.String,
+              JavaSerdes.Long
+            ).asScala.toList
+          found.groupMapReduce(_.key.key)(_.value.longValue)(_ + _) == keys.view.mapValues(_.toLong).toMap &&
+          found.forall(window => window.key.window.end - window.key.window.start == 5000L)
+        ,
         inputs = List("input-tumbling", "input-sessions")
       )

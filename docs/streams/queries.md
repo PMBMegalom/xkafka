@@ -105,8 +105,8 @@ numbers written with `Serde.long`, negative numbers come after the positive ones
 
 A windowed aggregation keeps a value for each key and window, and a session
 aggregation one for each key and session. Query them with
-`QueryableStore.window` and `QueryableStore.session`, giving the serdes of the
-plain key, not of the windowed one:
+`QueryableStore.window` and `QueryableStore.session`, giving the serdes of the key
+itself, not the windowed serde your output topic uses:
 
 ```scala mdoc:compile-only
 // Look up a page's views per minute over the last hour, and a user's visits
@@ -131,12 +131,13 @@ def visitsOf(streams: KafkaStreams[IO], user: String): IO[Either[QueryProblem, V
 
 | store | query | answer |
 | --- | --- | --- |
-| window | `fetch(key, from, to)` | the key's windows starting from `from` to `to`, both included, each by its start, earliest first |
-| window | `fetchAll(from, to)` | every key's windows starting in that time, by start and then by key |
-| session | `fetch(key)` | the key's sessions, each by its window, the earliest ending first |
+| window | `fetch(key, from, to)` | the key's windows starting from `from` to `to`, both included: each window's start time with its value, earliest first |
+| window | `fetchAll(from, to)` | the windows of every key starting in that time: each key and window with its value, earliest start first, then by key |
+| session | `fetch(key)` | the key's sessions: each session's window with its value, the earliest ending first |
 
-A window store keeps windows for its retention, so older windows are no longer
-found.
+`fetchAll` gives each window's start and end; the end is the start plus the window
+size your program sets. A window store keeps windows only for its retention, so
+older windows are no longer found.
 
 ## When a query cannot be answered
 
@@ -162,9 +163,10 @@ little behind, but it can answer while its store is moving between members.
 
 An application can mix xkafka and Java Kafka Streams members. A Java member
 answers xkafka's queries through `JavaQueries`, from the
-[`xkafka-streams-java` module](README.md#java-partitioners-jvm-only): give it the instance, the application's id, and each store that can be
-queried with its Java serdes, then call its `answer` from the internal route. The
-member's `application.server` setting is the endpoint xkafka members reach it at.
+[`xkafka-streams-java` module](README.md#java-partitioners-jvm-only). Give it the
+instance, the application's id, and each store that can be queried with its Java
+serdes, then call its `answer` from the internal route. The member's
+`application.server` setting is the endpoint xkafka members reach it at.
 
 ```java
 // Let a Java member answer xkafka members' queries of its page view counts
@@ -196,9 +198,9 @@ in a format xkafka reads, so a query that needs it fails with `NotXkafka`, or wi
 `Unreachable` where nothing answers at its endpoint.
 
 A Java member asks with `JavaQuerying`, giving it the instance, its topology, the
-application's id, and how to send a query to another member. It finds which
-member holds a key through Java's own metadata, xkafka members included, and asks
-that member, itself too, through its internal route:
+application's id, and how to send a query to another member. It finds the member
+holding a key through Java's own metadata, which lists xkafka members too, and
+sends the query to that member's internal route, even when that member is itself:
 
 ```java
 // Let a Java member ask for a page's view count, wherever it is held
@@ -230,6 +232,13 @@ final class Asking {
 | method | answer |
 | --- | --- |
 | `get(store, key, ...)` | what a key-value store holds for the key, if anything |
-| `range(store, from, to, ...)`, `all(store, ...)` | the keys of a key-value store with their values, as a list of Kafka's `KeyValue` |
-| `fetch(store, key, from, to, ...)` | a key's windows starting in that time, each by its start |
-| `sessions(store, key, ...)` | a key's sessions, each by its `Windowed` key |
+| `range(store, from, to, ...)` | the keys of a key-value store from `from` to `to`, both included, as a list of Kafka's `KeyValue` |
+| `all(store, ...)` | every key of a key-value store with its value, as a list of Kafka's `KeyValue` |
+| `fetch(store, key, from, to, ...)` | a key's windows starting in that time: each window's start time with its value |
+| `fetchAll(store, from, to, windowSize, ...)` | the windows of every key starting in that time, each as a `Windowed` key with its value |
+| `sessions(store, key, ...)` | a key's sessions, each as a `Windowed` key with its value |
+
+Java's metadata does not say how long a store's windows are, so `fetchAll` needs
+the size from you, and ends each window that long after it starts. Give it the
+size your program's windows have: a wrong size gives wrong ends, and nothing can
+tell.

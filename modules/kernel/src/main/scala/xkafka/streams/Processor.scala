@@ -181,7 +181,8 @@ object WindowStore:
       access => opened(store, access, key, value, size.toMillis, retention.toMillis),
       StoreAccess.idle(store),
       Some(retention.toMillis),
-      problems
+      problems,
+      windowSize = Some(size.toMillis)
     )
 
   private def opened[F[_], K, V](store: Store, access: StoreAccess[F], key: Serde[F, K], value: Serde[F, V], size: Long, retention: Long)(using
@@ -367,9 +368,11 @@ final class DeclaredStore[F[_], H] private[xkafka] (
     private[xkafka] val idle: StoreAccess[F],
     retention: Option[Long] = None,
     problems: List[String] = Nil,
-    session: Boolean = false
+    session: Boolean = false,
+    windowSize: Option[Long] = None
 ):
-  private[xkafka] val kept: KeptStore = KeptStore(store, retention = retention, session = session, shared = Some(this), problems = problems)
+  private[xkafka] val kept: KeptStore =
+    KeptStore(store, retention = retention, windowSize = windowSize, session = session, shared = Some(this), problems = problems)
 
 /** A store as bytes, for a task to give a processor, with what the processor wrote since its last commit in it. */
 private[xkafka] trait StoreAccess[F[_]]:

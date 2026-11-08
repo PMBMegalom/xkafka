@@ -289,19 +289,19 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
   /** The stores it keeps. */
   def kept: List[KeptStore] =
     this match
-      case Aggregate(store, _, _, _, _, _)                            => List(KeptStore(store))
-      case TableAggregate(store, _, _, _, _, _)                       => List(KeptStore(store))
-      case TableSource(store, _, _)                                   => List(KeptStore(store))
-      case ToTable(_, store, _, _)                                    => List(KeptStore(store))
-      case TableFilter(_, _, store)                                   => store.toList.map((stored, _, _) => KeptStore(stored))
-      case TableMapValues(_, _, _, store)                             => store.toList.map((stored, _, _) => KeptStore(stored))
-      case WindowedAggregate(store, _, retention, _, _, _, _, _, _)   => List(KeptStore(store, Some(retention)))
-      case SlidingAggregate(store, _, retention, _, _, _, _, _, _)    => List(KeptStore(store, Some(retention)))
-      case SessionAggregate(store, _, retention, _, _, _, _, _, _, _) => List(KeptStore(store, Some(retention), session = true))
-      case Suppress(suppressed, _, _, _)                              => List(KeptStore(Store(s"${suppressed.name}-store"), buffer = true))
-      case Cogrouped(side, step)                                      => if side == 0 then step.kept else Nil
-      case Process(processor, _)                                      => processor.kept
-      case _                                                          => Nil
+      case Aggregate(store, _, _, _, _, _)                                => List(KeptStore(store))
+      case TableAggregate(store, _, _, _, _, _)                           => List(KeptStore(store))
+      case TableSource(store, _, _)                                       => List(KeptStore(store))
+      case ToTable(_, store, _, _)                                        => List(KeptStore(store))
+      case TableFilter(_, _, store)                                       => store.toList.map((stored, _, _) => KeptStore(stored))
+      case TableMapValues(_, _, _, store)                                 => store.toList.map((stored, _, _) => KeptStore(stored))
+      case WindowedAggregate(store, windows, retention, _, _, _, _, _, _) => List(KeptStore(store, Some(retention), Some(windows.sizeMillis)))
+      case SlidingAggregate(store, windows, retention, _, _, _, _, _, _)  => List(KeptStore(store, Some(retention), Some(windows.differenceMillis)))
+      case SessionAggregate(store, _, retention, _, _, _, _, _, _, _)     => List(KeptStore(store, Some(retention), session = true))
+      case Suppress(suppressed, _, _, _)                                  => List(KeptStore(Store(s"${suppressed.name}-store"), buffer = true))
+      case Cogrouped(side, step)                                          => if side == 0 then step.kept else Nil
+      case Process(processor, _)                                          => processor.kept
+      case _                                                              => Nil
 
   /** Why its punctuators cannot be used, if any cannot. */
   def punctuationProblems: List[String] =
@@ -403,6 +403,7 @@ private[xkafka] enum Origin[F[_], K, V]:
 private[xkafka] final case class KeptStore(
     store: Store,
     retention: Option[Long] = None,
+    windowSize: Option[Long] = None,
     session: Boolean = false,
     buffer: Boolean = false,
     duplicates: Boolean = false,

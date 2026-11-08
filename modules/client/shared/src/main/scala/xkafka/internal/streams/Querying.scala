@@ -31,7 +31,7 @@ import cats.effect.{Concurrent, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
 import fs2.concurrent.Signal
-import xkafka.streams.{Endpoint, Forward, Query, QueryProblem, QueryRequest, StreamsPhase, Subtopology}
+import xkafka.streams.{Answering, Endpoint, Forward, Query, QueryProblem, QueryRequest, StreamsPhase, Subtopology}
 
 /** A query as one member asks another: what it asks of the store, of which partitions, and whether a standby copy may answer. */
 private[xkafka] final case class Asked(request: QueryRequest, partitions: List[Int], allowStandby: Boolean)
@@ -131,18 +131,18 @@ private[xkafka] final class Querying[F[_]](
   /** The sub-topology keeping each store that can be queried, with the topic its partitions are numbered by and its kind. Join stores and suppression
     * buffers cannot be queried.
     */
-  private val kept: Map[String, (String, String, Querying.Kind)] =
+  private val kept: Map[String, (String, String, Querying.Kind, Option[Long])] =
     subtopologies.toList.flatMap: (id, subtopology) =>
       subtopology.origins.headOption.toList.flatMap: source =>
         subtopology.kept.filter(store => !store.buffer && !store.duplicates).map: store =>
           val kind =
             if store.session then Querying.Kind.Session else if store.retention.nonEmpty then Querying.Kind.Window else Querying.Kind.KeyValue
-          store.store.value -> (id, Task.topicOf(application, source), kind)
+          store.store.value -> (id, Task.topicOf(application, source), kind, store.windowSize)
     .toMap
 
   /** The store `request` names, where the program has one of the kind it asks of. */
   private def keptFor(request: QueryRequest): Option[(String, String)] =
-    kept.get(request.storeName).collect { case (subtopology, topic, kind) if kind == Querying.kindOf(request) => (subtopology, topic) }
+    kept.get(request.storeName).collect { case (subtopology, topic, kind, _) if kind == Querying.kindOf(request) => (subtopology, topic) }
 
   /** The global table's store `request` names, which holds keys and values only. */
   private def globalFor(request: QueryRequest): Option[TaskStore[F]] =
@@ -157,7 +157,7 @@ private[xkafka] final class Querying[F[_]](
             case Some(global) => read(global, request).map(_.asRight[QueryProblem])
             case None         => keptFor(request)
                 .fold(F.pure(QueryProblem.UnknownStore(store).asLeft[Vector[(Chunk[Byte], Chunk[Byte])]]))(routed(request, allowStandby, _))
-        found.flatMap(_.traverse(query.answer(topic, _)))
+        found.flatMap(_.traverse(query.answer(Answering(topic, kept.get(store).flatMap(_._4)), _)))
 
   def answer(bytes: Chunk[Byte]): F[Chunk[Byte]] =
     QueryWire.asked(bytes).fold(F.raiseError[Chunk[Byte]](new IllegalArgumentException("the request is not an xkafka query"))): asked =>

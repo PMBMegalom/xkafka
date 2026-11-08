@@ -36,7 +36,7 @@ import org.apache.kafka.streams.{
 }
 import org.apache.kafka.streams.errors.{InvalidStateStoreException, StreamsNotStartedException, UnknownStateStoreException}
 import org.apache.kafka.streams.kstream.Windowed as JavaWindowed
-import org.apache.kafka.streams.kstream.internals.SessionWindow
+import org.apache.kafka.streams.kstream.internals.{SessionWindow, TimeWindow}
 import org.apache.kafka.streams.query.{FailureReason, KeyQuery, Query as JavaQuery, RangeQuery, StateQueryRequest, WindowKeyQuery, WindowRangeQuery}
 import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, WindowStoreIterator}
 import internal.streams.{Answered, Asked, QueryWire}
@@ -196,6 +196,26 @@ final class JavaQuerying private (
     keyed(store, key, keySerde, QueryRequest.Windows(store, Some(bytes), from.toEpochMilli, to.toEpochMilli))
       .map((stored, v) => (ByteBuffer.wrap(stored.drop(stored.size - 12).take(8).toArray).getLong, v)).sortBy(_._1)
       .map((start, v) => JavaKeyValue.pair(java.lang.Long.valueOf(start), read(store, valueSerde, v))).asJava
+
+  /** The windows of every key in the window store `store` starting from `from` to `to`, both included, from every member, in order of their starts
+    * and then of their keys' bytes. Java's metadata does not say how long the store's windows are, so `windowSize` gives each window its end, which
+    * is its start and that size: give the size the store's windows have, or the ends are wrong.
+    */
+  def fetchAll[K, V](
+      store: String,
+      from: Instant,
+      to: Instant,
+      windowSize: java.time.Duration,
+      keySerde: JavaSerde[K],
+      valueSerde: JavaSerde[V]
+  ): java.util.List[JavaKeyValue[JavaWindowed[K], V]] =
+    // A window store's key is the key, then the window's start in eight bytes and a sequence number in four.
+    everywhere(store, QueryRequest.Windows(store, None, from.toEpochMilli, to.toEpochMilli)).map: (stored, v) =>
+      val start = ByteBuffer.wrap(stored.drop(stored.size - 12).take(8).toArray).getLong
+      (start, stored.take(stored.size - 12), v)
+    .sortBy((start, key, _) => (start, key))(using Ordering.Tuple2(using Ordering.Long, QueryRequest.unsigned)).map: (start, key, v) =>
+      JavaKeyValue.pair(new JavaWindowed(read(store, keySerde, key), new TimeWindow(start, start + windowSize.toMillis)), read(store, valueSerde, v))
+    .asJava
 
   /** The sessions of `key` in the session store `store`, the earliest ending first. */
   def sessions[K, V](store: String, key: K, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.List[JavaKeyValue[JavaWindowed[K], V]] =

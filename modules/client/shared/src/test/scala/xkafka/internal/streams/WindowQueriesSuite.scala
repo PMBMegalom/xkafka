@@ -135,7 +135,9 @@ final class WindowQueriesSuite extends CatsEffectSuite:
         assertEquals(local, Right(Vector(10000L -> 2L, 20000L -> 3L)))
         assertEquals(remote, Right(Vector(0L -> 1L, 10000L -> 2L)))
 
-  test("the windows of every key in a time range come from every member, by their starts and then by their keys"):
+  test(
+    "the windows of every key in a time range come from every member, by their starts and then by their keys, each ending its size after its start"
+  ):
     asking.flatMap: querying =>
       querying.query(windows.fetchAll(Timestamp.fromEpochMillis(0L), Timestamp.fromEpochMillis(20000L)), false).map: found =>
         val byBytes  = Ordering.by(bytes)(using StoreContents.keys)
@@ -144,7 +146,7 @@ final class WindowQueriesSuite extends CatsEffectSuite:
         val expected =
           List(0L -> 1L, 10000L -> 2L, 20000L -> 3L).flatMap: (start, n) =>
             val here = plain.map(_ -> n) ++ (if start == 10000L then longer.map(_ -> 9L) else Nil)
-            here.sortBy(_._1)(using byBytes).map((key, count) => (key, start, count))
+            here.sortBy(_._1)(using byBytes).map((key, count) => (xkafka.streams.Windowed(key, Window(start, start + 10000L)), count))
         assertEquals(found, Right(expected.toVector))
 
   test("a key's sessions come from the member holding the key, by their ends, without those of a longer key"):

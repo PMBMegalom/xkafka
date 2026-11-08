@@ -63,10 +63,15 @@ enum QueryProblem derives CanEqual:
 final class Query[F[_], A] private[xkafka] (
     private[xkafka] val store: Store,
     private[xkafka] val request: xkafka.Topic => F[QueryRequest],
-    private[xkafka] val answer: (xkafka.Topic, Vector[(Chunk[Byte], Chunk[Byte])]) => F[A]
+    private[xkafka] val answer: (Answering, Vector[(Chunk[Byte], Chunk[Byte])]) => F[A]
 ):
   private[xkafka] def mapK[G[_]](fk: FunctionK[F, G]): Query[G, A] =
-    new Query(store, topic => fk(request(topic)), (topic, entries) => fk(answer(topic, entries)))
+    new Query(store, topic => fk(request(topic)), (answering, entries) => fk(answer(answering, entries)))
+
+/** What reading a query's answer needs from the program: the topic its store's keys and values are written for, and, for a window store, the size of
+  * its windows, which give each window its end.
+  */
+private[xkafka] final case class Answering(topic: xkafka.Topic, windowSize: Option[Long])
 
 /** What a query asks of a store, by serialized keys. */
 private[xkafka] object QueryRequest:
@@ -132,7 +137,7 @@ final class KeyValueQueries[F[_], K, V] private[streams] (store: Store, key: Ser
     new Query(
       store,
       topic => bytes(topic, of).map(QueryRequest.Get(store.value, _)),
-      (topic, found) => found.headOption.traverse((_, v) => value.deserializer.deserialize(topic, xkafka.Headers.empty, Some(v)))
+      (answering, found) => found.headOption.traverse((_, v) => value.deserializer.deserialize(answering.topic, xkafka.Headers.empty, Some(v)))
     )
 
   /** The keys from `from` to `to`, both included, and what each holds, in the order of their serialized bytes, from every member. */
@@ -140,11 +145,12 @@ final class KeyValueQueries[F[_], K, V] private[streams] (store: Store, key: Ser
     new Query(
       store,
       topic => (bytes(topic, from), bytes(topic, to)).mapN((first, last) => QueryRequest.Range(store.value, Some(first), Some(last))),
-      entries
+      (answering, found) => entries(answering.topic, found)
     )
 
   /** Every key and what it holds, in the order of their serialized bytes, from every member. */
-  def all: Query[F, Vector[(K, V)]] = new Query(store, _ => F.pure(QueryRequest.Range(store.value, None, None)), entries)
+  def all: Query[F, Vector[(K, V)]] =
+    new Query(store, _ => F.pure(QueryRequest.Range(store.value, None, None)), (answering, found) => entries(answering.topic, found))
 
 /** The queries of a window store, whose keys are each key and its window's start. */
 final class WindowQueries[F[_], K, V] private[streams] (store: Store, key: Serde[F, K], value: Serde[F, V])(using F: MonadThrow[F]):
@@ -163,21 +169,23 @@ final class WindowQueries[F[_], K, V] private[streams] (store: Store, key: Serde
       store,
       topic =>
         QueryableStore.bytesOf(store, key, topic, of).map(bytes => QueryRequest.Windows(store.value, Some(bytes), from.epochMillis, to.epochMillis)),
-      (topic, found) => windows(topic, found).map(_.map((_, start, v) => (start, v)).sortBy(_._1))
+      (answering, found) => windows(answering.topic, found).map(_.map((_, start, v) => (start, v)).sortBy(_._1))
     )
 
-  /** The windows of every key starting from `from` to `to`, both included, from every member, in order of their starts and then of their keys' bytes.
+  /** The windows of every key starting from `from` to `to`, both included, from every member, each with its key, in order of their starts and then of
+    * their keys' bytes. Each window ends its store's window size after it starts, as the program the store belongs to says.
     */
-  def fetchAll(from: xkafka.Timestamp, to: xkafka.Timestamp): Query[F, Vector[(K, Long, V)]] =
+  def fetchAll(from: xkafka.Timestamp, to: xkafka.Timestamp): Query[F, Vector[(Windowed[K], V)]] =
     new Query(
       store,
       _ => F.pure(QueryRequest.Windows(store.value, None, from.epochMillis, to.epochMillis)),
-      (topic, found) =>
+      (answering, found) =>
         val ordered =
           found.sortBy((stored, _) => (QueryableStore.longAt(stored, stored.size - 12), stored.take(stored.size - 12)))(using
             Ordering.Tuple2(using Ordering.Long, QueryRequest.unsigned)
           )
-        windows(topic, ordered)
+        F.fromOption(answering.windowSize, new IllegalStateException(s"the store ${store.value} has no window size")).flatMap: size =>
+          windows(answering.topic, ordered).map(_.map((k, start, v) => (Windowed(k, Window(start, start + size)), v)))
     )
 
 /** The queries of a session store, whose keys are each key and its session's end and start. */
@@ -187,10 +195,10 @@ final class SessionQueries[F[_], K, V] private[streams] (store: Store, key: Serd
     new Query(
       store,
       topic => QueryableStore.bytesOf(store, key, topic, of).map(QueryRequest.Sessions(store.value, _)),
-      (topic, found) =>
+      (answering, found) =>
         // A session store's key is the serialized key, then the session's end and its start, each in eight bytes.
         found.traverse((stored, held) =>
-          value.deserializer.deserialize(topic, xkafka.Headers.empty, Some(held))
+          value.deserializer.deserialize(answering.topic, xkafka.Headers.empty, Some(held))
             .map(v => (Window(QueryableStore.longAt(stored, stored.size - 8), QueryableStore.longAt(stored, stored.size - 16)), v))
         ).map(_.sortBy((window, _) => (window.end, window.start)))
     )
