@@ -78,7 +78,9 @@ the application keeps working, and the group's description has none.
 By default, stores are kept in memory, and a member refills them from their
 changelogs each time it starts or is given new work.
 
-Give a state directory to keep them on disk instead:
+### Keeping stores on disk
+
+Give a state directory to keep stores on disk instead:
 
 ```scala mdoc:compile-only
 // Keep the application's stores on disk, so a restarted member does not refill them from the start
@@ -91,19 +93,28 @@ def onDisk(client: ClientSettings, id: ApplicationId): ValidatedNel[StreamsSetti
   StreamsSettings.from(client, id).andThen(_.withStateDirectory("/var/lib/orders"))  // Stores go under /var/lib/orders/<application id>
 ```
 
-On the JVM, add RocksDB to the application's dependencies, as
-`"org.rocksdb" % "rocksdbjni" % "10.1.3"`; an application given a state directory
-without it fails to start, saying so. JavaScript and Native need nothing more in
-the build: see [Platform notes](../platform-notes.md#stores-on-disk) for what
-Native needs where the application runs.
-
 A member started again over the same directory usually gets back the work it
 had, and reads only the changelog records written since it stopped. The same
-goes for work that moves to another member and comes back. Give each running member a
-directory of its own: a second member of the application started over a
-directory already in use fails to start.
+goes for work that moves to another member and comes back. Give each running
+member a directory of its own: a second member started over a directory already
+in use fails to start.
 
-To keep a particular store in memory anyway, name it with `inMemory`:
+Stores on disk are kept by RocksDB 10.1.3. What each platform needs:
+
+- **JVM:** add RocksDB to the application's dependencies. Without it, an
+  application given a state directory fails to start, saying what to add.
+  ```scala
+  // In build.sbt
+  libraryDependencies += "org.rocksdb" % "rocksdbjni" % "10.1.3"
+  ```
+- **Scala.js:** nothing; RocksDB comes from npm with xkafka.
+- **Scala Native:** the RocksDB library file where the application runs, as
+  [Platform notes](../platform-notes.md#stores-on-disk) describe.
+
+### Keeping a store in memory
+
+A small store that is quick to refill, or one you would rather not write to disk,
+can stay in memory while the others go to disk. Name it with `inMemory`:
 
 ```scala mdoc:compile-only
 // Count each user's orders in a store on disk, and each user's page views in a store kept in memory
@@ -112,20 +123,22 @@ import cats.effect.IO
 import xkafka.*
 import xkafka.streams.*
 
-def counts(orders: Topic, views: Topic, totals: Topic, recent: Topic): List[Pipeline[IO]] =
+def counts(orders: Topic, views: Topic, orderCounts: Topic, viewCounts: Topic): List[Pipeline[IO]] =
   val text = Serde.utf8[IO]
   List(
     KStream(Named("read-orders"), orders, text, text).groupByKey(text, text)
       .count(Named("count-orders"), Store("orders"))                  // On disk, where a state directory is given
-      .toStream(Named("orders-changes")).to(Named("write-orders"), totals, text, Serde.long[IO]),
+      .toStream(Named("orders-changes")).to(Named("write-orders"), orderCounts, text, Serde.long[IO]),
     KStream(Named("read-views"), views, text, text).groupByKey(text, text)
       .count(Named("count-views"), Store("views").inMemory)           // In memory, refilled from its changelog on each start
-      .toStream(Named("views-changes")).to(Named("write-views"), recent, text, Serde.long[IO])
+      .toStream(Named("views-changes")).to(Named("write-views"), viewCounts, text, Serde.long[IO])
   )
 ```
 
 The buffers that [holding back updates](holding-back-updates.md) uses are always
 kept in memory.
+
+### Standby copies
 
 If the broker's `streams.num.standby.replicas` setting asks for standby
 replicas, members also keep up-to-date copies of other members' stores. When

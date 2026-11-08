@@ -46,6 +46,7 @@ private[xkafka] object QueryWire:
   private val Asking    = Chunk.array("XKQ1".getBytes(StandardCharsets.US_ASCII))
   private val Answering = Chunk.array("XKA1".getBytes(StandardCharsets.US_ASCII))
 
+  private def long(value: Long): Chunk[Byte]                    = Chunk.array(ByteBuffer.allocate(8).putLong(value).array)
   private def int(value: Int): Chunk[Byte]                      = Chunk.array(ByteBuffer.allocate(4).putInt(value).array)
   private def sized(bytes: Chunk[Byte]): Chunk[Byte]            = int(bytes.size) ++ bytes
   private def text(value: String): Chunk[Byte]                  = sized(Chunk.array(value.getBytes(StandardCharsets.UTF_8)))
@@ -55,8 +56,10 @@ private[xkafka] object QueryWire:
   def encode(asked: Asked): Chunk[Byte] =
     val request =
       asked.request match
-        case QueryRequest.Get(store, key)        => Chunk.singleton(1.toByte) ++ text(store) ++ sized(key)
-        case QueryRequest.Range(store, from, to) => Chunk.singleton(2.toByte) ++ text(store) ++ optional(from) ++ optional(to)
+        case QueryRequest.Get(store, key)               => Chunk.singleton(1.toByte) ++ text(store) ++ sized(key)
+        case QueryRequest.Range(store, from, to)        => Chunk.singleton(2.toByte) ++ text(store) ++ optional(from) ++ optional(to)
+        case QueryRequest.Windows(store, key, from, to) => Chunk.singleton(3.toByte) ++ text(store) ++ optional(key) ++ long(from) ++ long(to)
+        case QueryRequest.Sessions(store, key)          => Chunk.singleton(4.toByte) ++ text(store) ++ sized(key)
     Asking ++ request ++ int(asked.partitions.size) ++ Chunk.from(asked.partitions).flatMap(int) ++
       Chunk.singleton((if asked.allowStandby then 1 else 0).toByte)
 
@@ -76,6 +79,7 @@ private[xkafka] object QueryWire:
 
   private val byte: Read[Byte]                 = take(1).map(_(0))
   private val number: Read[Int]                = take(4).map(read => ByteBuffer.wrap(read.toArray).getInt)
+  private val wide: Read[Long]                 = take(8).map(read => ByteBuffer.wrap(read.toArray).getLong)
   private val bytes: Read[Chunk[Byte]]         = number.flatMap(take)
   private val word: Read[String]               = bytes.map(read => new String(read.toArray, StandardCharsets.UTF_8))
   private val maybe: Read[Option[Chunk[Byte]]] =
@@ -96,6 +100,8 @@ private[xkafka] object QueryWire:
       (byte, word).tupled.flatMap:
         case (1, store) => this.bytes.map(QueryRequest.Get(store, _))
         case (2, store) => (maybe, maybe).mapN(QueryRequest.Range(store, _, _))
+        case (3, store) => (maybe, wide, wide).mapN(QueryRequest.Windows(store, _, _, _))
+        case (4, store) => this.bytes.map(QueryRequest.Sessions(store, _))
         case _          => StateT.liftF(None)
     whole(bytes, magic(Asking) *> (request, many(number), byte).mapN((asked, partitions, standby) => Asked(asked, partitions, standby == 1)))
 
@@ -122,22 +128,34 @@ private[xkafka] final class Querying[F[_]](
     own: Option[Endpoint],
     forward: Forward[F]
 )(using F: Concurrent[F]):
-  /** The sub-topology keeping each key-value store that can be queried, with the topic its partitions are numbered by. */
-  private val kept: Map[String, (String, String)] =
+  /** The sub-topology keeping each store that can be queried, with the topic its partitions are numbered by and its kind. Join stores and suppression
+    * buffers cannot be queried.
+    */
+  private val kept: Map[String, (String, String, Querying.Kind)] =
     subtopologies.toList.flatMap: (id, subtopology) =>
       subtopology.origins.headOption.toList.flatMap: source =>
-        subtopology.kept.filter(store => store.retention.isEmpty && !store.buffer)
-          .map(store => store.store.value -> (id, Task.topicOf(application, source)))
+        subtopology.kept.filter(store => !store.buffer && !store.duplicates).map: store =>
+          val kind =
+            if store.session then Querying.Kind.Session else if store.retention.nonEmpty then Querying.Kind.Window else Querying.Kind.KeyValue
+          store.store.value -> (id, Task.topicOf(application, source), kind)
     .toMap
+
+  /** The store `request` names, where the program has one of the kind it asks of. */
+  private def keptFor(request: QueryRequest): Option[(String, String)] =
+    kept.get(request.storeName).collect { case (subtopology, topic, kind) if kind == Querying.kindOf(request) => (subtopology, topic) }
+
+  /** The global table's store `request` names, which holds keys and values only. */
+  private def globalFor(request: QueryRequest): Option[TaskStore[F]] =
+    globals.get(request.storeName).filter(_ => Querying.kindOf(request) == Querying.Kind.KeyValue)
 
   def query[A](query: Query[F, A], allowStandby: Boolean): F[Either[QueryProblem, A]] =
     val store = query.store.value
     topicNamed(if globals.contains(store) then store else s"$application-$store-changelog").flatMap: topic =>
       query.request(topic).flatMap: request =>
         val found =
-          globals.get(store) match
+          globalFor(request) match
             case Some(global) => read(global, request).map(_.asRight[QueryProblem])
-            case None         => kept.get(store)
+            case None         => keptFor(request)
                 .fold(F.pure(QueryProblem.UnknownStore(store).asLeft[Vector[(Chunk[Byte], Chunk[Byte])]]))(routed(request, allowStandby, _))
         found.flatMap(_.traverse(query.answer(topic, _)))
 
@@ -145,9 +163,9 @@ private[xkafka] final class Querying[F[_]](
     QueryWire.asked(bytes).fold(F.raiseError[Chunk[Byte]](new IllegalArgumentException("the request is not an xkafka query"))): asked =>
       val store = asked.request.storeName
       val found =
-        globals.get(store) match
+        globalFor(asked.request) match
           case Some(global) => read(global, asked.request).map(Answered.Found(_))
-          case None         => kept.get(store).fold(F.pure(Answered.Refused(QueryProblem.UnknownStore(store)))): (subtopology, _) =>
+          case None         => keptFor(asked.request).fold(F.pure(Answered.Refused(QueryProblem.UnknownStore(store)))): (subtopology, _) =>
               locally(subtopology, store, asked.partitions, asked.request, asked.allowStandby)
                 .map(_.fold(Answered.Refused(QueryProblem.Rebalancing))(Answered.Found(_)))
       found.map(QueryWire.encode)
@@ -157,6 +175,19 @@ private[xkafka] final class Querying[F[_]](
     request match
       case QueryRequest.Get(_, key)        => store.get(key).map(_.toVector.map(held => key -> held.value))
       case QueryRequest.Range(_, from, to) => store.range(from, to.map(_ ++ Chunk.singleton(0.toByte))).map(_.map((key, held) => key -> held.value))
+      // A window's key is the key and twelve bytes, its start and a sequence number; a session's is the key and sixteen, its end and start.
+      case QueryRequest.Windows(_, Some(key), from, to) => store.prefixed(key).map(_.collect {
+          case (stored, held) if stored.size == key.size + 12 && between(stored, from, to) => stored -> held.value
+        })
+      case QueryRequest.Windows(_, None, from, to) => store.timed(from, to).map(_.map((stored, held) => stored -> held.value))
+      case QueryRequest.Sessions(_, key)           => store.prefixed(key).map(_.collect {
+          case (stored, held) if stored.size == key.size + 16 => stored -> held.value
+        })
+
+  /** Whether the window a window store's key names starts from `from` to `to`, both included. */
+  private def between(stored: Chunk[Byte], from: Long, to: Long): Boolean =
+    val start = WindowStore.startOf(stored)
+    start >= from && start <= to
 
   /** What this member's stores find for `request` in `wanted` partitions, if it holds every one of them, running, as an active task or, where
     * `allowStandby` says, a standby.
@@ -187,8 +218,10 @@ private[xkafka] final class Querying[F[_]](
     topicNamed(topic).flatMap(partitions).flatMap: count =>
       val wanted =
         request match
-          case QueryRequest.Get(_, key) => List(Murmur2.partition(key, count))
-          case _                        => (0 until count).toList
+          case QueryRequest.Get(_, key)                 => List(Murmur2.partition(key, count))
+          case QueryRequest.Windows(_, Some(key), _, _) => List(Murmur2.partition(key, count))
+          case QueryRequest.Sessions(_, key)            => List(Murmur2.partition(key, count))
+          case _                                        => (0 until count).toList
       (member.get, holding.get).tupled.flatMap: (joined, held) =>
         val here  = joined.owned.active ++ (if allowStandby then joined.owned.standby else Set.empty)
         val local =
@@ -221,3 +254,14 @@ private[xkafka] final class Querying[F[_]](
           case None                            => QueryProblem.NotXkafka(at).asLeft
 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
+
+private[xkafka] object Querying:
+  /** The kinds of store a query asks of. */
+  enum Kind derives CanEqual:
+    case KeyValue, Window, Session
+
+  def kindOf(request: QueryRequest): Kind =
+    request match
+      case _: QueryRequest.Get | _: QueryRequest.Range => Kind.KeyValue
+      case _: QueryRequest.Windows                     => Kind.Window
+      case _: QueryRequest.Sessions                    => Kind.Session

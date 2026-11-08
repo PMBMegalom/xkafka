@@ -72,7 +72,7 @@ On macOS add a `-L` for the OpenSSL installation as well.
 ### Stores on disk
 
 An application that keeps its streams stores on disk, with a
-[state directory](streams/running.md#stores-and-standbys), also needs RocksDB
+[state directory](streams/running.md#keeping-stores-on-disk), also needs RocksDB
 10.1.3 when it runs. Take it from the `org.rocksdb:rocksdbjni:10.1.3` jar on
 Maven Central, which carries it for each platform:
 

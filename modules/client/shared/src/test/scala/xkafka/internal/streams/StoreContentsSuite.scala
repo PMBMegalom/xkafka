@@ -34,6 +34,12 @@ final class StoreContentsSuite extends FunSuite:
 
   private def of(keys: Chunk[Byte]*) = StoreContents.of(keys.zipWithIndex.map((k, n) => k -> held(n)))
 
+  test("keys written as numbers by Serde.long come in store order with zero first, the positive numbers next, and the negative ones last"):
+    val numbers = xkafka.streams.Serde.long[cats.effect.SyncIO]
+    val topic   = xkafka.Topic.from("t").toOption.get
+    val written = List(-2L, 7L, 0L, -1L, 300L).map(n => n -> numbers.serializer.serialize(topic, xkafka.Headers.empty, n).unsafeRunSync().get)
+    assertEquals(written.sortBy(_._2)(using StoreContents.keys).map(_._1), List(0L, 7L, 300L, -2L, -1L))
+
   test("keys go in the order of their bytes taken as unsigned, a key before a longer one it starts"):
     val ordered = List(key(), key(0), key(0, 0), key(1), key(1, 0), key(0x7f), key(0x80), key(0xff), key(0xff, 0))
     assertEquals(of(ordered.reverse*).toVector.map(_._1).toList, ordered)
