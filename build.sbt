@@ -259,7 +259,8 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     WorkflowStep.Use(
       UseRef.Public("actions", "setup-node", "v7"),
       name = Some("Setup Node.js"),
-      params = Map("node-version-file" -> ".nvmrc")
+      // Until npm trusts this workflow for the RocksDB packages, which it can only once they exist, their first publish uses a token.
+      params = Map("node-version-file" -> ".nvmrc", "registry-url" -> "https://registry.npmjs.org")
     ),
     WorkflowStep.Use(
       UseRef.Public("actions", "download-artifact", "v8"),
@@ -268,7 +269,8 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     ),
     WorkflowStep.Run(
       List("scripts/publish-npm-rocksdb.sh npm-packages"),
-      name = Some("Publish the versions npm does not have yet")
+      name = Some("Publish the versions npm does not have yet"),
+      env = Map("NODE_AUTH_TOKEN" -> "${{ secrets.NPM_TOKEN }}")
     )
   ),
   cond = Some(publishedArtifactCondition),
