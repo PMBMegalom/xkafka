@@ -25,6 +25,8 @@ import scala.scalanative.unsafe.*
 
 // The glue code holds the shim's cryptography and sockets too, which call OpenSSL directly, so every program that links the glue code links
 // libssl and libcrypto.
+// Each call that can wait, for the broker or for librdkafka to finish, is marked `@blocking`, so that the garbage collector does not wait for the
+// thread making it to reach a safepoint before it collects.
 @link("rdkafka") @link("ssl") @link("crypto") @extern
 private[xkafka] object Bindings:
   def xkafka_version_str(): CString = extern
@@ -40,6 +42,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_producer_destroy(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
 
   def xkafka_mock_bootstraps(client: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CString = extern
@@ -89,7 +92,9 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
-  def xkafka_producer_poll(producer: CVoidPtr, timeoutMs: CInt): Unit  = extern
+  @blocking
+  def xkafka_producer_poll(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
+  @blocking
   def xkafka_producer_flush(producer: CVoidPtr, timeoutMs: CInt): Unit = extern
 
   def xkafka_batch_pending(batch: CVoidPtr): CSize = extern
@@ -119,6 +124,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_consumer_destroy(consumer: CVoidPtr): Unit = extern
 
   def xkafka_consumer_take_rebalance(consumer: CVoidPtr): CVoidPtr = extern
@@ -147,6 +153,7 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_subscribe(consumer: CVoidPtr, subscription: CVoidPtr, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
 
+  @blocking
   def xkafka_consumer_poll(consumer: CVoidPtr, timeoutMs: CInt, status: Ptr[CInt], error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr =
     extern
 
@@ -193,6 +200,7 @@ private[xkafka] object Bindings:
 
   def xkafka_assignment_partition_at(assignment: CVoidPtr, index: CSize): CInt = extern
 
+  @blocking
   def xkafka_consumer_committed(
       consumer: CVoidPtr,
       topics: Ptr[CString],
@@ -223,6 +231,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_consumer_watermark_offsets(
       consumer: CVoidPtr,
       topic: CString,
@@ -235,6 +244,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_consumer_offsets_for_times(
       consumer: CVoidPtr,
       topics: Ptr[CString],
@@ -248,6 +258,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_consumer_metadata(
       consumer: CVoidPtr,
       topic: CString,
@@ -278,8 +289,10 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_admin_destroy(client: CVoidPtr): Unit = extern
 
+  @blocking
   def xkafka_admin_create_topics(
       client: CVoidPtr,
       names: Ptr[CString],
@@ -295,6 +308,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_admin_delete_topics(
       client: CVoidPtr,
       names: Ptr[CString],
@@ -305,6 +319,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_admin_create_partitions(
       client: CVoidPtr,
       topic: CString,
@@ -315,6 +330,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_admin_delete_records(
       client: CVoidPtr,
       topics: Ptr[CString],
@@ -331,6 +347,7 @@ private[xkafka] object Bindings:
 
   def xkafka_error_string(code: CInt): CString = extern
 
+  @blocking
   def xkafka_admin_describe_topic_configs(
       client: CVoidPtr,
       names: Ptr[CString],
@@ -341,6 +358,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_admin_alter_topic_configs(
       client: CVoidPtr,
       topics: Ptr[CString],
@@ -354,6 +372,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_admin_elect_preferred_leaders(
       client: CVoidPtr,
       topics: Ptr[CString],
@@ -388,6 +407,7 @@ private[xkafka] object Bindings:
 
   def xkafka_configs_destroy(configs: CVoidPtr): Unit = extern
 
+  @blocking
   def xkafka_admin_describe_cluster(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
 
   def xkafka_cluster_id(cluster: CVoidPtr): CString = extern
@@ -408,6 +428,7 @@ private[xkafka] object Bindings:
 
   def xkafka_node_rack(node: CVoidPtr): CString = extern
 
+  @blocking
   def xkafka_admin_describe_topics(
       client: CVoidPtr,
       names: Ptr[CString],
@@ -448,6 +469,7 @@ private[xkafka] object Bindings:
 
   def xkafka_topics_destroy(topics: CVoidPtr): Unit = extern
 
+  @blocking
   def xkafka_admin_list_groups(client: CVoidPtr, timeoutMs: CInt, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr = extern
 
   def xkafka_groups_count(groups: CVoidPtr): CSize = extern
@@ -458,6 +480,7 @@ private[xkafka] object Bindings:
 
   def xkafka_groups_destroy(groups: CVoidPtr): Unit = extern
 
+  @blocking
   def xkafka_admin_describe_groups(
       client: CVoidPtr,
       groups: Ptr[CString],
@@ -508,6 +531,7 @@ private[xkafka] object Bindings:
 
   def xkafka_descriptions_destroy(descriptions: CVoidPtr): Unit = extern
 
+  @blocking
   def xkafka_admin_list_group_offsets(
       client: CVoidPtr,
       group: CString,
@@ -520,6 +544,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_admin_alter_group_offsets(
       client: CVoidPtr,
       group: CString,
@@ -536,6 +561,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_admin_delete_group_offsets(
       client: CVoidPtr,
       group: CString,
@@ -549,6 +575,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_admin_delete_groups(
       client: CVoidPtr,
       groups: Ptr[CString],
@@ -595,6 +622,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_consumer_seek(
       consumer: CVoidPtr,
       topic: CString,
@@ -606,6 +634,7 @@ private[xkafka] object Bindings:
       errorCode: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_producer_init_transactions(
       producer: CVoidPtr,
       timeoutMs: CInt,
@@ -627,6 +656,7 @@ private[xkafka] object Bindings:
       transactionAbortRequired: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_producer_commit_transaction(
       producer: CVoidPtr,
       timeoutMs: CInt,
@@ -638,6 +668,7 @@ private[xkafka] object Bindings:
       transactionAbortRequired: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_producer_abort_transaction(
       producer: CVoidPtr,
       timeoutMs: CInt,
@@ -655,6 +686,7 @@ private[xkafka] object Bindings:
 
   def xkafka_consumer_group_metadata_destroy(metadata: CVoidPtr): Unit = extern
 
+  @blocking
   def xkafka_producer_send_offsets(
       producer: CVoidPtr,
       metadata: CVoidPtr,
@@ -673,6 +705,7 @@ private[xkafka] object Bindings:
       transactionAbortRequired: Ptr[CInt]
   ): CInt = extern
 
+  @blocking
   def xkafka_consumer_commit(
       consumer: CVoidPtr,
       topics: Ptr[CString],
