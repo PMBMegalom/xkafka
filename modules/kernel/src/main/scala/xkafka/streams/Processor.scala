@@ -387,6 +387,15 @@ private[xkafka] trait StoreAccess[F[_]]:
 
   def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]
 
+  /** What `key` holds, with the time it was written at, as Java's timestamped stores read it. */
+  def timed(key: Chunk[Byte]): F[Option[(Chunk[Byte], Long)]]
+
+  /** Writes `value` at `key` at the time `at`, or removes the key if there is none, as Java's timestamped stores write. */
+  def putAt(key: Chunk[Byte], value: Option[Chunk[Byte]], at: Long): F[Unit]
+
+  /** Every key, or those starting with `prefix`, in order, each with what it holds and its time. */
+  def timedScan(prefix: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Chunk[Byte], Long)]]
+
   /** Writes `value` as the window of `key` starting at `start`, or removes it if there is none, in a window store keeping windows for `retention`. */
   def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit]
 
@@ -420,6 +429,9 @@ private[xkafka] trait StoreAccess[F[_]]:
       def between(from: Chunk[Byte], to: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]]             = fk(self.between(from, to))
       def all: G[Vector[(Chunk[Byte], Chunk[Byte])]]                                                     = fk(self.all)
       def prefixed(prefix: Chunk[Byte]): G[Vector[(Chunk[Byte], Chunk[Byte])]]                           = fk(self.prefixed(prefix))
+      def timed(key: Chunk[Byte]): G[Option[(Chunk[Byte], Long)]]                                        = fk(self.timed(key))
+      def putAt(key: Chunk[Byte], value: Option[Chunk[Byte]], at: Long): G[Unit]                         = fk(self.putAt(key, value, at))
+      def timedScan(prefix: Option[Chunk[Byte]]): G[Vector[(Chunk[Byte], Chunk[Byte], Long)]]            = fk(self.timedScan(prefix))
       def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): G[Unit] =
         fk(self.windowPut(key, start, value, retention))
       def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): G[Vector[(Long, Chunk[Byte])]] =
@@ -446,6 +458,9 @@ private[xkafka] object StoreAccess:
       def between(from: Chunk[Byte], to: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]                 = refused
       def all: F[Vector[(Chunk[Byte], Chunk[Byte])]]                                                         = refused
       def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]]                               = refused
+      def timed(key: Chunk[Byte]): F[Option[(Chunk[Byte], Long)]]                                            = refused
+      def putAt(key: Chunk[Byte], value: Option[Chunk[Byte]], at: Long): F[Unit]                             = refused
+      def timedScan(prefix: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Chunk[Byte], Long)]]                = refused
       def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit]     = refused
       def windowsOf(key: Chunk[Byte], from: Long, to: Long, retention: Long): F[Vector[(Long, Chunk[Byte])]] = refused
       def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]          = refused
@@ -480,6 +495,49 @@ object Punctuation:
 private[xkafka] final class Punctuator[F[_], K2, V2](val schedule: Punctuation, val run: Timestamp => F[List[Record[K2, V2]]]):
   def mapK[G[_]](fk: FunctionK[F, G]): Punctuator[G, K2, V2] = new Punctuator(schedule, at => fk(run(at)))
 
+/** The task a hosted processor's instance runs in: the application, the sub-topology and partition that number the task, and `token`, which only this
+  * task's instance is kept under, so that two engines running the same task in one process keep instances of their own.
+  */
+private[xkafka] final class HostedTask(val application: String, val subtopology: Int, val partition: Int, val token: AnyRef = new Object)
+
+/** What a hosted processor's instance is given each time it runs: the stores it declared, opened for that call, the task's stream time and the clock,
+  * and where the record being read came from, if a record is being read.
+  */
+private[xkafka] final case class HostedCall[F[_]](
+    stores: Map[String, StoreAccess[F]],
+    streamTime: Long,
+    wallClock: Long,
+    origin: Option[RecordOrigin]
+):
+  def mapK[G[_]](fk: FunctionK[F, G]): HostedCall[G] = HostedCall(stores.view.mapValues(_.imapK(fk)).toMap, streamTime, wallClock, origin)
+
+/** A punctuator a hosted processor's instance scheduled: how often, and when first, where it said, in epoch milliseconds. */
+private[xkafka] final case class HostedSchedule(punctuation: Punctuation, start: Option[Long] = None)
+
+/** A processor whose logic lives in an instance each task starts and closes, as a Java processor's does: the instance keeps what it likes between
+  * calls, and schedules and cancels punctuators as it runs, each with a number it gives it. It keeps each task's instance itself, by the task.
+  */
+private[xkafka] trait Hosting[F[_], K, V, K2, V2]:
+  def start(task: HostedTask, call: HostedCall[F]): F[Unit]
+  def process(task: HostedTask, record: Record[K, V], call: HostedCall[F]): F[List[Record[K2, V2]]]
+  def punctuate(task: HostedTask, number: Int, at: Timestamp, call: HostedCall[F]): F[List[Record[K2, V2]]]
+
+  /** The task's instance's punctuators as they stand, by number. */
+  def schedules(task: HostedTask): F[Map[Int, HostedSchedule]]
+
+  def close(task: HostedTask): F[Unit]
+
+  def mapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Hosting[G, K, V, K2, V2] =
+    val self = this
+    new Hosting[G, K, V, K2, V2]:
+      def start(task: HostedTask, call: HostedCall[G]): G[Unit]                                         = fk(self.start(task, call.mapK(gk)))
+      def process(task: HostedTask, record: Record[K, V], call: HostedCall[G]): G[List[Record[K2, V2]]] =
+        fk(self.process(task, record, call.mapK(gk)))
+      def punctuate(task: HostedTask, number: Int, at: Timestamp, call: HostedCall[G]): G[List[Record[K2, V2]]] =
+        fk(self.punctuate(task, number, at, call.mapK(gk)))
+      def schedules(task: HostedTask): G[Map[Int, HostedSchedule]] = fk(self.schedules(task))
+      def close(task: HostedTask): G[Unit]                         = fk(self.close(task))
+
 /** What a processor does with each record and on its schedules, given the stores it opened. */
 final class ProcessorLogic[F[_], K, V, K2, V2] private[xkafka] (
     private[xkafka] val onRecord: Record[K, V] => F[List[Record[K2, V2]]],
@@ -497,16 +555,37 @@ final class ProcessorLogic[F[_], K, V, K2, V2] private[xkafka] (
 final class Processor[F[_], K, V, K2, V2] private (
     private[xkafka] val kept: List[KeptStore],
     private[xkafka] val idle: Map[String, StoreAccess[F]],
-    private[xkafka] val handling: Map[String, StoreAccess[F]] => ProcessorLogic[F, K, V, K2, V2]
+    private[xkafka] val handling: Map[String, StoreAccess[F]] => ProcessorLogic[F, K, V, K2, V2],
+    private[xkafka] val hosting: Option[Hosting[F, K, V, K2, V2]] = None
 ):
   /** The schedules it declares, in order. */
   private[xkafka] lazy val schedules: List[Punctuation] = handling(idle).punctuators.map(_.schedule)
 
   /** The same processor with its effects in `G`: its stores come from `G` and its handlers go to it. */
   private[xkafka] def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): Processor[G, K, V, K2, V2] =
-    new Processor(kept, idle.view.mapValues(_.imapK(fk)).toMap, access => handling(access.view.mapValues(_.imapK(gk)).toMap).mapK(fk))
+    new Processor(
+      kept,
+      idle.view.mapValues(_.imapK(fk)).toMap,
+      access => handling(access.view.mapValues(_.imapK(gk)).toMap).mapK(fk),
+      hosting.map(_.mapK(fk)(gk))
+    )
 
 object Processor:
+  /** A processor whose logic lives in an instance each task starts and closes, as a Java processor's does, keeping the stores `stores` declares. It
+    * declares no punctuators of its own: each instance schedules them as it runs.
+    */
+  private[xkafka] def hosted[F[_], K, V, K2, V2](
+      kept: List[KeptStore],
+      idle: Map[String, StoreAccess[F]],
+      hosting: Hosting[F, K, V, K2, V2]
+  ): Processor[F, K, V, K2, V2] =
+    new Processor(
+      kept,
+      idle,
+      _ => new ProcessorLogic(_ => throw new IllegalStateException("a hosted processor runs in the instance its task started")),
+      Some(hosting)
+    )
+
   /** What to do with each record: the records it returns go on to the next step. */
   def onRecord[F[_], K, V, K2, V2](handle: Record[K, V] => F[List[Record[K2, V2]]]): ProcessorLogic[F, K, V, K2, V2] = new ProcessorLogic(handle)
 
@@ -568,6 +647,9 @@ final class FixedKeyLogic[F[_], K, V, V2] private[xkafka] (private[xkafka] val l
 final class FixedKeyProcessor[F[_], K, V, V2] private (private[xkafka] val processor: Processor[F, K, V, K, V2])
 
 object FixedKeyProcessor:
+  /** A processor keeping each record's key whose logic lives in an instance each task starts, as a Java processor's does. */
+  private[xkafka] def hosted[F[_], K, V, V2](processor: Processor[F, K, V, K, V2]): FixedKeyProcessor[F, K, V, V2] = new FixedKeyProcessor(processor)
+
   /** What to do with each record: the records it returns go on to the next step. */
   def onRecord[F[_]: Functor, K, V, V2](handle: FixedKeyRecord[K, V] => F[List[FixedKeyRecord[K, V2]]]): FixedKeyLogic[F, K, V, V2] =
     new FixedKeyLogic(Processor.onRecord(record => handle(new FixedKeyRecord(record)).map(_.map(_.record))))

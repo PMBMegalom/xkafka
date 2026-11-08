@@ -305,6 +305,7 @@ private[xkafka] object Engine:
               .handleErrorWith(_ => F.sleep(PollMillis.millis)) *> reading
           )
         Resource.make(reading.start)(fiber => stopping.set(true) *> fiber.join.void)
+      opened <- Resource.eval(F.ref(Map.empty[TaskId, Task[F]]))
       loop =
         Loop(
           application,
@@ -322,10 +323,13 @@ private[xkafka] object Engine:
           following,
           partitions,
           globals.fold(F.pure(Map.empty[String, StoreContents]))(_.contents),
-          open
+          open,
+          opened
         )
       running <-
-        Resource.make(loop.run(Running(Map.empty, started, started)).start)(fiber => member.leave.timeout(closeTimeout).attempt *> fiber.cancel)
+        // The tasks still open once the loop has stopped close with the engine, and with them their processors' instances.
+        Resource.make(loop.run(Running(Map.empty, started, started)).start): fiber =>
+          member.leave.timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.close))
     yield new KafkaStreams[F]:
       def run: F[Unit]                   = globals.fold(running.joinWithNever)(held => F.race(running.joinWithNever, held.failure).void)
       def state: Stream[F, StreamsState] =
@@ -446,9 +450,14 @@ private[xkafka] object Engine:
       following: Ref[F, Boolean],
       partitions: Topic => F[Int],
       globals: F[Map[String, StoreContents]],
-      open: TaskStore.Open[F]
+      open: TaskStore.Open[F],
+      opened: Ref[F, Map[TaskId, Task[F]]]
   )(using F: Async[F]):
     import MemberAction.*
+
+    /** Closes the tasks given, which no longer run here, and with them their processors' instances, as Java closes a task it gives up. */
+    private def closed(tasks: Iterable[(TaskId, Live[F])]): F[Unit] =
+      tasks.toList.traverse_((_, live) => live.task.close) *> opened.update(_ -- tasks.map(_._1))
 
     /** Carries out the changes the member told of since the last batch, reads, processes and writes until the next commit, then purges what is due.
       */
@@ -556,7 +565,7 @@ private[xkafka] object Engine:
 
     /** Starts every task again from what the group committed, dropping what it held and where it read to since. */
     private def restart(running: Running[F]): F[Running[F]] =
-      (start(running.tasks.keys.toList, Map.empty), F.monotonic).tupled.flatMap: (started, now) =>
+      (closed(running.tasks.toList) *> start(running.tasks.keys.toList, Map.empty), F.monotonic).tupled.flatMap: (started, now) =>
         val again = running.copy(tasks = started, committed = now)
         reassign(again).as(again)
 
@@ -564,11 +573,11 @@ private[xkafka] object Engine:
       told.liftTo[F].flatMap:
         case Revoke(round, tasks) => commit(running, tasks).flatMap: committed =>
             val kept = committed.copy(tasks = committed.tasks -- tasks)
-            reassign(kept) *> member.revoked(round).as(kept)
+            closed(committed.tasks.view.filterKeys(tasks).toList) *> reassign(kept) *> member.revoked(round).as(kept)
         case Assign(round, assignment) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
           val added = (assignment.active -- kept.keySet).toList
-          F.monotonic.flatMap: now =>
+          closed(running.tasks.view.filterKeys(id => !assignment.active(id)).toList) *> F.monotonic.flatMap: now =>
             val stillKept = running.kept.filter((_, held) => now - held._2 < StateCleanupDelay)
             val available = running.standbys ++ stillKept.view.mapValues(_._1)
             phase.set(StreamsPhase.Restoring).whenA(added.exists(id => subtopologies(id.subtopology).stores.nonEmpty)) *>
@@ -578,7 +587,7 @@ private[xkafka] object Engine:
                   val keeping = (stillKept ++ dropped).view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toMap
                   val after   = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping)
                   reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running).as(after)
-        case LoseAll => F.monotonic.flatMap: now =>
+        case LoseAll => closed(running.tasks.toList) *> F.monotonic.flatMap: now =>
             val lost =
               running.copy(tasks = Map.empty[TaskId, Live[F]], standbys = Map.empty, kept = running.kept ++ running.standbys.view.mapValues(_ -> now))
             phase.set(StreamsPhase.Lost) *> reassign(lost) *> refollow(running, lost).as(lost)
@@ -625,8 +634,8 @@ private[xkafka] object Engine:
               val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), read.retentions, read.sessionStores)
               val state   = TaskState(Map.empty, times.toMap, lastEmitted = emitted)
               val reads   = found.map((partition, at) => partition -> Input(at.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)))
-              Task.over[F](application, read, id.partition, kept, open)
-                .map(task => id -> Live(task, task.started(state, clock.toMillis), reads.toMap))
+              Task.over[F](application, read, id.partition, kept, open, id.subtopology.toIntOption.getOrElse(0)).flatMap: task =>
+                (task.opened(state, clock.toMillis) <* opened.update(_.updated(id, task))).map(ready => id -> Live(task, ready, reads.toMap))
             .map(_.toMap)
 
     /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */

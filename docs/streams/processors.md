@@ -302,3 +302,58 @@ Give two processors the same `KeyValueStore.of` value and they share one store.
 One task then handles the same-numbered partition of both inputs, and both
 processors see the same part of the store. Two separate values with the same store
 name are refused when you call `Topology.of`.
+
+## Java processors (JVM only)
+
+On the JVM, a `Processor` or `FixedKeyProcessor` written for Java Kafka Streams can
+run as a step. It comes with the `xkafka-streams-java` module (see
+[Java partitioners](README.md#java-partitioners-jvm-only)).
+
+```scala mdoc:compile-only
+// Run a processor written for Java Kafka Streams as a step, with the store it uses
+import cats.effect.IO
+import org.apache.kafka.streams.processor.api.Processor as JavaProcessor
+
+import xkafka.*
+import xkafka.streams.*
+import xkafka.streams.interop.*                                        // Adds Processor.fromJava and JavaStore, on the JVM only
+
+def withJava(input: Topic, output: Topic, make: () => JavaProcessor[String, String, String, String]): Pipeline[IO] =
+  val text   = Serde.utf8[IO]
+  val counts = JavaStore.keyValue(Store("counts"), text, text)         // The Java code finds it with getStateStore("counts")
+  KStream(Named("read"), input, text, text)
+    .process(Named("count"), Processor.fromJava[IO](make, counts))     // Each task makes an instance of its own with make
+    .to(Named("write"), output, text, text)
+```
+
+The processor runs as it does in Java Kafka Streams:
+
+- Each task makes its own instance, calls `init` when the task starts, and `close`
+  when the task stops or moves to another member. Fields keep their values in
+  between.
+- `forward` sends records on, with the times and headers they are given.
+- `schedule` runs punctuators by stream time or by the clock, from the start time
+  given where there is one, and `cancel` stops them. Each task's instance schedules
+  its own.
+- `recordMetadata` gives the topic, partition and offset of the record being read,
+  and `taskId`, `applicationId`, `currentStreamTimeMs` and `currentSystemTimeMs`
+  give what they do in Java.
+
+Declare each store the Java code reads with `JavaStore.keyValue`, which it takes as a
+`KeyValueStore<K, V>`, or `JavaStore.timestamped`, which it takes as a
+`TimestampedKeyValueStore<K, V>`. Keys and values must be objects, such as `String`
+or `java.lang.Long`. Window and session stores cannot be given yet, and a store given
+to a Java processor cannot also be given to one of xkafka's.
+
+Each call into the Java code runs on a thread meant for waiting, since its calls to
+stores wait for them. That can cost a switch of threads for each record such a step
+handles; xkafka's own steps do not pay it.
+
+These fail with an error saying so: writing to a store or sending records on in
+`init`, sending records to a named next step, `stateDir`, `keySerde` and `valueSerde`.
+`commit()` does nothing, since commits happen at the commit interval anyway, and
+sensors from `metrics()` record what they are given, which nothing reports.
+
+If some members run Java Kafka Streams, give their program the same processor under
+the same name, with the same stores.
+

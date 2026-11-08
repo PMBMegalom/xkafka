@@ -29,8 +29,8 @@ import cats.syntax.all.*
 import fs2.Chunk
 import cats.data.Ior
 import xkafka.streams.{
-  Consumer, Entry, ForeignKeyJoined, Joiner, Origin, Processor, Punctuating, Punctuation, Record, RecordOrigin, Release, Source, Step, Store,
-  StoreAccess, StreamJoin, StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue, TableView, Window, Windowed
+  Consumer, Entry, ForeignKeyJoined, HostedCall, HostedNode, HostedTask, Joiner, Origin, Processor, Punctuating, Punctuation, Record, RecordOrigin,
+  Release, Source, Step, Store, StoreAccess, StreamJoin, StreamsJoined, Subtopology, TableKey, TablesJoined, TableValue, TableView, Window, Windowed
 }
 
 /** A record as a topic holds it, read by a task. */
@@ -81,7 +81,8 @@ private[xkafka] final case class TaskState(
     joinTimes: Map[String, JoinTime] = Map.empty,
     reading: Option[TaskInput] = None,
     globals: Map[String, StoreContents] = Map.empty,
-    punctuations: Map[Boolean, PunctuationQueue] = Map.empty
+    punctuations: Map[Boolean, PunctuationQueue] = Map.empty,
+    hostedSchedules: Map[(String, Int), Punctuation] = Map.empty
 ):
   /** The state with `change` written to `key` of `store`. */
   def written(store: String, key: Chunk[Byte], change: Option[Stored]): TaskState =
@@ -145,8 +146,15 @@ private[xkafka] final class Task[F[_]](
     application: String,
     subtopology: Subtopology[F],
     partition: Int,
-    stores: Map[String, TaskStore[F]] = Map.empty[String, TaskStore[F]]
+    stores: Map[String, TaskStore[F]] = Map.empty[String, TaskStore[F]],
+    number: Int = 0
 )(using F: MonadThrow[F], refs: Ref.Make[F]):
+  /** The task as its hosted processors know it, whose instances they keep under it alone. */
+  private val hostedTask = HostedTask(application, number, partition)
+
+  /** The hosted processors, by the name of their node. */
+  private val hostedNodes: Map[String, HostedNode[F]] = subtopology.hosted.map(node => node.named -> node).toMap
+
   /** A record going from step to step; a table's change also carries the value it replaced, where Java passes one on, and a change a suppression
     * held, where it came from, which Java passes on with it.
     */
@@ -179,8 +187,47 @@ private[xkafka] final class Task[F[_]](
   private val declared: List[((String, Int), Punctuation)] =
     subtopology.punctuating.flatMap(node => node.schedules.zipWithIndex.map((schedule, index) => (node.named, index) -> schedule))
 
-  /** Whether it has anything to run but what arrives. */
-  val punctuates: Boolean = declared.nonEmpty
+  /** Whether it has anything to run but what arrives: punctuators it declares, or hosted processors, which may schedule some as they run. */
+  val punctuates: Boolean = declared.nonEmpty || hostedNodes.nonEmpty
+
+  /** The state once each hosted processor's instance has started, at wall-clock time `now`, with the punctuators each scheduled as it started. Its
+    * stores can be read as it starts, and not written to.
+    */
+  def opened(state: TaskState, now: Long): F[TaskState] =
+    subtopology.hosted.foldLeftM(started(state, now)): (current, node) =>
+      for
+        working <- Ref.of[F, (TaskState, Vector[TaskOutput])]((current.copy(reading = None), Vector.empty))
+        access  <- node.stores.traverse(store => accessTo(store, now, working).map(store -> _))
+        _       <- node.hosting.start(hostedTask, hostedCall(access.toMap, current, now))
+        ended   <- working.get
+        _       <- F.raiseWhen(ended._2.nonEmpty)(new UnsupportedOperationException(s"the processor '${node.named}' wrote to a store as it started"))
+        synced  <- schedulesOf(node, ended._1, now)
+      yield synced
+
+  /** Closes each hosted processor's instance. */
+  def close: F[Unit] = subtopology.hosted.traverse_(_.hosting.close(hostedTask))
+
+  /** What a hosted processor's instance is given for a call, with the task's stream time, or -1 before it has one, as Java gives it. */
+  private def hostedCall(access: Map[String, StoreAccess[F]], state: TaskState, now: Long): HostedCall[F] =
+    HostedCall(access, streamTime(state).getOrElse(-1L), now, state.reading.flatMap(originOf))
+
+  /** The state with the punctuators `node`'s instance has as it stands: one it newly scheduled queued as Java queues one, one going by stream time at
+    * 0, so that it runs as soon as there is a stream time, and one going by the clock an interval away; one it cancelled dropped, and skipped when
+    * its time comes, as Java's queue skips it.
+    */
+  private def schedulesOf(node: HostedNode[F], state: TaskState, now: Long): F[TaskState] =
+    node.hosting.schedules(hostedTask).map: live =>
+      val mine   = state.hostedSchedules.keySet.filter(_._1 == node.named)
+      val added  = live.filter((id, _) => !mine((node.named, id)))
+      val queues =
+        added.toList.sortBy(_._1).foldLeft(state.punctuations): (queues, entry) =>
+          val (id, scheduled) = entry
+          val schedule        = scheduled.punctuation
+          val first           = scheduled.start.getOrElse(if schedule.wallClock then now + schedule.millis else 0L)
+          queues.updated(schedule.wallClock, queues.getOrElse(schedule.wallClock, PunctuationQueue(Vector.empty)).added((node.named, id) -> first))
+      val kept =
+        state.hostedSchedules.filter((id, _) => id._1 != node.named) ++ live.map((id, scheduled) => (node.named, id) -> scheduled.punctuation)
+      state.copy(punctuations = queues, hostedSchedules = kept)
 
   /** The time a task's stream-time punctuators go by, the latest time of a record read from any of its topics, if it has read one. */
   private def streamTime(state: TaskState): Option[Long] = state.partitionTimes.values.maxOption.filter(_ >= 0)
@@ -212,11 +259,18 @@ private[xkafka] final class Task[F[_]](
         queue.next.filter(_._2 <= at) match
           case None             => F.pure(Right((current, out)))
           case Some((id, time)) =>
-            val (node, index, schedule) = scheduled(id)
-            val again                   = time + ((at - time) / schedule.millis + 1) * schedule.millis
-            val moved                   = current.copy(punctuations = current.punctuations.updated(wallClock, queue.polled))
-            fired(node, index, at, moved, now).map: (after, more) =>
-              Left((after.copy(punctuations = after.punctuations.updated(wallClock, after.punctuations(wallClock).added(id -> again))), out ++ more))
+            val moved                                             = current.copy(punctuations = current.punctuations.updated(wallClock, queue.polled))
+            def again(schedule: Punctuation)                      = time + ((at - time) / schedule.millis + 1) * schedule.millis
+            def requeued(after: TaskState, schedule: Punctuation) =
+              after.copy(punctuations = after.punctuations.updated(wallClock, after.punctuations(wallClock).added(id -> again(schedule))))
+            scheduled.get(id) match
+              case Some((node, index, schedule)) => fired(node, index, at, moved, now)
+                  .map((after, more) => Left((requeued(after, schedule), out ++ more)))
+              case None => moved.hostedSchedules.get(id) match
+                  // A punctuator its instance cancelled is dropped once its time comes, as Java drops it.
+                  case None           => F.pure(Left((moved, out)))
+                  case Some(schedule) => hostedFired(hostedNodes(id._1), id._2, at, moved, now).map: (after, more) =>
+                      Left((requeued(after, schedule), out ++ more))
     if !punctuates then F.pure((state, Vector.empty))
     else
       val ready = started(state, now)
@@ -234,6 +288,19 @@ private[xkafka] final class Task[F[_]](
       ended   <- working.get
       going = results.toVector.map(travelling)
       pushed <- allPushed(node.next, going, ended._1, ended._2, now)
+    yield pushed
+
+  /** What the punctuator `number` of the hosted processor `node` makes at `at`, as `fired` makes for a declared one, with the instance's punctuators
+    * as they stand after it.
+    */
+  private def hostedFired(node: HostedNode[F], number: Int, at: Long, state: TaskState, now: Long): F[(TaskState, Vector[TaskOutput])] =
+    for
+      working <- Ref.of[F, (TaskState, Vector[TaskOutput])]((state.copy(reading = None), Vector.empty))
+      access  <- node.stores.traverse(store => accessTo(store, at, working).map(store -> _))
+      results <- node.hosting.punctuate(hostedTask, number, Timestamp.fromEpochMillis(at), hostedCall(access.toMap, state.copy(reading = None), now))
+      ended   <- working.get
+      synced  <- schedulesOf(node, ended._1, now)
+      pushed  <- allPushed(node.next, results.toVector.map(travelling), synced, ended._2, now)
     yield pushed
 
   /** Writes what the task wrote since it last did to its stores, once the group has committed it. */
@@ -296,7 +363,7 @@ private[xkafka] final class Task[F[_]](
     */
   private def pushed[K, V](consumer: Consumer[F, K, V], record: Travelling[K, V], state: TaskState, now: Long): F[(TaskState, Vector[TaskOutput])] =
     consumer.expanded match
-      case Consumer.Then(_, last, next) => step(last, record, state, now, next.requests).flatMap: (after, records, written) =>
+      case Consumer.Then(named, last, next) => step(last, record, state, now, next.requests, node = named.value).flatMap: (after, records, written) =>
           allPushed(next, records, after, written, now)
       case Consumer.Output(_, topic, key, value, partitioner) => written(F.pure(topic), key, value, false, record, partitioner).map((state, _))
       case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate, _, partitioner) =>
@@ -829,7 +896,8 @@ private[xkafka] final class Task[F[_]](
       state: TaskState,
       now: Long,
       asked: => Boolean,
-      clock: Option[Int] = None
+      clock: Option[Int] = None,
+      node: String = ""
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     def passing(records: Vector[Travelling[K2, V2]]) = F.pure((state, records, Vector.empty[TaskOutput]))
     step match
@@ -856,7 +924,7 @@ private[xkafka] final class Task[F[_]](
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
       case Step.Cogrouped(side, folding)                                 => this.step(folding, record, state, now, asked, Some(side))
-      case Step.Process(processor, _)                                    => processed(processor, record, state)
+      case Step.Process(processor, _)                                    => processed(processor, record, state, node, now)
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
       case joining @ Step.GlobalJoin(_, _, _)                            => globallyJoined(joining, record, state)
@@ -948,20 +1016,27 @@ private[xkafka] final class Task[F[_]](
   private def processed[K, V, K2, V2](
       processor: Processor[F, K, V, K2, V2],
       record: Travelling[K, V],
-      state: TaskState
+      state: TaskState,
+      node: String,
+      now: Long
   ): F[(TaskState, Vector[Travelling[K2, V2]], Vector[TaskOutput])] =
     for
       working <- Ref.of[F, (TaskState, Vector[TaskOutput])]((state, Vector.empty))
       access  <- processor.kept.traverse(kept => accessTo(kept.store.value, record.timestamp, working).map(kept.store.value -> _))
-      results <- processor.handling(access.toMap).onRecord(asRead(record, state))
-      ended   <- working.get
-    yield (ended._1, results.toVector.map(travelling), ended._2)
+      results <-
+        processor.hosting.fold(processor.handling(access.toMap).onRecord(asRead(record, state))): hosting =>
+          hosting.process(hostedTask, asRead(record, state), hostedCall(access.toMap, state, now))
+      ended  <- working.get
+      synced <- hostedNodes.get(node).filter(_ => processor.hosting.isDefined).fold(F.pure(ended._1))(schedulesOf(_, ended._1, now))
+    yield (synced, results.toVector.map(travelling), ended._2)
+
+  /** Where the record being read came from. */
+  private def originOf(input: TaskInput): Option[RecordOrigin] =
+    (Topic.from(input.topic).toOption, Partition.from(input.partition).toOption, Offset.from(input.offset).toOption).mapN(RecordOrigin(_, _, _))
 
   /** `record` as a program's own code reads it, with where it came from. */
   private def asRead[K, V](record: Travelling[K, V], state: TaskState): Record[K, V] =
-    def origin(input: TaskInput) =
-      (Topic.from(input.topic).toOption, Partition.from(input.partition).toOption, Offset.from(input.offset).toOption).mapN(RecordOrigin(_, _, _))
-    Record(record.key, record.value, Timestamp.fromEpochMillis(record.timestamp), record.headers, state.reading.flatMap(origin))
+    Record(record.key, record.value, Timestamp.fromEpochMillis(record.timestamp), record.headers, state.reading.flatMap(originOf))
 
   /** What a program's own code returned, going on to the next step. */
   private def travelling[K, V](result: Record[K, V]): Travelling[K, V] =
@@ -990,6 +1065,20 @@ private[xkafka] final class Task[F[_]](
 
         def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
           working.get.flatMap((state, _) => storedUnder(state, store, prefix)).map(_.map((key, held) => (key, held.value)))
+
+        def timed(key: Chunk[Byte]): F[Option[(Chunk[Byte], Long)]] =
+          working.get.flatMap((state, _) => storedAt(state, store, key)).map(_.map(held => (held.value, held.timestamp)))
+
+        def putAt(key: Chunk[Byte], value: Option[Chunk[Byte]], at: Long): F[Unit] =
+          working.update: (state, logged) =>
+            (
+              state.written(store, key, value.map(Stored(_, at))),
+              logged :+ TaskOutput(changelog, Some(partition), Some(key), value, at, Headers.empty)
+            )
+
+        def timedScan(prefix: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Chunk[Byte], Long)]] =
+          working.get.flatMap((state, _) => prefix.fold(contents(state, store).map(_.toVector))(storedUnder(state, store, _)))
+            .map(_.map((key, held) => (key, held.value, held.timestamp)))
 
         def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit] =
           working.access.flatMap:
@@ -1653,12 +1742,16 @@ private[xkafka] final class Task[F[_]](
 
 private[xkafka] object Task:
   /** A task over each store its sub-topology declares, opened with `open`, holding what `held` gives for it. */
-  def over[F[_]](application: String, subtopology: Subtopology[F], partition: Int, held: Map[String, StoreContents], open: TaskStore.Open[F])(using
-      F: MonadThrow[F],
-      refs: Ref.Make[F]
-  ): F[Task[F]] =
+  def over[F[_]](
+      application: String,
+      subtopology: Subtopology[F],
+      partition: Int,
+      held: Map[String, StoreContents],
+      open: TaskStore.Open[F],
+      number: Int = 0
+  )(using F: MonadThrow[F], refs: Ref.Make[F]): F[Task[F]] =
     subtopology.stores.traverse(store => open(store.value, held.getOrElse(store.value, StoreContents.empty)).map(store.value -> _))
-      .map(stores => new Task(application, subtopology, partition, stores.toMap))
+      .map(stores => new Task(application, subtopology, partition, stores.toMap, number))
 
   /** A task over stores in memory. */
   def inMemory[F[_]: Concurrent](

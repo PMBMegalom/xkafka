@@ -752,6 +752,18 @@ private[xkafka] object Entry:
   * read from before a repartition topic, in other sub-topologies; the stores it keeps and the repartition topics it writes; and its nodes as Java's
   * builder makes them.
   */
+/** A processor whose logic lives in an instance each task starts and closes, named as its node is, and what reads the records it returns. */
+private[xkafka] trait HostedNode[F[_]]:
+  type Key
+  type Value
+  type Key2
+  type Value2
+
+  def named: String
+  def stores: List[String]
+  def hosting: xkafka.streams.Hosting[F, Key, Value, Key2, Value2]
+  def next: Consumer[F, Key2, Value2]
+
 /** A processor with punctuators, and what reads the records they return. */
 private[xkafka] trait Punctuating[F[_]]:
   type Key
@@ -762,6 +774,23 @@ private[xkafka] trait Punctuating[F[_]]:
   def schedules: List[Punctuation]
   def punctuators(access: Map[String, StoreAccess[F]]): List[Punctuator[F, Key, Value]]
   def next: Consumer[F, Key, Value]
+
+private[xkafka] object HostedNode:
+  def apply[F[_], K, V, K2, V2](
+      name: String,
+      kept: List[String],
+      hosted: xkafka.streams.Hosting[F, K, V, K2, V2],
+      reader: Consumer[F, K2, V2]
+  ): HostedNode[F] =
+    new HostedNode[F]:
+      type Key    = K
+      type Value  = V
+      type Key2   = K2
+      type Value2 = V2
+      val named: String                                    = name
+      val stores: List[String]                             = kept
+      val hosting: xkafka.streams.Hosting[F, K, V, K2, V2] = hosted
+      val next: Consumer[F, K2, V2]                        = reader
 
 private[xkafka] object Punctuating:
   def apply[F[_], K, V, K2, V2](name: String, processor: Processor[F, K, V, K2, V2], reader: Consumer[F, K2, V2]): Punctuating[F] =
@@ -789,12 +818,12 @@ private[xkafka] final case class Subtopology[F[_]](
   /** The topics it reads, its own first. */
   def origins: List[Source] = entries.flatMap(_.origin.sources)
 
-  /** The processors in it with punctuators, in the order their records reach them, each node walked once however many paths lead through it. */
-  lazy val punctuating: List[Punctuating[F]] =
-    def found[K, V](consumer: Consumer[F, K, V], seen: Set[AnyRef]): (List[Punctuating[F]], Set[AnyRef]) =
+  /** What `pick` finds at each step in it, in the order records reach the steps, each node walked once however many paths lead through it. */
+  private def picked[A](pick: [K, V, K2, V2] => (String, Step[F, K, V, K2, V2], Consumer[F, K2, V2]) => Option[A]): List[A] =
+    def found[K, V](consumer: Consumer[F, K, V], seen: Set[AnyRef]): (List[A], Set[AnyRef]) =
       val marked                                       = seen + consumer
       def all[K2, V2](next: List[Consumer[F, K2, V2]]) =
-        next.foldLeft((List.empty[Punctuating[F]], marked)):
+        next.foldLeft((List.empty[A], marked)):
           case ((so, inner), child) =>
             val (more, after) = found(child, inner)
             (so ++ more, after)
@@ -803,9 +832,7 @@ private[xkafka] final case class Subtopology[F[_]](
         consumer.expanded match
           case Consumer.Then(named, step, next) =>
             val (more, after) = found(next, marked)
-            step match
-              case Step.Process(processor, _) if processor.schedules.nonEmpty => (Punctuating(named.value, processor, next) :: more, after)
-              case _                                                          => (more, after)
+            (pick(named.value, step, next).toList ++ more, after)
           case Consumer.Beside(_, _, next)     => found(next, marked)
           case Consumer.Fan(children)          => all(children)
           case Consumer.Merged(_, next)        => found(next, marked)
@@ -819,11 +846,27 @@ private[xkafka] final case class Subtopology[F[_]](
           case Consumer.RightStream(join)      => found(join.next, marked)
           case Consumer.ForeignAnswered(join)  => found(join.next, marked)
           case _                               => (Nil, marked)
-    entries.foldLeft((List.empty[Punctuating[F]], Set.empty[AnyRef])):
+    entries.foldLeft((List.empty[A], Set.empty[AnyRef])):
       case ((so, seen), entry) =>
         val (more, after) = found(entry.consumer, seen)
         (so ++ more, after)
     ._1
+
+  /** The processors in it with punctuators, in the order their records reach them. */
+  lazy val punctuating: List[Punctuating[F]] =
+    picked: [K, V, K2, V2] =>
+      (named: String, step: Step[F, K, V, K2, V2], next: Consumer[F, K2, V2]) =>
+        step match
+          case Step.Process(processor, _) if processor.schedules.nonEmpty => Some(Punctuating(named, processor, next))
+          case _                                                          => None
+
+  /** The processors in it whose logic lives in an instance each task starts, in the order their records reach them. */
+  lazy val hosted: List[HostedNode[F]] =
+    picked: [K, V, K2, V2] =>
+      (named: String, step: Step[F, K, V, K2, V2], next: Consumer[F, K2, V2]) =>
+        step match
+          case Step.Process(processor, _) => processor.hosting.map(HostedNode(named, processor.kept.map(_.store.value), _, next))
+          case _                          => None
 
   /** Its stores. */
   def stores: List[Store] = kept.map(_.store)
