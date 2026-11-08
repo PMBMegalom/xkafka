@@ -199,7 +199,8 @@ With the name `order-customer`, the join adds these to the application:
 | A topic | `<application id>-order-customer-subscription-response-topic` |
 | A store | `order-customer-subscription-store`, with its changelog |
 
-Windowed tables cannot join on a foreign key, and there is no outer version. If the
+Windowed tables cannot join on a foreign key, and there is no outer version. (Other
+joins of windowed tables are in [Windows](windows.md#joining-windowed-tables).) If the
 other table's topic is partitioned some other way than by Kafka's default, give that
 table its partitioner (see [Choosing partitions](README.md#choosing-partitions)).
 

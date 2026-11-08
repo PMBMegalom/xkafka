@@ -1461,18 +1461,14 @@ final class TimeWindowedKStream[F[_], K, V, O] private[xkafka] (
     key: Serde[F, K],
     value: Serde[F, V]
 ):
-  private def aggregated[A](
-      named: Named,
-      store: Store,
-      serde: Serde[F, A],
-      initial: Option[A],
-      start: (K, V) => A,
-      add: (K, V, A) => A
+  private def aggregated[A](named: Named, store: Store, serde: Serde[F, A], initial: Option[A], start: (K, V) => A, add: (K, V, A) => A)(using
+      F: MonadThrow[F]
   ): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] =
     val (problems, keep) = TimeWindowedKStream.kept(windows, retention, store)
     val fold             = TimeWindowedKStream.fold(windows, store, keep, emitOnClose, key, serde, initial, start, add)
     val (size, grace)    = TimeWindowedKStream.sized(windows)
-    KTable.updating(grouped.folded(named, fold, problems), TableKey.TimeWindowed(key, size), serde, Some(grace))
+    val view             = TableView.WindowedStored(store, key, Serde.timeWindowed(key, FiniteDuration(size, "ms")), serde, false)
+    KTable.updating(grouped.folded(named, fold, problems), TableKey.TimeWindowed(key, size), serde, Some(grace), Some(view))
 
   /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
     * emits once it closes may expire before it is emitted when the retention is no longer than that, as in Java Kafka Streams, so keep it longer
@@ -1488,16 +1484,16 @@ final class TimeWindowedKStream[F[_], K, V, O] private[xkafka] (
   def emitOnWindowClose: TimeWindowedKStream[F, K, V, O] = TimeWindowedKStream(grouped, windows, retention, true, key, value)
 
   /** Counts each key's records in each window in `store`, in the step `named`. */
-  def count(named: Named, store: Store)(using F: ApplicativeThrow[F]): KTable.Flowing[F, Windowed[K], Long, KTable.Updated, O] =
+  def count(named: Named, store: Store)(using F: MonadThrow[F]): KTable.Flowing[F, Windowed[K], Long, KTable.Updated, O] =
     aggregated(named, store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1)
 
   /** Combines each key's values in each window in `store`, starting from the window's first, in the step `named`. */
-  def reduce(named: Named, store: Store)(combine: (V, V) => V): KTable.Flowing[F, Windowed[K], V, KTable.Updated, O] =
+  def reduce(named: Named, store: Store)(combine: (V, V) => V)(using F: MonadThrow[F]): KTable.Flowing[F, Windowed[K], V, KTable.Updated, O] =
     aggregated(named, store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v))
 
   /** Folds each key's values in each window into `store`, starting each window from `initial`, in the step `named`. */
-  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(
-      add: (K, V, A) => A
+  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(using
+      F: MonadThrow[F]
   ): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] = aggregated(named, store, serde, Some(initial), (k, v) => add(k, v, initial), add)
 
 private[xkafka] object TimeWindowedKStream:
@@ -1604,7 +1600,9 @@ final class TimeWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
     TimeWindowedCogroupedKStream(cogrouped, windows, Some(retention), key)
 
   /** Folds each key's values in each window into `store`, starting each window from `initial`, in the steps `named` names. */
-  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] =
+  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A)(using
+      F: MonadThrow[F]
+  ): KTable.Flowing[F, Windowed[K], A, KTable.Updated, O] =
     val (problems, keep) = TimeWindowedKStream.kept(windows, retention, store)
     val (size, grace)    = TimeWindowedKStream.sized(windows)
     val folding          =
@@ -1615,7 +1613,8 @@ final class TimeWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
             TimeWindowedKStream.fold(windows, store, keep, false, key, serde, Some(initial), (k: K, v: V) => add(k, v, initial), add),
         problems
       )
-    KTable.updating(folding, TableKey.TimeWindowed(key, size), serde, Some(grace))
+    val view = TableView.WindowedStored(store, key, Serde.timeWindowed(key, FiniteDuration(size, "ms")), serde, false)
+    KTable.updating(folding, TableKey.TimeWindowed(key, size), serde, Some(grace), Some(view))
 
 /** Groups of records split by key into sessions, ready to be folded into one session store, as for [[SessionWindowedKStream]], a record being dropped
   * when its session has closed by the latest time read from its own group, as in Java.
@@ -1633,7 +1632,9 @@ final class SessionWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
   /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them, in the
     * steps `named` names.
     */
-  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A)(merge: (K, A, A) => A): KTable.Flowing[F, Windowed[K], A, Option, O] =
+  def aggregate(named: Named, store: Store, serde: Serde[F, A])(initial: A)(merge: (K, A, A) => A)(using
+      F: MonadThrow[F]
+  ): KTable.Flowing[F, Windowed[K], A, Option, O] =
     val (problems, keep) = SessionWindowedKStream.kept(windows, retention, store)
     val folding          =
       cogrouped.folded[Windowed[K], Option[A]](
@@ -1643,7 +1644,8 @@ final class SessionWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
             Step.SessionAggregate(store, windows, keep, false, key, serde, Some(initial), (k: K, v: V) => add(k, v, initial), add, merge),
         problems
       )
-    KTable.deleting(folding, TableKey.SessionWindowed(key), serde, Some(windows.graceMillis + windows.gapMillis))
+    val view = TableView.WindowedStored(store, key, Serde.sessionWindowed(key), serde, true)
+    KTable.deleting(folding, TableKey.SessionWindowed(key), serde, Some(windows.graceMillis + windows.gapMillis), Some(view))
 
 /** Records grouped by key into sessions, ready to be folded into a session store. Each session's value goes downstream as it changes, and a session
   * merged into another goes on as none, as Java sends a session merged away as a tombstone. A record later than its session's end by more than the
@@ -1665,26 +1667,33 @@ final class SessionWindowedKStream[F[_], K, V, O] private[xkafka] (
       start: (K, V) => A,
       add: (K, V, A) => A,
       merge: (K, A, A) => A
-  ): KTable.Flowing[F, Windowed[K], A, Option, O] =
+  )(using F: MonadThrow[F]): KTable.Flowing[F, Windowed[K], A, Option, O] =
     val (problems, keep) = SessionWindowedKStream.kept(windows, retention, store)
     val fold             = Step.SessionAggregate(store, windows, keep, emitOnClose, key, serde, initial, start, add, merge)
-    KTable.deleting(grouped.folded(named, fold, problems), TableKey.SessionWindowed(key), serde, Some(windows.graceMillis + windows.gapMillis))
+    val view             = TableView.WindowedStored(store, key, Serde.sessionWindowed(key), serde, true)
+    KTable.deleting(
+      grouped.folded(named, fold, problems),
+      TableKey.SessionWindowed(key),
+      serde,
+      Some(windows.graceMillis + windows.gapMillis),
+      Some(view)
+    )
 
   /** Counts each key's records in each session in `store`, in the step `named`. */
-  def count(named: Named, store: Store)(using F: ApplicativeThrow[F]): KTable.Flowing[F, Windowed[K], Long, Option, O] =
+  def count(named: Named, store: Store)(using F: MonadThrow[F]): KTable.Flowing[F, Windowed[K], Long, Option, O] =
     aggregated(named, store, Serde.long[F], Some(0L), (_, _) => 1L, (_, _, n) => n + 1, (_, a, b) => a + b)
 
   /** Combines each key's values in each session in `store`, starting from the session's first, and merging sessions with `combine` too, in the step
     * `named`.
     */
-  def reduce(named: Named, store: Store)(combine: (V, V) => V): KTable.Flowing[F, Windowed[K], V, Option, O] =
+  def reduce(named: Named, store: Store)(combine: (V, V) => V)(using F: MonadThrow[F]): KTable.Flowing[F, Windowed[K], V, Option, O] =
     aggregated(named, store, value, None, (_, v) => v, (_, v, acc) => combine(acc, v), (_, acc, session) => combine(acc, session))
 
   /** Folds each key's values in each session into `store` from `initial`, merging two sessions' values with `merge` where a record joins them, in the
     * step `named`.
     */
-  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(
-      merge: (K, A, A) => A
+  def aggregate[A](named: Named, store: Store, serde: Serde[F, A])(initial: A)(add: (K, V, A) => A)(merge: (K, A, A) => A)(using
+      F: MonadThrow[F]
   ): KTable.Flowing[F, Windowed[K], A, Option, O] = aggregated(named, store, serde, Some(initial), (k, v) => add(k, v, initial), add, merge)
 
   /** Keeps each session in the store for `retention` after its end, which must be at least the inactivity gap and grace, their default. */
@@ -1794,22 +1803,30 @@ private[xkafka] enum TableView[F[_], K, V]:
   /** A `mapValues` kept in no store, as Java's value getter maps what its parent's finds. */
   case Mapped[F[_], K, A, B](parent: TableView[F, K, A], change: A => B) extends TableView[F, K, B]
 
+  /** A windowed table's window store, or its session store where `session` says so, read for one window as Java's windowed value getters read it: the
+    * window with the same key and start, and for a session the same end, while the store's retention keeps it.
+    */
+  case WindowedStored[F[_], K, V](store: Store, key: Serde[F, K], windowed: Serde[F, Windowed[K]], value: Serde[F, V], session: Boolean)
+      extends TableView[F, Windowed[K], V]
+
   def mapK[G[_]](fk: FunctionK[F, G]): TableView[G, K, V] =
     this match
-      case Stored(store, key, value)   => Stored(store, key.mapK(fk), value.mapK(fk))
-      case Held(buffer, parent)        => Held(buffer, parent.mapK(fk))
-      case Joined(left, right, joiner) => Joined(left.mapK(fk), right.mapK(fk), joiner)
-      case Filtered(parent, keep)      => Filtered(parent.mapK(fk), keep)
-      case Mapped(parent, change)      => Mapped(parent.mapK(fk), change)
+      case Stored(store, key, value)                            => Stored(store, key.mapK(fk), value.mapK(fk))
+      case Held(buffer, parent)                                 => Held(buffer, parent.mapK(fk))
+      case Joined(left, right, joiner)                          => Joined(left.mapK(fk), right.mapK(fk), joiner)
+      case Filtered(parent, keep)                               => Filtered(parent.mapK(fk), keep)
+      case Mapped(parent, change)                               => Mapped(parent.mapK(fk), change)
+      case WindowedStored(store, key, windowed, value, session) => WindowedStored(store, key.mapK(fk), windowed.mapK(fk), value.mapK(fk), session)
 
   /** The serde its table's keys are written with. */
   def keys: Serde[F, K] =
     this match
-      case Stored(_, key, _)   => key
-      case Held(_, parent)     => parent.keys
-      case Joined(left, _, _)  => left.keys
-      case Filtered(parent, _) => parent.keys
-      case Mapped(parent, _)   => parent.keys
+      case Stored(_, key, _)                    => key
+      case Held(_, parent)                      => parent.keys
+      case Joined(left, _, _)                   => left.keys
+      case Filtered(parent, _)                  => parent.keys
+      case Mapped(parent, _)                    => parent.keys
+      case WindowedStored(_, _, windowed, _, _) => windowed
 
 /** What a table's change holds: for a table that only ever updates its keys the new value, or for one that can delete them, the new value or none. */
 private[xkafka] sealed trait ChangeKind[C[_]]:
@@ -2002,6 +2019,11 @@ sealed trait KTable[F[_], K, V]:
   /** The table as one side of a join. */
   private def side: Side[F, K, V, Change[V]] = Side(kind.present(_), view)
 
+  private def plain[A](table: TableKey[F, A]): Boolean =
+    table match
+      case TableKey.Plain(_, _) => true
+      case _                    => false
+
   /** The table joined with `other`, by a key `foreignKey` takes from each row, as Java's foreign-key joins join them. */
   private def onForeignKey[KO, VO, R](
       named: Named,
@@ -2015,7 +2037,8 @@ sealed trait KTable[F[_], K, V]:
       store: Option[(Store, Serde[F, R])]
   ): Deleting[R] =
     (view, other.view) match
-      case (Some(mine), Some(_)) =>
+      // Windowed tables cannot join on a foreign key.
+      case (Some(mine), Some(_)) if plain(key) && plain(other.key) =>
         val feeding: Consumer[F, K, Option[R]] => Out =
           next =>
             val join =

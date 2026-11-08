@@ -91,11 +91,12 @@ private[xkafka] object Describing:
     */
   def stores[F[_], K, V](view: TableView[F, K, V]): List[String] =
     view match
-      case TableView.Stored(store, _, _)    => List(store.value)
-      case TableView.Held(buffer, parent)   => buffer :: stores(parent)
-      case TableView.Joined(left, right, _) => (stores(left) ++ stores(right)).distinct
-      case TableView.Filtered(parent, _)    => stores(parent)
-      case TableView.Mapped(parent, _)      => stores(parent)
+      case TableView.Stored(store, _, _)               => List(store.value)
+      case TableView.Held(buffer, parent)              => buffer :: stores(parent)
+      case TableView.Joined(left, right, _)            => (stores(left) ++ stores(right)).distinct
+      case TableView.Filtered(parent, _)               => stores(parent)
+      case TableView.Mapped(parent, _)                 => stores(parent)
+      case TableView.WindowedStored(store, _, _, _, _) => List(store.value)
 
   /** A sub-topology as Java describes it: each node, in the order Java's `HashMap` of them iterates, connected to its predecessors and they to it in
     * `TreeSet`s ordered by the size of the nodes' subtrees at the time, larger first, then by name, each connection growing the subtrees above it;

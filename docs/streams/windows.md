@@ -194,6 +194,41 @@ default, sessions are kept for the gap plus the grace after they end, which is
 also the shortest `withRetention` accepts. With `emitOnWindowClose`, only each
 session's final value goes downstream, and no `None` values are sent.
 
+## Joining windowed tables
+
+Two windowed tables join window by window, as other tables join key by key. This
+joins each page's clicks per minute with its views in the same minute:
+
+```scala mdoc:compile-only
+// Each page's clicks and views per minute, joined minute by minute into a click rate
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def clickRates(clicks: Topic, views: Topic, output: Topic): Pipeline[IO] =
+  val page    = Serde.utf8[IO]
+  val minute  = TimeWindows.tumbling(1.minute, grace = 10.seconds)
+  val clicked = KStream(Named("clicks"), clicks, page, page).groupByKey(page, page).windowedBy(minute).count(Named("count-clicks"), Store("clicks"))
+  val viewed  = KStream(Named("views"), views, page, page).groupByKey(page, page).windowedBy(minute).count(Named("count-views"), Store("views"))
+  clicked
+    .join(Named("click-rate"), viewed)((c, v) => s"${c.toDouble / v}")  // Each page and minute meets the same page and minute
+    .toStream(Named("rates"))
+    .to(Named("write-rates"), output, Serde.timeWindowed(page, 1.minute), page.option)
+```
+
+A window meets only the same window of the other table: the same key and the same
+start, and for sessions the same end too. A window the other table has already
+dropped, once its retention has passed, finds nothing. `join`, `leftJoin` and
+`outerJoin` all work this way, and so does keeping the result in a store. A stream
+keyed by window, such as a windowed table's `toStream`, joins a windowed table in the
+same way.
+
+Both tables' topics must have the same number of partitions, as for any table join.
+Windowed tables cannot join on a foreign key.
+
 ## Writing windowed keys
 
 To write windowed keys to a topic, use `Serde.timeWindowed(key, size)`, with the

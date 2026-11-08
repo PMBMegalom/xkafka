@@ -99,10 +99,10 @@ final class TablesSuite extends FunSuite:
         .windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Named("count"), Store("visits"))
     assertEquals(
       refused(
-        KStream(Named("read"), topic, Serde.timeWindowed(text, 1.second), text).join(Named("join"), windowed)((v, n) => s"$v$n")
-          .to(Named("write"), topic, Serde.timeWindowed(text, 1.second), text)
+        KStream(Named("read"), Topic.from("windowed-reads").orFail, Serde.timeWindowed(text, 1.second), text)
+          .join(Named("join"), windowed)((v, n) => s"$v$n").to(Named("write"), topic, Serde.timeWindowed(text, 1.second), text)
       ),
-      Some(List(TopologyError.WindowedJoin))
+      None
     )
 
   test("two tables joined give a table that can delete its keys, whichever kinds of table they are"):
@@ -117,7 +117,7 @@ final class TablesSuite extends FunSuite:
       Topology.of(table.toStream(Named("to-stream-4")).to(Named("write-4"), Topic.from("out").orFail, text, text.option))
     assertEquals(List(joined, left, outer, stored).map(written(_).isRight), List(true, true, true, true))
 
-  test("a table joined with itself, or with a table read from the same topic, is refused, and so is one windowed"):
+  test("a table joined with itself, or with a table read from the same topic, is refused, and one windowed joins"):
     val users                                                 = KTable(Named("users"), topic, text, text, Store("users"))
     def refused(table: KTable.Of[IO, String, String, Option]) =
       Topology.of(table.toStream(Named("to-stream-5")).to(Named("write-5"), Topic.from("out").orFail, text, text.option)).left.toOption.map(_.toList)
@@ -130,12 +130,12 @@ final class TablesSuite extends FunSuite:
       ).exists(_.contains(TopologyError.DuplicateSource(topic)))
     )
     def windowed(name: String) =
-      KStream(Named("read-5"), Topic.from(name).orFail, text, text).groupByKey(text, text)
-        .windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Named("count-5"), Store(name))
+      KStream(Named(s"read-$name"), Topic.from(name).orFail, text, text).groupByKey(text, text)
+        .windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Named(s"count-$name"), Store(name))
     val both =
       windowed("visits").join(Named("join-3"), windowed("clicks"))(_ + _).toStream(Named("to-stream-6"))
         .to(Named("write-6"), Topic.from("out").orFail, Serde.timeWindowed(text, 1.second), count.option)
-    assertEquals(Topology.of(both).left.toOption.map(_.toList), Some(List(TopologyError.WindowedJoin)))
+    assert(Topology.of(both).isRight, Topology.of(both).toString)
 
   test("the result of joining tables is suppressed only once it is kept in a store, which gives the suppression a serde"):
     val users                                                    = KTable(Named("users"), Topic.from("users").orFail, text, text, Store("users"))

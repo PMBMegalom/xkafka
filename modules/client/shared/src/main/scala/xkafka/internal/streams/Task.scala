@@ -1587,9 +1587,25 @@ private[xkafka] final class Task[F[_]](
               case None         => valueOf(parent, key, state)
               case Some(stored) => (Held.decode(stored.value), Task.valuesOf(parent)).tupled.liftTo[F](unreadable).flatMap: (held, values) =>
                   held.prior.traverse(prior => values.deserializer.deserialize(changelog, held.context.headers, Some(prior)).map(_ -> Task.Unknown))
-      case TableView.Joined(left, right, joiner) => joinedValueOf(left, right, joiner, key, state)
-      case TableView.Filtered(parent, keep)      => valueOf(parent, key, state).map(_.filter((value, _) => keep(key, value)))
-      case mapped @ TableView.Mapped(_, _)       => mappedValueOf(mapped, key, state)
+      case TableView.Joined(left, right, joiner)              => joinedValueOf(left, right, joiner, key, state)
+      case TableView.Filtered(parent, keep)                   => valueOf(parent, key, state).map(_.filter((value, _) => keep(key, value)))
+      case mapped @ TableView.Mapped(_, _)                    => mappedValueOf(mapped, key, state)
+      case windowed @ TableView.WindowedStored(_, _, _, _, _) => windowedValueOf(windowed, key, state)
+
+  /** One window's value, at the time it was stored, or for a session at its end, as Java's windowed value getters give it. A window past the store's
+    * retention is not there to find, as the store removes each such window once its clock passes it.
+    */
+  private def windowedValueOf[K, V](view: TableView.WindowedStored[F, K, V], key: Windowed[K], state: TaskState): F[Option[(V, Long)]] =
+    val store = view.store.value
+    topicNamed(s"$application-$store-changelog").flatMap: changelog =>
+      view.key.serializer.serialize(changelog, Headers.empty, key.key).flatMap:
+        case None        => F.pure(None)
+        case Some(bytes) =>
+          val stored = if view.session then SessionStore.key(bytes, key.window.start, key.window.end) else WindowStore.key(bytes, key.window.start)
+          storedAt(state, store, stored).flatMap:
+            _.traverse: found =>
+              view.value.deserializer.deserialize(changelog, Headers.empty, Some(found.value))
+                .map(_ -> (if view.session then key.window.end else found.timestamp))
 
   private def mappedValueOf[K, A, B](view: TableView.Mapped[F, K, A, B], key: K, state: TaskState): F[Option[(B, Long)]] =
     valueOf(view.parent, key, state).map(_.map((value, timestamp) => (view.change(value), timestamp)))
@@ -1668,11 +1684,12 @@ private[xkafka] object Task:
   /** The serde a table view's values are written with, which the result of joining tables kept in no store does not have. */
   def valuesOf[F[_], K, V](view: TableView[F, K, V]): Option[xkafka.streams.Serde[F, V]] =
     view match
-      case TableView.Stored(_, _, value) => Some(value)
-      case TableView.Held(_, parent)     => valuesOf(parent)
-      case TableView.Joined(_, _, _)     => None
-      case TableView.Filtered(parent, _) => valuesOf(parent)
-      case TableView.Mapped(_, _)        => None
+      case TableView.Stored(_, _, value)               => Some(value)
+      case TableView.Held(_, parent)                   => valuesOf(parent)
+      case TableView.Joined(_, _, _)                   => None
+      case TableView.Filtered(parent, _)               => valuesOf(parent)
+      case TableView.Mapped(_, _)                      => None
+      case TableView.WindowedStored(_, _, _, value, _) => Some(value)
 
   /** What Java's join processor for the left side makes of `change` and the right side's value `other`, for each kind of join: the result's new
     * value, its old value where `sendOld`, and its time, or nothing where Java forwards nothing.
