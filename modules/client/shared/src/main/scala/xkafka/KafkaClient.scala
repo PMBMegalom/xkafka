@@ -23,7 +23,7 @@ package xkafka
 
 import cats.arrow.FunctionK
 import cats.effect.{Async, MonadCancelThrow, Resource}
-import streams.{KafkaStreams, StreamsSettings, Topology}
+import streams.{Forward, KafkaStreams, StreamsSettings, Topology}
 
 trait KafkaClient[F[_]]:
   self =>
@@ -43,6 +43,9 @@ trait KafkaClient[F[_]]:
     */
   def streams(settings: StreamsSettings, topology: Topology[F]): Resource[F, KafkaStreams[F]]
 
+  /** Runs a streams program as `streams` does, asking the members holding what a query needs through `forward`, as the application reaches them. */
+  def streams(settings: StreamsSettings, topology: Topology[F], forward: Forward[F]): Resource[F, KafkaStreams[F]]
+
   final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F])(using MonadCancelThrow[F], MonadCancelThrow[G]): KafkaClient[G] =
     new KafkaClient[G]:
       override def producer[K, V](settings: ProducerSettings[G, K, V]): Resource[G, KafkaProducer[G, K, V]] =
@@ -57,7 +60,10 @@ trait KafkaClient[F[_]]:
       override def admin(settings: ClientSettings): Resource[G, KafkaAdminClient[G]] = self.admin(settings).map(_.mapK(fk)).mapK(fk)
 
       override def streams(settings: StreamsSettings, topology: Topology[G]): Resource[G, KafkaStreams[G]] =
-        self.streams(settings, topology.imapK(gk)(fk)).map(_.mapK(fk)).mapK(fk)
+        self.streams(settings, topology.imapK(gk)(fk)).map(_.imapK(fk)(gk)).mapK(fk)
+
+      override def streams(settings: StreamsSettings, topology: Topology[G], forward: Forward[G]): Resource[G, KafkaStreams[G]] =
+        self.streams(settings, topology.imapK(gk)(fk), (to, request) => gk(forward(to, request))).map(_.imapK(fk)(gk)).mapK(fk)
 
 object KafkaClient:
   /** The client for the platform this runs on. */

@@ -33,7 +33,7 @@ import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
 import internal.{ClientProperties, PollQueue}
 import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
-import streams.{KafkaStreams, StreamsSettings, Topology}
+import streams.{Forward, KafkaStreams, StreamsSettings, Topology}
 
 private def isolationLevel(value: IsolationLevel): String =
   value match
@@ -209,7 +209,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       reportEnds = false
     )
 
-  override def streams(settings: StreamsSettings, topology: Topology[F]): Resource[F, KafkaStreams[F]] =
+  override def streams(settings: StreamsSettings, topology: Topology[F]): Resource[F, KafkaStreams[F]] = streams(settings, topology, Forward.none[F])
+
+  override def streams(settings: StreamsSettings, topology: Topology[F], forward: Forward[F]): Resource[F, KafkaStreams[F]] =
     internal.streams.Engine(
       this,
       driver,
@@ -221,7 +223,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       settings.concurrency,
       closeTimeout = settings.closeTimeout,
       topologyDescriptionPush = settings.topologyDescriptionPush,
-      stateDirectory = settings.stateDirectory
+      stateDirectory = settings.stateDirectory,
+      queryEndpoint = settings.queryEndpoint,
+      forward = Some(forward)
     )
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =

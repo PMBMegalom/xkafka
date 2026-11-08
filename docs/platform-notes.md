@@ -134,4 +134,5 @@ A streams `Pipeline` or `Topology` changes effect with `imapK`, which also needs
 both directions: a [processor](streams/processors.md) runs its handler in one
 effect and its stores in the other. They have cats-tagless `InvariantK`
 instances, as do `Transaction` and `KafkaTransactionalProducer`, and a streams
-`Serde` and `KafkaStreams` have `FunctorK` instances.
+`Serde` has a `FunctorK` instance. `KafkaStreams` changes effect with `imapK`, as its
+queries go both ways, and has an `InvariantK` instance.

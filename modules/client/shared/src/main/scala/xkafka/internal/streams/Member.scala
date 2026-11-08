@@ -157,7 +157,8 @@ private[xkafka] final case class Member(
     failures: Int,
     statuses: List[StreamsGroup.Status],
     unauthorized: Option[String] = None,
-    taskOffsetInterval: Option[FiniteDuration] = None
+    taskOffsetInterval: Option[FiniteDuration] = None,
+    endpoints: List[StreamsGroup.EndpointPartitions] = Nil
 ):
   import Member.*
   import MemberAction.*
@@ -234,6 +235,8 @@ private[xkafka] final case class Member(
         phase = if phase == Phase.Joining then Phase.Joined else phase,
         epoch = response.memberEpoch,
         endpointEpoch = response.endpointInformationEpoch,
+        // The coordinator sends where each member's tasks are only when that changes.
+        endpoints = response.partitionsByUserEndpoint.getOrElse(endpoints),
         failures = 0,
         statuses = response.statuses.getOrElse(statuses),
         unauthorized = None,

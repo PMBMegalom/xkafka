@@ -37,7 +37,10 @@ import driver.{KafkaDriver, PolledRecord, StartAt}
 import group.{Connections, PlatformCrypto, PlatformSockets}
 import protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{GlobalStore, KafkaStreams, ProcessingGuarantee, Source, StreamsPhase, StreamsProblem, StreamsState, Subtopology, Topology}
+import xkafka.streams.{
+  Endpoint, Forward, GlobalStore, KafkaStreams, ProcessingGuarantee, Query, QueryProblem, Source, StreamsPhase, StreamsProblem, StreamsState,
+  Subtopology, Topology
+}
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
   * one consumer and write through one producer. At least once, they commit what they read through the member; exactly once, in the transaction that
@@ -109,6 +112,8 @@ private[xkafka] object Engine:
       closeTimeout: FiniteDuration = 30.seconds,
       topologyDescriptionPush: Boolean = true,
       stateDirectory: Option[String] = None,
+      queryEndpoint: Option[Endpoint] = None,
+      forward: Option[Forward[F]] = None,
       watch: Plane[F] => Plane[F] = identity[Plane[F]]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
@@ -132,7 +137,7 @@ private[xkafka] object Engine:
           RebalanceTimeout.toMillis.toInt,
           None,
           Nil,
-          None,
+          queryEndpoint.map(at => StreamsGroup.Endpoint(at.host, at.port)),
           Option.when(topologyDescriptionPush)(Declaration.described(application, topology))
         )
       admin  <- client.admin(settings)
@@ -198,7 +203,9 @@ private[xkafka] object Engine:
           partitions,
           TaskStore.memory[F],
           globals,
-          state
+          state,
+          queryEndpoint,
+          forward
         )
     yield running
 
@@ -269,7 +276,9 @@ private[xkafka] object Engine:
       partitions: Topic => F[Int],
       open: TaskStore.Open[F],
       globals: Option[GlobalStores.Held[F]] = None,
-      state: Option[StateDirectory[F]] = None
+      state: Option[StateDirectory[F]] = None,
+      own: Option[Endpoint] = None,
+      forward: Option[Forward[F]] = None
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val subtopologies = topology.numbered.map((id, subtopology) => id.toString -> subtopology).toMap
     val unordered     =
@@ -342,9 +351,23 @@ private[xkafka] object Engine:
         Resource.make(loop.begin(Running(Map.empty, started, started), kept).start): fiber =>
           member.leave.timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.close)) *>
             stores.getAndSet(Map.empty).flatMap(_.values.toList.flatMap(_.values).traverse_(_.close))
+      querying =
+        Querying(
+          application,
+          subtopologies,
+          globals.fold(Map.empty[String, TaskStore[F]])(_.stores),
+          stores,
+          member.reports,
+          phase,
+          partitions,
+          own,
+          forward.getOrElse(Forward.none[F])
+        )
     yield new KafkaStreams[F]:
-      def run: F[Unit]                   = globals.fold(running.joinWithNever)(held => F.race(running.joinWithNever, held.failure).void)
-      def state: Stream[F, StreamsState] =
+      def run: F[Unit] = globals.fold(running.joinWithNever)(held => F.race(running.joinWithNever, held.failure).void)
+      def query[A](query: Query[F, A], allowStandby: Boolean): F[Either[QueryProblem, A]] = querying.query(query, allowStandby)
+      def answer(request: Chunk[Byte]): F[Chunk[Byte]]                                    = querying.answer(request)
+      def state: Stream[F, StreamsState]                                                  =
         (phase, member.reports)
           .mapN((now, reported) => StreamsState(now, problemsOf(reported) ++ unordered ++ buildOrdered ++ unstartable ++ globalOrdered)).discrete
           .changes

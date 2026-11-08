@@ -564,6 +564,36 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             // The second run starts each store from where the first left it, past what the first counted.
             assert(after.drop(before.size).exists(from => from.nonEmpty && from.values.forall(_ > 0L)), s"the second run restored from $after")
 
+    test(s"$release, $under: a count is queried from either of two members, each asking the other for the keys it holds"):
+      counting(server): app =>
+        val counts   = xkafka.streams.QueryableStore.keyValue(Store("counts"), text, Serde.long[IO])
+        val members  = List("a", "b").map(name => xkafka.streams.Endpoint.from(name, 1).orFail)
+        val interval = Option.when(summon[ProcessingGuarantee] == ProcessingGuarantee.AtLeastOnce)(1.second)
+        IO.ref(Map.empty[xkafka.streams.Endpoint, xkafka.streams.KafkaStreams[IO]]).flatMap: reachable =>
+          // Each member reaches the other in this process, through its answer.
+          val forward: xkafka.streams.Forward[IO] =
+            (to, request) => reachable.get.flatMap(_.get(to).fold(IO.raiseError[fs2.Chunk[Byte]](new RuntimeException(s"no $to")))(_.answer(request)))
+          def engine(at: xkafka.streams.Endpoint) =
+            Engine(
+              PlatformKafkaClient(),
+              KafkaClientPlatform.driver[IO],
+              client(server),
+              app.application,
+              app.topology,
+              summon[ProcessingGuarantee],
+              interval,
+              queryEndpoint = Some(at),
+              forward = Some(forward)
+            ).evalTap(streams => reachable.update(_.updated(at, streams)))
+          (engine(members(0)), engine(members(1))).tupled.use: (one, two) =>
+            val answers = one.run.race(two.run).flatMap(_ => IO.raiseError[Unit](new AssertionError("an engine stopped")))
+            def answered(streams: xkafka.streams.KafkaStreams[IO]) =
+              total(first).toList.traverse((key, count) => streams.query(counts.get(key)).map(_ == Right(Some(count)))).map(_.forall(identity))
+            val steps =
+              produce(server, app.input, first) *> latest(server, app.output, total(first)) *>
+                eventually("both members answering every key")((answered(one), answered(two)).mapN(_ && _))
+            answers.race(steps).flatMap(_.fold(IO.pure, IO.pure))
+
     test(s"$release, $under: a second engine of the application over the same state directory is refused while the first runs"):
       counting(server): app =>
         val state    = Some(s"${Option(System.getProperty("java.io.tmpdir")).getOrElse("target")}/${app.application}-state")

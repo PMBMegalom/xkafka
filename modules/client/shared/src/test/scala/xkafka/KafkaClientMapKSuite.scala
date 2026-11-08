@@ -30,7 +30,8 @@ import fs2.{Chunk, Stream}
 import internal.streams.{Task, TaskInput, TaskState}
 import munit.CatsEffectSuite
 import streams.{
-  ApplicationId, KafkaStreams, KeyValueStore, KStream, Named, Pipeline, Processor, Serde, Store, StreamsPhase, StreamsSettings, StreamsState, Topology
+  ApplicationId, Endpoint, Forward, KafkaStreams, KeyValueStore, KStream, Named, Pipeline, Processor, Query, QueryProblem, Serde, Store, StreamsPhase,
+  StreamsSettings, StreamsState, Topology
 }
 
 final class KafkaClientMapKSuite extends CatsEffectSuite:
@@ -72,14 +73,29 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
   test("a running application and a serde change effect through their instances"):
     val streams =
       new KafkaStreams[IO]:
-        def run: IO[Unit]                   = IO.unit
-        def state: Stream[IO, StreamsState] = Stream.empty
-    val text  = FunctorK[[F[_]] =>> Serde[F, String]].mapK(Serde.utf8[IO])(ioToErrorIO)
-    val topic = Topic.from("in").toOption.get
-    (FunctorK[KafkaStreams].mapK(streams)(ioToErrorIO).run.value, text.serializer.serialize(topic, Headers.empty, "a").value).tupled.map:
-      (ran, written) =>
+        def run: IO[Unit]                                                                     = IO.unit
+        def state: Stream[IO, StreamsState]                                                   = Stream.empty
+        def query[A](query: Query[IO, A], allowStandby: Boolean): IO[Either[QueryProblem, A]] = IO.pure(Left(QueryProblem.Rebalancing))
+        def answer(request: Chunk[Byte]): IO[Chunk[Byte]]                                     = IO.pure(request ++ request)
+    val text   = FunctorK[[F[_]] =>> Serde[F, String]].mapK(Serde.utf8[IO])(ioToErrorIO)
+    val topic  = Topic.from("in").toOption.get
+    val mapped = InvariantK[KafkaStreams].imapK(streams)(ioToErrorIO)(errorIOToIO)
+    (mapped.run.value, mapped.answer(Chunk(1.toByte)).value, text.serializer.serialize(topic, Headers.empty, "a").value).tupled.map:
+      (ran, answered, written) =>
         assertEquals(ran, Right(()))
+        assertEquals(answered, Right(Chunk(1.toByte, 1.toByte)))
         assertEquals(written, Right(Some(Chunk.array("a".getBytes))))
+
+  test("the way a client is given to reach other members changes effect with the client, back to the effect the client runs in"):
+    val settings =
+      StreamsSettings.from(ClientSettings.from(NonEmptyList.one("localhost:9092")).toOption.get, ApplicationId.from("app").toOption.get).toOption.get
+    val program =
+      KStream(Named("read"), Topic.from("in").toOption.get, Serde.utf8[ErrorIO], Serde.utf8[ErrorIO])
+        .to(Named("write"), Topic.from("out").toOption.get, Serde.utf8[ErrorIO], Serde.utf8[ErrorIO])
+    val forward: Forward[ErrorIO] = (to, request) => EitherT.leftT(s"asked ${to.host} with ${request.size} bytes")
+    sourceRecording(_ => IO.unit).imapK(ioToErrorIO)(errorIOToIO).streams(settings, Topology.of(program).orFail, forward)
+      .use(_.answer(Chunk(1.toByte, 2.toByte))) // Going back to the client's effect, the forward's refusal becomes a failure there.
+      .value.attempt.map(answered => assertEquals(answered.left.toOption.map(_.getMessage), Some("asked member with 2 bytes")))
 
   test("a transactional producer changes effect through its instance, its transaction going both ways"):
     val topic  = Topic.from("in").toOption.get
@@ -270,11 +286,16 @@ final class KafkaClientMapKSuite extends CatsEffectSuite:
 
             override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(Partition.from(0).toOption.get))
 
-      // Runs one record through the program's first step, so that its effects show where they run.
       override def streams(settings: StreamsSettings, topology: Topology[IO]): Resource[IO, KafkaStreams[IO]] =
+        streams(settings, topology, (_, request) => IO.pure(request))
+
+      // Runs one record through the program's first step, so that its effects show where they run, and answers by asking `forward`.
+      override def streams(settings: StreamsSettings, topology: Topology[IO], forward: Forward[IO]): Resource[IO, KafkaStreams[IO]] =
         Resource.pure:
           new KafkaStreams[IO]:
-            override def run: IO[Unit] =
+            override def query[A](query: Query[IO, A], allowStandby: Boolean): IO[Either[QueryProblem, A]] = IO.pure(Left(QueryProblem.Rebalancing))
+            override def answer(request: Chunk[Byte]): IO[Chunk[Byte]] = forward(Endpoint.from("member", 1).toOption.get, request)
+            override def run: IO[Unit]                                 =
               internal.streams.Task[IO](settings.applicationId.value, topology.subtopologies.head, 0).process(
                 internal.streams.TaskState.empty,
                 internal.streams.TaskInput(Some(Chunk.array("k".getBytes)), Some(Chunk.array("v".getBytes)), 0L, Headers.empty),

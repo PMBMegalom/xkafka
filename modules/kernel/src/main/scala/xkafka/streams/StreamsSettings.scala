@@ -62,6 +62,7 @@ enum StreamsSettingsError derives CanEqual:
   case NonPositiveConcurrency(value: Int)
   case NonPositiveCloseTimeout(value: FiniteDuration)
   case EmptyStateDirectory
+  case InvalidEndpoint(host: String, port: Int)
 
   def message: String =
     this match
@@ -72,6 +73,7 @@ enum StreamsSettingsError derives CanEqual:
       case NonPositiveConcurrency(value)         => s"concurrency must be positive, was $value"
       case NonPositiveCloseTimeout(value)        => s"close timeout must be positive, was $value"
       case EmptyStateDirectory                   => "state directory must not be empty"
+      case InvalidEndpoint(host, port)           => s"an endpoint needs a host and a port from 1 to 65535, was '$host' and $port"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -101,6 +103,9 @@ final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError
   * @param stateDirectory
   *   where the application keeps its stores on disk, as Java Streams' `state.dir`; with none, every store is kept in memory and filled again from its
   *   changelog each time the application starts
+  * @param queryEndpoint
+  *   where this member answers the queries other members forward to it, as Java Streams' `application.server`; with none, other members cannot ask
+  *   this one, and it answers only what its own stores hold
   */
 sealed abstract case class StreamsSettings private (
     client: ClientSettings,
@@ -110,7 +115,8 @@ sealed abstract case class StreamsSettings private (
     concurrency: Int,
     closeTimeout: FiniteDuration,
     topologyDescriptionPush: Boolean,
-    stateDirectory: Option[String]
+    stateDirectory: Option[String],
+    queryEndpoint: Option[Endpoint]
 ):
   def withClient(value: ClientSettings): StreamsSettings = copy(client = value)
 
@@ -143,6 +149,12 @@ sealed abstract case class StreamsSettings private (
   /** Keeps every store in memory. */
   def withoutStateDirectory: StreamsSettings = copy(stateDirectory = None)
 
+  /** Answers the queries other members forward to `value`, which the group tells them. */
+  def withQueries(value: Endpoint): StreamsSettings = copy(queryEndpoint = Some(value))
+
+  /** Answers no queries from other members. */
+  def withoutQueries: StreamsSettings = copy(queryEndpoint = None)
+
   private def copy(
       client: ClientSettings = client,
       applicationId: ApplicationId = applicationId,
@@ -151,9 +163,20 @@ sealed abstract case class StreamsSettings private (
       concurrency: Int = concurrency,
       closeTimeout: FiniteDuration = closeTimeout,
       topologyDescriptionPush: Boolean = topologyDescriptionPush,
-      stateDirectory: Option[String] = stateDirectory
+      stateDirectory: Option[String] = stateDirectory,
+      queryEndpoint: Option[Endpoint] = queryEndpoint
   ): StreamsSettings =
-    new StreamsSettings(client, applicationId, guarantee, commitInterval, concurrency, closeTimeout, topologyDescriptionPush, stateDirectory) {}
+    new StreamsSettings(
+      client,
+      applicationId,
+      guarantee,
+      commitInterval,
+      concurrency,
+      closeTimeout,
+      topologyDescriptionPush,
+      stateDirectory,
+      queryEndpoint
+    ) {}
 
 object StreamsSettings:
   val DefaultCloseTimeout: FiniteDuration = 30.seconds
@@ -166,7 +189,8 @@ object StreamsSettings:
       concurrency: Int = 1,
       closeTimeout: FiniteDuration = DefaultCloseTimeout,
       topologyDescriptionPush: Boolean = true,
-      stateDirectory: Option[String] = None
+      stateDirectory: Option[String] = None,
+      queryEndpoint: Option[Endpoint] = None
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
       commitInterval.traverse(positive(_)(StreamsSettingsError.NonPositiveCommitInterval(_))),
@@ -174,7 +198,7 @@ object StreamsSettings:
       positive(closeTimeout)(StreamsSettingsError.NonPositiveCloseTimeout(_)),
       stateDirectory.traverse(directory)
     ).mapN((interval, tasks, timeout, kept) =>
-      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept) {}
+      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint) {}
     )
 
   private def directory(value: String): ValidatedNel[StreamsSettingsError, String] =

@@ -52,7 +52,8 @@ final class MemberSuite extends FunSuite:
       error: Short = 0,
       interval: Int = 5000,
       endpointEpoch: Int = 0,
-      statuses: Option[List[StreamsGroup.Status]] = None
+      statuses: Option[List[StreamsGroup.Status]] = None,
+      endpoints: Option[List[StreamsGroup.EndpointPartitions]] = None
   ): StreamsGroupHeartbeatResponse =
     def wire(tasks: Set[TaskId]) =
       tasks.toList.sortBy(t => (t.subtopology, t.partition)).map(t => StreamsGroup.Tasks(t.subtopology, List(t.partition)))
@@ -71,7 +72,7 @@ final class MemberSuite extends FunSuite:
       active.map(_ => Nil),
       false,
       endpointEpoch,
-      None
+      endpoints
     )
 
   /** Runs the events in order, returning the member after them and the actions of each. */
@@ -113,6 +114,14 @@ final class MemberSuite extends FunSuite:
         false
       ))
     )
+
+  test("a member keeps where each member's tasks are, as the coordinator last sent it, through answers that leave it out"):
+    val here       = StreamsGroup.EndpointPartitions(StreamsGroup.Endpoint("a", 1), List(StreamsGroup.TopicPartitions("in", List(0))), Nil)
+    val there      = StreamsGroup.EndpointPartitions(StreamsGroup.Endpoint("b", 2), List(StreamsGroup.TopicPartitions("in", List(1))), Nil)
+    val (first, _) = run(Member(identity), Start, Answered(answer(3, Some(Set.empty), endpointEpoch = 1, endpoints = Some(List(here, there)))))
+    val (kept, _)  = run(first, Due, Answered(answer(3, endpointEpoch = 1)))
+    val (moved, _) = run(kept, Due, Answered(answer(3, endpointEpoch = 2, endpoints = Some(List(there)))))
+    assertEquals((first.endpoints, kept.endpoints, moved.endpoints), (List(here, there), List(here, there), List(there)))
 
   test("a joined member runs what it is given, then reports it at once, then sends only the epochs until something changes"):
     val handed            = Set(task("0", 0), task("1", 2))
