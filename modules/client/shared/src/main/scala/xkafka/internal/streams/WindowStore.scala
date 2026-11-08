@@ -27,6 +27,8 @@ import java.nio.ByteBuffer
 
 import scala.annotation.tailrec
 
+import cats.Monad
+import cats.syntax.all.*
 import fs2.Chunk
 import xkafka.streams.Subtopology
 
@@ -53,9 +55,6 @@ private[xkafka] object WindowStore:
   /** The start of the window a key names. */
   def startOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.drop(key.size - 12).take(8).toArray).getLong
 
-  /** The clock of a store holding `entries`: the latest window start among them, or a removal named. */
-  def clockOf(entries: StoreContents): Long = math.max(entries.keysIterator.map(startOf).maxOption.getOrElse(NoTime), entries.latestRemoved)
-
   /** How to read the time that counts towards its clock from a key of each window and session store of `subtopologies`. */
   def timesOf[F[_]](subtopologies: Iterable[Subtopology[F]]): Map[String, Chunk[Byte] => Long] =
     subtopologies.flatMap: subtopology =>
@@ -65,18 +64,14 @@ private[xkafka] object WindowStore:
   /** Whether a window starting at `start` has expired by `clock`. */
   def expired(start: Long, clock: Long, retention: Long): Boolean = start <= clock - retention
 
-  /** The windows of `entries` that have not expired by `clock`. */
-  def pruned(entries: StoreContents, clock: Long, retention: Long): StoreContents =
-    entries.filter((key, _) => !expired(startOf(key), clock, retention))
-
-  /** Each window or session store of `stores`, those `sessions` names being session stores, without what has expired by its clock, as Java leaves a
-    * store after restoring it.
+  /** Removes from each store of `stores` that `retentions` names what has expired by its clock, as Java drops it from a store after restoring a
+    * batch.
     */
-  def prunedAll(stores: Map[String, StoreContents], retentions: Map[String, Long], sessions: Set[String] = Set.empty): Map[String, StoreContents] =
-    stores.map: (name, entries) =>
-      name -> retentions.get(name).fold(entries): retention =>
-        if sessions(name) then SessionStore.pruned(entries, SessionStore.clockOf(entries), retention)
-        else pruned(entries, clockOf(entries), retention)
+  def swept[F[_]](stores: Map[String, TaskStore[F]], retentions: Map[String, Long])(using F: Monad[F]): F[Unit] =
+    stores.toList.traverse_ : (name, store) =>
+      retentions.get(name).traverse_ : retention =>
+        store.clock.flatMap(clock => store.timed(Long.MinValue, clock - retention)).flatMap: gone =>
+          store.write(StoreContents.unchanged ++ gone.map((key, _) => key -> None)).unlessA(gone.isEmpty)
 
 /** A session store as Java's in-memory session store keeps one. Its contents are keyed as its changelog is: the serialized key, then the session's
   * end and its start, each as eight big-endian bytes. Its clock is the latest session end it has held; a session whose end is a retention or more
@@ -92,13 +87,6 @@ private[xkafka] object SessionStore:
 
   /** The start of the session a key names. */
   def startOf(key: Chunk[Byte]): Long = ByteBuffer.wrap(key.drop(key.size - 8).toArray).getLong
-
-  /** The clock of a store holding `entries`: the latest session end among them, or a removal named. */
-  def clockOf(entries: StoreContents): Long = math.max(entries.keysIterator.map(endOf).maxOption.getOrElse(WindowStore.NoTime), entries.latestRemoved)
-
-  /** The sessions of `entries` that have not expired by `clock`. */
-  def pruned(entries: StoreContents, clock: Long, retention: Long): StoreContents =
-    entries.filter((key, _) => !WindowStore.expired(endOf(key), clock, retention))
 
 /** The window store of one side of a stream-stream join, as Java's keeps one, which keeps every record: keyed as its changelog is, by the serialized
   * key, the record's time as eight big-endian bytes, and a sequence number of four, which tells records of one key and time apart.

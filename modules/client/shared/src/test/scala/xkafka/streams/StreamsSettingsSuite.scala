@@ -48,6 +48,16 @@ final class StreamsSettingsSuite extends FunSuite:
     )
     assertEquals(StreamsSettings.from(client, app, topologyDescriptionPush = false).orFail.topologyDescriptionPush, false)
 
+  test("stores are kept in memory unless a state directory is given, which must not be empty"):
+    val settings = StreamsSettings.from(client, app).orFail
+    assertEquals(settings.stateDirectory, None)
+    assertEquals(StreamsSettings.from(client, app, stateDirectory = Some("/var/lib/app")).orFail.stateDirectory, Some("/var/lib/app"))
+    assertEquals(settings.withStateDirectory("/var/lib/app").map(_.stateDirectory), Validated.valid(Some("/var/lib/app")))
+    assertEquals(settings.withStateDirectory("/var/lib/app").orFail.withoutStateDirectory.stateDirectory, None)
+    assertEquals(settings.withStateDirectory(" "), Validated.invalidNel(StreamsSettingsError.EmptyStateDirectory))
+    assertEquals(StreamsSettings.from(client, app, stateDirectory = Some("")), Validated.invalidNel(StreamsSettingsError.EmptyStateDirectory))
+    assertEquals(StreamsSettingsError.EmptyStateDirectory.message, "state directory must not be empty")
+
   test("every invalid setting is reported at once"):
     assertEquals(
       StreamsSettings.from(client, app, commitInterval = Some(Duration.Zero), concurrency = 0, closeTimeout = (-1).second),

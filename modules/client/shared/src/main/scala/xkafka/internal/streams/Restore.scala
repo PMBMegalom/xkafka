@@ -25,10 +25,10 @@ package streams
 
 import scala.concurrent.duration.*
 
+import cats.MonadThrow
 import cats.effect.Temporal
 import cats.syntax.all.*
 import driver.{KafkaDriver, PartitionEnd, PolledRecord, StartAt}
-import fs2.Chunk
 
 /** Refills stores from their changelogs. */
 private[xkafka] object Restore:
@@ -42,29 +42,50 @@ private[xkafka] object Restore:
   private val EndsBackoff = 100.millis
 
   /** Reads each changelog partition `changelogs` names, with the store it backs, from where `from` says, or its start, to its end, through
-    * `consumer`, which reads under read_committed and reports the ends it reaches, onto what `held` already holds. Each store holds the latest value
-    * of each key, and a record with no value removes its key. Records without a key, which no store writes, are skipped.
+    * `consumer`, which reads under read_committed and reports the ends it reaches, into `stores`, each poll's records written as one change. Each
+    * store holds the latest value of each key, and a record with no value removes its key. Records without a key, which no store writes, are skipped.
     */
   def apply[F[_]](
       driver: KafkaDriver[F],
       consumer: driver.Client,
       changelogs: Map[TopicPartition, String],
-      from: Map[TopicPartition, Long] = Map.empty,
-      held: Map[String, StoreContents] = Map.empty,
-      times: Map[String, Chunk[Byte] => Long] = Map.empty
-  )(using F: Temporal[F]): F[Map[String, StoreContents]] =
-    val stores   = changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> store)
+      from: Map[TopicPartition, Long],
+      stores: Map[String, TaskStore[F]]
+  )(using F: Temporal[F]): F[Unit] =
+    val backing  = changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> store)
     val starting = changelogs.keys.toVector
-    def read(left: Set[(String, Int)], ends: Ends, restored: Map[String, StoreContents]): F[Map[String, StoreContents]] =
-      if left.isEmpty then F.pure(restored)
+    def read(left: Set[(String, Int)], ends: Ends): F[Unit] =
+      if left.isEmpty then F.unit
       else
         driver.poll(consumer, PollMillis).flatMap: polled =>
-          val after =
-            polled.records.foldLeft(restored)((now, record) => stores.get((record.topic, record.partition)).fold(now)(applied(now, _, record, times)))
-          read(unfinished(left, polled.ends, ends), ends, after)
+          val remaining = unfinished(left, polled.ends, ends)
+          // Each store records how far it now holds its changelog: past the last record read, or at the end, for a partition finished.
+          val past      = polled.records.groupMapReduce(record => (record.topic, record.partition))(_.offset + 1)(math.max)
+          val finished  = (left -- remaining).map(partition => partition -> ends.getOrElse(partition, 0L)).toMap
+          val positions = (past.toList ++ finished.toList).flatMap((partition, at) => backing.get(partition).map(_ -> at))
+            .groupMapReduce(_._1)(_._2)(math.max)
+          written(stores, changes(polled.records.flatMap(record => backing.get((record.topic, record.partition)).map(_ -> record))), positions) *>
+            read(remaining, ends)
     driver.assign(consumer, starting, starting.map(partition => StartAt(partition, from.getOrElse(partition, 0L), -1))) *>
-      endsOf(driver, consumer, starting).flatMap: ends =>
-        read(stores.keySet, ends, stores.values.map(store => store -> held.getOrElse(store, StoreContents.empty)).toMap)
+      endsOf(driver, consumer, starting).flatMap(read(backing.keySet, _))
+
+  /** The changes `records` make to the stores they are paired with, by the store's name, in the order read. */
+  def changes(records: Iterable[(String, PolledRecord)]): Map[String, StoreChanges] =
+    records.foldLeft(Map.empty[String, StoreChanges])((made, paired) => changed(made, paired._1, paired._2))
+
+  /** The changes `made` so far with one record of `store`'s changelog: its key's latest value, or its removal; a record without a key changes
+    * nothing.
+    */
+  def changed(made: Map[String, StoreChanges], store: String, record: PolledRecord): Map[String, StoreChanges] =
+    record.key.fold(made): key =>
+      made.updated(store, made.getOrElse(store, StoreContents.unchanged).updated(key, record.value.map(Stored(_, record.timestamp.getOrElse(-1L)))))
+
+  /** Writes each store's changes into it, with where it holds its changelog up to, where `positions` says. */
+  def written[F[_]](stores: Map[String, TaskStore[F]], changes: Map[String, StoreChanges], positions: Map[String, Long] = Map.empty)(using
+      F: MonadThrow[F]
+  ): F[Unit] = (changes.keySet ++ positions.keySet).toList.traverse_ : store =>
+    F.fromOption(stores.get(store), new IllegalStateException(s"no store '$store' to restore"))
+      .flatMap(_.write(changes.getOrElse(store, StoreContents.unchanged), positions.get(store)))
 
   /** Where each partition being caught up on ends, by topic name and number. */
   type Ends = Map[(String, Int), Long]
@@ -93,15 +114,3 @@ private[xkafka] object Restore:
     */
   def unfinished(left: Set[(String, Int)], reached: List[PartitionEnd], ends: Ends): Set[(String, Int)] =
     left -- reached.collect { case end if end.offset >= ends.getOrElse((end.topic, end.partition), 0L) => (end.topic, end.partition) }
-
-  /** The stores with one changelog record applied to `store`. A removal from a store `times` can read a time from counts towards its clock. */
-  def applied(
-      restored: Map[String, StoreContents],
-      store: String,
-      record: PolledRecord,
-      times: Map[String, Chunk[Byte] => Long] = Map.empty
-  ): Map[String, StoreContents] =
-    record.key.fold(restored): key =>
-      val contents = restored.getOrElse(store, StoreContents.empty)
-      def removed  = times.get(store).fold(contents)(time => contents.removedAt(time(key))) - key
-      restored.updated(store, record.value.fold(removed)(value => contents.updated(key, Stored(value, record.timestamp.getOrElse(-1L)))))

@@ -75,8 +75,57 @@ the application keeps working, and the group's description has none.
 
 ## Stores and standbys
 
-Stores are kept in memory. A member given new work first refills its stores from
-their changelogs.
+By default, stores are kept in memory, and a member refills them from their
+changelogs each time it starts or is given new work.
+
+Give a state directory to keep them on disk instead:
+
+```scala mdoc:compile-only
+// Keep the application's stores on disk, so a restarted member does not refill them from the start
+import cats.data.ValidatedNel
+
+import xkafka.*
+import xkafka.streams.*
+
+def onDisk(client: ClientSettings, id: ApplicationId): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+  StreamsSettings.from(client, id).andThen(_.withStateDirectory("/var/lib/orders"))  // Stores go under /var/lib/orders/<application id>
+```
+
+On the JVM, add RocksDB to the application's dependencies, as
+`"org.rocksdb" % "rocksdbjni" % "10.1.3"`; an application given a state directory
+without it fails to start, saying so. JavaScript and Native need nothing more in
+the build: see [Platform notes](../platform-notes.md#stores-on-disk) for what
+Native needs where the application runs.
+
+A member started again over the same directory usually gets back the work it
+had, and reads only the changelog records written since it stopped. The same
+goes for work that moves to another member and comes back. Give each running member a
+directory of its own: a second member of the application started over a
+directory already in use fails to start.
+
+To keep a particular store in memory anyway, name it with `inMemory`:
+
+```scala mdoc:compile-only
+// Count each user's orders in a store on disk, and each user's page views in a store kept in memory
+import cats.effect.IO
+
+import xkafka.*
+import xkafka.streams.*
+
+def counts(orders: Topic, views: Topic, totals: Topic, recent: Topic): List[Pipeline[IO]] =
+  val text = Serde.utf8[IO]
+  List(
+    KStream(Named("read-orders"), orders, text, text).groupByKey(text, text)
+      .count(Named("count-orders"), Store("orders"))                  // On disk, where a state directory is given
+      .toStream(Named("orders-changes")).to(Named("write-orders"), totals, text, Serde.long[IO]),
+    KStream(Named("read-views"), views, text, text).groupByKey(text, text)
+      .count(Named("count-views"), Store("views").inMemory)           // In memory, refilled from its changelog on each start
+      .toStream(Named("views-changes")).to(Named("write-views"), recent, text, Serde.long[IO])
+  )
+```
+
+The buffers that [holding back updates](holding-back-updates.md) uses are always
+kept in memory.
 
 If the broker's `streams.num.standby.replicas` setting asks for standby
 replicas, members also keep up-to-date copies of other members' stores. When
@@ -85,5 +134,5 @@ copy has not yet read.
 
 @:callout(info)
 A copy that is no longer needed is kept for 10 minutes, in case the work comes
-back.
+back. So are the stores on disk of work that moved to another member.
 @:@

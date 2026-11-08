@@ -23,37 +23,87 @@ package xkafka
 package internal
 package streams
 
+import scala.collection.immutable.TreeMap
+
 import cats.effect.Concurrent
 import cats.syntax.all.*
 import fs2.Chunk
 
 /** One store of a task, by serialized key, in the order of [[StoreContents.keys]]. A task reads it through what it has written since its last commit,
   * and writes to it only once that commit has succeeded, all of a commit's changes at once, so that a store never holds what the group has not
-  * committed.
+  * committed. A window, session or join window store also finds its keys by the time each names, and keeps a clock: the latest time any key written
+  * to it named, removals included, as Java's window and session stores keep theirs.
   */
 private[xkafka] trait TaskStore[F[_]]:
   def get(key: Chunk[Byte]): F[Option[Stored]]
 
-  /** The keys starting with `prefix` and what they hold, in order. */
-  def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Stored)]]
+  /** The keys from `from`, included, to `to`, left out, and what they hold, in order; a bound not given leaves that side open. */
+  def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Stored)]]
 
-  def all: F[StoreContents]
+  /** The keys naming a time from `from` to `to`, both included, and what they hold, in order of time and then of key; none for a store without time.
+    */
+  def timed(from: Long, to: Long): F[Vector[(Chunk[Byte], Stored)]]
+
+  /** The latest time a key written to it named, or [[WindowStore.NoTime]], as for a store without time. */
+  def clock: F[Long]
+
+  /** Applies `changes` as one, a key with nothing to hold removed, and records with them that the store holds its changelog up to `position`, the
+    * offset to read from next, where one is given.
+    */
+  def write(changes: StoreChanges, position: Option[Long]): F[Unit]
+
+  /** Where the store last recorded that it holds its changelog up to, if anywhere. It never runs ahead of what the store holds. */
+  def position: F[Option[Long]]
 
   /** Applies `changes` as one: a key with nothing to hold is removed. */
-  def write(changes: StoreChanges): F[Unit]
+  final def write(changes: StoreChanges): F[Unit] = write(changes, None)
+
+  /** Releases what the store holds open, after which it is not used again; a store in memory holds nothing open. */
+  def close: F[Unit]
+
+  /** The keys starting with `prefix` and what they hold, in order. */
+  final def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Stored)]] = range(Some(prefix), StoreContents.past(prefix))
+
+  /** Every key and what it holds, in order. */
+  final def all: F[Vector[(Chunk[Byte], Stored)]] = range(None, None)
 
 private[xkafka] object TaskStore:
-  /** Opens the store of a name for a task, holding what its changelog restored. */
-  type Open[F[_]] = (String, StoreContents) => F[TaskStore[F]]
+  /** How to read the time a key names, for a window, session or join window store. */
+  type TimeOf = Chunk[Byte] => Long
+
+  /** Opens the store of a name for a task, reading times with the `TimeOf` given, if any, and holding what its changelog restored. */
+  type Open[F[_]] = (String, Option[TimeOf], StoreContents) => F[TaskStore[F]]
 
   /** Opens each store in memory. */
-  def memory[F[_]: Concurrent]: Open[F] = (_, held) => inMemory(held)
+  def memory[F[_]: Concurrent]: Open[F] = (_, time, held) => inMemory(held, time)
 
-  /** A store in memory, holding `held` to start with. */
-  def inMemory[F[_]](held: StoreContents)(using F: Concurrent[F]): F[TaskStore[F]] =
-    F.ref(held).map: contents =>
+  /** What a store in memory holds: its keys, the same keys in order of time where it has a time, its clock, and its position. */
+  private final case class Held(contents: StoreContents, byTime: TreeMap[(Long, Chunk[Byte]), Unit], clock: Long, position: Option[Long])
+
+  private val timeThenKey: Ordering[(Long, Chunk[Byte])] = Ordering.Tuple2(using Ordering.Long, StoreContents.keys)
+
+  /** A store in memory, holding `held` to start with, at `position` if given, and finding keys by the time `time` reads, if given. */
+  def inMemory[F[_]](held: StoreContents, time: Option[TimeOf] = None, position: Option[Long] = None)(using F: Concurrent[F]): F[TaskStore[F]] =
+    val byTime =
+      time.fold(TreeMap.empty(using timeThenKey))(of => TreeMap.from(held.keysIterator.map(key => (of(key), key) -> ()))(using timeThenKey))
+    val clock = time.fold(WindowStore.NoTime)(of => held.keysIterator.map(of).maxOption.getOrElse(WindowStore.NoTime))
+    F.ref(Held(held, byTime, clock, position)).map: state =>
       new TaskStore[F]:
-        def get(key: Chunk[Byte]): F[Option[Stored]]                        = contents.get.map(_.get(key))
-        def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Stored)]] = contents.get.map(_.prefixed(prefix))
-        def all: F[StoreContents]                                           = contents.get
-        def write(changes: StoreChanges): F[Unit]                           = contents.update(_.after(changes))
+        def get(key: Chunk[Byte]): F[Option[Stored]]                                                    = state.get.map(_.contents.get(key))
+        def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Stored)]] = state.get.map(_.contents.range(from, to))
+        def timed(from: Long, to: Long): F[Vector[(Chunk[Byte], Stored)]]                               =
+          state.get.map: now =>
+            if from > to then Vector.empty
+            else now.byTime.rangeFrom((from, Chunk.empty)).keysIterator.takeWhile(_._1 <= to).map((_, key) => key -> now.contents(key)).toVector
+        def clock: F[Long]                                                = state.get.map(_.clock)
+        def position: F[Option[Long]]                                     = state.get.map(_.position)
+        def close: F[Unit]                                                = F.unit
+        def write(changes: StoreChanges, position: Option[Long]): F[Unit] =
+          state.update: now =>
+            val moved = position.orElse(now.position)
+            time.fold(now.copy(contents = now.contents.after(changes), position = moved)): of =>
+              val indexed =
+                changes.foldLeft(now.byTime):
+                  case (index, (key, Some(_))) => index.updated((of(key), key), ())
+                  case (index, (key, None))    => index - ((of(key), key))
+              Held(now.contents.after(changes), indexed, changes.keysIterator.map(of).foldLeft(now.clock)(math.max), moved)

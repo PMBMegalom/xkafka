@@ -69,6 +69,33 @@ nativeConfig := nativeConfig.value
 
 On macOS add a `-L` for the OpenSSL installation as well.
 
+### Stores on disk
+
+An application that keeps its streams stores on disk, with a
+[state directory](streams/running.md#stores-and-standbys), also needs RocksDB
+10.1.3 when it runs. Take it from the `org.rocksdb:rocksdbjni:10.1.3` jar on
+Maven Central, which carries it for each platform:
+
+| Platform | File in the jar |
+| --- | --- |
+| macOS on Apple silicon | `librocksdbjni-osx-arm64.jnilib` |
+| macOS on Intel | `librocksdbjni-osx-x86_64.jnilib` |
+| Linux x64 with glibc | `librocksdbjni-linux64.so` |
+| Linux arm64 with glibc | `librocksdbjni-linux-aarch64.so` |
+| Linux x64 with musl, such as Alpine | `librocksdbjni-linux64-musl.so` |
+| Linux arm64 with musl | `librocksdbjni-linux-aarch64-musl.so` |
+
+```sh
+# Put this platform's RocksDB next to the application, here for Linux x64 with glibc
+unzip -j rocksdbjni-10.1.3.jar librocksdbjni-linux64.so -d path/to/app/bin
+```
+
+The application looks for the file in the directory of its executable, then
+wherever the system looks for libraries. To keep it somewhere else, set
+`XKAFKA_ROCKSDB_LIBRARY` to its path. Any other RocksDB release is refused when
+the application opens its first store. Nothing more is needed to compile or
+link.
+
 ## Scala.js
 
 xkafka uses librdkafka here, the same release as on Scala Native. It runs on
@@ -87,7 +114,9 @@ installs. npm adds the prebuilt library for the platform it runs on:
 | Linux arm64 with musl | `@xkafka/librdkafka-linux-arm64-musl` |
 
 Nothing else needs installing: each library carries its own OpenSSL, zlib and
-zstd. Each xkafka release needs the exact `@xkafka/librdkafka` version it was
+zstd. Stores kept on disk use RocksDB, which comes the same way, from
+`@xkafka/rocksdb` and its package for the platform, such as
+`@xkafka/rocksdb-darwin-arm64`. Each xkafka release needs the exact `@xkafka/librdkafka` version it was
 published with, so do not pin or override that package. With any other version,
 acquiring a client fails with a `BackendFailure` naming both versions.
 

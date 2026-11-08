@@ -42,7 +42,7 @@ import org.apache.kafka.streams.test.TestRecord
 import scodec.bits.ByteVector
 import internal.driver.PolledRecord
 import internal.protocol.{StreamsGroup, StreamsGroupTopologyDescriptionUpdateRequest}
-import internal.streams.{Declaration, GlobalStores, Task, TaskInput, TaskOutput, TaskState}
+import internal.streams.{Declaration, GlobalStores, Restore, StoreContents, Task, TaskInput, TaskOutput, TaskState, TaskStore}
 
 /** Global tables, against the same programs in Java: the description and topology, and every record tasks write as the tables change, with Java's
   * record cache off.
@@ -92,34 +92,39 @@ final class GlobalTableGoldenSuite extends CatsEffectSuite:
 
   private def ours(pipeline: Pipeline[IO], inputs: List[Input]): IO[Map[String, Vector[Output]]] =
     val topology = Topology.of(pipeline).orFail
-    val tasks    = topology.subtopologies.toVector.map(Task[IO]("app", _, 0))
     val reading  = topology.subtopologies.zipWithIndex.flatMap((sub, id) => sub.origins.map(Task.topicOf("app", _) -> id)).toMap
     val tables   = topology.globals.map(_._2).map(global => global.topic.value -> global).toMap
-    inputs.foldLeftM((Vector.fill(tasks.size)(TaskState.empty), Map.empty[String, internal.streams.StoreContents], Vector.empty[(String, Output)])):
-      case ((states, held, out), input) => tables.get(input.topic) match
-          case Some(global) =>
-            val polled = PolledRecord(input.topic, 0, 0L, Some(input.timestamp), 0, -1, input.key.map(bytes), input.value.map(bytes), headers(input))
-            GlobalStores.updated(global, held, polled).map(after => (states, after, out))
-          case None =>
-            val first = Queue(TaskInput(input.key.map(bytes), input.value.map(bytes), input.timestamp, headers(input), input.topic))
-            runAll(tasks, reading, first, states, held, out).map((after, written) => (after, held, written))
-    .map(_._3.groupMap(_._1)(_._2))
+    tables.values.toList.traverse(global => TaskStore.inMemory[IO](StoreContents.empty).map(global.store.value -> _)).map(_.toMap).flatMap: stores =>
+      val tasks = topology.subtopologies.toVector.map(Task[IO]("app", _, 0, globals = stores))
+      inputs.foldLeftM((Vector.fill(tasks.size)(TaskState.empty), Vector.empty[(String, Output)])):
+        case ((states, out), input) => tables.get(input.topic) match
+            case Some(global) =>
+              val polled =
+                PolledRecord(input.topic, 0, 0L, Some(input.timestamp), 0, -1, input.key.map(bytes), input.value.map(bytes), headers(input))
+              GlobalStores.updated(global, Map.empty, polled).flatMap(Restore.written(stores, _)).as((states, out))
+            case None => runAll(
+                tasks,
+                reading,
+                Queue(TaskInput(input.key.map(bytes), input.value.map(bytes), input.timestamp, headers(input), input.topic)),
+                states,
+                out
+              )
+      .map(_._2.groupMap(_._1)(_._2))
 
   private def runAll(
       tasks: Vector[Task[IO]],
       reading: Map[String, Int],
       queue: Queue[TaskInput],
       states: Vector[TaskState],
-      held: GlobalStores.Contents,
       out: Vector[(String, Output)]
   ): IO[(Vector[TaskState], Vector[(String, Output)])] =
     queue.dequeueOption match
       case None                 => IO.pure((states, out))
       case Some((record, rest)) =>
         val at = reading(record.topic)
-        tasks(at).process(states(at).copy(globals = held), record, 0L).flatMap: (state, written) =>
+        tasks(at).process(states(at), record, 0L).flatMap: (state, written) =>
           val read = written.filter(_.topic.value.endsWith("-repartition")).map(r => TaskInput(r.key, r.value, r.timestamp, r.headers, r.topic.value))
-          runAll(tasks, reading, rest ++ read, states.updated(at, state), held, out ++ written.map(r => r.topic.value -> output(r)))
+          runAll(tasks, reading, rest ++ read, states.updated(at, state), out ++ written.map(r => r.topic.value -> output(r)))
 
   private def bytes(text: String) = Chunk.array(text.getBytes)
 

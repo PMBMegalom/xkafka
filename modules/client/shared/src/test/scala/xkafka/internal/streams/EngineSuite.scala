@@ -188,13 +188,16 @@ final class EngineSuite extends CatsEffectSuite:
 
   /** Stores in memory that record each batch written to them. */
   private def recording(batches: Ref[IO, List[StoreChanges]]): TaskStore.Open[IO] =
-    (_, held) =>
-      TaskStore.inMemory[IO](held).map: store =>
+    (_, time, held) =>
+      TaskStore.inMemory[IO](held, time).map: store =>
         new TaskStore[IO]:
-          def get(key: Chunk[Byte]): IO[Option[Stored]]                        = store.get(key)
-          def prefixed(prefix: Chunk[Byte]): IO[Vector[(Chunk[Byte], Stored)]] = store.prefixed(prefix)
-          def all: IO[StoreContents]                                           = store.all
-          def write(changes: StoreChanges): IO[Unit]                           = batches.update(_ :+ changes) *> store.write(changes)
+          def get(key: Chunk[Byte]): IO[Option[Stored]]                                                    = store.get(key)
+          def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): IO[Vector[(Chunk[Byte], Stored)]] = store.range(from, to)
+          def timed(from: Long, to: Long): IO[Vector[(Chunk[Byte], Stored)]]                               = store.timed(from, to)
+          def clock: IO[Long]                                                                              = store.clock
+          def close: IO[Unit]                                                                              = store.close
+          def write(changes: StoreChanges, position: Option[Long]): IO[Unit] = batches.update(_ :+ changes) *> store.write(changes, position)
+          def position: IO[Option[Long]]                                     = store.position
 
   private def storing(
       commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]],
@@ -855,7 +858,8 @@ final class EngineSuite extends CatsEffectSuite:
         _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
-      yield assertEquals(from.map(_._2("windows").keySet), List(Set.empty[Chunk[Byte]]))
+      // The plane records only the stores holding something.
+      yield assertEquals(from.map(_._2.get("windows").fold(Set.empty[Chunk[Byte]])(_.keySet)), List(Set.empty[Chunk[Byte]]))
 
   /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
   private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
@@ -872,6 +876,68 @@ final class EngineSuite extends CatsEffectSuite:
       _       <- IO.sleep(500.millis)
       from    <- world.restoredFrom.get
     yield (from.map(_._1), offsets)
+
+  test("with a state directory, a task given up after its commit keeps its stores at its changelog's end, and back again restores from there"):
+    MemoryStateDirectory().flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _       <- world.endsAt(Map(changelog(1) -> 7L))
+          _       <- world.tell(assign(TaskId("0", 1)))
+          _       <- IO.sleep(100.millis)
+          _       <- world.records(record(1, 0L, "k", 1000L))
+          _       <- IO.sleep(200.millis)
+          _       <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1))))
+          _       <- IO.sleep(200.millis)
+          offsets <- world.taskOffsets
+          gaveUp  <- directory.held
+          _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _       <- IO.sleep(200.millis)
+          from    <- world.restoredFrom.get
+        yield
+          assertEquals(gaveUp, Map("0_1" -> Map("counts" -> 7L)))
+          assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 7L)))
+          assertEquals(from.map(_._1), List(Map.empty[TopicPartition, Long], Map(changelog(1) -> 7L)))
+          assertEquals(from.map(_._2.get("counts").map(_.keySet)), List(None, Some(Set(Chunk.array("k".getBytes)))))
+
+  test("with a state directory, a standby records with each batch how far it has read, kept when it is taken away, and restored from there"):
+    MemoryStateDirectory().flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+          _      <- IO.sleep(500.millis)
+          _      <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+          _      <- IO.sleep(500.millis)
+          _      <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty)))
+          _      <- IO.sleep(500.millis)
+          gaveUp <- directory.held
+          _      <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _      <- IO.sleep(500.millis)
+          from   <- world.restoredFrom.get
+        yield
+          assertEquals(gaveUp, Map("0_1" -> Map("counts" -> 2L)))
+          assertEquals(from.map(_._1), List(Map(changelog(1) -> 2L)))
+
+  test("tasks an earlier run gave up are reported in task offsets from the start, and restored from where their stores were"):
+    val held = Map(("0_1", "counts") -> (StoreContents.of(Map(Chunk.array("k".getBytes) -> counted(3L))), Some(4L)))
+    MemoryStateDirectory(held, Map("0_1" -> Map("counts" -> 4L), "9_0" -> Map("gone" -> 1L))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _       <- IO.sleep(100.millis)
+          offsets <- world.taskOffsets
+          _       <- world.tell(assign(TaskId("0", 1)))
+          _       <- IO.sleep(200.millis)
+          from    <- world.restoredFrom.get
+        yield
+          assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 4L)))
+          assertEquals(from.map(_._1), List(Map(changelog(1) -> 4L)))
+
+  test("a store kept in memory, and a store with no position, are not taken from the state directory"):
+    val inMemory =
+      KStream(Named("read"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts").inMemory)
+        .toStream(Named("to-stream")).to(Named("write"), Topic.from("out").orFail, text, Serde.long[IO])
+    MemoryStateDirectory().flatMap: directory =>
+      run(topology = Topology.of(inMemory).orFail, state = Some(directory)): world =>
+        (world.tell(assign(TaskId("0", 1))) *> IO.sleep(200.millis) *> directory.opened.get).map(opened => assertEquals(opened, Nil))
 
   test("a standby taken away keeps its store, reported in task offsets, and its task made active soon after restores only what it had not read"):
     run(): world =>
@@ -1113,13 +1179,12 @@ object EngineSuite:
         def poll: IO[List[PolledRecord]]            =
           polls.update(_ + 1) *> incoming.tryTakeN(None)
             .flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
-        def restore(
-            changelogs: Map[TopicPartition, String],
-            from: Map[TopicPartition, Long],
-            held: Map[String, StoreContents]
-        ): IO[Map[String, StoreContents]] =
-          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> restoredFrom.update(_ :+ (from, held)) *>
-            restoredAlso.get.map(held ++ _)
+        def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], stores: Map[String, TaskStore[IO]]): IO[Unit] =
+          val held = stores.toList.traverse((name, store) => store.all.map(name -> StoreContents.of(_))).map(_.toMap.filter(!_._2.isEmpty))
+          restoring.get.flatMap(IO.sleep) *> logged(Event.Restored(changelogs)) *> held.flatMap(now => restoredFrom.update(_ :+ (from, now))) *>
+            restoredAlso.get.flatMap(_.toList.traverse_((name, also) =>
+              stores.get(name).traverse_(_.write(StoreContents.unchanged ++ also.toVector.map((k, v) => k -> Some(v))))
+            ))
         def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
         def followed: IO[List[PolledRecord]]          =
           standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
@@ -1167,13 +1232,27 @@ object EngineSuite:
       failing: Option[Int => Option[Throwable]] = None,
       topology: Topology[IO] = counting,
       concurrency: Int = 1,
-      open: TaskStore.Open[IO] = TaskStore.memory[IO]
+      open: TaskStore.Open[IO] = TaskStore.memory[IO],
+      state: Option[StateDirectory[IO]] = None
   )(script: World => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
         val transactions = failing.map(world.transactions)
         val member       = world.member(committed, commit)
-        Engine.running("app", topology, member, world.plane, transactions, 1.second, concurrency, PurgeInterval, CloseTimeout, _ => IO.pure(4), open)
-          .use: running =>
-            running.run.attempt.flatMap(world.finished).start *> script(world)
+        Engine.running(
+          "app",
+          topology,
+          member,
+          world.plane,
+          transactions,
+          1.second,
+          concurrency,
+          PurgeInterval,
+          CloseTimeout,
+          _ => IO.pure(4),
+          open,
+          None,
+          state
+        ).use: running =>
+          running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(15.minutes))

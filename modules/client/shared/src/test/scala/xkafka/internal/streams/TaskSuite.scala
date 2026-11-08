@@ -30,7 +30,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
-import xkafka.streams.{KStream, KTable, Named, Pipeline, Serde, Store, TimeWindows, Topology}
+import xkafka.streams.{JoinWindows, KStream, KTable, Named, Pipeline, Serde, Store, TimeWindows, Topology}
 
 /** What a task writes to its changelogs and keeps between records, on every platform. */
 final class TaskSuite extends CatsEffectSuite:
@@ -52,6 +52,25 @@ final class TaskSuite extends CatsEffectSuite:
   // A member taking over a task restores the window store, and its clock with it, but its windowing step's stream time starts again, as Java's does.
   // A record the last member found past the grace can then reach a window the store has expired: Java's in-memory store reads it as absent and does
   // not keep the write, which its changelog still logs (InMemoryWindowStore.fetch and put, ChangeLoggingWindowBytesStore.put).
+  test("a join side's store drops a record once its clock is a whole retention past the record's time, and keeps one a millisecond younger"):
+    val joined =
+      KStream(Named("left"), Topic.from("left").orFail, text, text).join(
+        Named("pairs"),
+        KStream(Named("right"), Topic.from("right").orFail, text, text),
+        JoinWindows(5.seconds, grace = 1.second),
+        Store("pairs"),
+        text,
+        text,
+        text
+      )(_ + _).to(Named("write-pairs"), out, text, text)
+    val subtopology                 = Topology.of(joined).orFail.subtopologies.head
+    val retention                   = subtopology.retentions("pairs-this-join-store")
+    def left(key: String, at: Long) = TaskInput(bytes(key), bytes("v"), at, Headers.empty, "left")
+    Task.inMemory[IO]("app", subtopology, 0).flatMap: task =>
+      List(left("a", 0L), left("b", 1L), left("c", retention)).foldLeftM(TaskState.empty)((state, input) => task.process(state, input, 0L).map(_._1))
+        .flatMap(task.contents(_, "pairs-this-join-store")).map: held =>
+          assertEquals(held.keysIterator.map(WindowStore.startOf).toList.sorted, List(1L, retention))
+
   test("after a task moves, a record for a window its store has expired starts the window again, logged but not kept"):
     val windowed =
       KStream(Named("read-2"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
@@ -59,12 +78,8 @@ final class TaskSuite extends CatsEffectSuite:
         .to(Named("write-2"), out, Serde.timeWindowed(text, 10.seconds), count)
     val old    = WindowStore.key(Chunk.array("k".getBytes), 0L)
     val latest = WindowStore.key(Chunk.array("other".getBytes), 30000L)
-    // Restoring drops the windows the store's clock has expired, as the engine and Java's store do.
-    val restored =
-      WindowStore.prunedAll(
-        Map("windows" -> StoreContents.of(Map(old -> Stored(long(5).get, 9000L), latest -> Stored(long(1).get, 30000L)))),
-        Map("windows" -> 15000L)
-      )
+    // The store as restoring leaves it: its clock is at 30000, so the window starting at 0 has expired and gone, as the engine and Java's store drop it.
+    val restored = Map("windows" -> StoreContents.of(Map(latest -> Stored(long(1).get, 30000L))))
     Task.inMemory[IO]("app", Topology.of(windowed).orFail.subtopologies.head, 0, restored).flatMap: running =>
       running.process(TaskState(Map.empty, Map("in" -> 30000L)), TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L).flatMap:
         (state, written) =>

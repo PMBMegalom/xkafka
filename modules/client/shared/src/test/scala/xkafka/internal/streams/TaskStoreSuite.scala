@@ -62,7 +62,7 @@ final class TaskStoreSuite extends CatsEffectSuite:
       assertEquals(found, Some(two))
       assertEquals(gone, None)
       assertEquals(under, Vector(bytes("a") -> two, bytes("ab") -> one))
-      assertEquals(all.keySet, Set(bytes("a"), bytes("ab")))
+      assertEquals(all.map(_._1), Vector(bytes("a"), bytes("ab")))
 
   test("a task reads what it wrote before it is stored, and its store holds that only once it is stored"):
     for

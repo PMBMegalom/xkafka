@@ -37,7 +37,7 @@ import driver.{KafkaDriver, PolledRecord, StartAt}
 import group.{Connections, PlatformCrypto, PlatformSockets}
 import protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 // `streams` alone names this package, so the program's own package is named in full.
-import xkafka.streams.{KafkaStreams, ProcessingGuarantee, Source, StreamsPhase, StreamsProblem, StreamsState, Subtopology, Topology}
+import xkafka.streams.{GlobalStore, KafkaStreams, ProcessingGuarantee, Source, StreamsPhase, StreamsProblem, StreamsState, Subtopology, Topology}
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
   * one consumer and write through one producer. At least once, they commit what they read through the member; exactly once, in the transaction that
@@ -108,6 +108,7 @@ private[xkafka] object Engine:
       purgeInterval: FiniteDuration = PurgeInterval,
       closeTimeout: FiniteDuration = 30.seconds,
       topologyDescriptionPush: Boolean = true,
+      stateDirectory: Option[String] = None,
       watch: Plane[F] => Plane[F] = identity[Plane[F]]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
@@ -119,8 +120,9 @@ private[xkafka] object Engine:
       )(driver.destroyConsumer)
     given UUIDGen[F] = GroupMember.uuids(PlatformCrypto[F])
     for
+      state     <- stateDirectory.traverse(PlatformStateDirectory[F](_, application))
       memberId  <- Resource.eval(GroupMember.memberId[F])
-      processId <- Resource.eval(UUIDGen[F].randomUUID.map(_.toString))
+      processId <- Resource.eval(UUIDGen[F].randomUUID.map(_.toString).flatMap(fresh => state.fold(F.pure(fresh))(_.processId(fresh))))
       identity =
         MemberIdentity(
           application,
@@ -149,7 +151,8 @@ private[xkafka] object Engine:
       globals <-
         topology.globals.map(_._2) match
           case Nil    => Resource.pure[F, Option[GlobalStores.Held[F]]](None)
-          case tables => consumer(isolation, reportEnds = true).flatMap(GlobalStores(driver, _, tables, partitions)).map(Some(_))
+          case tables => consumer(isolation, reportEnds = true).flatMap(GlobalStores(driver, _, tables, partitions, globalStores(state, tables)))
+              .map(Some(_))
       member   <- GroupMember(connections.coordinator(application), identity, closeTimeout)
       input    <- consumer(isolation, reportEnds = false)
       follower <- consumer("read_committed", reportEnds = false)
@@ -171,12 +174,8 @@ private[xkafka] object Engine:
         new Plane[F]:
           def read(starts: Vector[StartAt]): F[Unit] = driver.assign(input, starts.map(_.partition), starts)
           def poll: F[List[PolledRecord]]            = driver.poll(input, PollMillis).map(_.records)
-          def restore(
-              changelogs: Map[TopicPartition, String],
-              from: Map[TopicPartition, Long],
-              held: Map[String, StoreContents]
-          ): F[Map[String, StoreContents]] =
-            consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, held, WindowStore.timesOf(topology.subtopologies)))
+          def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], stores: Map[String, TaskStore[F]]): F[Unit] =
+            consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, stores))
           def follow(starts: Vector[StartAt]): F[Unit]                               = driver.assign(follower, starts.map(_.partition), starts)
           def followed: F[List[PolledRecord]]                                        = driver.poll(follower, PollMillis).map(_.records)
           def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]] =
@@ -198,9 +197,16 @@ private[xkafka] object Engine:
           closeTimeout,
           partitions,
           TaskStore.memory[F],
-          globals
+          globals,
+          state
         )
     yield running
+
+  /** Opens the global tables' stores: on disk where `state` is given, unless a table's store is kept in memory. */
+  private def globalStores[F[_]: Async](state: Option[StateDirectory[F]], tables: List[GlobalStore[F]]): TaskStore.Open[F] =
+    val inMemory = tables.filter(_.store.keptInMemory).map(_.store.value).toSet
+    (name, time, held) =>
+      state.filterNot(_ => inMemory(name)).fold(TaskStore.memory[F].apply(name, time, held))(_.open(StateDirectory.Global, name, time))
 
   /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
   private def transactional[F[_]](
@@ -262,7 +268,8 @@ private[xkafka] object Engine:
       closeTimeout: FiniteDuration,
       partitions: Topic => F[Int],
       open: TaskStore.Open[F],
-      globals: Option[GlobalStores.Held[F]] = None
+      globals: Option[GlobalStores.Held[F]] = None,
+      state: Option[StateDirectory[F]] = None
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val subtopologies = topology.numbered.map((id, subtopology) => id.toString -> subtopology).toMap
     val unordered     =
@@ -288,7 +295,7 @@ private[xkafka] object Engine:
       _        <- member.changes.attempt.evalMap(changes.offer).compile.drain.background
       started  <- Resource.eval(F.monotonic)
       phase    <- Resource.eval(SignallingRef[F].of[StreamsPhase](StreamsPhase.Joining))
-      standing <- Resource.eval(F.ref(Map.empty[TaskId, Standby]))
+      standing <- Resource.eval(F.ref(Map.empty[TaskId, Standby[F]]))
       _        <- Resource.eval(member.offsetsFrom(taskOffsets(standing, plane)))
       // Standby tasks read on a fiber of their own, so that waiting for their records holds up no processing; the Java consumer refuses to
       // poll with nothing assigned, and would not read in polls that do not wait.
@@ -306,6 +313,8 @@ private[xkafka] object Engine:
           )
         Resource.make(reading.start)(fiber => stopping.set(true) *> fiber.join.void)
       opened <- Resource.eval(F.ref(Map.empty[TaskId, Task[F]]))
+      kept   <- Resource.eval(state.fold(F.pure(Map.empty[TaskId, Map[String, Long]]))(_.held.map(Engine.heldTasks)))
+      stores <- Resource.eval(F.ref(Map.empty[TaskId, Map[String, TaskStore[F]]]))
       loop =
         Loop(
           application,
@@ -322,14 +331,17 @@ private[xkafka] object Engine:
           read,
           following,
           partitions,
-          globals.fold(F.pure(Map.empty[String, StoreContents]))(_.contents),
+          globals.fold(Map.empty[String, TaskStore[F]])(_.stores),
           open,
-          opened
+          opened,
+          state,
+          stores
         )
       running <-
         // The tasks still open once the loop has stopped close with the engine, and with them their processors' instances.
-        Resource.make(loop.run(Running(Map.empty, started, started)).start): fiber =>
-          member.leave.timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.close))
+        Resource.make(loop.begin(Running(Map.empty, started, started), kept).start): fiber =>
+          member.leave.timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.close)) *>
+            stores.getAndSet(Map.empty).flatMap(_.values.toList.flatMap(_.values).traverse_(_.close))
     yield new KafkaStreams[F]:
       def run: F[Unit]                   = globals.fold(running.joinWithNever)(held => F.race(running.joinWithNever, held.failure).void)
       def state: Stream[F, StreamsState] =
@@ -351,12 +363,22 @@ private[xkafka] object Engine:
           next(remaining.map(queue => if queue eq head then queue.tail else queue), head.head._1 :: taken)
     next(queues, Nil)
 
+  /** The tasks a state directory holds stores of, by the id each was recorded under, which names a task as `<sub-topology>_<partition>`. */
+  private[streams] def heldTasks(held: Map[String, Map[String, Long]]): Map[TaskId, Map[String, Long]] =
+    held.flatMap: (owner, positions) =>
+      owner.split('_') match
+        case Array(subtopology, partition) => partition.toIntOption.map(TaskId(subtopology, _) -> positions)
+        case _                             => None
+
+  /** The name a task's stores go under in a state directory. */
+  private[streams] def ownerOf(id: TaskId): String = s"${id.subtopology}_${id.partition}"
+
   /** Where each standby task is in its changelogs, and where those end, each summed over the task's partitions, as Java Streams reports them. */
-  private def taskOffsets[F[_]](standing: Ref[F, Map[TaskId, Standby]], plane: Plane[F])(using F: Async[F]): F[TaskOffsets] =
+  private def taskOffsets[F[_]](standing: Ref[F, Map[TaskId, Standby[F]]], plane: Plane[F])(using F: Async[F]): F[TaskOffsets] =
     standing.get.flatMap: standbys =>
       plane.ends(standbys.values.flatMap(_.changelogs.keys).toVector).map: ends =>
-        val ordered                               = standbys.toList.sortBy((id, _) => (id.subtopology, id.partition))
-        def summed(of: Standby => Iterable[Long]) =
+        val ordered                                  = standbys.toList.sortBy((id, _) => (id.subtopology, id.partition))
+        def summed(of: Standby[F] => Iterable[Long]) =
           ordered.map((id, standby) => StreamsGroup.TaskOffset(id.subtopology, id.partition, of(standby).sum))
         TaskOffsets(summed(_.positions.values), summed(_.changelogs.keys.map(partition => ends.getOrElse(partition, 0L))))
 
@@ -382,12 +404,8 @@ private[xkafka] object Engine:
     /** The next records of the partitions being read, waiting a little for some. */
     def poll: F[List[PolledRecord]]
 
-    /** Each store's contents, read back from its changelog partition from where `from` says, or its start, onto what `held` holds. */
-    def restore(
-        changelogs: Map[TopicPartition, String],
-        from: Map[TopicPartition, Long],
-        held: Map[String, StoreContents]
-    ): F[Map[String, StoreContents]]
+    /** Reads each store's changelog partition from where `from` says, or its start, into the store. */
+    def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], stores: Map[String, TaskStore[F]]): F[Unit]
 
     /** Follows exactly these changelog partitions for standby tasks, each from where it starts. */
     def follow(starts: Vector[StartAt]): F[Unit]
@@ -412,7 +430,12 @@ private[xkafka] object Engine:
     def settled: Input = copy(read = None, committed = read.map(_._1).orElse(committed))
 
   /** A task the engine runs: its program, what it holds, and each partition it reads, one of each topic its sub-topology reads. */
-  private final case class Live[F[_]](task: Task[F], state: TaskState, inputs: Map[TopicPartition, Input]):
+  private final case class Live[F[_]](
+      task: Task[F],
+      state: TaskState,
+      inputs: Map[TopicPartition, Input],
+      stores: Map[String, TaskStore[F]] = Map.empty[String, TaskStore[F]]
+  ):
     /** Committed where it read to. */
     def settled: Live[F] = copy(inputs = inputs.view.mapValues(_.settled).toMap)
 
@@ -423,15 +446,19 @@ private[xkafka] object Engine:
     def read: Boolean = inputs.values.exists(_.read.nonEmpty)
 
   /** A standby task: its stores, kept as their changelogs are read, the changelog partition of each, and where it has read each to. */
-  private final case class Standby(stores: Map[String, StoreContents], changelogs: Map[TopicPartition, String], positions: Map[TopicPartition, Long])
+  private final case class Standby[F[_]](
+      stores: Map[String, TaskStore[F]],
+      changelogs: Map[TopicPartition, String],
+      positions: Map[TopicPartition, Long]
+  )
 
   /** The tasks the engine runs and keeps standing by, and when it last committed and purged. */
   private final case class Running[F[_]](
       tasks: Map[TaskId, Live[F]],
       committed: FiniteDuration,
       purged: FiniteDuration,
-      standbys: Map[TaskId, Standby] = Map.empty,
-      kept: Map[TaskId, (Standby, FiniteDuration)] = Map.empty
+      standbys: Map[TaskId, Standby[F]] = Map.empty[TaskId, Standby[F]],
+      kept: Map[TaskId, (Standby[F], FiniteDuration)] = Map.empty[TaskId, (Standby[F], FiniteDuration)]
   )
 
   private final class Loop[F[_]](
@@ -445,19 +472,39 @@ private[xkafka] object Engine:
       concurrency: Int,
       purgeInterval: FiniteDuration,
       phase: SignallingRef[F, StreamsPhase],
-      standing: Ref[F, Map[TaskId, Standby]],
+      standing: Ref[F, Map[TaskId, Standby[F]]],
       read: Queue[F, PolledRecord],
       following: Ref[F, Boolean],
       partitions: Topic => F[Int],
-      globals: F[Map[String, StoreContents]],
+      globals: Map[String, TaskStore[F]],
       open: TaskStore.Open[F],
-      opened: Ref[F, Map[TaskId, Task[F]]]
+      opened: Ref[F, Map[TaskId, Task[F]]],
+      state: Option[StateDirectory[F]],
+      holding: Ref[F, Map[TaskId, Map[String, TaskStore[F]]]]
   )(using F: Async[F]):
     import MemberAction.*
 
     /** Closes the tasks given, which no longer run here, and with them their processors' instances, as Java closes a task it gives up. */
     private def closed(tasks: Iterable[(TaskId, Live[F])]): F[Unit] =
-      tasks.toList.traverse_((_, live) => live.task.close) *> opened.update(_ -- tasks.map(_._1))
+      tasks.toList.traverse_((id, live) => live.task.close *> released(id, live.stores, settled = false).void) *> opened.update(_ -- tasks.map(_._1))
+
+    /** Closes the stores of a task given up here. `settled`, where the task has just committed, so that its stores hold all it wrote to their
+      * changelogs, each store records the end of its changelog partition first. Where stores are kept on disk, the task's are then recorded as given
+      * up, with where each holds its changelog to, which is what the task is kept as, for the group to give back.
+      */
+    private def released(id: TaskId, stores: Map[String, TaskStore[F]], settled: Boolean): F[Option[Standby[F]]] =
+      if stores.isEmpty then F.pure(None)
+      else
+        changelogsOf(id).flatMap: changelogs =>
+          val settling =
+            if settled then
+              plane.ends(changelogs.keys.toVector)
+                .flatMap(_.toList.traverse_((partition, end) => stores(changelogs(partition)).write(StoreContents.unchanged, Some(end))))
+            else F.unit
+          settling *> changelogs.toList.traverse((partition, store) => stores(store).position.map(at => (partition, store, at))).flatMap: positions =>
+            stores.values.toList.traverse_(_.close) *> holding.update(_ - id) *> state.traverse: directory =>
+              directory.released(ownerOf(id), positions.flatMap((_, store, at) => at.map(store -> _)).toMap)
+                .as(Standby(Map.empty, changelogs, positions.map((partition, _, at) => partition -> at.getOrElse(0L)).toMap))
 
     /** Carries out the changes the member told of since the last batch, reads, processes and writes until the next commit, then purges what is due.
       */
@@ -469,35 +516,27 @@ private[xkafka] object Engine:
       if running.standbys.isEmpty then F.pure(running)
       else
         read.tryTakeN(None).flatMap: records =>
-          val times  = WindowStore.timesOf(subtopologies.values)
           val owners =
             running.standbys.toList.flatMap((id, standby) =>
               standby.changelogs.map((partition, store) => (partition.topic.value, partition.partition.value) -> (id, partition, store))
             ).toMap
-          val after =
-            records.foldLeft(running.standbys): (standbys, record) =>
-              // A record read before its partition was followed again from further on was applied already.
-              owners.get((record.topic, record.partition)).filter((id, partition, _) => record.offset >= standbys(id).positions(partition))
-                .fold(standbys): (id, partition, store) =>
-                  val standby = standbys(id)
-                  standbys.updated(
-                    id,
-                    standby.copy(
-                      stores = Restore.applied(standby.stores, store, record, times),
-                      positions = standby.positions.updated(partition, record.offset + 1)
-                    )
-                  )
+          // A record read before its partition was followed again from further on was applied already.
+          val (positions, fresh) =
+            records.foldLeft((running.standbys.view.mapValues(_.positions).toMap, Vector.empty[(TaskId, String, PolledRecord)])):
+              case ((at, taken), record) =>
+                owners.get((record.topic, record.partition)).filter((id, partition, _) => record.offset >= at(id)(partition)).fold((at, taken)):
+                  (id, partition, store) => (at.updated(id, at(id).updated(partition, record.offset + 1)), taken :+ (id, store, record))
           // Expired windows go once the batch is applied, as Java's restore drops them after each batch it reads.
-          val pruned =
-            if records.isEmpty then after
-            else
-              after.map((id, standby) =>
-                id -> standby.copy(stores =
-                  WindowStore.prunedAll(standby.stores, subtopologies(id.subtopology).retentions, subtopologies(id.subtopology).sessionStores)
-                )
-              )
-          val now = running.copy(standbys = pruned)
-          report(now).as(now)
+          fresh.groupBy(_._1).toList.traverse_ { (id, taken) =>
+            val standby = running.standbys(id)
+            val stores  = standby.stores
+            val reached = standby.changelogs.flatMap((partition, store) => positions(id).get(partition).map(store -> _))
+            Restore.written(stores, Restore.changes(taken.map((_, store, record) => store -> record)), reached) *>
+              WindowStore.swept(stores, subtopologies(id.subtopology).retentions)
+          } *> {
+            val now = running.copy(standbys = running.standbys.map((id, standby) => id -> standby.copy(positions = positions(id))))
+            report(now).as(now)
+          }
 
     /** At least once: one batch, then a commit through the member once the interval has passed. Exactly once: once a poll brings records, a
       * transaction that writes the batches read until the interval has passed or the member has news, with the offsets read up to there. A
@@ -571,9 +610,8 @@ private[xkafka] object Engine:
 
     private def change(running: Running[F], told: Either[Throwable, MemberAction]): F[Running[F]] =
       told.liftTo[F].flatMap:
-        case Revoke(round, tasks) => commit(running, tasks).flatMap: committed =>
-            val kept = committed.copy(tasks = committed.tasks -- tasks)
-            closed(committed.tasks.view.filterKeys(tasks).toList) *> reassign(kept) *> member.revoked(round).as(kept)
+        case Revoke(round, tasks) => commit(running, tasks).flatMap(gaveUp(_, tasks))
+            .flatTap(after => reassign(after) *> report(after) *> member.revoked(round))
         case Assign(round, assignment) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
           val added = (assignment.active -- kept.keySet).toList
@@ -583,21 +621,65 @@ private[xkafka] object Engine:
             phase.set(StreamsPhase.Restoring).whenA(added.exists(id => subtopologies(id.subtopology).stores.nonEmpty)) *>
               start(added, available).flatMap: started =>
                 standby((assignment.standby ++ assignment.warmup) -- assignment.active, available).flatMap: standbys =>
-                  val dropped = running.standbys.view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).mapValues(_ -> now)
-                  val keeping = (stillKept ++ dropped).view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toMap
-                  val after   = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping)
-                  reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running).as(after)
+                  val gone = running.standbys.view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toList
+                  dropped(gone).flatMap: left =>
+                    val keeping = (stillKept ++ left.view.mapValues(_ -> now)).view.filterKeys(id => !standbys.contains(id) && !assignment.active(id))
+                      .toMap
+                    val after = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping)
+                    val owned = (after.tasks.keySet ++ after.standbys.keySet).map(ownerOf)
+                    reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running) *>
+                      state.traverse_(_.cleaned(owned, StateCleanupDelay)).as(after)
         case LoseAll => closed(running.tasks.toList) *> F.monotonic.flatMap: now =>
             val lost =
               running.copy(tasks = Map.empty[TaskId, Live[F]], standbys = Map.empty, kept = running.kept ++ running.standbys.view.mapValues(_ -> now))
             phase.set(StreamsPhase.Lost) *> reassign(lost) *> refollow(running, lost).as(lost)
         case _ => F.pure(running)
 
+    /** `running` without `tasks`, which have just committed and are given up: closed, and where their stores are on disk, kept as they are there. */
+    private def gaveUp(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
+      val giving = running.tasks.view.filterKeys(tasks).toList
+      (giving.traverse((id, live) => live.task.close *> released(id, live.stores, settled = true).map(_.map(id -> _))), F.monotonic).tupled.flatMap:
+        (held, now) =>
+          opened.update(_ -- tasks)
+            .as(running.copy(tasks = running.tasks -- tasks, kept = running.kept ++ held.flatten.map((id, kept) => id -> (kept, now))))
+
+    /** The standby tasks no longer wanted, as they are kept: those whose stores are in memory as they are, and the others with their stores, on disk,
+      * closed and recorded as given up.
+      */
+    private def dropped(gone: List[(TaskId, Standby[F])]): F[Map[TaskId, Standby[F]]] =
+      gone.traverse: (id, standby) =>
+        if state.isEmpty then F.pure(id -> standby) else released(id, standby.stores, settled = false).map(held => id -> held.getOrElse(standby))
+      .map(_.toMap)
+
+    /** Runs from `running`, keeping the tasks a state directory holds stores of as an earlier run left them, as given up now, and reporting them. */
+    def begin(running: Running[F], held: Map[TaskId, Map[String, Long]]): F[Unit] =
+      restarted(held).map(kept => running.copy(kept = kept)).flatTap(report).flatMap(run)
+
+    /** The tasks a state directory holds stores of as an earlier run left them, kept as given up then, of the sub-topologies this program has. */
+    private def restarted(held: Map[TaskId, Map[String, Long]]): F[Map[TaskId, (Standby[F], FiniteDuration)]] =
+      F.monotonic.flatMap: now =>
+        held.toList.filter((id, _) => subtopologies.contains(id.subtopology)).traverse: (id, positions) =>
+          changelogsOf(id).map(changelogs =>
+            id ->
+              (
+                Standby(
+                  Map.empty[String, TaskStore[F]],
+                  changelogs,
+                  changelogs.map((partition, store) => partition -> positions.getOrElse(store, 0L))
+                ),
+                now
+              )
+          )
+        .map(_.toMap)
+
     /** The standby tasks of `wanted` that keep stores, those already standing by as they are and the others from the start of their changelogs. */
-    private def standby(wanted: Set[TaskId], standing: Map[TaskId, Standby]): F[Map[TaskId, Standby]] =
+    private def standby(wanted: Set[TaskId], standing: Map[TaskId, Standby[F]]): F[Map[TaskId, Standby[F]]] =
       wanted.toList.filter(id => subtopologies(id.subtopology).stores.nonEmpty).traverse: id =>
-        standing.get(id).fold(changelogsOf(id).map(changelogs => Standby(Map.empty, changelogs, changelogs.keys.map(_ -> 0L).toMap)))(F.pure)
-          .map(id -> _)
+        standing.get(id).filter(_.stores.nonEmpty).fold(
+          (changelogsOf(id), storesOf(id)).tupled.flatMap: (changelogs, stores) =>
+            changelogs.toList.traverse((partition, store) => stores(store).position.map(at => partition -> at.getOrElse(0L)))
+              .map(positions => Standby(stores, changelogs, positions.toMap))
+        )(F.pure).map(id -> _)
       .map(_.toMap)
 
     /** Follows the standby tasks' changelogs, where the tasks standing by changed. */
@@ -610,6 +692,17 @@ private[xkafka] object Engine:
     /** The stores the member reports the task offsets of: those standing by and those kept. */
     private def report(running: Running[F]): F[Unit] = standing.set(running.standbys ++ running.kept.view.mapValues(_._1))
 
+    /** A task's stores, opened empty. */
+    private def storesOf(id: TaskId): F[Map[String, TaskStore[F]]] =
+      val read  = subtopologies(id.subtopology)
+      val times = WindowStore.timesOf(List(read))
+      read.kept.traverse: kept =>
+        val name = kept.store.value
+        // Suppression buffers stay in memory, as Java keeps them.
+        state.filterNot(_ => kept.store.keptInMemory || kept.buffer)
+          .fold(open(name, times.get(name), StoreContents.empty))(_.open(ownerOf(id), name, times.get(name))).map(name -> _)
+      .map(_.toMap).flatTap(stores => holding.update(_.updated(id, stores)))
+
     /** The changelog partitions of a task's stores, with the store each backs. */
     private def changelogsOf(id: TaskId): F[Map[TopicPartition, String]] =
       subtopologies(id.subtopology).stores
@@ -620,7 +713,7 @@ private[xkafka] object Engine:
       plane.read(running.tasks.values.toVector.flatMap(_.inputs.toVector.map((partition, input) => StartAt(partition, input.position, -1))))
 
     /** Starts tasks where the group last committed them, or at the start of their partitions, with their stores refilled from their changelogs. */
-    private def start(tasks: List[TaskId], standbys: Map[TaskId, Standby]): F[Map[TaskId, Live[F]]] =
+    private def start(tasks: List[TaskId], standbys: Map[TaskId, Standby[F]]): F[Map[TaskId, Live[F]]] =
       tasks.traverse(id => sourcesOf(id).map(id -> _)).flatMap: inputs =>
         val asked = inputs.flatMap(_._2).groupMap(_.topic.value)(_.partition.value).toList.map(OffsetFetchRequest.Topic(_, _))
         if inputs.isEmpty then F.pure(Map.empty)
@@ -631,11 +724,12 @@ private[xkafka] object Engine:
               val times   = found.flatMap((partition, at) => at.flatMap(_.metadata).flatMap(PartitionTime.decode).map(partition.topic.value -> _))
               val emitted = PartitionTime.merged(found.flatMap(_._2.flatMap(_.metadata)))
               val read    = subtopologies(id.subtopology)
-              val kept    = WindowStore.prunedAll(stores.getOrElse(id, Map.empty), read.retentions, read.sessionStores)
               val state   = TaskState(Map.empty, times.toMap, lastEmitted = emitted)
               val reads   = found.map((partition, at) => partition -> Input(at.filter(_.offset >= 0).fold(KafkaDriver.BeginningOffset)(_.offset)))
-              Task.over[F](application, read, id.partition, kept, open, id.subtopology.toIntOption.getOrElse(0)).flatMap: task =>
-                (task.opened(state, clock.toMillis) <* opened.update(_.updated(id, task))).map(ready => id -> Live(task, ready, reads.toMap))
+              val task    =
+                new Task[F](application, read, id.partition, stores.getOrElse(id, Map.empty), id.subtopology.toIntOption.getOrElse(0), globals)
+              (task.opened(state, clock.toMillis) <* opened.update(_.updated(id, task)))
+                .map(ready => id -> Live(task, ready, reads.toMap, stores.getOrElse(id, Map.empty)))
             .map(_.toMap)
 
     /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */
@@ -647,17 +741,18 @@ private[xkafka] object Engine:
           case None       => F.pure(Option.when(codes.forall(_ == 0))(answer.partitions.map(p => (p.topic, p.partition) -> p).toMap))
 
     /** Each task's stores, read back from the task's partition of their changelogs, one task after another: a task that stood by from where it read
-      * to, onto what it holds, and any other from the start.
+      * to, into the stores it holds, and any other from the start into stores opened empty, each without what has expired once it is read.
       */
-    private def restore(tasks: List[TaskId], standbys: Map[TaskId, Standby]): F[Map[TaskId, Map[String, StoreContents]]] =
-      val stateful = tasks.filter(id => subtopologies(id.subtopology).stores.nonEmpty)
-      if stateful.isEmpty then F.pure(Map.empty)
-      else
-        stateful.traverse: id =>
-          val held = standbys.get(id)
-          changelogsOf(id).flatMap(changelogs => plane.restore(changelogs, held.fold(Map.empty)(_.positions), held.fold(Map.empty)(_.stores)))
-            .map(id -> _)
-        .map(_.toMap)
+    private def restore(tasks: List[TaskId], standbys: Map[TaskId, Standby[F]]): F[Map[TaskId, Map[String, TaskStore[F]]]] =
+      tasks.filter(id => subtopologies(id.subtopology).stores.nonEmpty).traverse: id =>
+        val held = standbys.get(id).filter(_.stores.nonEmpty)
+        (changelogsOf(id), held.fold(storesOf(id))(standby => F.pure(standby.stores))).tupled.flatMap: (changelogs, stores) =>
+          val from =
+            held.fold(changelogs.toList.traverse((partition, store) => stores(store).position.map(_.map(partition -> _))).map(_.flatten.toMap))(
+              standby => F.pure(standby.positions)
+            )
+          from.flatMap(plane.restore(changelogs, _, stores)) *> WindowStore.swept(stores, subtopologies(id.subtopology).retentions).as(id -> stores)
+      .map(_.toMap)
 
     /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready. A member the group no
       * longer counts commits nothing: its tasks go to others, which read again from the group's last commit.
@@ -709,22 +804,19 @@ private[xkafka] object Engine:
       F.realTime.flatMap: clock =>
         def punctuated(live: Live[F]): F[(Live[F], Vector[TaskOutput])] =
           if !live.task.punctuates then F.pure((live, Vector.empty))
-          else
-            globals.flatMap(held => live.task.punctuate(live.state.copy(globals = held), clock.toMillis))
-              .map((state, out) => (live.copy(state = state), out))
+          else live.task.punctuate(live.state, clock.toMillis).map((state, out) => (live.copy(state = state), out))
         running.tasks.toList.filter((id, live) => byTask.contains(id) || live.task.punctuates).parTraverseN(concurrency): (id, live) =>
           Engine.byTime(byTask.getOrElse(id, Nil)).foldLeftM((live, Vector.empty[TaskOutput])):
-            case ((live, written), (partition, record)) => globals
-                .flatMap(held => live.task.process(live.state.copy(globals = held), inputOf(record), clock.toMillis)).flatMap: (state, out) =>
-                  val read =
-                    Input(
-                      record.offset + 1,
-                      Some((record.offset + 1, record.leaderEpoch)),
-                      live.inputs(partition).committed,
-                      live.inputs(partition).purged
-                    )
-                  punctuated(live.copy(state = state, inputs = live.inputs.updated(partition, read)))
-                    .map((after, more) => (after, written ++ out ++ more))
+            case ((live, written), (partition, record)) => live.task.process(live.state, inputOf(record), clock.toMillis).flatMap: (state, out) =>
+                val read =
+                  Input(
+                    record.offset + 1,
+                    Some((record.offset + 1, record.leaderEpoch)),
+                    live.inputs(partition).committed,
+                    live.inputs(partition).purged
+                  )
+                punctuated(live.copy(state = state, inputs = live.inputs.updated(partition, read)))
+                  .map((after, more) => (after, written ++ out ++ more))
           .flatMap((after, written) => punctuated(after).map((done, more) => id -> (done, written ++ more)))
       .flatMap: done =>
         val written = done.flatMap(_._2._2)

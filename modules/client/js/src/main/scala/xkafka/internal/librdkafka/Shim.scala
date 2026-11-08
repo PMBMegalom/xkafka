@@ -314,7 +314,7 @@ private[librdkafka] object Shim:
         Option(PrebuiltLibrary.library)
           .toRight(new KafkaException.BackendFailure(Option(PrebuiltLibrary.error).getOrElse("@xkafka/librdkafka found no library")))
       shim <-
-        Either.catchNonFatal { Koffi.proto(s"void $DoneType(int64_t token)"): Unit; new Shim(Koffi.load(path)) }
+        Either.catchNonFatal { Completions.declared: Unit; new Shim(Koffi.load(path)) }
           .leftMap(error => new KafkaException.BackendFailure(s"could not load the xkafka librdkafka library from $path: ${error.getMessage}"))
       reported = shim.shimId().asInstanceOf[String]
       _ <-
@@ -337,16 +337,21 @@ private[librdkafka] object PrebuiltLibrary extends js.Object:
   * koffi runs the callback on the event loop. A call waiting on its own thread does not keep Node running by itself, so a timer does while any call
   * is outstanding.
   */
-private[librdkafka] object Completions:
+private[internal] object Completions:
   private val waiting   = scala.collection.mutable.LongMap.empty[() => Unit]
   private val tokens    = new java.util.concurrent.atomic.AtomicLong(0L)
   private val keepAlive = new java.util.concurrent.atomic.AtomicReference[Option[scala.scalajs.js.timers.SetIntervalHandle]](None)
+
+  /** The callback type, declared to koffi once for every library whose prototypes name it. */
+  lazy val declared: String =
+    Koffi.proto(s"void ${Shim.DoneType}(int64_t token)"): Unit
+    Shim.DoneType
 
   /** The registered callback, passed to every `async` function. */
   lazy val done: js.Any =
     val report: js.Function1[js.Any, Unit] =
       token => complete(if js.typeOf(token) == "bigint" then token.toString.toLong else token.asInstanceOf[Double].toLong)
-    Koffi.register(report, s"${Shim.DoneType} *")
+    Koffi.register(report, s"$declared *")
 
   /** A token for a call about to start, which runs `onDone` once the call reports. */
   def expect(onDone: () => Unit): Long =

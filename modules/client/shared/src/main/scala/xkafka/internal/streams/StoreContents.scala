@@ -28,11 +28,9 @@ import scala.collection.immutable.TreeMap
 import fs2.Chunk
 
 /** What one store of a task holds, by serialized key, in the order of the keys' bytes taken as unsigned, which is the order a store on disk keeps
-  * them in, so that all of a key's windows or sessions can be found from where they start, without going through the rest. `latestRemoved` is the
-  * latest time a removal from a window or session store's changelog named, which counts towards its clock as it does in Java's restore, though no key
-  * is left to tell it.
+  * them in, so that all of a key's windows or sessions can be found from where they start, without going through the rest.
   */
-private[xkafka] final case class StoreContents(entries: TreeMap[Chunk[Byte], Stored], latestRemoved: Long = -1L):
+private[xkafka] final case class StoreContents(entries: TreeMap[Chunk[Byte], Stored]):
   def get(key: Chunk[Byte]): Option[Stored] = entries.get(key)
 
   def apply(key: Chunk[Byte]): Stored = entries(key)
@@ -49,9 +47,6 @@ private[xkafka] final case class StoreContents(entries: TreeMap[Chunk[Byte], Sto
 
   def filter(keep: (Chunk[Byte], Stored) => Boolean): StoreContents = copy(entries = entries.filter(keep(_, _)))
 
-  /** What it holds, having been told of a removal naming `time`. */
-  def removedAt(time: Long): StoreContents = copy(latestRemoved = math.max(latestRemoved, time))
-
   /** Every key and what it holds, in order. */
   def toVector: Vector[(Chunk[Byte], Stored)] = entries.toVector
 
@@ -66,9 +61,9 @@ private[xkafka] final case class StoreContents(entries: TreeMap[Chunk[Byte], Sto
   /** The keys starting with `prefix` and what they hold, in order. */
   def prefixed(prefix: Chunk[Byte]): Vector[(Chunk[Byte], Stored)] = StoreContents.starting(entries, prefix).toVector
 
-  /** The keys from `from` to `to`, both included, and what they hold, in order. */
-  def between(from: Chunk[Byte], to: Chunk[Byte]): Vector[(Chunk[Byte], Stored)] =
-    entries.iteratorFrom(from).takeWhile((key, _) => StoreContents.keys.lteq(key, to)).toVector
+  /** The keys from `from`, included, to `to`, left out, and what they hold, in order; a bound not given leaves that side open. */
+  def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): Vector[(Chunk[Byte], Stored)] =
+    from.fold(entries.iterator)(entries.iteratorFrom).takeWhile((key, _) => to.forall(StoreContents.keys.lt(key, _))).toVector
 
   /** What it holds once `changes` are made, a key with nothing to hold being removed. */
   def after(changes: IterableOnce[(Chunk[Byte], Option[Stored])]): StoreContents =
@@ -98,6 +93,13 @@ private[xkafka] object StoreContents:
 
   /** No changes to a store. */
   val unchanged: StoreChanges = TreeMap.empty(using keys)
+
+  /** The first key past every key starting with `prefix`, or none where no key is: `prefix` with its last byte below 0xff counted up by one and what
+    * follows it dropped.
+    */
+  def past(prefix: Chunk[Byte]): Option[Chunk[Byte]] =
+    val kept = prefix.toArray.reverse.dropWhile(_ == -1).reverse
+    Option.when(kept.nonEmpty)(Chunk.array(kept.updated(kept.length - 1, (kept.last + 1).toByte)))
 
   /** The entries of `entries` whose keys start with `prefix`, in order. */
   def starting[V](entries: TreeMap[Chunk[Byte], V], prefix: Chunk[Byte]): Iterator[(Chunk[Byte], V)] =

@@ -35,9 +35,27 @@ final class TopologySuite extends CatsEffectSuite:
   private val text  = Serde.utf8[IO]
   private val count = Serde.long[IO]
 
-  private def counting(input: String, repartition: String, store: String): Pipeline[IO] =
+  private def counting(input: String, repartition: String, store: String): Pipeline[IO] = countingIn(input, repartition, Store(store))
+
+  private def countingIn(input: String, repartition: String, store: Store): Pipeline[IO] =
     KStream(Named(s"$input-read"), topic(input), text, text).groupBy(Repartition(repartition), text, text)((_, v) => v)
-      .count(Named(s"$input-count"), Store(store)).toStream(Named(s"$input-changes")).to(Named(s"$input-write"), topic(s"$input-out"), text, count)
+      .count(Named(s"$input-count"), store).toStream(Named(s"$input-changes")).to(Named(s"$input-write"), topic(s"$input-out"), text, count)
+
+  test("a store kept in memory keeps its name and its changelog, and cannot take a name another store has, however that one is kept"):
+    val kept = Store("counts").inMemory
+    assertEquals(
+      (kept.value, kept.keptInMemory, Store("counts").keptInMemory, cats.Show[Store].show(kept), kept.toString),
+      ("counts", true, false, "counts", "counts")
+    )
+    assertNotEquals(kept, Store("counts"))
+    val inMemory = Topology.of(countingIn("in", "by-value", kept)).map(Declaration("app", _))
+    val onDisk   = Topology.of(counting("in", "by-value", "counts")).map(Declaration("app", _))
+    assertEquals(inMemory, onDisk)
+    assertEquals(
+      Topology.of(countingIn("in", "one", kept), counting("other", "two", "counts")).left
+        .map(_.toList.filter(_.isInstanceOf[TopologyError.DuplicateStore])),
+      Left(List(TopologyError.DuplicateStore("counts")))
+    )
 
   test("a grouped program declares its input, its repartition topic and its changelog, with the configs Java gives them"):
     val declared = Topology.of(counting("in", "by-value", "counts")).map(Declaration("app", _))

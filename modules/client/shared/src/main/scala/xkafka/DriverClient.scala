@@ -220,7 +220,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       settings.commitInterval,
       settings.concurrency,
       closeTimeout = settings.closeTimeout,
-      topologyDescriptionPush = settings.topologyDescriptionPush
+      topologyDescriptionPush = settings.topologyDescriptionPush,
+      stateDirectory = settings.stateDirectory
     )
 
   override def transactionalProducer[K, V](settings: TransactionalProducerSettings[F, K, V]): Resource[F, KafkaTransactionalProducer[F, K, V]] =

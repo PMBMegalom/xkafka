@@ -31,6 +31,7 @@ import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
+import driver.PolledRecord
 
 /** Stores refilled from changelogs written in transactions, against the broker, on every platform. */
 final class RestoreSuite extends CatsEffectSuite:
@@ -85,8 +86,29 @@ final class RestoreSuite extends CatsEffectSuite:
         create(broker, table) *> transactionally(broker)(
           _.produce(NonEmptyList.fromListUnsafe(keys.zipWithIndex.map((key, n) => record(table, n % 2, key, Some("v"), 1000L)))).void
         ) *> consumer.use: client =>
-          GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
-            held.contents.map(contents => assertEquals(contents("gs").keySet.map(key => new String(key.toArray)), keys.toSet))
+          GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
+            held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, keys.toSet))
+
+  test(
+    "each store's changes from a batch of its changelog keep each key's latest value with its record's time, and a record without a value removes it"
+  ):
+    def record(key: Option[String], value: Option[String], at: Option[Long]) =
+      PolledRecord("c", 0, 0L, at, 0, -1, key.map(text), value.map(text), Headers.empty)
+    val made =
+      Restore.changes(List(
+        "a" -> record(Some("k"), Some("1"), Some(5L)),
+        "a" -> record(Some("k"), Some("2"), Some(6L)),
+        "b" -> record(Some("k"), None, Some(7L)),
+        "a" -> record(None, Some("x"), Some(8L)),
+        "a" -> record(Some("j"), Some("3"), None)
+      ))
+    assertEquals(
+      made,
+      Map(
+        "a" -> StoreContents.unchanged.updated(text("k"), Some(Stored(text("2"), 6L))).updated(text("j"), Some(Stored(text("3"), -1L))),
+        "b" -> StoreContents.unchanged.updated(text("k"), None)
+      )
+    )
 
   test("a partition is finished by reaching where it was found to end, not by a report of an end before that"):
     def end(partition: Int, offset: Long) = xkafka.internal.driver.PartitionEnd("t", partition, offset)
@@ -144,6 +166,23 @@ final class RestoreSuite extends CatsEffectSuite:
       Restore.whileMoving(ask).attempt *> asked.get.map(assertEquals(_, 1))
 
   for broker <- server.toList do
+    test("a global table keeps the bytes of what its topic held before it was acquired as they are, without reading them through its serdes"):
+      Names.fresh:
+        val table    = topic("raw")
+        val text     = xkafka.streams.Serde.utf8[IO]
+        val refusing =
+          xkafka.streams.Serde(text.serializer, Deserializer.instance[IO, String]((_, _, _) => IO.raiseError(new IllegalArgumentException("unread"))))
+        val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, refusing, xkafka.streams.Store("gs"))
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
+          )(driver.destroyConsumer)
+        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k", Some("raw"), 1000L))).void) *> consumer.use:
+          client =>
+            GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
+              held.stores("gs").all
+                .map(all => assertEquals(all.map((key, stored) => (new String(key.toArray), new String(stored.value.toArray))), Vector("k" -> "raw")))
+
     test("a global table acquired as soon as its topic is created waits for the topic's leaders"):
       Names.fresh:
         val text     = xkafka.streams.Serde.utf8[IO]
@@ -155,8 +194,8 @@ final class RestoreSuite extends CatsEffectSuite:
           val table = topic(s"fresh-$n")
           val read  = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
           consumer.use: client =>
-            create(broker, table) *> GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
-              held.contents.map(contents => assertEquals(contents("gs").size, 0))
+            create(broker, table) *> GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
+              held.stores("gs").all.map(all => assertEquals(all.size, 0))
 
     test("a global table under read_committed does not wait for a transaction still open, and does not hold what it wrote"):
       Names.fresh:
@@ -170,8 +209,8 @@ final class RestoreSuite extends CatsEffectSuite:
         create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "done", Some("v"), 1000L))).void) *>
           transactionally(broker): open =>
             open.produce(NonEmptyList.of(record(table, 0, "open", Some("v"), 1000L))).void *> consumer.use: client =>
-              GlobalStores(driver, client, List(read), _ => IO.pure(2)).use: held =>
-                held.contents.map(contents => assertEquals(contents("gs").keySet.map(key => new String(key.toArray)), Set("done")))
+              GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
+                held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, Set("done")))
 
   /** A consumer reading under read_committed and reporting the ends it reaches, as the engine's restore consumer does. */
   private def restoring(server: String): Resource[IO, driver.Client] =
@@ -211,7 +250,9 @@ final class RestoreSuite extends CatsEffectSuite:
                 record(changelog, 0, "k1", Some("a2"), now + 500)
               )).void
             )
-          restored <-
+          kept <- TaskStore.inMemory[IO](StoreContents.empty)
+          none <- TaskStore.inMemory[IO](StoreContents.empty)
+          _    <-
             restoring(server).use: consumer =>
               Restore(
                 driver,
@@ -221,14 +262,24 @@ final class RestoreSuite extends CatsEffectSuite:
                   partition(changelog, 1) -> "kept",
                   partition(empty, 0)     -> "none",
                   partition(empty, 1)     -> "none"
-                )
+                ),
+                Map.empty,
+                Map("kept" -> kept, "none" -> none)
               )
-        yield assertEquals(
-          restored,
-          Map(
-            "kept" -> StoreContents.of(
-              Map(text("k1") -> Stored(text("a2"), now + 500), text("k3") -> Stored(text("c"), now + 400), text("k5") -> Stored(text("e"), now + 200))
-            ),
-            "none" -> StoreContents.empty
+          restored <- (kept.all, none.all).mapN((k, n) => Map("kept" -> StoreContents.of(k), "none" -> StoreContents.of(n)))
+          ends     <- restoring(server).use(Restore.endsOf(driver, _, Vector(partition(changelog, 0), partition(changelog, 1))))
+          at       <- (kept.position, none.position).tupled
+        yield
+          assertEquals(
+            restored,
+            Map(
+              "kept" -> StoreContents.of(Map(
+                text("k1") -> Stored(text("a2"), now + 500),
+                text("k3") -> Stored(text("c"), now + 400),
+                text("k5") -> Stored(text("e"), now + 200)
+              )),
+              "none" -> StoreContents.empty
+            )
           )
-        )
+          // Each store says it holds its changelog to where its partitions end, past the transactions' markers, and to the start of an empty one.
+          assertEquals(at, (Some(ends.values.max), Some(0L)))

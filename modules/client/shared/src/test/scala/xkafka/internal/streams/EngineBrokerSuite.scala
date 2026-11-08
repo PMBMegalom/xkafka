@@ -360,18 +360,32 @@ final class EngineBrokerSuite extends CatsEffectSuite:
             IO.raiseError(new RuntimeException("abort"))
         .attempt.void
 
-  /** An engine for `app`, as `running` starts it, whose restores and the changelogs it follows are recorded. */
-  private def watched(server: String, app: Counting, restores: Ref[IO, List[Map[TopicPartition, Long]]], follows: Ref[IO, List[Vector[StartAt]]])(
-      using guarantee: ProcessingGuarantee
-  ) =
+  /** An engine for `app`, as `running` starts it, whose restores and the changelogs it follows are recorded, keeping its stores under `state`. */
+  private def watched(
+      server: String,
+      app: Counting,
+      restores: Ref[IO, List[Map[TopicPartition, Long]]],
+      follows: Ref[IO, List[Vector[StartAt]]],
+      state: Option[String] = None
+  )(using guarantee: ProcessingGuarantee) =
     val interval                                         = Option.when(guarantee == ProcessingGuarantee.AtLeastOnce)(1.second)
     def watch(plane: Engine.Plane[IO]): Engine.Plane[IO] =
       new Engine.Plane[IO]:
         export plane.{ends, followed, poll, purge, read, write}
-        def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], held: Map[String, StoreContents]) =
-          restores.update(_ :+ from) *> plane.restore(changelogs, from, held)
+        def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], stores: Map[String, TaskStore[IO]]) =
+          restores.update(_ :+ from) *> plane.restore(changelogs, from, stores)
         def follow(starts: Vector[StartAt]) = follows.update(_ :+ starts) *> plane.follow(starts)
-    Engine(PlatformKafkaClient(), KafkaClientPlatform.driver[IO], client(server), app.application, app.topology, guarantee, interval, watch = watch)
+    Engine(
+      PlatformKafkaClient(),
+      KafkaClientPlatform.driver[IO],
+      client(server),
+      app.application,
+      app.topology,
+      guarantee,
+      interval,
+      stateDirectory = state,
+      watch = watch
+    )
 
   /** Waits up to a minute for `condition` to hold. */
   private def eventually(what: String)(condition: IO[Boolean]): IO[Unit] =
@@ -530,6 +544,34 @@ final class EngineBrokerSuite extends CatsEffectSuite:
                   eventually("the second engine restoring its standby task from where it read to")(promoted) *> produce(server, app.input, third) *>
                   latest(server, app.output, total(first, second, third))
               stayer.run.race(steps).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure))
+
+    test(s"$release, $under: an engine started again over its state directory restores only what its stores did not hold, and the counts go on"):
+      counting(server): app =>
+        val state    = Some(s"${Option(System.getProperty("java.io.tmpdir")).getOrElse("target")}/${app.application}-state")
+        val recorded = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
+        recorded.flatMap: (restores, follows) =>
+          def engine             = watched(server, app, restores, follows, state)
+          def run(use: IO[Unit]) = engine.use(_.run.race(use).flatMap(_.fold(_ => IO.raiseError(new AssertionError("the engine stopped")), IO.pure)))
+          for
+            _      <- produce(server, app.input, first)
+            _      <- run(latest(server, app.output, total(first)))
+            before <- restores.get
+            _      <- produce(server, app.input, second)
+            _      <- run(latest(server, app.output, total(first, second)))
+            after  <- restores.get
+          yield
+            assert(before.forall(_.values.forall(_ == 0L)), s"the first run restored from $before")
+            // The second run starts each store from where the first left it, past what the first counted.
+            assert(after.drop(before.size).exists(from => from.nonEmpty && from.values.forall(_ > 0L)), s"the second run restored from $after")
+
+    test(s"$release, $under: a second engine of the application over the same state directory is refused while the first runs"):
+      counting(server): app =>
+        val state    = Some(s"${Option(System.getProperty("java.io.tmpdir")).getOrElse("target")}/${app.application}-state")
+        val recorded = (IO.ref(List.empty[Map[TopicPartition, Long]]), IO.ref(List.empty[Vector[StartAt]])).tupled
+        recorded.flatMap: (restores, follows) =>
+          watched(server, app, restores, follows, state).use: _ =>
+            watched(server, app, restores, follows, state).use_.attempt.map: second =>
+              assert(second.left.exists(_.getMessage.contains("in use by another instance")), second)
 
     test(s"$release, $under: an engine runs a processor, and one started later restores its store from its changelog and goes on"):
       val program =

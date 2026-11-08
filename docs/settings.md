@@ -159,6 +159,7 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | `concurrency` | 1 | how many tasks process records at once |
 | `closeTimeout` | 30s | how long releasing the application waits to give back its tasks and leave |
 | `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
+| `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Stores and standbys](streams/running.md#stores-and-standbys)) |
 
 See [Streams](streams/running.md#guarantees) for each of them.
 

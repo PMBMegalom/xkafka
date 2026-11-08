@@ -63,10 +63,10 @@ private[xkafka] final case class Stored(value: Chunk[Byte], timestamp: Long)
 
 /** What a task keeps between records: what it has written to each store since it last wrote to the stores, the partition time, the largest timestamp
   * it has read, and for each window store, the stream time its windowing steps have seen, each side of a cogroup its own, which starts again on each
-  * member as Java's does, the store's clock (see [[WindowStore]]), taken from its contents where the task has not yet kept it, and where its step
-  * emits windows once they close, the close time it last emitted for, committed with the task's offsets, and the wall-clock time before which it does
-  * not look for closed windows again, and when each punctuator runs next, those going by the clock apart from those going by stream time, in memory
-  * only, as Java's schedules are.
+  * member as Java's does, the store's clock (see [[TaskStore]]), taken from the store where the task has not yet kept it, and where its step emits
+  * windows once they close, the close time it last emitted for, committed with the task's offsets, and the wall-clock time before which it does not
+  * look for closed windows again, and when each punctuator runs next, those going by the clock apart from those going by stream time, in memory only,
+  * as Java's schedules are.
   */
 private[xkafka] final case class TaskState(
     pending: Map[String, StoreChanges],
@@ -80,7 +80,6 @@ private[xkafka] final case class TaskState(
     sequences: Map[String, Int] = Map.empty,
     joinTimes: Map[String, JoinTime] = Map.empty,
     reading: Option[TaskInput] = None,
-    globals: Map[String, StoreContents] = Map.empty,
     punctuations: Map[Boolean, PunctuationQueue] = Map.empty,
     hostedSchedules: Map[(String, Int), Punctuation] = Map.empty
 ):
@@ -147,10 +146,14 @@ private[xkafka] final class Task[F[_]](
     subtopology: Subtopology[F],
     partition: Int,
     stores: Map[String, TaskStore[F]] = Map.empty[String, TaskStore[F]],
-    number: Int = 0
+    number: Int = 0,
+    globals: Map[String, TaskStore[F]] = Map.empty[String, TaskStore[F]]
 )(using F: MonadThrow[F], refs: Ref.Make[F]):
   /** The task as its hosted processors know it, whose instances they keep under it alone. */
   private val hostedTask = HostedTask(application, number, partition)
+
+  /** How to read the time each key of the task's window, session and join window stores names. */
+  private val timesOf: Map[String, TaskStore.TimeOf] = WindowStore.timesOf(List(subtopology))
 
   /** The hosted processors, by the name of their node. */
   private val hostedNodes: Map[String, HostedNode[F]] = subtopology.hosted.map(node => node.named -> node).toMap
@@ -310,8 +313,16 @@ private[xkafka] final class Task[F[_]](
     .as(state.copy(pending = Map.empty))
 
   /** What `store` holds, with what the task wrote since it last stored. */
-  def contents(state: TaskState, store: String): F[StoreContents] =
-    stores.get(store).fold(F.pure(StoreContents.empty))(_.all).map(held => state.pending.get(store).fold(held)(held.after))
+  def contents(state: TaskState, store: String): F[StoreContents] = storedRange(state, store, None, None).map(StoreContents.of)
+
+  /** The keys of `store` from `from`, included, to `to`, left out, and what they hold, in order, with what the task wrote since it last stored; a
+    * bound not given leaves that side open.
+    */
+  private def storedRange(state: TaskState, store: String, from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Stored)]] =
+    stores.get(store).fold(F.pure(Vector.empty[(Chunk[Byte], Stored)]))(_.range(from, to)).map: held =>
+      state.pending.get(store).fold(held): changes =>
+        val changed = to.fold(from.fold(changes)(changes.rangeFrom))(until => from.fold(changes)(changes.rangeFrom).rangeUntil(until))
+        if changed.isEmpty then held else StoreContents.of(held).after(changed).toVector
 
   /** What `store` holds at `key`, with what the task wrote since it last stored. */
   private def storedAt(state: TaskState, store: String, key: Chunk[Byte]): F[Option[Stored]] =
@@ -319,16 +330,28 @@ private[xkafka] final class Task[F[_]](
 
   /** The keys of `store` starting with `prefix` and what they hold, in order, with what the task wrote since it last stored. */
   private def storedUnder(state: TaskState, store: String, prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Stored)]] =
-    stores.get(store).fold(F.pure(Vector.empty[(Chunk[Byte], Stored)]))(_.prefixed(prefix)).map: held =>
-      state.pending.get(store).fold(held)(changes => StoreContents.of(held).after(StoreContents.starting(changes, prefix)).toVector)
+    storedRange(state, store, Some(prefix), StoreContents.past(prefix))
 
-  /** The clock of `store`, taken from what it holds with `read` where the task has not yet kept it. */
-  private def clockOf(state: TaskState, store: String, read: StoreContents => Long): F[Long] =
-    state.clocks.get(store).fold(contents(state, store).map(read))(F.pure)
+  /** The keys of `store` naming a time from `from` to `to`, both included, and what they hold, in order of time and then of key, with what the task
+    * wrote since it last stored.
+    */
+  private def storedBetween(state: TaskState, store: String, from: Long, to: Long): F[Vector[(Chunk[Byte], Stored)]] =
+    stores.get(store).fold(F.pure(Vector.empty[(Chunk[Byte], Stored)]))(_.timed(from, to)).map: held =>
+      (state.pending.get(store), timesOf.get(store)).tupled.fold(held): (changes, time) =>
+        val changed = changes.filter((key, _) => time(key) >= from && time(key) <= to)
+        val kept    = held.filterNot((key, _) => changed.contains(key))
+        (kept ++ changed.toVector.collect { case (key, Some(stored)) => key -> stored })
+          .sortBy((key, _) => (time(key), key))(using Ordering.Tuple2(using Ordering.Long, StoreContents.keys))
 
-  /** The state with the keys of `store` that `gone` picks removed. */
-  private def swept(state: TaskState, store: String, gone: Chunk[Byte] => Boolean): F[TaskState] =
-    contents(state, store).map(held => state.removed(store, held.keysIterator.filter(gone)))
+  /** The clock of `store`: the task's where it keeps one, or else the store's. Each step writing to a window, session or join store keeps the clock
+    * it moves the store to, so the store's own is read only before the task first writes to it.
+    */
+  private def clockOf(state: TaskState, store: String): F[Long] =
+    state.clocks.get(store).fold(stores.get(store).fold(F.pure(WindowStore.NoTime))(_.clock))(F.pure)
+
+  /** The state with the keys of `store` naming a time of `until` or earlier removed. */
+  private def swept(state: TaskState, store: String, until: Long): F[TaskState] =
+    storedBetween(state, store, Long.MinValue, until).map(held => state.removed(store, held.iterator.map(_._1)))
 
   /** What the task's suppression buffers write to their changelogs at a commit, as Java's buffer logs on commit: each key changed since the last
     * commit, with what it holds and the header `v=3`, or a tombstone where it no longer holds the key. The changelog's broker gives each its time.
@@ -798,19 +821,17 @@ private[xkafka] final class Task[F[_]](
       bytes: Chunk[Byte],
       record: Travelling[K, X]
   ): F[(TaskState, TaskOutput)] =
-    (side.values.serializer.serialize(changelog, record.headers, record.value), clockOf(state, side.own, WindowStore.clockOf)).tupled.flatMap:
-      (written, clock) =>
-        val sequence = JoinWindowStore.next(state.sequences.getOrElse(side.own, 0))
-        val ticked   = math.max(clock, record.timestamp)
-        val key      = JoinWindowStore.key(bytes, record.timestamp, sequence)
-        val kept     =
-          if WindowStore.expired(record.timestamp, ticked, retention) then state
-          else written.fold(state)(value => state.written(side.own, key, Some(Stored(value, record.timestamp))))
-        val pruned =
-          if ticked > clock then swept(kept, side.own, held => WindowStore.expired(WindowStore.startOf(held), ticked, retention)) else F.pure(kept)
-        pruned.map: after =>
-          val moved = after.copy(clocks = after.clocks.updated(side.own, ticked), sequences = after.sequences.updated(side.own, sequence))
-          (moved, TaskOutput(changelog, Some(partition), Some(key), written, record.timestamp, record.headers))
+    (side.values.serializer.serialize(changelog, record.headers, record.value), clockOf(state, side.own)).tupled.flatMap: (written, clock) =>
+      val sequence = JoinWindowStore.next(state.sequences.getOrElse(side.own, 0))
+      val ticked   = math.max(clock, record.timestamp)
+      val key      = JoinWindowStore.key(bytes, record.timestamp, sequence)
+      val kept     =
+        if WindowStore.expired(record.timestamp, ticked, retention) then state
+        else written.fold(state)(value => state.written(side.own, key, Some(Stored(value, record.timestamp))))
+      val pruned = if ticked > clock then swept(kept, side.own, ticked - retention) else F.pure(kept)
+      pruned.map: after =>
+        val moved = after.copy(clocks = after.clocks.updated(side.own, ticked), sequences = after.sequences.updated(side.own, sequence))
+        (moved, TaskOutput(changelog, Some(partition), Some(key), written, record.timestamp, record.headers))
 
   /** The held records whose windows have closed, sent on alone and removed from the join's shared store, as Java's join sends them
     * (`emitNonJoinedOuterRecords`): only once the earliest time held, with the processor's `after` and the grace, is behind the stream time, and no
@@ -882,8 +903,8 @@ private[xkafka] final class Task[F[_]](
   ): F[(TaskState, Vector[Travelling[K, R]], Vector[TaskOutput])] =
     import step.table
     table.key.serializer.serialize(table.topic, Headers.empty, step.select(record.key, record.value)).flatMap: written =>
-      written.flatMap(state.globals.getOrElse(table.store.value, StoreContents.empty).get)
-        .traverse(held => table.value.deserializer.deserialize(table.topic, Headers.empty, Some(held.value)))
+      written.flatTraverse(key => globals.get(table.store.value).flatTraverse(_.get(key)))
+        .flatMap(_.traverse(held => table.value.deserializer.deserialize(table.topic, Headers.empty, Some(held.value))))
         .map(found => (state, step.join(record.value, found).toVector.map(v => record.copy(value = v, old = None)), Vector.empty))
 
   /** The other side's value for `key` and its time, where its view finds one; a windowed table has no view, and its joins are refused. */
@@ -1058,10 +1079,11 @@ private[xkafka] final class Task[F[_]](
             )
 
         def between(from: Chunk[Byte], to: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
-          working.get.flatMap((state, _) => contents(state, store)).map(_.between(from, to).map((key, held) => (key, held.value)))
+          working.get.flatMap((state, _) => storedRange(state, store, Some(from), Some(to ++ Chunk.singleton(0.toByte))))
+            .map(_.map((key, held) => (key, held.value)))
 
         def all: F[Vector[(Chunk[Byte], Chunk[Byte])]] =
-          working.get.flatMap((state, _) => contents(state, store)).map(_.toVector.map((key, held) => (key, held.value)))
+          working.get.flatMap((state, _) => storedRange(state, store, None, None)).map(_.map((key, held) => (key, held.value)))
 
         def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
           working.get.flatMap((state, _) => storedUnder(state, store, prefix)).map(_.map((key, held) => (key, held.value)))
@@ -1077,7 +1099,7 @@ private[xkafka] final class Task[F[_]](
             )
 
         def timedScan(prefix: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Chunk[Byte], Long)]] =
-          working.get.flatMap((state, _) => prefix.fold(contents(state, store).map(_.toVector))(storedUnder(state, store, _)))
+          working.get.flatMap((state, _) => prefix.fold(storedRange(state, store, None, None))(storedUnder(state, store, _)))
             .map(_.map((key, held) => (key, held.value, held.timestamp)))
 
         def windowPut(key: Chunk[Byte], start: Long, value: Option[Chunk[Byte]], retention: Long): F[Unit] =
@@ -1090,9 +1112,12 @@ private[xkafka] final class Task[F[_]](
             .map(_.map((start, held) => (start, held.value)))
 
         def windows(from: Long, to: Long, keys: Option[(Chunk[Byte], Chunk[Byte])]): F[Vector[(Chunk[Byte], Long, Chunk[Byte])]] =
-          working.get.flatMap((state, _) => contents(state, store)).map: held =>
+          val held =
+            working.get.flatMap: (state, _) =>
+              keys.fold(storedBetween(state, store, from, to))((first, last) => storedRange(state, store, Some(first), StoreContents.past(last)))
+          held.map: entries =>
             def spanned(key: Chunk[Byte]) = keys.forall((first, last) => StoreContents.keys.gteq(key, first) && StoreContents.keys.lteq(key, last))
-            held.toVector.flatMap: (windowed, stored) =>
+            entries.flatMap: (windowed, stored) =>
               val key   = windowed.take(windowed.size - 12)
               val start = WindowStore.startOf(windowed)
               Option.when(start >= from && start <= to && spanned(key))((key, start, stored.value))
@@ -1114,7 +1139,8 @@ private[xkafka] final class Task[F[_]](
             working.get.flatMap: (state, _) =>
               keys match
                 case Some((first, last)) if first == last => storedUnder(state, store, first)
-                case _                                    => contents(state, store).map(_.toVector)
+                case Some((first, last))                  => storedRange(state, store, Some(first), StoreContents.past(last))
+                case None                                 => storedBetween(state, store, earliestEnd, latestEnd)
           held.map: entries =>
             def spanned(key: Chunk[Byte]) = keys.forall((first, last) => StoreContents.keys.gteq(key, first) && StoreContents.keys.lteq(key, last))
             entries.flatMap: (session, stored) =>
@@ -1167,7 +1193,7 @@ private[xkafka] final class Task[F[_]](
     * expired, as Java's window store fetches them.
     */
   private def windowsOf(state: TaskState, store: String, retention: Long, bytes: Chunk[Byte], from: Long, to: Long): F[Vector[(Long, Stored)]] =
-    (clockOf(state, store, WindowStore.clockOf), storedUnder(state, store, bytes)).mapN: (clock, entries) =>
+    (clockOf(state, store), storedUnder(state, store, bytes)).mapN: (clock, entries) =>
       val least = math.max(from, clock - retention + 1)
       entries.collect:
         case (held, stored) if held.size == bytes.size + 12 => (WindowStore.startOf(held), stored)
@@ -1187,12 +1213,11 @@ private[xkafka] final class Task[F[_]](
       written: Option[Chunk[Byte]],
       timestamp: Long
   ): F[(TaskState, TaskOutput)] =
-    clockOf(state, store, WindowStore.clockOf).flatMap: clock =>
+    clockOf(state, store).flatMap: clock =>
       val windowed = WindowStore.key(bytes, start)
       val ticked   = math.max(clock, start)
       val kept   = if WindowStore.expired(start, ticked, retention) then state else state.written(store, windowed, written.map(Stored(_, timestamp)))
-      val pruned =
-        if ticked > clock then swept(kept, store, held => WindowStore.expired(WindowStore.startOf(held), ticked, retention)) else F.pure(kept)
+      val pruned = if ticked > clock then swept(kept, store, ticked - retention) else F.pure(kept)
       pruned.map(after =>
         (
           after.copy(clocks = after.clocks.updated(store, ticked)),
@@ -1323,7 +1348,7 @@ private[xkafka] final class Task[F[_]](
       timestamp: Long,
       moving: Option[Boolean] = None
   ): F[(TaskState, TaskOutput)] =
-    clockOf(state, store, SessionStore.clockOf).flatMap: clock =>
+    clockOf(state, store).flatMap: clock =>
       val session = SessionStore.key(bytes, start, end)
       val ticked  = if moving.getOrElse(written.isDefined) then math.max(clock, end) else clock
       val kept    =
@@ -1331,8 +1356,7 @@ private[xkafka] final class Task[F[_]](
           case None                                                   => state.written(store, session, None)
           case Some(_) if WindowStore.expired(end, ticked, retention) => state
           case Some(value)                                            => state.written(store, session, Some(Stored(value, timestamp)))
-      val pruned =
-        if ticked > clock then swept(kept, store, held => WindowStore.expired(SessionStore.endOf(held), ticked, retention)) else F.pure(kept)
+      val pruned = if ticked > clock then swept(kept, store, ticked - retention) else F.pure(kept)
       pruned.map(after =>
         (
           after.copy(clocks = after.clocks.updated(store, ticked)),
@@ -1419,9 +1443,9 @@ private[xkafka] final class Task[F[_]](
       val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
       range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
         case None                 => F.pure((Vector.empty, throttled))
-        case Some((lower, upper)) => contents(throttled, store).flatMap: entries =>
+        case Some((lower, upper)) => storedBetween(throttled, store, lower, upper).flatMap: entries =>
             val due =
-              entries.toVector.map: (held, stored) =>
+              entries.map: (held, stored) =>
                 (SessionStore.endOf(held), held.take(held.size - 16), SessionStore.startOf(held), stored)
               .filter((end, _, _, _) => end >= lower && end <= upper).sortWith: (a, b) =>
                 a._1 < b._1 || (a._1 == b._1 && (StoreContents.keys.compare(a._2, b._2) < 0 || (a._2 == b._2 && a._3 < b._3)))
@@ -1648,9 +1672,9 @@ private[xkafka] final class Task[F[_]](
       val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
       range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
         case None                 => F.pure((Vector.empty, throttled))
-        case Some((lower, upper)) => contents(throttled, store).flatMap: entries =>
+        case Some((lower, upper)) => storedBetween(throttled, store, lower, upper).flatMap: entries =>
             val due =
-              entries.toVector.map((stored, held) => (WindowStore.startOf(stored), stored.take(stored.size - 12), held))
+              entries.map((stored, held) => (WindowStore.startOf(stored), stored.take(stored.size - 12), held))
                 .filter((start, _, _) => start >= lower && start <= upper).sortWith: (a, b) =>
                   a._1 < b._1 || (a._1 == b._1 && StoreContents.keys.compare(a._2, b._2) < 0)
             due.traverse: (start, serialized, held) =>
@@ -1750,8 +1774,10 @@ private[xkafka] object Task:
       open: TaskStore.Open[F],
       number: Int = 0
   )(using F: MonadThrow[F], refs: Ref.Make[F]): F[Task[F]] =
-    subtopology.stores.traverse(store => open(store.value, held.getOrElse(store.value, StoreContents.empty)).map(store.value -> _))
-      .map(stores => new Task(application, subtopology, partition, stores.toMap, number))
+    subtopology.stores.traverse(store =>
+      open(store.value, WindowStore.timesOf(List(subtopology)).get(store.value), held.getOrElse(store.value, StoreContents.empty))
+        .map(store.value -> _)
+    ).map(stores => new Task(application, subtopology, partition, stores.toMap, number))
 
   /** A task over stores in memory. */
   def inMemory[F[_]: Concurrent](

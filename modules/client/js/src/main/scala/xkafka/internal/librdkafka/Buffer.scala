@@ -23,10 +23,11 @@ package xkafka.internal.librdkafka
 
 import scala.scalajs.js
 import scala.scalajs.js.annotation.JSGlobal
+import scala.scalajs.js.typedarray.Int8Array
 
 /** A Node buffer, which koffi passes to C as a pointer to its bytes. Every platform xkafka ships for is little-endian. */
 @js.native
-private[librdkafka] trait Buffer extends js.Object:
+private[internal] trait Buffer extends js.Object:
   def writeInt32LE(value: Int, offset: Int): Int               = js.native
   def readInt32LE(offset: Int): Int                            = js.native
   def writeBigInt64LE(value: js.BigInt, offset: Int): Int      = js.native
@@ -34,9 +35,10 @@ private[librdkafka] trait Buffer extends js.Object:
   def readBigInt64LE(offset: Int): js.BigInt                   = js.native
   def indexOf(value: Int): Int                                 = js.native
   def toString(encoding: String, start: Int, end: Int): String = js.native
+  def set(source: Int8Array, offset: Int): Unit                = js.native
 
 @js.native
 @JSGlobal("Buffer")
-private[librdkafka] object Buffers extends js.Object:
+private[internal] object Buffers extends js.Object:
   /** A zero-filled buffer whose memory lives outside the JavaScript heap, so it stays put while a worker thread writes to it. */
   def alloc(size: Int): Buffer = js.native

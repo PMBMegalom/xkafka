@@ -37,6 +37,8 @@ val snappyJavaVersion      = "1.1.10.12" // kafka-clients asks for 1.1.10.7, whi
 val nodeVersion            = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
 val librdkafkaVersion      = "2.16.0"
 val librdkafkaSha256       = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
+val rocksdbVersion         = "10.1.3"    // rocksdbjni on the JVM, and the libraries its jar carries on the others
+val rocksdbSha256          = "e7f925287d9fe2574fb7c7a86f7facaa9b8ab602a2eed0e598bf633528121498"
 val munitVersion           = "1.3.6"
 val munitCatsEffectVersion = "2.2.1"
 val munitScalacheckVersion = "1.3.1"
@@ -57,8 +59,19 @@ val forgetStaleLibrdkafka  = taskKey[Unit]("Removes the tests' installed library
 val npmLibrdkafkaMusl      =
   taskKey[File]("Builds the library for musl on this machine's architecture in an Alpine container, checks it loads there, and packages it")
 
+val prepareRocksdb     = taskKey[File]("Downloads and verifies the pinned rocksdbjni jar once, and extracts its RocksDB library for this platform")
+val sharedRocksdb      = taskKey[File]("Builds the RocksDB shim into the shared library the @xkafka/rocksdb npm packages carry")
+val npmRocksdbLocal    = settingKey[File]("The @xkafka/rocksdb package the tests install, which names this platform's package by path")
+val npmRocksdb         = taskKey[File]("Assembles the @xkafka/rocksdb npm package and the package for this platform")
+val forgetStaleRocksdb = taskKey[Unit]("Removes the tests' installed RocksDB packages and npm locks when they come from an earlier shim identity")
+val npmRocksdbMusl     = taskKey[File]("Builds the RocksDB shim for musl in an Alpine container, checks it opens a store there, and packages it")
+val rocksdbShimTest    = taskKey[Unit]("Tests the RocksDB shim in C, through the library the npm package carries, under a leak checker")
+
 val repositoryRoot = file(".")
 val isMacOs        = sys.props.getOrElse("os.name", "").toLowerCase.contains("mac")
+
+// The rocksdbjni jar and the libraries taken from it, which the JavaScript and Native builds share.
+val rocksdbRoot = repositoryRoot / "target" / s"rocksdb-$rocksdbVersion"
 
 /** A file of this repository as the workflow names it, relative to the repository root. */
 def repositoryPath(file: File): String =
@@ -96,6 +109,13 @@ def cacheLibrdkafkaLibrary = Def.setting {
   )
 }
 
+// The rocksdbjni jar is downloaded once and kept, under a key that names the jar by its checksum.
+val cacheRocksdb = WorkflowStep.Use(
+  UseRef.Public("actions", "cache", "v6"),
+  name = Some("Cache the rocksdbjni jar"),
+  params = Map("path" -> repositoryPath(rocksdbRoot), "key" -> s"rocksdbjni-${rocksdbSha256.take(16)}")
+)
+
 ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
   Some("matrix.project == 'rootJS'")
 )
@@ -123,6 +143,7 @@ ThisBuild / githubWorkflowBuildPreamble += WorkflowStep.Run(
   cond = Some("matrix.project == 'rootNative' && startsWith(matrix.os, 'macos')")
 )
 ThisBuild / githubWorkflowBuildPreamble += cacheLibrdkafkaLibrary.value.withCond(Some("matrix.project == 'rootJS'"))
+ThisBuild / githubWorkflowBuildPreamble += cacheRocksdb.withCond(Some("matrix.project == 'rootJS' || matrix.project == 'rootNative'"))
 
 // The jobs below build with the one Scala version the project has, so they need neither a Scala axis in their matrix nor the `++` that selects it.
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
@@ -153,6 +174,23 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   timeoutMinutes = Some(45)
 )
 
+// npm trusts this workflow to publish the packages, so a job that publishes them proves which workflow it is with a GitHub identity token and
+// holds no npm token.
+val npmPublishPermissions = Permissions.Specify(
+  actions = PermissionValue.None,
+  checks = PermissionValue.None,
+  contents = PermissionValue.Read,
+  deployments = PermissionValue.None,
+  idToken = PermissionValue.Write,
+  issues = PermissionValue.None,
+  packages = PermissionValue.None,
+  pages = PermissionValue.None,
+  pullRequests = PermissionValue.None,
+  repositoryProjects = PermissionValue.None,
+  securityEvents = PermissionValue.None,
+  statuses = PermissionValue.None
+)
+
 // Each version is published once, and the Maven artifacts that depend on it wait for it.
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "npm-publish",
@@ -175,27 +213,70 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     )
   ),
   cond = Some(publishedArtifactCondition),
-  // npm trusts this workflow to publish the packages, so the job proves which workflow it is with a GitHub identity token and holds no npm token.
-  permissions = Some(
-    Permissions.Specify(
-      actions = PermissionValue.None,
-      checks = PermissionValue.None,
-      contents = PermissionValue.Read,
-      deployments = PermissionValue.None,
-      idToken = PermissionValue.Write,
-      issues = PermissionValue.None,
-      packages = PermissionValue.None,
-      pages = PermissionValue.None,
-      pullRequests = PermissionValue.None,
-      repositoryProjects = PermissionValue.None,
-      securityEvents = PermissionValue.None,
-      statuses = PermissionValue.None
-    )
-  ),
+  permissions = Some(npmPublishPermissions),
   oses = List("ubuntu-24.04"),
   scalas = Nil,
   javas = List(JavaSpec.temurin("17")),
   needs = List("npm-librdkafka"),
+  timeoutMinutes = Some(15)
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "npm-rocksdb",
+  name = "Prebuilt RocksDB shims",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    setupNode,
+    cacheLibrdkafkaLibrary.value,
+    cacheRocksdb,
+    WorkflowStep.Sbt(List("clientJS/rocksdbShimTest"), name = Some("Test the shim in C under a leak checker")),
+    WorkflowStep.Sbt(
+      List("clientJS/testOnly xkafka.internal.rocksdb.*"),
+      name = Some("Build this platform's package and open a store through it")
+    ),
+    WorkflowStep.Sbt(
+      List("clientJS/npmRocksdbMusl"),
+      name = Some("Build the musl shim in Alpine and check that it opens a store there"),
+      cond = Some("runner.os == 'Linux'")
+    ),
+    WorkflowStep.Use(
+      UseRef.Public("actions", "upload-artifact", "v7"),
+      name = Some("Keep the packages"),
+      params = Map("name" -> "npm-rocksdb-${{ matrix.os }}", "path" -> s"${repositoryPath((client.js / npmLibrdkafkaPackages).value)}/rocksdb*")
+    )
+  ),
+  oses = List("ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel"),
+  scalas = Nil,
+  sbtStepPreamble = Nil,
+  javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(45)
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "npm-publish-rocksdb",
+  name = "Publish the prebuilt RocksDB shims",
+  steps = List(
+    WorkflowStep.Checkout,
+    WorkflowStep.Use(
+      UseRef.Public("actions", "setup-node", "v7"),
+      name = Some("Setup Node.js"),
+      params = Map("node-version-file" -> ".nvmrc")
+    ),
+    WorkflowStep.Use(
+      UseRef.Public("actions", "download-artifact", "v8"),
+      name = Some("Collect the packages"),
+      params = Map("pattern" -> "npm-rocksdb-*", "merge-multiple" -> "true", "path" -> "npm-packages")
+    ),
+    WorkflowStep.Run(
+      List("scripts/publish-npm-rocksdb.sh npm-packages"),
+      name = Some("Publish the versions npm does not have yet")
+    )
+  ),
+  cond = Some(publishedArtifactCondition),
+  permissions = Some(npmPublishPermissions),
+  oses = List("ubuntu-24.04"),
+  scalas = Nil,
+  javas = List(JavaSpec.temurin("17")),
+  needs = List("npm-rocksdb"),
   timeoutMinutes = Some(15)
 )
 
@@ -206,6 +287,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     setupNode,
     installNativeDependencies,
     cacheLibrdkafkaLibrary.value.withCond(Some("matrix.platform == 'js'")),
+    cacheRocksdb.withCond(Some("matrix.platform != 'jvm'")),
     WorkflowStep.Run(
       List("scripts/integration-test.sh ${{ matrix.platform }}"),
       name = Some("Test the backend against Kafka, including TLS and SASL")
@@ -233,6 +315,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     setupNode,
     installNativeDependencies,
     cacheLibrdkafkaLibrary.value.withCond(Some("matrix.platform == 'js'")),
+    cacheRocksdb.withCond(Some("matrix.platform != 'jvm'")),
     WorkflowStep.Run(
       List("scripts/integration-test.sh --streams ${{ matrix.platform }}"),
       name = Some("Test the streams engine against each supported Kafka release, beside Java Streams")
@@ -325,10 +408,11 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 
 // sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
+val publishWaitsFor = List("integration", "streams-integration", "native-leaks", "js-leaks", "npm-publish", "npm-publish-rocksdb")
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
     if (job.id == "publish")
-      job.withNeeds((job.needs ++ List("integration", "streams-integration", "native-leaks", "js-leaks", "npm-publish")).distinct)
+      job.withNeeds((job.needs ++ publishWaitsFor).distinct)
     else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
     else job
   }
@@ -421,12 +505,12 @@ def hostNpmPlatform: String = {
   if (isMacOs) s"darwin-$cpu" else s"linux-$cpu-${if (musl) "musl" else "gnu"}"
 }
 
-/** The package.json of an @xkafka/librdkafka package: the fields they all share, then the package's own. */
-def npmPackageJson(name: String, description: String, license: String, fields: (String, scalajsbundler.util.JSON)*): String = {
+/** The package.json of an @xkafka package: the fields they all share, then the package's own. */
+def npmPackageJson(name: String, version: String, description: String, license: String, fields: (String, scalajsbundler.util.JSON)*): String = {
   import scalajsbundler.util.JSON
   val common = Seq(
     "name"        -> JSON.str(name),
-    "version"     -> JSON.str(librdkafkaShimId),
+    "version"     -> JSON.str(version),
     "description" -> JSON.str(description),
     "license"     -> JSON.str(license),
     "repository"  -> JSON.objStr(Seq("type" -> "git", "url" -> "git+https://github.com/PMBMegalom/xkafka.git"))
@@ -459,6 +543,7 @@ def writePlatformPackage(root: File, platform: String, library: File, sources: F
     directory / "package.json",
     npmPackageJson(
       s"@xkafka/librdkafka-$platform",
+      librdkafkaShimId,
       s"librdkafka $librdkafkaVersion with OpenSSL, zlib and zstd, built for xkafka on $label",
       "MIT AND BSD-2-Clause AND Apache-2.0 AND BSD-3-Clause AND Zlib",
       Seq("os" -> JSON.arr(JSON.str(os)), "cpu" -> JSON.arr(JSON.str(cpu))) ++
@@ -478,6 +563,7 @@ def writeUmbrellaPackage(directory: File, clientBase: File, platforms: Seq[(Stri
     directory / "package.json",
     npmPackageJson(
       "@xkafka/librdkafka",
+      librdkafkaShimId,
       s"librdkafka $librdkafkaVersion for xkafka on Node.js, prebuilt for each supported platform",
       "MIT",
       "main"                 -> JSON.str("index.js"),
@@ -485,6 +571,134 @@ def writeUmbrellaPackage(directory: File, clientBase: File, platforms: Seq[(Stri
       "optionalDependencies" -> JSON.objStr(platforms.map { case (platform, version) => s"@xkafka/librdkafka-$platform" -> version })
     )
   )
+}
+
+/** Downloads the pinned rocksdbjni jar from Maven Central once, and verifies it. */
+def fetchRocksdb(log: Logger): File = {
+  val jar      = rocksdbRoot / s"rocksdbjni-$rocksdbVersion.jar"
+  val download = URI.create(s"https://repo1.maven.org/maven2/org/rocksdb/rocksdbjni/$rocksdbVersion/rocksdbjni-$rocksdbVersion.jar").toURL
+
+  IO.createDirectory(rocksdbRoot)
+  if (!jar.isFile) {
+    log.info(s"Downloading rocksdbjni $rocksdbVersion")
+    // Written beside the jar and renamed into place, so a build running at the same time never reads half of it.
+    val partial = java.io.File.createTempFile("rocksdbjni", ".part", rocksdbRoot)
+    val input   = download.openStream()
+    try IO.transfer(input, partial)
+    finally input.close()
+    IO.move(partial, jar)
+  }
+
+  val actualSha256 = MessageDigest.getInstance("SHA-256").digest(IO.readBytes(jar)).iterator.map(byte => f"${byte & 0xff}%02x").mkString
+  if (actualSha256 != rocksdbSha256)
+    sys.error(s"rocksdbjni checksum mismatch: expected $rocksdbSha256, got $actualSha256")
+  jar
+}
+
+// The library rocksdbjni carries for each platform the npm packages are built for, by its name in the jar.
+val rocksdbLibraries = Map(
+  "darwin-arm64"     -> "librocksdbjni-osx-arm64.jnilib",
+  "darwin-x64"       -> "librocksdbjni-osx-x86_64.jnilib",
+  "linux-x64-gnu"    -> "librocksdbjni-linux64.so",
+  "linux-arm64-gnu"  -> "librocksdbjni-linux-aarch64.so",
+  "linux-x64-musl"   -> "librocksdbjni-linux64-musl.so",
+  "linux-arm64-musl" -> "librocksdbjni-linux-aarch64-musl.so"
+)
+
+/** The RocksDB library of one platform, taken from the verified jar the first time it is asked for. */
+def rocksdbLibrary(log: Logger, platform: String): File = {
+  val name    = rocksdbLibraries.getOrElse(platform, sys.error(s"rocksdbjni carries no library for $platform"))
+  val library = rocksdbRoot / platform / name
+  if (!library.isFile) {
+    val jar = fetchRocksdb(log)
+    IO.withTemporaryDirectory(
+      staging => {
+        IO.unzip(jar, staging, new ExactFilter(name)): Unit
+        IO.move(staging / name, library)
+      },
+      keepDirectory = false
+    )
+  }
+  library
+}
+
+// The C shim through which both the JavaScript and the Native backend reach RocksDB.
+val rocksdbShim = repositoryRoot / "modules" / "client" / "native" / "src" / "main" / "resources" / "scala-native" / "xkafka_rocksdb.c"
+
+// The shim's identity: the RocksDB release and everything the npm packages are made from. It versions the packages and the shim reports it, so
+// the JavaScript backend refuses a shim built from anything else, as it does librdkafka's.
+val rocksdbShimId = {
+  val digest = MessageDigest.getInstance("SHA-256")
+  val inputs = Seq(
+    rocksdbShim,
+    repositoryRoot / "scripts" / "build-rocksdb-library.sh",
+    repositoryRoot / "modules" / "client" / "js" / "npm" / "rocksdb" / "index.js",
+    repositoryRoot / "modules" / "client" / "js" / "npm" / "rocksdb" / "LICENSES.txt"
+  )
+  inputs.foreach(source => digest.update(IO.readBytes(source)))
+  s"$rocksdbVersion-${digest.digest().iterator.map(byte => f"${byte & 0xff}%02x").mkString.take(12)}"
+}
+
+/** The command that builds the RocksDB shim into the shared library the npm packages carry. */
+def rocksdbLibraryCommand(output: File): Seq[String] =
+  Seq((repositoryRoot / "scripts" / "build-rocksdb-library.sh").getAbsolutePath, output.getAbsolutePath, rocksdbShimId, rocksdbShim.getAbsolutePath)
+
+/** Writes the RocksDB package of one platform, holding the shim, the RocksDB library and their licenses, and answers its directory. */
+def writeRocksdbPlatformPackage(root: File, platform: String, shim: File, library: File): File = {
+  import scalajsbundler.util.JSON
+  val label     = npmPlatforms.toMap.getOrElse(platform, sys.error(s"no npm package is built for $platform"))
+  val os        = platform.split('-')(0)
+  val cpu       = platform.split('-')(1)
+  val libc      = platform.split('-').lift(2).map(value => if (value == "gnu") "glibc" else value)
+  val shimName  = if (os == "darwin") "libxkafka_rocksdb.dylib" else "libxkafka_rocksdb.so"
+  val directory = root / s"rocksdb-$platform"
+  val licenses  = repositoryRoot / "modules" / "client" / "js" / "npm" / "rocksdb" / "LICENSES.txt"
+
+  IO.delete(directory)
+  IO.copyFile(shim, directory / shimName)
+  IO.copyFile(library, directory / library.getName)
+  IO.write(directory / "LICENSES.txt", s"==== xkafka shim (MIT) ====\n\n${IO.read(repositoryRoot / "LICENSE")}\n\n${IO.read(licenses)}")
+  IO.write(
+    directory / "package.json",
+    npmPackageJson(
+      s"@xkafka/rocksdb-$platform",
+      rocksdbShimId,
+      s"RocksDB $rocksdbVersion from rocksdbjni, with the shim xkafka opens it through, on $label",
+      "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-2-Clause AND Zlib AND bzip2-1.0.6",
+      Seq("os" -> JSON.arr(JSON.str(os)), "cpu" -> JSON.arr(JSON.str(cpu))) ++
+        libc.map(value => "libc" -> JSON.arr(JSON.str(value))) :+
+        ("files" -> JSON.arr(JSON.str(shimName), JSON.str(library.getName), JSON.str("LICENSES.txt"))): _*
+    )
+  )
+  directory
+}
+
+/** Writes the RocksDB umbrella package, which depends on each platform package, at the versions given, and finds the one npm installed. */
+def writeRocksdbUmbrellaPackage(directory: File, clientBase: File, platforms: Seq[(String, String)]): Unit = {
+  import scalajsbundler.util.JSON
+  IO.delete(directory)
+  IO.copyFile(clientBase / "npm" / "rocksdb" / "index.js", directory / "index.js")
+  IO.write(
+    directory / "package.json",
+    npmPackageJson(
+      "@xkafka/rocksdb",
+      rocksdbShimId,
+      s"RocksDB $rocksdbVersion for xkafka on Node.js, prebuilt for each supported platform",
+      "MIT",
+      "main"                 -> JSON.str("index.js"),
+      "files"                -> JSON.arr(JSON.str("index.js")),
+      "optionalDependencies" -> JSON.objStr(platforms.map { case (platform, version) => s"@xkafka/rocksdb-$platform" -> version })
+    )
+  )
+}
+
+/** Removes the tests' installed @xkafka packages, and the npm locks that name them, when `name` was installed from another identity. */
+def forgetStalePackage(workspace: File, clientBase: File, name: String, identity: String): Unit = {
+  val locks = Seq(clientBase / "package-lock.json", workspace / "package-lock.json", workspace / "node_modules" / ".package-lock.json")
+  def installed(lock: File): Option[String] =
+    (play.api.libs.json.Json.parse(IO.read(lock)) \ "packages" \ s"node_modules/@xkafka/$name" \ "resolved").asOpt[String]
+  if (locks.exists(lock => lock.isFile && installed(lock).exists(!_.contains(s"/local/$identity/"))))
+    IO.delete(locks :+ (workspace / "node_modules" / "@xkafka"))
 }
 
 val commonSettings = Seq(
@@ -524,14 +738,14 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
     // The release the group connection names to the broker.
     buildInfoPackage := "xkafka.internal",
-    buildInfoKeys    := Seq[BuildInfoKey](version),
+    buildInfoKeys    := Seq[BuildInfoKey](version, "rocksdb" -> rocksdbVersion),
     buildInfoOptions ++= Seq(BuildInfoOption.PackagePrivate, BuildInfoOption.ConstantValue)
   )
   .jsConfigure(
     _.enablePlugins(ScalaJSBundlerPlugin)
   )
   .jsSettings(
-    Compile / npmDependencies ++= Seq("koffi" -> koffiVersion, "@xkafka/librdkafka" -> librdkafkaShimId),
+    Compile / npmDependencies ++= Seq("koffi" -> koffiVersion, "@xkafka/librdkafka" -> librdkafkaShimId, "@xkafka/rocksdb" -> rocksdbShimId),
     Compile / additionalNpmConfig += "license" -> scalajsbundler.util.JSON.str("MIT"),
     // koffi's install script only compiles koffi from source where no prebuilt binary matches the platform, and every platform xkafka
     // supports has one, so the script is declined.
@@ -595,17 +809,74 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       sharedLibrdkafka.value: Unit
       writePlatformPackage(npmLibrdkafkaPackages.value, hostNpmPlatform.replace("-gnu", "-musl"), output, buildRoot / "source")
     },
-    forgetStaleLibrdkafka := {
-      val workspace = (Test / npmUpdate / crossTarget).value
-      val locks = Seq(baseDirectory.value / "package-lock.json", workspace / "package-lock.json", workspace / "node_modules" / ".package-lock.json")
-      def installed(lock: File): Option[String] =
-        (play.api.libs.json.Json.parse(IO.read(lock)) \ "packages" \ "node_modules/@xkafka/librdkafka" \ "resolved").asOpt[String]
-      if (locks.exists(lock => lock.isFile && installed(lock).exists(!_.contains(s"/local/$librdkafkaShimId/"))))
-        IO.delete(locks :+ (workspace / "node_modules" / "@xkafka"))
+    forgetStaleLibrdkafka := forgetStalePackage((Test / npmUpdate / crossTarget).value, baseDirectory.value, "librdkafka", librdkafkaShimId),
+    prepareRocksdb        := rocksdbLibrary(streams.value.log, hostNpmPlatform),
+    // The shim alone, which opens the RocksDB library rocksdbjni carries, so it builds in moments.
+    sharedRocksdb := {
+      val log    = streams.value.log
+      val output = target.value / "xkafka-rocksdb" / (if (isMacOs) "libxkafka_rocksdb.dylib" else "libxkafka_rocksdb.so")
+      val built  = target.value / "xkafka-rocksdb" / ".shim-id"
+      if (!output.isFile || !built.isFile || IO.read(built) != rocksdbShimId) {
+        runCommand(log, rocksdbLibraryCommand(output), repositoryRoot)
+        IO.write(built, rocksdbShimId)
+      }
+      output
     },
-    // The tests ask for the local copy beside the published version, and the resolution settles that conflict in its favour.
-    Test / npmDependencies += "@xkafka/librdkafka" -> s"file:${npmLibrdkafkaLocal.value.getAbsolutePath}",
-    Test / npmResolutions                          := Map("@xkafka/librdkafka" -> s"file:${npmLibrdkafkaLocal.value.getAbsolutePath}"),
+    npmRocksdbLocal := npmLibrdkafkaPackages.value / "local" / rocksdbShimId / "rocksdb",
+    // As for librdkafka: the umbrella package as npm gets it, and a copy the tests install, which names this platform's package by path.
+    npmRocksdb := {
+      val root     = npmLibrdkafkaPackages.value
+      val platform = hostNpmPlatform
+      val packaged = writeRocksdbPlatformPackage(root, platform, sharedRocksdb.value, prepareRocksdb.value)
+      writeRocksdbUmbrellaPackage(root / "rocksdb", baseDirectory.value, npmPlatforms.map { case (name, _) => name -> rocksdbShimId })
+      writeRocksdbUmbrellaPackage(npmRocksdbLocal.value, baseDirectory.value, Seq(platform -> s"file:${packaged.getAbsolutePath}"))
+      root
+    },
+    // The check opens a store with the musl RocksDB library in the container, which shows both it and the shim work with musl.
+    npmRocksdbMusl := {
+      val log      = streams.value.log
+      val platform = s"linux-${hostNpmPlatform.split('-')(1)}-musl" // The container runs on this machine's architecture.
+      val output   = target.value / "xkafka-rocksdb-musl" / "libxkafka_rocksdb.so"
+      val library  = rocksdbLibrary(log, platform)
+      val project  = repositoryRoot.getAbsolutePath
+      val check    =
+        s"mkdir -p /tmp/koffi && npm install --silent --no-audit --no-fund --prefix /tmp/koffi koffi@$koffiVersion && " +
+          s"node ${(repositoryRoot / "scripts" / "check-rocksdb-library.cjs").getAbsolutePath} /tmp/koffi ${output.getAbsolutePath} " +
+          s"${library.getAbsolutePath} $rocksdbShimId $rocksdbVersion"
+      runCommand(
+        log,
+        Seq(
+          "docker",
+          "run",
+          "--rm",
+          "--volume",
+          s"$project:$project",
+          "--workdir",
+          project,
+          s"node:$nodeVersion-alpine",
+          "sh",
+          "-c",
+          s"apk add --no-cache build-base >/dev/null && ${rocksdbLibraryCommand(output).mkString(" ")} && $check"
+        ),
+        repositoryRoot
+      )
+      writeRocksdbPlatformPackage(npmLibrdkafkaPackages.value, platform, output, library)
+    },
+    forgetStaleRocksdb := forgetStalePackage((Test / npmUpdate / crossTarget).value, baseDirectory.value, "rocksdb", rocksdbShimId),
+    rocksdbShimTest    := {
+      val script = (repositoryRoot / "scripts" / "rocksdb-shim-test.sh").getAbsolutePath
+      runCommand(
+        streams.value.log,
+        Seq(script, sharedRocksdb.value.getAbsolutePath, prepareRocksdb.value.getAbsolutePath, rocksdbVersion, rocksdbShimId),
+        repositoryRoot
+      )
+    },
+    // The tests ask for the local copies beside the published versions, and the resolutions settle those conflicts in their favour.
+    Test / npmResolutions := Map(
+      "@xkafka/librdkafka" -> s"file:${npmLibrdkafkaLocal.value.getAbsolutePath}",
+      "@xkafka/rocksdb"    -> s"file:${npmRocksdbLocal.value.getAbsolutePath}"
+    ),
+    Test / npmDependencies ++= (Test / npmResolutions).value.toSeq,
     // npm links a local directory without installing what it depends on, so the local copies are installed as packages instead.
     Test / npmExtraArgs ++= Seq("--install-links"),
     // The published jar lists its npm dependencies for every configuration, and an application's tests install a library's test dependencies too,
@@ -613,20 +884,20 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     Compile / packageBin / mappings := {
       import scalajsbundler.NpmDependencies
       val manifest = NpmDependencies.manifestFileName
-      val local    = "@xkafka/librdkafka" -> s"file:${npmLibrdkafkaLocal.value.getAbsolutePath}"
+      val locals   = (Test / npmResolutions).value.toSet
       (Compile / packageBin / mappings).value.map {
         case (file, `manifest`) =>
           val listed    = play.api.libs.json.Json.parse(IO.read(file)).as(NpmDependencies.serializer)
-          val published = listed.copy(testDependencies = listed.testDependencies.filterNot(_ == local))
+          val published = listed.copy(testDependencies = listed.testDependencies.filterNot(locals))
           NpmDependencies.writeManifest(published, target.value / "published-npm-dependencies") -> manifest
         case other => other
       }
     },
     // npm keeps an installed local package, through its locks, even after the path it is asked for changes, so one from an earlier library
     // identity is removed along with the locks that name it.
-    Test / npmUpdate := (Test / npmUpdate).dependsOn(npmLibrdkafka, forgetStaleLibrdkafka).value,
-    // The identity of the library this build was made with, which the loaded library must report.
-    buildInfoKeys += BuildInfoKey("shim" -> librdkafkaShimId)
+    Test / npmUpdate := (Test / npmUpdate).dependsOn(npmLibrdkafka, forgetStaleLibrdkafka, npmRocksdb, forgetStaleRocksdb).value,
+    // The identities of the libraries this build was made with, which the loaded libraries must report, and the RocksDB release.
+    buildInfoKeys ++= Seq[BuildInfoKey]("shim" -> librdkafkaShimId, "rocksdbShim" -> rocksdbShimId)
   )
   .nativeSettings(
     librdkafkaPrefix  := sys.env.get("XKAFKA_LIBRDKAFKA_PREFIX").fold(target.value / s"librdkafka-$librdkafkaVersion")(file),
@@ -691,9 +962,12 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 
       prefix
     },
-    Compile / nativeLink := (Compile / nativeLink).dependsOn(prepareLibrdkafka).value,
-    Test / nativeLink    := (Test / nativeLink).dependsOn(prepareLibrdkafka).value,
-    nativeConfig         := {
+    prepareRocksdb := rocksdbLibrary(streams.value.log, hostNpmPlatform),
+    // A Native program finds the RocksDB library where XKAFKA_ROCKSDB_LIBRARY says, so the tests name the one extracted for this platform.
+    Test / envVars += "XKAFKA_ROCKSDB_LIBRARY" -> prepareRocksdb.value.getAbsolutePath,
+    Compile / nativeLink                       := (Compile / nativeLink).dependsOn(prepareLibrdkafka).value,
+    Test / nativeLink                          := (Test / nativeLink).dependsOn(prepareLibrdkafka).value,
+    nativeConfig                               := {
       val config = nativeConfig.value
       val prefix = librdkafkaPrefix.value
       // The static librdkafka archive leaves TLS and compression symbols undefined, so the final link needs
@@ -720,7 +994,9 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   )
   .jvmSettings(
     libraryDependencies ++= Seq(
-      "org.apache.kafka"  % "kafka-clients"            % kafkaClientsVersion,
+      "org.apache.kafka" % "kafka-clients" % kafkaClientsVersion,
+      // Only an application keeping its stores on disk needs RocksDB, and adds it itself.
+      "org.rocksdb"       % "rocksdbjni"               % rocksdbVersion      % Optional,
       "at.yawk.lz4"       % "lz4-java"                 % lz4JavaVersion,
       "org.xerial.snappy" % "snappy-java"              % snappyJavaVersion,
       "org.slf4j"         % "slf4j-nop"                % slf4jVersion        % Test,

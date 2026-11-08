@@ -24,13 +24,25 @@ package streams
 
 import cats.Show
 
-/** The name of a state store, from which its changelog topic `<application id>-<name>-changelog` is named. */
-opaque type Store = String
+/** The name of a state store, from which its changelog topic `<application id>-<name>-changelog` is named. Where the application keeps its stores on
+  * disk, a store can be kept in memory instead, and filled again from its changelog each time its task starts.
+  */
+final class Store private (val value: String, val keptInMemory: Boolean):
+  /** This store, kept in memory even where the application keeps its stores on disk. */
+  def inMemory: Store = new Store(value, true)
+
+  override def equals(other: Any): Boolean =
+    other match
+      case store: Store => store.value == value && store.keptInMemory == keptInMemory
+      case _            => false
+
+  override def hashCode: Int = (value, keptInMemory).hashCode
+
+  override def toString: String = value
 
 object Store:
-  def apply(name: String): Store = name
-
-  extension (store: Store) def value: String = store
+  /** The store of this name, kept on disk where the application keeps its stores on disk. */
+  def apply(name: String): Store = new Store(name, false)
 
   given CanEqual[Store, Store] = CanEqual.derived
   given Show[Store]            = Show.show(_.value)
