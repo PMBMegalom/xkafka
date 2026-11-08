@@ -498,8 +498,9 @@ private[xkafka] object Engine:
         changelogsOf(id).flatMap: changelogs =>
           val settling =
             if settled then
-              plane.ends(changelogs.keys.toVector)
-                .flatMap(_.toList.traverse_((partition, end) => stores(changelogs(partition)).write(StoreContents.unchanged, Some(end))))
+              plane.ends(changelogs.keys.toVector).flatMap(_.toList.traverse_((partition, end) =>
+                stores(changelogs(partition)).write(StoreContents.unchanged, Map(partition.partition.value -> end))
+              ))
             else F.unit
           settling *> changelogs.toList.traverse((partition, store) => stores(store).position.map(at => (partition, store, at))).flatMap: positions =>
             stores.values.toList.traverse_(_.close) *> holding.update(_ - id) *> state.traverse: directory =>
@@ -530,7 +531,8 @@ private[xkafka] object Engine:
           fresh.groupBy(_._1).toList.traverse_ { (id, taken) =>
             val standby = running.standbys(id)
             val stores  = standby.stores
-            val reached = standby.changelogs.flatMap((partition, store) => positions(id).get(partition).map(store -> _))
+            val reached =
+              standby.changelogs.flatMap((partition, store) => positions(id).get(partition).map(at => store -> Map(partition.partition.value -> at)))
             Restore.written(stores, Restore.changes(taken.map((_, store, record) => store -> record)), reached) *>
               WindowStore.swept(stores, subtopologies(id.subtopology).retentions)
           } *> {

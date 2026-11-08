@@ -110,6 +110,19 @@ final class RestoreSuite extends CatsEffectSuite:
       )
     )
 
+  test("each store holds each partition past the last record read from it, or to its end once finished, the furthest of the two"):
+    def at(partition: Int, offset: Long) = PolledRecord("c", partition, offset, Some(1L), 0, -1, Some(text("k")), Some(text("v")), Headers.empty)
+    val stores                           = Map(("c", 0) -> "a", ("c", 1) -> "a", ("c", 2) -> "b")
+    assertEquals(
+      Restore.reached(
+        List(at(0, 4L), at(0, 2L), at(1, 7L), at(2, 1L)),
+        Set(("c", 1), ("c", 2), ("c", 3)),
+        Map(("c", 1) -> 5L, ("c", 2) -> 9L),
+        stores.get
+      ),
+      Map("a" -> Map(0 -> 5L, 1 -> 8L), "b" -> Map(2 -> 9L))
+    )
+
   test("a partition is finished by reaching where it was found to end, not by a report of an end before that"):
     def end(partition: Int, offset: Long) = xkafka.internal.driver.PartitionEnd("t", partition, offset)
     val left                              = Set(("t", 0), ("t", 1))
@@ -182,6 +195,31 @@ final class RestoreSuite extends CatsEffectSuite:
             GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
               held.stores("gs").all
                 .map(all => assertEquals(all.map((key, stored) => (new String(key.toArray), new String(stored.value.toArray))), Vector("k" -> "raw")))
+
+    test("a global table acquired again over the store it kept reads on from where it was, without reading its topic again"):
+      Names.fresh:
+        val table    = topic("again")
+        val utf8     = xkafka.streams.Serde.utf8[IO]
+        val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, utf8, utf8, xkafka.streams.Store("gs"))
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
+          )(driver.destroyConsumer)
+        TaskStore.inMemory[IO](StoreContents.empty).flatMap: kept =>
+          // The same store each time the table is acquired, as a store on disk outlives the application.
+          val open: TaskStore.Open[IO] = (_, _, _) => IO.pure(kept)
+          def acquired                 = consumer.use(client => GlobalStores(driver, client, List(read), _ => IO.pure(2), open).use_)
+          for
+            _     <- create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k", Some("v"), 1000L))).void)
+            _     <- acquired
+            first <- kept.positions
+            // Read from the start again, the topic's record would overwrite this.
+            _      <- kept.write(StoreContents.unchanged.updated(text("k"), Some(Stored(text("local"), 1L))))
+            _      <- acquired
+            second <- kept.get(text("k"))
+          yield
+            assert(first.get(0).exists(_ > 0L) && first.get(1).contains(0L), first)
+            assertEquals(second.map(stored => new String(stored.value.toArray)), Some("local"))
 
     test("a global table acquired as soon as its topic is created waits for the topic's leaders"):
       Names.fresh:

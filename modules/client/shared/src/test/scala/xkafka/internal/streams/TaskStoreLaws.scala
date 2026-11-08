@@ -130,19 +130,25 @@ abstract class TaskStoreLaws(kind: String) extends CatsEffectSuite:
       plain   <- fresh(None).flatTap(_.write(StoreContents.unchanged.updated(timedKey(4, 0), Some(held(1L))))).flatMap(_.clock)
     yield assertEquals(List(before, written, removed, after, plain), List(WindowStore.NoTime, 4L, 9L, 9L, WindowStore.NoTime))
 
-  test(s"$kind: a store records the position a write gives with it, keeps it through writes that give none, and starts with none"):
+  test(
+    s"$kind: a store records the positions a write gives with it, each partition's apart, keeps them through writes that give none, and starts with none"
+  ):
     for
       store <- fresh(None)
-      none  <- store.position
-      _     <- store.write(StoreContents.unchanged.updated(bytes(1), Some(held(1L))), Some(5L))
-      five  <- store.position
+      none  <- store.positions
+      _     <- store.write(StoreContents.unchanged.updated(bytes(1), Some(held(1L))), Map(0 -> 5L))
+      five  <- store.positions
       _     <- store.write(StoreContents.unchanged.updated(bytes(2), Some(held(2L))))
-      kept  <- store.position
-      _     <- store.write(StoreContents.unchanged, Some(9L))
-      nine  <- store.position
+      kept  <- store.positions
+      _     <- store.write(StoreContents.unchanged, Map(1 -> 3L))
+      both  <- store.positions
+      _     <- store.write(StoreContents.unchanged, Map(0 -> 9L))
+      moved <- store.positions
+      last  <- store.position
       all   <- store.all
     yield
-      assertEquals(List(none, five, kept, nine), List(None, Some(5L), Some(5L), Some(9L)))
+      assertEquals(List(none, five, kept, both, moved), List(Map.empty, Map(0 -> 5L), Map(0 -> 5L), Map(0 -> 5L, 1 -> 3L), Map(0 -> 9L, 1 -> 3L)))
+      assertEquals(last, Some(9L))
       assertEquals(all.map(_._1), Vector(bytes(1), bytes(2)))
 
 /** The laws, for a store in memory. */

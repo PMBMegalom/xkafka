@@ -68,7 +68,7 @@ final class StateDirectorySuite extends CatsEffectSuite:
       PlatformStateDirectory[IO](at.toString, "app").use: directory =>
         for
           positioned <- directory.open("0_1", "counts", None)
-          _          <- positioned.write(StoreContents.unchanged.updated(key, value("kept")), Some(3L))
+          _          <- positioned.write(StoreContents.unchanged.updated(key, value("kept")), Map(0 -> 3L))
           _          <- positioned.close
           unplaced   <- directory.open("0_2", "counts", None)
           _          <- unplaced.write(StoreContents.unchanged.updated(key, value("lost")))

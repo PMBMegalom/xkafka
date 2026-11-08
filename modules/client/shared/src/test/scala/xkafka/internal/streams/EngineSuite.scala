@@ -196,8 +196,8 @@ final class EngineSuite extends CatsEffectSuite:
           def timed(from: Long, to: Long): IO[Vector[(Chunk[Byte], Stored)]]                               = store.timed(from, to)
           def clock: IO[Long]                                                                              = store.clock
           def close: IO[Unit]                                                                              = store.close
-          def write(changes: StoreChanges, position: Option[Long]): IO[Unit] = batches.update(_ :+ changes) *> store.write(changes, position)
-          def position: IO[Option[Long]]                                     = store.position
+          def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = batches.update(_ :+ changes) *> store.write(changes, positions)
+          def positions: IO[Map[Int, Long]]                                     = store.positions
 
   private def storing(
       commit: (Int, List[OffsetCommitRequest.Topic]) => IO[List[OffsetCommitRequest.Answer]],
@@ -918,7 +918,7 @@ final class EngineSuite extends CatsEffectSuite:
           assertEquals(from.map(_._1), List(Map(changelog(1) -> 2L)))
 
   test("tasks an earlier run gave up are reported in task offsets from the start, and restored from where their stores were"):
-    val held = Map(("0_1", "counts") -> (StoreContents.of(Map(Chunk.array("k".getBytes) -> counted(3L))), Some(4L)))
+    val held = Map(("0_1", "counts") -> (StoreContents.of(Map(Chunk.array("k".getBytes) -> counted(3L))), Map(1 -> 4L)))
     MemoryStateDirectory(held, Map("0_1" -> Map("counts" -> 4L), "9_0" -> Map("gone" -> 1L))).flatMap: directory =>
       run(state = Some(directory)): world =>
         for

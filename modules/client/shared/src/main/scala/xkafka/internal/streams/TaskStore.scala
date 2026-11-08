@@ -47,16 +47,19 @@ private[xkafka] trait TaskStore[F[_]]:
   /** The latest time a key written to it named, or [[WindowStore.NoTime]], as for a store without time. */
   def clock: F[Long]
 
-  /** Applies `changes` as one, a key with nothing to hold removed, and records with them that the store holds its changelog up to `position`, the
-    * offset to read from next, where one is given.
+  /** Applies `changes` as one, a key with nothing to hold removed, and records with them that the store holds each partition `positions` names of
+    * what fills it up to the offset given, the one to read from next.
     */
-  def write(changes: StoreChanges, position: Option[Long]): F[Unit]
+  def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit]
 
-  /** Where the store last recorded that it holds its changelog up to, if anywhere. It never runs ahead of what the store holds. */
-  def position: F[Option[Long]]
+  /** Where the store last recorded that it holds each partition of what fills it up to. It never runs ahead of what the store holds. */
+  def positions: F[Map[Int, Long]]
 
   /** Applies `changes` as one: a key with nothing to hold is removed. */
-  final def write(changes: StoreChanges): F[Unit] = write(changes, None)
+  final def write(changes: StoreChanges): F[Unit] = write(changes, Map.empty)
+
+  /** Where a task's store, filled from one partition of its changelog, last recorded that it holds it up to, if anywhere. */
+  final def position(using F: cats.Functor[F]): F[Option[Long]] = F.map(positions)(_.values.maxOption)
 
   /** Releases what the store holds open, after which it is not used again; a store in memory holds nothing open. */
   def close: F[Unit]
@@ -78,16 +81,18 @@ private[xkafka] object TaskStore:
   def memory[F[_]: Concurrent]: Open[F] = (_, time, held) => inMemory(held, time)
 
   /** What a store in memory holds: its keys, the same keys in order of time where it has a time, its clock, and its position. */
-  private final case class Held(contents: StoreContents, byTime: TreeMap[(Long, Chunk[Byte]), Unit], clock: Long, position: Option[Long])
+  private final case class Held(contents: StoreContents, byTime: TreeMap[(Long, Chunk[Byte]), Unit], clock: Long, positions: Map[Int, Long])
 
   private val timeThenKey: Ordering[(Long, Chunk[Byte])] = Ordering.Tuple2(using Ordering.Long, StoreContents.keys)
 
-  /** A store in memory, holding `held` to start with, at `position` if given, and finding keys by the time `time` reads, if given. */
-  def inMemory[F[_]](held: StoreContents, time: Option[TimeOf] = None, position: Option[Long] = None)(using F: Concurrent[F]): F[TaskStore[F]] =
+  /** A store in memory, holding `held` to start with, at `positions`, and finding keys by the time `time` reads, if given. */
+  def inMemory[F[_]](held: StoreContents, time: Option[TimeOf] = None, positions: Map[Int, Long] = Map.empty)(using
+      F: Concurrent[F]
+  ): F[TaskStore[F]] =
     val byTime =
       time.fold(TreeMap.empty(using timeThenKey))(of => TreeMap.from(held.keysIterator.map(key => (of(key), key) -> ()))(using timeThenKey))
     val clock = time.fold(WindowStore.NoTime)(of => held.keysIterator.map(of).maxOption.getOrElse(WindowStore.NoTime))
-    F.ref(Held(held, byTime, clock, position)).map: state =>
+    F.ref(Held(held, byTime, clock, positions)).map: state =>
       new TaskStore[F]:
         def get(key: Chunk[Byte]): F[Option[Stored]]                                                    = state.get.map(_.contents.get(key))
         def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Stored)]] = state.get.map(_.contents.range(from, to))
@@ -95,13 +100,13 @@ private[xkafka] object TaskStore:
           state.get.map: now =>
             if from > to then Vector.empty
             else now.byTime.rangeFrom((from, Chunk.empty)).keysIterator.takeWhile(_._1 <= to).map((_, key) => key -> now.contents(key)).toVector
-        def clock: F[Long]                                                = state.get.map(_.clock)
-        def position: F[Option[Long]]                                     = state.get.map(_.position)
-        def close: F[Unit]                                                = F.unit
-        def write(changes: StoreChanges, position: Option[Long]): F[Unit] =
+        def clock: F[Long]                                                   = state.get.map(_.clock)
+        def positions: F[Map[Int, Long]]                                     = state.get.map(_.positions)
+        def close: F[Unit]                                                   = F.unit
+        def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit] =
           state.update: now =>
-            val moved = position.orElse(now.position)
-            time.fold(now.copy(contents = now.contents.after(changes), position = moved)): of =>
+            val moved = now.positions ++ positions
+            time.fold(now.copy(contents = now.contents.after(changes), positions = moved)): of =>
               val indexed =
                 changes.foldLeft(now.byTime):
                   case (index, (key, Some(_))) => index.updated((of(key), key), ())

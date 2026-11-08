@@ -72,18 +72,21 @@ private[xkafka] trait DirectoryFiles[F[_]]:
   * store's clock and position.
   */
 private[xkafka] object LibraryStore:
-  private val ClockKey    = "clock".getBytes
-  private val PositionKey = "position".getBytes
-  private val Families    = Vector("default", "time", "meta")
-  private val Entries     = 0
-  private val ByTime      = 1
-  private val Meta        = 2
+  private val ClockKey = "clock".getBytes
+  private val Position = "position-"
+  private val Families = Vector("default", "time", "meta")
+  private val Entries  = 0
+  private val ByTime   = 1
+  private val Meta     = 2
 
   /** Opens the store at `path`, making it where there is none, finding keys by the time `time` reads if given. */
   def open[F[_]](access: RocksdbAccess[F], path: String, time: Option[TaskStore.TimeOf])(using F: Concurrent[F]): F[TaskStore[F]] =
     access.open(path, Families).flatMap: db =>
-      (access.get(db, Meta, ClockKey), access.get(db, Meta, PositionKey)).tupled.flatMap: (clock, position) =>
-        (Ref.of[F, Long](clock.fold(WindowStore.NoTime)(long)), Ref.of[F, Option[Long]](position.map(long))).mapN(new Store(access, db, time, _, _))
+      val prefix = Position.getBytes
+      (access.get(db, Meta, ClockKey), access.range(db, Meta, Some(prefix), StoreContents.past(Chunk.array(prefix)).map(_.toArray))).tupled.flatMap:
+        (clock, held) =>
+          val positions = held.flatMap((key, value) => new String(key).drop(Position.length).toIntOption.map(_ -> long(value))).toMap
+          (Ref.of[F, Long](clock.fold(WindowStore.NoTime)(long)), Ref.of[F, Map[Int, Long]](positions)).mapN(new Store(access, db, time, _, _))
 
   private def long(bytes: Array[Byte]): Long = ByteBuffer.wrap(bytes).getLong
 
@@ -102,7 +105,7 @@ private[xkafka] object LibraryStore:
       db: access.Store,
       time: Option[TaskStore.TimeOf],
       clocked: Ref[F, Long],
-      positioned: Ref[F, Option[Long]]
+      positioned: Ref[F, Map[Int, Long]]
   )(using F: Concurrent[F])
       extends TaskStore[F]:
     def get(key: Chunk[Byte]): F[Option[Stored]] = access.get(db, Entries, key.toArray).map(_.map(held))
@@ -119,9 +122,9 @@ private[xkafka] object LibraryStore:
 
     def clock: F[Long] = clocked.get
 
-    def position: F[Option[Long]] = positioned.get
+    def positions: F[Map[Int, Long]] = positioned.get
 
-    def write(changes: StoreChanges, position: Option[Long]): F[Unit] =
+    def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit] =
       clocked.get.flatMap: before =>
         val after  = time.fold(before)(of => changes.keysIterator.map(of).foldLeft(before)(math.max))
         val writes =
@@ -133,9 +136,8 @@ private[xkafka] object LibraryStore:
               change.fold(RocksdbWrite.Delete(ByTime, indexed))(_ => RocksdbWrite.Put(ByTime, indexed, Array.emptyByteArray))
         val meta =
           Option.when(after != before)(RocksdbWrite.Put(Meta, ClockKey, longBytes(after))).toVector ++
-            position.map(at => RocksdbWrite.Put(Meta, PositionKey, longBytes(at))).toVector
-        access.write(db, writes ++ meta).unlessA(writes.isEmpty && meta.isEmpty) *> clocked.set(after) *>
-          position.traverse_(at => positioned.set(Some(at)))
+            positions.toVector.map((partition, at) => RocksdbWrite.Put(Meta, s"$Position$partition".getBytes, longBytes(at)))
+        access.write(db, writes ++ meta).unlessA(writes.isEmpty && meta.isEmpty) *> clocked.set(after) *> positioned.update(_ ++ positions)
 
     def close: F[Unit] = access.close(db)
 

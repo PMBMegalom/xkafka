@@ -59,11 +59,7 @@ private[xkafka] object Restore:
       else
         driver.poll(consumer, PollMillis).flatMap: polled =>
           val remaining = unfinished(left, polled.ends, ends)
-          // Each store records how far it now holds its changelog: past the last record read, or at the end, for a partition finished.
-          val past      = polled.records.groupMapReduce(record => (record.topic, record.partition))(_.offset + 1)(math.max)
-          val finished  = (left -- remaining).map(partition => partition -> ends.getOrElse(partition, 0L)).toMap
-          val positions = (past.toList ++ finished.toList).flatMap((partition, at) => backing.get(partition).map(_ -> at))
-            .groupMapReduce(_._1)(_._2)(math.max)
+          val positions = reached(polled.records, left -- remaining, ends, backing.get)
           written(stores, changes(polled.records.flatMap(record => backing.get((record.topic, record.partition)).map(_ -> record))), positions) *>
             read(remaining, ends)
     driver.assign(consumer, starting, starting.map(partition => StartAt(partition, from.getOrElse(partition, 0L), -1))) *>
@@ -80,12 +76,25 @@ private[xkafka] object Restore:
     record.key.fold(made): key =>
       made.updated(store, made.getOrElse(store, StoreContents.unchanged).updated(key, record.value.map(Stored(_, record.timestamp.getOrElse(-1L)))))
 
-  /** Writes each store's changes into it, with where it holds its changelog up to, where `positions` says. */
-  def written[F[_]](stores: Map[String, TaskStore[F]], changes: Map[String, StoreChanges], positions: Map[String, Long] = Map.empty)(using
+  /** How far each store holds each partition of what fills it once `records` are applied: past the last record read, or at the end, for a partition
+    * `finished` by the poll, by the store `storeOf` names for the partition.
+    */
+  def reached(
+      records: List[PolledRecord],
+      finished: Set[(String, Int)],
+      ends: Ends,
+      storeOf: ((String, Int)) => Option[String]
+  ): Map[String, Map[Int, Long]] =
+    val past = records.groupMapReduce(record => (record.topic, record.partition))(_.offset + 1)(math.max)
+    (past.toList ++ finished.toList.map(partition => partition -> ends.getOrElse(partition, 0L))).groupMapReduce(_._1)(_._2)(math.max).toList
+      .flatMap((partition, at) => storeOf(partition).map(_ -> (partition._2 -> at))).groupMap(_._1)(_._2).view.mapValues(_.toMap).toMap
+
+  /** Writes each store's changes into it, with where it holds each partition of its changelog up to, where `positions` says. */
+  def written[F[_]](stores: Map[String, TaskStore[F]], changes: Map[String, StoreChanges], positions: Map[String, Map[Int, Long]] = Map.empty)(using
       F: MonadThrow[F]
   ): F[Unit] = (changes.keySet ++ positions.keySet).toList.traverse_ : store =>
     F.fromOption(stores.get(store), new IllegalStateException(s"no store '$store' to restore"))
-      .flatMap(_.write(changes.getOrElse(store, StoreContents.unchanged), positions.get(store)))
+      .flatMap(_.write(changes.getOrElse(store, StoreContents.unchanged), positions.getOrElse(store, Map.empty)))
 
   /** Where each partition being caught up on ends, by topic name and number. */
   type Ends = Map[(String, Int), Long]

@@ -66,12 +66,19 @@ private[xkafka] object GlobalStores:
               (0 until count).toList
                 .traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F].map(TopicPartition(global.topic, _)))
         )
-      _    <- Resource.eval(driver.assign(consumer, starts.toVector, starts.toVector.map(StartAt(_, 0L, -1))))
-      ends <- Resource.eval(Restore.endsOf(driver, consumer, starts.toVector))
       held <-
         Resource.make(
           globals.traverse(global => open(global.store.value, None, StoreContents.empty).map(global.store.value -> _)).map(_.toMap)
         )(_.values.toList.traverse_(_.close))
+      // A table kept on disk is read on from where its store holds each partition to, and any other from the start.
+      from <- Resource.eval(globals.traverse(global => held(global.store.value).positions.map(global.topic.value -> _)).map(_.toMap))
+      _    <-
+        Resource.eval(driver.assign(
+          consumer,
+          starts.toVector,
+          starts.toVector.map(at => StartAt(at, from.get(at.topic.value).flatMap(_.get(at.partition.value)).getOrElse(0L), -1))
+        ))
+      ends     <- Resource.eval(Restore.endsOf(driver, consumer, starts.toVector))
       ready    <- Resource.eval(F.deferred[Unit])
       failed   <- Resource.eval(F.deferred[Throwable])
       stopping <- Resource.eval(F.ref(false))
@@ -85,9 +92,10 @@ private[xkafka] object GlobalStores:
                 byTopic.get(record.topic).fold(F.pure(made)): global =>
                   if left((record.topic, record.partition)) then F.pure(Restore.changed(made, global.store.value, record))
                   else updated(global, made, record)
-              }.flatMap(Restore.written(held, _)) *> {
+              }.flatMap { made =>
                 val remaining = Restore.unfinished(left, polled.ends, ends)
-                ready.complete(()).whenA(remaining.isEmpty) *> read(remaining)
+                val reached   = Restore.reached(polled.records, left -- remaining, ends, partition => byTopic.get(partition._1).map(_.store.value))
+                Restore.written(held, made, reached) *> ready.complete(()).whenA(remaining.isEmpty) *> read(remaining)
               }
           )
         read(starts.map(partition => (partition.topic.value, partition.partition.value)).toSet).handleErrorWith(error => failed.complete(error).void)

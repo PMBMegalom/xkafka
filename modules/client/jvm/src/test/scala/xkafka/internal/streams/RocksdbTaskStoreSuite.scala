@@ -39,8 +39,9 @@ final class RocksdbTaskStoreSuite extends TaskStoreLaws("on disk"):
     for
       directory <- IO.blocking(Files.createTempDirectory("xkafka-rocksdb"))
       first     <- RocksdbStore.open[IO](directory, Some(time))
-      _ <- first.write(StoreContents.unchanged.updated(key(3, 1), Some(Stored(Chunk.array("v".getBytes), 7L))).updated(key(9, 0), None), Some(42L))
-      _ <- first.close
+      _         <-
+        first.write(StoreContents.unchanged.updated(key(3, 1), Some(Stored(Chunk.array("v".getBytes), 7L))).updated(key(9, 0), None), Map(0 -> 42L))
+      _        <- first.close
       again    <- RocksdbStore.open[IO](directory, Some(time))
       held     <- again.all
       found    <- again.timed(0L, 5L)

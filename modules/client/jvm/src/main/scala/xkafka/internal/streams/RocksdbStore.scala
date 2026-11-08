@@ -42,8 +42,8 @@ import org.rocksdb.{
   * is filled again from its changelog; a flush writes all three families out together.
   */
 private[xkafka] object RocksdbStore:
-  private val ClockKey    = "clock".getBytes
-  private val PositionKey = "position".getBytes
+  private val ClockKey = "clock".getBytes
+  private val Position = "position-"
 
   /** Opens the store kept in `directory`, making it where there is none, finding keys by the time `time` reads if given. */
   def open[F[_]](directory: Path, time: Option[TaskStore.TimeOf])(using F: Sync[F]): F[TaskStore[F]] =
@@ -63,8 +63,9 @@ private[xkafka] object RocksdbStore:
       val handles                = new java.util.ArrayList[ColumnFamilyHandle]()
       val db                     = RocksDB.open(options, directory.toString, names.map(new ColumnFamilyDescriptor(_, family)).asJava, handles)
       def long(key: Array[Byte]) = Option(db.get(handles.get(2), key)).map(ByteBuffer.wrap(_).getLong)
-      Opened(db, handles.asScala.toList, List(options, family, cache, filter), time, long(ClockKey).getOrElse(WindowStore.NoTime), long(PositionKey))
-    }.flatMap(opened => (Ref.of[F, Long](opened.clock), Ref.of[F, Option[Long]](opened.position)).mapN(new Store(opened, _, _)))
+      val positions              = positionsIn(db, handles.get(2))
+      Opened(db, handles.asScala.toList, List(options, family, cache, filter), time, long(ClockKey).getOrElse(WindowStore.NoTime), positions)
+    }.flatMap(opened => (Ref.of[F, Long](opened.clock), Ref.of[F, Map[Int, Long]](opened.positions)).mapN(new Store(opened, _, _)))
 
   /** What an open store holds open, the column families to close before the database and the options after it, and its clock and position. */
   private final case class Opened(
@@ -73,8 +74,21 @@ private[xkafka] object RocksdbStore:
       options: List[AutoCloseable],
       time: Option[TaskStore.TimeOf],
       clock: Long,
-      position: Option[Long]
+      positions: Map[Int, Long]
   )
+
+  /** The positions a store's meta family holds, by partition, each under `position-<partition>`. */
+  private def positionsIn(db: RocksDB, meta: ColumnFamilyHandle): Map[Int, Long] =
+    val cursor = db.newIterator(meta)
+    try
+      cursor.seek(Position.getBytes)
+      Iterator.continually(cursor).takeWhile(at => at.isValid && new String(at.key).startsWith(Position)).map: at =>
+        val partition = new String(at.key).drop(Position.length).toIntOption
+        val offset    = ByteBuffer.wrap(at.value).getLong
+        at.next()
+        partition.map(_ -> offset)
+      .toList.flatten.toMap
+    finally cursor.close()
 
   /** A time as eight bytes that order as the times do: big-endian, with the sign bit flipped. */
   private def timeBytes(at: Long): Array[Byte] = ByteBuffer.allocate(8).putLong(at ^ Long.MinValue).array
@@ -84,7 +98,7 @@ private[xkafka] object RocksdbStore:
   private def heldBytes(stored: Stored): Array[Byte] =
     ByteBuffer.allocate(8 + stored.value.size).putLong(stored.timestamp).put(stored.value.toArray).array
 
-  private final class Store[F[_]](opened: Opened, clocked: Ref[F, Long], positioned: Ref[F, Option[Long]])(using F: Sync[F]) extends TaskStore[F]:
+  private final class Store[F[_]](opened: Opened, clocked: Ref[F, Long], positioned: Ref[F, Map[Int, Long]])(using F: Sync[F]) extends TaskStore[F]:
     import opened.{db, time}
     private val entries = opened.families(0)
     private val byTime  = opened.families(1)
@@ -108,9 +122,9 @@ private[xkafka] object RocksdbStore:
 
     def clock: F[Long] = clocked.get
 
-    def position: F[Option[Long]] = positioned.get
+    def positions: F[Map[Int, Long]] = positioned.get
 
-    def write(changes: StoreChanges, position: Option[Long]): F[Unit] =
+    def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit] =
       clocked.get.flatMap: before =>
         val after = time.fold(before)(of => changes.keysIterator.map(of).foldLeft(before)(math.max))
         F.blocking {
@@ -123,10 +137,10 @@ private[xkafka] object RocksdbStore:
                 val indexed = timeBytes(of(key)) ++ bytes
                 change.fold(batch.delete(byTime, indexed))(_ => batch.put(byTime, indexed, Array.emptyByteArray))
             if after != before then batch.put(meta, ClockKey, ByteBuffer.allocate(8).putLong(after).array)
-            position.foreach(at => batch.put(meta, PositionKey, ByteBuffer.allocate(8).putLong(at).array))
+            positions.foreach((partition, at) => batch.put(meta, s"$Position$partition".getBytes, ByteBuffer.allocate(8).putLong(at).array))
             db.write(writing, batch)
           finally batch.close()
-        } *> clocked.set(after) *> position.traverse_(at => positioned.set(Some(at)))
+        } *> clocked.set(after) *> positioned.update(_ ++ positions)
 
     def close: F[Unit] =
       F.blocking:
