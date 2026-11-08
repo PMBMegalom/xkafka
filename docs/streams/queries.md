@@ -143,7 +143,27 @@ little behind, but it can answer while its store is moving between members.
 
 ## Java members
 
-An application can mix xkafka and Java Kafka Streams members, but Java members
-cannot answer xkafka's queries. A query for a key a Java member holds fails with
-`NotXkafka`, or with `Unreachable` where nothing answers at that member's
-endpoint.
+An application can mix xkafka and Java Kafka Streams members. A Java member
+answers xkafka's queries through `JavaQueries`, from the `xkafka-streams-java`
+module, on the JVM: give it the instance, the application's id, and each store
+that can be queried with its Java serdes, then pass the bytes your internal route
+receives to its `answer`. The member's `application.server` setting is the
+endpoint xkafka members reach it at.
+
+```scala mdoc:compile-only
+// Let a Java Kafka Streams member answer xkafka members' queries of its counts
+import org.apache.kafka.common.serialization.Serdes
+import org.apache.kafka.streams.KafkaStreams
+
+import xkafka.streams.interop.JavaQueries
+
+def answering(streams: KafkaStreams): Array[Byte] => Array[Byte] =
+  val queries = JavaQueries.of(streams, "page-view-counter").keyValue("views-per-page", Serdes.String, Serdes.Long)
+  queries.answer                                     // Your internal route's handler: the request's bytes in, the answer's out
+```
+
+`JavaQueries` also takes `window` and `session` stores. It runs each query
+through Java's interactive queries on that instance, so its stores answer as
+Java's do. A Java member without it answers in a format xkafka does not read,
+and a query that needs it fails with `NotXkafka`, or with `Unreachable` where
+nothing answers at its endpoint.

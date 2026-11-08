@@ -38,7 +38,7 @@ for backend in "${backends[@]}"; do
   case "$backend" in
     jvm)    commands+=("clientJVM/Test/testOnly ${jvm_suites:-$suites}")
             # Java processors run through xkafka, against a broker, on the JVM alone.
-            if [[ "$streams" == true ]]; then commands+=("streamsJava/Test/testOnly xkafka.streams.interop.ProcessorFromJavaBrokerSuite"); fi ;;
+            if [[ "$streams" == true ]]; then commands+=("streamsJava/Test/testOnly xkafka.streams.interop.ProcessorFromJavaBrokerSuite xkafka.streams.interop.JavaQueriesBrokerSuite"); fi ;;
     js)     commands+=("clientJS/Test/testOnly $suites") ;;
     native) commands+=("clientNative/Test/testOnly $suites") ;;
   esac
