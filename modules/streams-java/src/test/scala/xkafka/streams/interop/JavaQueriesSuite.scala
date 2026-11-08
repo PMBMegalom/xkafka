@@ -35,9 +35,12 @@ import internal.streams.{Answered, Asked, QueryWire}
 
 /** What a Java member answers before it runs, and for stores it was not given, without a broker. */
 final class JavaQueriesSuite extends FunSuite:
-  private def notStarted(): JavaKafkaStreams =
+  private def topology() =
     val builder = new StreamsBuilder()
     builder.stream[String, String]("in").groupByKey.count(Materialized.as("counts"))
+    builder.build()
+
+  private def notStarted(): JavaKafkaStreams =
     val properties = new Properties()
     properties.put(StreamsConfig.APPLICATION_ID_CONFIG, "app")
     properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1")
@@ -45,7 +48,7 @@ final class JavaQueriesSuite extends FunSuite:
     properties.put(StreamsConfig.STATE_DIR_CONFIG, Files.createTempDirectory("xkafka-java-queries").toString)
     properties.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, JavaSerdes.String.getClass)
     properties.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, JavaSerdes.String.getClass)
-    new JavaKafkaStreams(builder.build(), properties)
+    new JavaKafkaStreams(topology(), properties)
 
   private def asked(request: QueryRequest) = QueryWire.encode(Asked(request, List(0), false)).toArray
 
@@ -66,4 +69,14 @@ final class JavaQueriesSuite extends FunSuite:
     try
       val failure = intercept[IllegalArgumentException](JavaQueries.of(streams, "app").answer("GET /".getBytes))
       assertEquals(failure.getMessage, "the request is not an xkafka query")
+    finally streams.close()
+
+  test("a Java member asking before it runs is told the store is moving, and asking of a store its program lacks is told the store is unknown"):
+    val streams = notStarted()
+    try
+      val asking               = JavaQuerying.of(streams, topology(), "app", (_, _) => throw new AssertionError("nothing is asked of other members"))
+      def problem(ask: => Any) = intercept[QueryProblemException](ask).problem
+      assertEquals(problem(asking.get("counts", "k", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.Rebalancing)
+      assertEquals(problem(asking.all("counts", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.Rebalancing)
+      assertEquals(problem(asking.all("other", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.UnknownStore("other"))
     finally streams.close()

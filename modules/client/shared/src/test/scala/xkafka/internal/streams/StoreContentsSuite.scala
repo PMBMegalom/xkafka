@@ -37,7 +37,8 @@ final class StoreContentsSuite extends FunSuite:
   test("keys written as text by Serde.utf8 come in store order by their characters, capitals before lower-case letters"):
     val texts   = xkafka.streams.Serde.utf8[cats.effect.SyncIO]
     val topic   = xkafka.Topic.from("t").toOption.get
-    val written = List("adam", "Zoe", "bob", "Al").map(name => name -> texts.serializer.serialize(topic, xkafka.Headers.empty, name).unsafeRunSync().get)
+    val written =
+      List("adam", "Zoe", "bob", "Al").map(name => name -> texts.serializer.serialize(topic, xkafka.Headers.empty, name).unsafeRunSync().get)
     assertEquals(written.sortBy(_._2)(using StoreContents.keys).map(_._1), List("Al", "Zoe", "adam", "bob"))
 
   test("keys written as numbers by Serde.long come in store order with zero first, the positive numbers next, and the negative ones last"):

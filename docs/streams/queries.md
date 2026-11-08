@@ -194,3 +194,42 @@ final class Answering {
 interactive queries on that instance. A Java member without it does not answer
 in a format xkafka reads, so a query that needs it fails with `NotXkafka`, or with
 `Unreachable` where nothing answers at its endpoint.
+
+A Java member asks with `JavaQuerying`, giving it the instance, its topology, the
+application's id, and how to send a query to another member. It finds which
+member holds a key through Java's own metadata, xkafka members included, and asks
+that member, itself too, through its internal route:
+
+```java
+// Let a Java member ask for a page's view count, wherever it is held
+import java.util.Optional;
+import java.util.function.BiFunction;
+
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.KafkaStreams;
+import org.apache.kafka.streams.Topology;
+import org.apache.kafka.streams.state.HostInfo;
+
+import xkafka.streams.interop.JavaQuerying;
+
+final class Asking {
+  private final JavaQuerying querying;
+
+  // `post` is your HTTP client: it posts the bytes to the member's internal route and returns what it answers
+  Asking(KafkaStreams streams, Topology topology, BiFunction<HostInfo, byte[], byte[]> post) {
+    querying = JavaQuerying.of(streams, topology, "page-view-counter", post);
+  }
+
+  // Throws a QueryProblemException when it cannot answer, whose problem says why, as xkafka's queries do
+  Optional<Long> views(String page) {
+    return querying.get("views-per-page", page, Serdes.String(), Serdes.Long());
+  }
+}
+```
+
+| method | answer |
+| --- | --- |
+| `get(store, key, ...)` | what a key-value store holds for the key, if anything |
+| `range(store, from, to, ...)`, `all(store, ...)` | the keys of a key-value store with their values, as a list of Kafka's `KeyValue` |
+| `fetch(store, key, from, to, ...)` | a key's windows starting in that time, each by its start |
+| `sessions(store, key, ...)` | a key's sessions, each by its `Windowed` key |

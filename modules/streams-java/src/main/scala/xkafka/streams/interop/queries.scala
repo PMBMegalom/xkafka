@@ -31,11 +31,14 @@ import scala.util.{Failure, Success, Try, Using}
 
 import fs2.Chunk
 import org.apache.kafka.common.serialization.Serde as JavaSerde
-import org.apache.kafka.streams.KafkaStreams as JavaKafkaStreams
+import org.apache.kafka.streams.{
+  KafkaStreams as JavaKafkaStreams, KeyQueryMetadata, KeyValue as JavaKeyValue, Topology as JavaTopology, TopologyDescription
+}
 import org.apache.kafka.streams.errors.{InvalidStateStoreException, StreamsNotStartedException, UnknownStateStoreException}
 import org.apache.kafka.streams.kstream.Windowed as JavaWindowed
+import org.apache.kafka.streams.kstream.internals.SessionWindow
 import org.apache.kafka.streams.query.{FailureReason, KeyQuery, Query as JavaQuery, RangeQuery, StateQueryRequest, WindowKeyQuery, WindowRangeQuery}
-import org.apache.kafka.streams.state.{KeyValueIterator, WindowStoreIterator}
+import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, WindowStoreIterator}
 import internal.streams.{Answered, Asked, QueryWire}
 
 /** Lets a Java Kafka Streams instance answer the queries xkafka members of its application forward to it, for the stores registered here, through
@@ -146,3 +149,123 @@ object JavaQueries:
             )
           )
         case _ => None
+
+/** Why a query a Java member asked through [[JavaQuerying]] could not be answered. */
+final class QueryProblemException(val problem: QueryProblem) extends RuntimeException(problem.toString)
+
+/** Lets a Java Kafka Streams instance ask the members of its application for what their stores hold, xkafka and Java members alike, wherever each key
+  * is held: Java's own metadata says which member holds it, and `forward` sends it the query, to the route where it answers, as an xkafka member's
+  * `answer` and [[JavaQueries]] do. Every query goes to the member holding what it needs, this one included. A query that cannot be answered throws a
+  * [[QueryProblemException]].
+  */
+final class JavaQuerying private (
+    streams: JavaKafkaStreams,
+    topology: TopologyDescription,
+    application: String,
+    forward: java.util.function.BiFunction[HostInfo, Array[Byte], Array[Byte]]
+):
+  /** What the key-value store `store` holds for `key`, if anything. */
+  def get[K, V](store: String, key: K, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.Optional[V] =
+    val bytes = keyBytes(store, keySerde, key)
+    keyed(store, key, keySerde, QueryRequest.Get(store, bytes)).headOption
+      .fold(java.util.Optional.empty[V]())((_, v) => java.util.Optional.of(read(store, valueSerde, v)))
+
+  /** The keys of the key-value store `store` from `from` to `to`, both included, with their values, in the order of their serialized bytes. */
+  def range[K, V](store: String, from: K, to: K, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.List[JavaKeyValue[K, V]] =
+    everywhere(store, QueryRequest.Range(store, Some(keyBytes(store, keySerde, from)), Some(keyBytes(store, keySerde, to))))
+      .map((k, v) => JavaKeyValue.pair(read(store, keySerde, k), read(store, valueSerde, v))).asJava
+
+  /** Every key of the key-value store `store` with its value, in the order of their serialized bytes. */
+  def all[K, V](store: String, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.List[JavaKeyValue[K, V]] =
+    everywhere(store, QueryRequest.Range(store, None, None)).map((k, v) => JavaKeyValue.pair(read(store, keySerde, k), read(store, valueSerde, v)))
+      .asJava
+
+  /** The windows of `key` in the window store `store` starting from `from` to `to`, both included, each by its start in epoch milliseconds, earliest
+    * first.
+    */
+  def fetch[K, V](
+      store: String,
+      key: K,
+      from: Instant,
+      to: Instant,
+      keySerde: JavaSerde[K],
+      valueSerde: JavaSerde[V]
+  ): java.util.List[JavaKeyValue[java.lang.Long, V]] =
+    val bytes = keyBytes(store, keySerde, key)
+    // A window store's key is the key, then the window's start in eight bytes and a sequence number in four.
+    keyed(store, key, keySerde, QueryRequest.Windows(store, Some(bytes), from.toEpochMilli, to.toEpochMilli))
+      .map((stored, v) => (ByteBuffer.wrap(stored.drop(stored.size - 12).take(8).toArray).getLong, v)).sortBy(_._1)
+      .map((start, v) => JavaKeyValue.pair(java.lang.Long.valueOf(start), read(store, valueSerde, v))).asJava
+
+  /** The sessions of `key` in the session store `store`, the earliest ending first. */
+  def sessions[K, V](store: String, key: K, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.List[JavaKeyValue[JavaWindowed[K], V]] =
+    val bytes = keyBytes(store, keySerde, key)
+    // A session store's key is the key, then the session's end and its start, each in eight bytes.
+    keyed(store, key, keySerde, QueryRequest.Sessions(store, bytes)).map: (stored, v) =>
+      val end   = ByteBuffer.wrap(stored.drop(stored.size - 16).take(8).toArray).getLong
+      val start = ByteBuffer.wrap(stored.drop(stored.size - 8).toArray).getLong
+      JavaKeyValue.pair(new JavaWindowed(key, new SessionWindow(start, end)), read(store, valueSerde, v))
+    .sortBy(found => (found.key.window.end, found.key.window.start)).asJava
+
+  private def topicOf(store: String) = s"$application-$store-changelog"
+
+  /** What Java's metadata says, where the instance can say: one not running yet, or not running any more, is moving. */
+  private def settled[A](metadata: => A): A =
+    Try(metadata) match
+      case Success(said)                                                                                     => said
+      case Failure(_: StreamsNotStartedException | _: InvalidStateStoreException | _: IllegalStateException) =>
+        throw new QueryProblemException(QueryProblem.Rebalancing)
+      case Failure(other) => throw other
+
+  private def keyBytes[K](store: String, serde: JavaSerde[K], key: K): Chunk[Byte] = Chunk.array(serde.serializer.serialize(topicOf(store), key))
+
+  private def read[A](store: String, serde: JavaSerde[A], bytes: Chunk[Byte]): A = serde.deserializer.deserialize(topicOf(store), bytes.toArray)
+
+  /** The entries the member holding `key` finds for `request`. */
+  private def keyed[K](store: String, key: K, serde: JavaSerde[K], request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
+    val held = settled(streams.queryMetadataForKey(store, key, serde.serializer))
+    if held == null || held == KeyQueryMetadata.NOT_AVAILABLE || held.activeHost.port < 0 then
+      throw new QueryProblemException(QueryProblem.Rebalancing)
+    asked(held.activeHost, Asked(request, List(held.partition), false))
+
+  /** The entries every member holding part of `store` finds for `request`, each asked for its partitions of the topic the store is filled from. */
+  private def everywhere(store: String, request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
+    val topics  = sourcesOf(store)
+    val holders =
+      settled(streams.streamsMetadataForStore(store)).asScala.toList
+        .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(held => topics(held.topic)).map(_.partition).toList.sorted.distinct)
+        .filter(_._2.nonEmpty)
+    val covered = holders.flatMap(_._2)
+    // Every partition up to the last one held must be held by someone, or part of the store is moving.
+    if holders.isEmpty || covered.distinct.size != covered.size || covered.toSet != (0 to covered.max).toSet then
+      throw new QueryProblemException(QueryProblem.Rebalancing)
+    holders.toVector.flatMap((at, partitions) => asked(at, Asked(request, partitions, false))).sortBy(_._1)(using QueryRequest.unsigned)
+
+  /** The topics the sub-topology keeping `store` reads. */
+  private def sourcesOf(store: String): Set[String] =
+    topology.subtopologies.asScala.find(_.nodes.asScala.exists {
+      case processor: TopologyDescription.Processor => processor.stores.contains(store)
+      case _                                        => false
+    }).fold(throw new QueryProblemException(QueryProblem.UnknownStore(store))): subtopology =>
+      subtopology.nodes.asScala.collect { case source: TopologyDescription.Source => source.topicSet.asScala }.flatten.toSet
+
+  private def asked(at: HostInfo, query: Asked): Vector[(Chunk[Byte], Chunk[Byte])] =
+    val member = Endpoint.from(at.host, at.port).getOrElse(throw new QueryProblemException(QueryProblem.Rebalancing))
+    val reply  =
+      Try(forward.apply(at, QueryWire.encode(query).toArray)) match
+        case Success(bytes)   => bytes
+        case Failure(failure) =>
+          throw new QueryProblemException(QueryProblem.Unreachable(member, Option(failure.getMessage).getOrElse(failure.toString)))
+    QueryWire.answered(Chunk.array(reply)) match
+      case Some(Answered.Found(entries))   => entries
+      case Some(Answered.Refused(problem)) => throw new QueryProblemException(problem)
+      case None                            => throw new QueryProblemException(QueryProblem.NotXkafka(member))
+
+object JavaQuerying:
+  /** Queries asked by `streams`, an instance of `application` running `topology`, sent to other members through `forward`. */
+  def of(
+      streams: JavaKafkaStreams,
+      topology: JavaTopology,
+      application: String,
+      forward: java.util.function.BiFunction[HostInfo, Array[Byte], Array[Byte]]
+  ): JavaQuerying = new JavaQuerying(streams, topology.describe(), application, forward)
