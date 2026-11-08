@@ -112,6 +112,11 @@
  * Starting answers 0, or -1 when no thread could be started, in which case
  * `done` is never called. */
 
+/* Scala Native compiles C as strict C11, which leaves out the POSIX
+ * declarations (readlink, PATH_MAX) this file needs; glibc and musl give
+ * them back for this, and macOS shows them anyway. */
+#define _DEFAULT_SOURCE
+
 #include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
