@@ -18,7 +18,9 @@ Two modules are published:
 - `xkafka-client` holds `KafkaClient`, which connects to Kafka on each platform,
   and depends on the kernel.
 
-Most applications need `xkafka-client` alone.
+Most applications need `xkafka-client` alone. On the JVM, `xkafka-streams-java` lets
+streams programs use code written for Java Kafka Streams, such as its partitioners;
+it depends on Java Kafka Streams itself.
 
 ## Versioning
 

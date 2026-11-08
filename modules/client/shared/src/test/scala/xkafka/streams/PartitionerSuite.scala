@@ -45,7 +45,8 @@ final class PartitionerSuite extends CatsEffectSuite:
     val subtopology = topology.subtopologies.find(_.origins.exists(Task.topicOf("app", _) == topic)).get
     Task.inMemory[IO]("app", subtopology, 0).flatMap(_.process(TaskState.empty, from, 0L)).map(_._2)
 
-  private def chosen(outputs: Vector[TaskOutput], topic: String, count: Int) = outputs.filter(_.topic.value == topic).map(_.choose.map(_(count)))
+  private def chosen(outputs: Vector[TaskOutput], topic: String, count: Int) =
+    outputs.filter(_.topic.value == topic).map(_.choose.map(_(count).getOrElse(-1)))
 
   test("a partitioner given to `to` chooses from the key, the value and the headers, and without one the default partitioning stays"):
     val byAll  = Partitioner[String, String]((key, value, headers, count) => (key.length + value.length + headers.values.size) % count)

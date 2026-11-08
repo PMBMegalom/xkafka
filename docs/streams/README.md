@@ -268,6 +268,31 @@ val urgentFirst = Partitioner[String, String]: (key, _, headers, count) =>
 - `hashCode` can be negative: `Math.floorMod`, unlike `%`, always gives a number
   from 0 up.
 
+#### Java partitioners (JVM only)
+
+On the JVM, a `StreamPartitioner` written for Java Kafka Streams can be used as a
+partitioner. It comes with the `xkafka-streams-java` module, which also depends on
+Java Kafka Streams:
+
+```scala
+libraryDependencies += "io.github.pmbmegalom" %% "xkafka-streams-java" % "@VERSION@"
+```
+
+```scala mdoc:compile-only
+// Turn a StreamPartitioner your Java Kafka Streams application already uses into a partitioner for xkafka
+import org.apache.kafka.streams.processor.StreamPartitioner
+
+import xkafka.streams.*
+import xkafka.streams.interop.*                                       // Adds Partitioner.fromJava, on the JVM only
+
+def sameAsJava(java: StreamPartitioner[String, String]): Partitioner[String, String] = Partitioner.fromJava(java)
+```
+
+It is given each record's topic, key, value, headers and partition count, as in Java.
+Where it chooses no partition, the record goes where Kafka's default puts it. Where
+it chooses several partitions, or an empty set, the application stops with an error
+naming the topic, since xkafka sends each record to one partition.
+
 #### Tables whose topic is partitioned its own way
 
 A table's topic may be written by another application that partitions it its own

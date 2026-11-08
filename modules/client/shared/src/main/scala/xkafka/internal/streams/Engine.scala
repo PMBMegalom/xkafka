@@ -728,13 +728,15 @@ private[xkafka] object Engine:
     private def recordOf(output: TaskOutput): F[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] =
       def outside(chosen: Int, count: Int) =
         new IllegalArgumentException(s"a partitioner chose partition $chosen of the topic '${output.topic.value}', which has $count partitions")
-      val chosen =
-        (output.choose, output.partitionBy) match
-          case (Some(choose), _) => partitions(output.topic).flatMap: count =>
-              val picked = choose(count)
-              if picked >= 0 && picked < count then F.pure(Some(picked)) else F.raiseError(outside(picked, count))
-          case (None, Some(by)) => partitions(output.topic).map(count => Some(Murmur2.partition(by, count)))
-          case (None, None)     => F.pure(output.partition)
+      // A partitioner that gives no partition leaves the record to Kafka's default, as Java's does.
+      def default = output.partitionBy.fold(F.pure(output.partition))(by => partitions(output.topic).map(count => Some(Murmur2.partition(by, count))))
+      val chosen  =
+        output.choose.fold(default): choose =>
+          partitions(output.topic).flatMap(count => F.catchNonFatal(choose(count)).map(count -> _)).flatMap: (count, answer) =>
+            answer match
+              case None                                          => default
+              case Some(picked) if picked >= 0 && picked < count => F.pure(Some(picked))
+              case Some(picked)                                  => F.raiseError(outside(picked, count))
       chosen.flatMap(_.traverse(n => Partition.from(n).leftMap(new KafkaException.InvalidValue(_)).liftTo[F])).map: partition =>
         ProducerRecord(
           output.topic,

@@ -730,6 +730,17 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   )
 
 // The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it.
+lazy val streamsJava = project
+  .in(file("modules/streams-java"))
+  .dependsOn(client.jvm % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name                   := "xkafka-streams-java",
+    description            := "Java Kafka Streams' partitioners and processors in xkafka streams programs, on the JVM",
+    tlMimaPreviousVersions := Set.empty,
+    libraryDependencies ++= Seq("org.apache.kafka" % "kafka-streams" % kafkaClientsVersion)
+  )
+
 lazy val streamsFixture = project
   .in(file("modules/streams-fixture"))
   .enablePlugins(NoPublishPlugin)
@@ -746,11 +757,11 @@ lazy val streamsFixture = project
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
-  .dependsOn(client.jvm)
+  .dependsOn(client.jvm, streamsJava)
   .settings(
     tlSiteHelium := tlSiteHelium.value.site.topNavigationBar(
       homeLink = IconLink.external("https://github.com/PMBMegalom/xkafka", HeliumIcon.home)
     )
   )
 
-lazy val root = tlCrossRootProject.aggregate(kernel, client).settings(name := "xkafka")
+lazy val root = tlCrossRootProject.aggregate(kernel, client, streamsJava).settings(name := "xkafka")

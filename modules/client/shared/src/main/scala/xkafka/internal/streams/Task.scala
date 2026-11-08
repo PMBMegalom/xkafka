@@ -55,7 +55,7 @@ private[xkafka] final case class TaskOutput(
     timestamp: Long,
     headers: Headers,
     partitionBy: Option[Chunk[Byte]] = None,
-    choose: Option[Int => Int] = None
+    choose: Option[Int => Option[Int]] = None
 )
 
 /** The latest value a store holds for a key, and its timestamp, as the bytes its changelog carries. */
@@ -410,7 +410,9 @@ private[xkafka] final class Task[F[_]](
                 val value = Subscription(hash, instruction, key, partition).encoded
                 // A subscription goes to the partition that holds its foreign key in the other table's topic, however that topic is partitioned.
                 val chosen =
-                  target.flatMap(foreign => join.otherPartitioner.map(chooser => (count: Int) => chooser.choose(foreign, (), record.headers, count)))
+                  target.flatMap(foreign =>
+                    join.otherPartitioner.map(chooser => (count: Int) => chooser.chosen(topic, foreign, (), record.headers, count))
+                  )
                 TaskOutput(topic, None, bytes, Some(value), record.timestamp, record.headers, choose = chosen)
       yield (state, out)
 
@@ -1644,7 +1646,7 @@ private[xkafka] final class Task[F[_]](
       by     <- base(target)
     // Java drops a record with a null key before its repartition topic, which here is a key its serializer writes as none.
     yield
-      val chosen = partitioner.map(chooser => (count: Int) => chooser.choose(record.key, record.value, record.headers, count))
+      val chosen = partitioner.map(chooser => (count: Int) => chooser.chosen(target, record.key, record.value, record.headers, count))
       if repartitioning && k.isEmpty then Vector.empty else Vector(TaskOutput(target, None, k, v, record.timestamp, record.headers, by, chosen))
 
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]

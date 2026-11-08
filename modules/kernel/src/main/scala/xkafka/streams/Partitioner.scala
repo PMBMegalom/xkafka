@@ -25,10 +25,14 @@ package streams
 /** Chooses the partition a record is written to, from its key, value and headers and how many partitions the topic has. It must give one of them,
   * from 0 up to one less than that number; any other number stops the application.
   */
-final class Partitioner[-K, -V](val choose: (K, V, Headers, Int) => Int)
+final class Partitioner[-K, -V] private[xkafka] (private[xkafka] val chosen: (Topic, K, V, Headers, Int) => Option[Int])
 
 object Partitioner:
-  def apply[K, V](choose: (K, V, Headers, Int) => Int): Partitioner[K, V] = new Partitioner(choose)
+  def apply[K, V](choose: (K, V, Headers, Int) => Int): Partitioner[K, V] =
+    new Partitioner((_, key, value, headers, count) => Some(choose(key, value, headers, count)))
 
   /** A partitioner that goes by the key alone, as the partitioner of a table's topic must, so that a key always lands in the same partition. */
-  def byKey[K](choose: (K, Int) => Int): Partitioner[K, Any] = new Partitioner((key, _, _, count) => choose(key, count))
+  def byKey[K](choose: (K, Int) => Int): Partitioner[K, Any] = new Partitioner((_, key, _, _, count) => Some(choose(key, count)))
+
+  /** A partitioner that is also told the topic, and can leave a record to Kafka's default partitioning by giving none, as Java's can. */
+  private[xkafka] def orDefault[K, V](choose: (Topic, K, V, Headers, Int) => Option[Int]): Partitioner[K, V] = new Partitioner(choose)

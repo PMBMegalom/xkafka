@@ -734,6 +734,20 @@ final class EngineBrokerSuite extends CatsEffectSuite:
               produceValues(server, app.input, keys.map(key => s"order-$key" -> Some(key))) *> read(server, app.output, keys.size, text)
                 .map(seen => assertEquals(seen.toSet, keys.map(key => key -> s"$key:name-$key").toSet))
 
+    test(s"$release, $under: a partitioner that chooses no partition leaves each record where Kafka's default puts it"):
+      val program =
+        (input: Topic, output: Topic) =>
+          val none = Partitioner.orDefault[String, String]((_, _, _, _, _) => None)
+          KStream(Named("read-53"), input, text, text).to(Named("write-53"), output, text, text, Some(none))
+      val keys = (0 until 8).map(n => s"k$n").toList
+      counting(server, program): app =>
+        produceValues(server, app.input, keys.map(_ -> Some("v"))) *> running(server, app):
+          placed(server, app.output, keys.size).map: seen =>
+            assertEquals(
+              seen.map((key, _, partition) => key -> partition).toMap,
+              keys.map(key => key -> Murmur2.partition(fs2.Chunk.array(key.getBytes), 2)).toMap
+            )
+
     test(s"$release, $under: a partitioner that chooses a partition the topic does not have stops the application, saying which"):
       val program =
         (input: Topic, output: Topic) =>
