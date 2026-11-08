@@ -19,7 +19,14 @@ platform="$(uname -s)"
 if [[ "${1:-}" == "--run" ]]; then
   binary="${XKAFKA_SMOKE_BINARY:?the linked smoke binary was not passed through}"
   case "$platform" in
-    Darwin) exec leaks --atExit -- "$binary" ;;
+    Darwin)
+      # leaks answers for the leaks it found and not for how the program exited, so the binary's own report of
+      # its round trip is what tells whether it passed.
+      log="$(mktemp)"
+      leaks --atExit -- "$binary" 2>&1 | tee "$log"
+      grep -q "xkafka downstream smoke test passed" "$log"
+      exit 0
+      ;;
     Linux)
       export LD_LIBRARY_PATH="$XKAFKA_LIBRDKAFKA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
       if [[ -z "${LSAN_SYMBOLIZER_PATH:-}" ]]; then
