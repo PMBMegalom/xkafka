@@ -13,29 +13,40 @@ Every member of the application needs:
    `withQueries`. A member without one cannot be asked, so the keys it holds
    cannot be answered by any other member.
 2. **A `Forward`**, which sends the bytes of a query to another member's endpoint
-   and gives back the bytes it answers. This is your HTTP client, or whatever your
-   members already use to talk to each other.
+   and gives back the bytes it answers.
 3. **An internal route** on that endpoint, which passes the bytes it receives to
    `answer` and sends back what `answer` returns.
 
+xkafka does not choose how members talk to each other. Here they use HTTP, with
+[http4s](https://http4s.org):
+
 ```scala mdoc:compile-only
-// Run a member that answers other members' queries and can query theirs
+// Run a member that answers other members' queries over HTTP, and asks them for the keys they hold
 import cats.effect.IO
+import com.comcast.ip4s.*
 import fs2.Chunk
+import org.http4s.*
+import org.http4s.dsl.io.*
+import org.http4s.ember.client.EmberClientBuilder
+import org.http4s.ember.server.EmberServerBuilder
 
 import xkafka.*
 import xkafka.streams.*
 
-def member(
-    settings: StreamsSettings,
-    topology: Topology[IO],
-    sendTo: (Endpoint, Chunk[Byte]) => IO[Chunk[Byte]],      // Your HTTP client: posts the bytes, returns the response's bytes
-    serveRoute: (Chunk[Byte] => IO[Chunk[Byte]]) => IO[Unit] // Your HTTP server: runs the internal route with this handler
-): IO[Unit] =
+def member(settings: StreamsSettings, topology: Topology[IO]): IO[Unit] =
   Endpoint.from("orders-3.internal", 8080).liftTo[IO].flatMap: here =>
-    val forward: Forward[IO] = sendTo
-    KafkaClient[IO].streams(settings.withQueries(here), topology, forward).use: streams =>
-      IO.race(streams.run, serveRoute(streams.answer)).void // Other members' queries arrive here
+    EmberClientBuilder.default[IO].build.use: http =>
+      // Post a query's bytes to the member that holds the key, and give back what it answers
+      val forward: Forward[IO] = (member, query) =>
+        val route = Uri.unsafeFromString(s"http://${member.host}:${member.port}/xkafka-query")
+        http.expect[Array[Byte]](Request[IO](Method.POST, route).withEntity(query.toArray)).map(Chunk.array(_))
+      KafkaClient[IO].streams(settings.withQueries(here), topology, forward).use: streams =>
+        // Answer the queries other members post here
+        val internal = HttpRoutes.of[IO]:
+          case request @ POST -> Root / "xkafka-query" =>
+            request.as[Array[Byte]].flatMap(query => streams.answer(Chunk.array(query))).flatMap(answer => Ok(answer.toArray))
+        val server = EmberServerBuilder.default[IO].withHost(ipv4"0.0.0.0").withPort(port"8080").withHttpApp(internal.orNotFound).build
+        server.surround(streams.run)                       // Serve the route for as long as the member runs
 ```
 
 Keep the internal route away from the outside world: it answers any query, for
@@ -44,23 +55,29 @@ any store.
 ## Asking
 
 Describe a key-value store with `QueryableStore.keyValue`, giving its name and the
-serdes its keys and values are written with, then pass a query to `query`. The call is
-the same whichever member holds the key:
+serdes its keys and values are written with, then pass a query to `query`. The call
+is the same whichever member holds the key. Here a public route answers with a
+user's balance:
 
 ```scala mdoc:compile-only
-// Look up a user's balance, asking again while the store is moving between members
-import scala.concurrent.duration.*
-
+// Answer GET /balance/<user> with the user's balance, wherever it is held
 import cats.effect.IO
+import org.http4s.*
+import org.http4s.dsl.io.*
+import org.http4s.headers.`Retry-After`
 
 import xkafka.streams.*
 
 val balances = QueryableStore.keyValue(Store("balances"), Serde.utf8[IO], Serde.long[IO])
 
-def balance(streams: KafkaStreams[IO], user: String): IO[Either[QueryProblem, Option[Long]]] =
-  streams.query(balances.get(user)).flatMap:
-    case Left(QueryProblem.Rebalancing) => IO.sleep(1.second) *> balance(streams, user) // Moving: ask again
-    case answered                       => IO.pure(answered)                            // Found, absent, or another problem
+def public(streams: KafkaStreams[IO]): HttpRoutes[IO] =
+  HttpRoutes.of[IO]:
+    case GET -> Root / "balance" / user =>
+      streams.query(balances.get(user)).flatMap:
+        case Right(Some(balance))           => Ok(balance.toString)
+        case Right(None)                    => NotFound()
+        case Left(QueryProblem.Rebalancing) => ServiceUnavailable().map(_.putHeaders(`Retry-After`.unsafeFromLong(1))) // Moving: ask again shortly
+        case Left(problem)                  => BadGateway(problem.toString)
 ```
 
 These stores can be queried:
@@ -80,9 +97,9 @@ Each store offers:
 | `all` | every key with its value |
 
 `range` and `all` ask every member holding part of the store. Their keys come in
-the order of their serialized bytes. For text keys that is alphabetical order;
-for numbers written with `Serde.long`, negative numbers come after the positive
-ones.
+the order of their serialized bytes. For text keys that is the order of their
+characters, capitals before lower-case letters, so `Zoe` comes before `adam`. For
+numbers written with `Serde.long`, negative numbers come after the positive ones.
 
 ## Window and session stores
 
@@ -144,26 +161,36 @@ little behind, but it can answer while its store is moving between members.
 ## Java members
 
 An application can mix xkafka and Java Kafka Streams members. A Java member
-answers xkafka's queries through `JavaQueries`, from the `xkafka-streams-java`
-module, on the JVM: give it the instance, the application's id, and each store
-that can be queried with its Java serdes, then pass the bytes your internal route
-receives to its `answer`. The member's `application.server` setting is the
-endpoint xkafka members reach it at.
+answers xkafka's queries through `JavaQueries`, from the
+[`xkafka-streams-java` module](README.md#java-partitioners-jvm-only): give it the instance, the application's id, and each store that can be
+queried with its Java serdes, then call its `answer` from the internal route. The
+member's `application.server` setting is the endpoint xkafka members reach it at.
 
-```scala mdoc:compile-only
-// Let a Java Kafka Streams member answer xkafka members' queries of its counts
-import org.apache.kafka.common.serialization.Serdes
-import org.apache.kafka.streams.KafkaStreams
+```java
+// Let a Java member answer xkafka members' queries of its page view counts
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.KafkaStreams;
 
-import xkafka.streams.interop.JavaQueries
+import xkafka.streams.interop.JavaQueries;
 
-def answering(streams: KafkaStreams): Array[Byte] => Array[Byte] =
-  val queries = JavaQueries.of(streams, "page-view-counter").keyValue("views-per-page", Serdes.String, Serdes.Long)
-  queries.answer                                     // Your internal route's handler: the request's bytes in, the answer's out
+final class Answering {
+  private final JavaQueries queries;
+
+  Answering(KafkaStreams streams) {
+    queries =
+        JavaQueries.of(streams, "page-view-counter")
+            .keyValue("views-per-page", Serdes.String(), Serdes.Long())   // A table or a count
+            .window("views-per-minute", Serdes.String(), Serdes.Long());  // A windowed count
+  }
+
+  // Call this from the internal route: the bytes posted to it in, the answer's bytes out
+  byte[] answer(byte[] query) {
+    return queries.answer(query);
+  }
+}
 ```
 
-`JavaQueries` also takes `window` and `session` stores. It runs each query
-through Java's interactive queries on that instance, so its stores answer as
-Java's do. A Java member without it answers in a format xkafka does not read,
-and a query that needs it fails with `NotXkafka`, or with `Unreachable` where
-nothing answers at its endpoint.
+`JavaQueries` also takes `session` stores. It reads each store through Java's own
+interactive queries on that instance. A Java member without it does not answer
+in a format xkafka reads, so a query that needs it fails with `NotXkafka`, or with
+`Unreachable` where nothing answers at its endpoint.

@@ -1037,6 +1037,8 @@ lazy val docs = project
   .enablePlugins(TypelevelSitePlugin)
   .dependsOn(client.jvm, streamsJava)
   .settings(
+    // The examples of querying stores show an HTTP connection between members; the site depends on http4s, the published modules do not.
+    libraryDependencies ++= Seq("ember-server", "ember-client", "dsl").map(module => "org.http4s" %% s"http4s-$module" % "0.23.38"),
     tlSiteHelium := tlSiteHelium.value.site.topNavigationBar(
       homeLink = IconLink.external("https://github.com/PMBMegalom/xkafka", HeliumIcon.home)
     )
