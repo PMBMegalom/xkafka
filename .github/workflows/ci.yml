@@ -390,6 +390,7 @@ jobs:
   npm-rocksdb:
     name: Prebuilt RocksDB shims
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-24.04
@@ -441,6 +442,10 @@ jobs:
         with:
           path: target/rocksdb-10.1.3
           key: rocksdbjni-e7f925287d9fe257
+
+      - name: Install gdb
+        if: runner.os == 'Linux'
+        run: sudo apt-get install --yes gdb
 
       - name: Test the shim in C under a leak checker
         run: sbt clientJS/rocksdbShimTest

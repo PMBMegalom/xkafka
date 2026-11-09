@@ -228,6 +228,8 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     setupNode,
     cacheLibrdkafkaLibrary.value,
     cacheRocksdb,
+    // The shim test prints the stacks of a harness that hangs, through gdb on Linux.
+    WorkflowStep.Run(List("sudo apt-get install --yes gdb"), name = Some("Install gdb"), cond = Some("runner.os == 'Linux'")),
     WorkflowStep.Sbt(List("clientJS/rocksdbShimTest"), name = Some("Test the shim in C under a leak checker")),
     WorkflowStep.Sbt(
       List("clientJS/testOnly xkafka.internal.rocksdb.*"),
@@ -248,6 +250,8 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   scalas = Nil,
   sbtStepPreamble = Nil,
   javas = List(JavaSpec.temurin("17")),
+  // Each platform's shim is checked on its own, so one that fails leaves the others to report.
+  matrixFailFast = Some(false),
   timeoutMinutes = Some(45)
 )
 
