@@ -338,7 +338,7 @@ private[librdkafka] object PrebuiltLibrary extends js.Object:
   * is outstanding.
   */
 private[internal] object Completions:
-  private val waiting   = scala.collection.mutable.LongMap.empty[() => Unit]
+  private val waiting   = scala.collection.mutable.LongMap.empty[(Seq[js.Any], () => Unit)]
   private val tokens    = new java.util.concurrent.atomic.AtomicLong(0L)
   private val keepAlive = new java.util.concurrent.atomic.AtomicReference[Option[scala.scalajs.js.timers.SetIntervalHandle]](None)
 
@@ -353,10 +353,12 @@ private[internal] object Completions:
       token => complete(if js.typeOf(token) == "bigint" then token.toString.toLong else token.asInstanceOf[Double].toLong)
     Koffi.register(report, s"$declared *")
 
-  /** A token for a call about to start, which runs `onDone` once the call reports. */
-  def expect(onDone: () => Unit): Long =
+  /** A token for a call about to start, which runs `onDone` once the call reports. The call's arguments are `held` until then: its thread reads and
+    * writes their memory, which the garbage collector would otherwise free once nothing in JavaScript refers to it.
+    */
+  def expect(held: Seq[js.Any])(onDone: () => Unit): Long =
     val token = tokens.incrementAndGet()
-    waiting.update(token, onDone)
+    waiting.update(token, (held, onDone))
     if keepAlive.get.isEmpty then keepAlive.set(Some(scala.scalajs.js.timers.setInterval(1.0e9)(())))
     token
 
@@ -368,7 +370,7 @@ private[internal] object Completions:
   private def complete(token: Long): Unit =
     val onDone = waiting.remove(token)
     settle()
-    onDone.foreach(_())
+    onDone.foreach((_, run) => run())
 
   private def settle(): Unit =
     if waiting.isEmpty then

@@ -130,13 +130,13 @@ private[xkafka] object JsRocksdb extends RocksdbLibrary:
 
   private def prebuiltError: String = Option(PrebuiltRocksdb.error).getOrElse("@xkafka/rocksdb found no library")
 
-  /** Starts a call on its thread, then reads what it wrote with `read` once it reports. The buffers it writes into are held until then. */
+  /** Starts a call on its thread, then reads what it wrote with `read` once it reports. Its arguments are held until then. */
   private def started[A](function: RocksdbShim => js.Dynamic, arguments: js.Any*)(read: RocksdbShim => A): Future[A] =
     loaded match
       case Left(failure) => Future.failed(failure)
       case Right(shim)   =>
         val promise = Promise[A]()
-        val token   = Completions.expect(() => promise.complete(Try(read(shim))))
+        val token   = Completions.expect(arguments)(() => promise.complete(Try(read(shim))))
         val code    = function(shim)((arguments ++ Seq[js.Any](Completions.done, js.BigInt(token.toString)))*)
         if integer(code) != 0 then
           Completions.forget(token)

@@ -60,7 +60,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
   private def background(function: Shim => js.Dynamic)(arguments: js.Any*): F[Unit] =
     shim.flatMap: loaded =>
       F.async_[Unit]: callback =>
-        val token   = Completions.expect(() => callback(Right(())))
+        val token   = Completions.expect(arguments)(() => callback(Right(())))
         val started = function(loaded)((arguments ++ Seq[js.Any](Completions.done, bigInt(token)))*)
         if started.asInstanceOf[Int] != 0 then
           Completions.forget(token)
