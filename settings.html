@@ -72,9 +72,18 @@
     <li class="level1 active nav-leaf"><a href="#">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -95,9 +104,10 @@
     <li class="level1 nav-leaf"><a href="#validation">Validation</a></li>
     <li class="level1 nav-leaf"><a href="#properties">Properties</a></li>
     <li class="level1 nav-leaf"><a href="#managed-properties">Managed properties</a></li>
-    <li class="level1 nav-leaf"><a href="#withers">Withers</a></li>
+    <li class="level1 nav-leaf"><a href="#changing-settings">Changing settings</a></li>
     <li class="level1 nav-leaf"><a href="#consumer-settings">Consumer settings</a></li>
     <li class="level1 nav-leaf"><a href="#producer-settings">Producer settings</a></li>
+    <li class="level1 nav-leaf"><a href="#streams-settings">Streams settings</a></li>
     <li class="level1 nav-leaf"><a href="#client-settings">Client settings</a></li>
   </ul>
 
@@ -111,8 +121,10 @@
         <p><code>ClientSettings</code> describes the connection. <code>ProducerSettings</code> and
         <code>ConsumerSettings</code> each build on it and add what their client needs.
         <code>TransactionalProducerSettings</code> wraps <code>ProducerSettings</code>, and is covered in
-        <a href="transactions.html">Transactions</a>.</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+        <a href="transactions.html">Transactions</a>. <code>StreamsSettings</code> also builds on <code>ClientSettings</code>,
+        and is <a href="#streams-settings">described below</a>.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Validate the connection, then build producer settings on it
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -120,24 +132,25 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">utf8</span><span> = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">settings</span><span> =
-  </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
-    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>)</span></code></pre>
+  </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;  </span><span class="comment">// Runs only if the connection settings are valid
+</span><span>    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>)</span></code></pre>
         
         <h2 id="validation" class="section"><a class="anchor-link left" href="#validation"><i class="icofont-laika link">&#xef71;</i></a>Validation</h2>
         <p>Every <code>from</code> constructor returns <code>ValidatedNel[SettingsError, *]</code>. It
         accumulates, so one call reports every problem at once, and only valid settings
         can be constructed.</p>
         <p><code>liftTo</code> carries the failure into the effect:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Turn invalid values or settings into a failure of the effect
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
   </span><span class="keyword">for</span><span>
-    </span><span class="identifier">client</span><span> &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="identifier">topic</span><span>  &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-  </span><span class="keyword">yield</span><span> (</span><span class="identifier">client</span><span>, </span><span class="identifier">topic</span><span>)</span></code></pre>
+    </span><span class="identifier">client</span><span> &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]  </span><span class="comment">// Fails with InvalidSettings
+</span><span>    </span><span class="identifier">topic</span><span>  &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]                                     </span><span class="comment">// Fails with InvalidValue
+</span><span>  </span><span class="keyword">yield</span><span> (</span><span class="identifier">client</span><span>, </span><span class="identifier">topic</span><span>)</span></code></pre>
         <p>A rejected value raises <code>KafkaException.InvalidValue</code>, which carries the
         <code>ValidationError</code> that rejected it. Rejected settings raise
         <code>KafkaException.InvalidSettings</code>, which carries every <code>SettingsError</code>, so the
@@ -152,9 +165,10 @@
         <code>ConsumerSettings.MaxPollIntervalLimit</code> (24 hours).</p>
         
         <h2 id="properties" class="section"><a class="anchor-link left" href="#properties"><i class="icofont-laika link">&#xef71;</i></a>Properties</h2>
-        <p>Each settings type accepts an immutable <code>properties</code> map for backend
-        configuration the portable model does not describe:</p>
-        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+        <p>Each settings type accepts an immutable <code>properties</code> map for Kafka client
+        properties that have no typed setting:</p>
+        <pre><code class="nohighlight"><span class="comment">// Pass Kafka properties that have no typed setting
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -164,12 +178,14 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">settings</span><span> =
   </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(
     </span><span class="identifier">bootstrapServers</span><span> = </span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>),
-    </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;client.rack&quot;</span><span> -&gt; </span><span class="string-literal">&quot;eu-west-1a&quot;</span><span>)
-  ).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
-    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;retry.backoff.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;200&quot;</span><span>))</span></code></pre>
-        <p>Producer or consumer properties override client properties. Names and values are
-        interpreted by the selected backend, so portable applications should use only
-        properties supported with the same meaning by each one.</p>
+    </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;client.rack&quot;</span><span> -&gt; </span><span class="string-literal">&quot;eu-west-1a&quot;</span><span>)  </span><span class="comment">// For everything built on this client
+</span><span>  ).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
+    </span><span class="comment">// For this producer only, and overrides the client&#39;s
+</span><span>    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;retry.backoff.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;200&quot;</span><span>))</span></code></pre>
+        <p>Producer or consumer properties override client properties. Each platform&#39;s client reads
+        the names and values itself: the Java client on the JVM, and librdkafka on Scala.js
+        and Scala Native. For code that runs on more than one platform, use only properties
+        that both accept with the same meaning.</p>
         
         <h2 id="managed-properties" class="section"><a class="anchor-link left" href="#managed-properties"><i class="icofont-laika link">&#xef71;</i></a>Managed properties</h2>
         <p><code>ManagedProperties</code> is the set of property names xkafka sets from the typed
@@ -177,11 +193,11 @@
         TLS and SASL names. Supplying one of them through the map is a <code>SettingsError</code>;
         use the typed setting instead.</p>
         
-        <h2 id="withers" class="section"><a class="anchor-link left" href="#withers"><i class="icofont-laika link">&#xef71;</i></a>Withers</h2>
+        <h2 id="changing-settings" class="section"><a class="anchor-link left" href="#changing-settings"><i class="icofont-laika link">&#xef71;</i></a>Changing settings</h2>
         <p>Each type has <code>with*</code> methods for deriving one value from another. Those that
         can invalidate the result, such as <code>withProperty</code>, return
         <code>ValidatedNel[SettingsError, *]</code> and revalidate in full. This includes every
-        duration wither: <code>withMetadataRefreshInterval</code>, <code>withCloseTimeout</code>,
+        one that sets a duration: <code>withMetadataRefreshInterval</code>, <code>withCloseTimeout</code>,
         <code>withTransactionTimeout</code>, <code>withCommitTimeout</code>, <code>withPollTimeout</code>,
         <code>withRequestTimeout</code>, <code>withLinger</code>, <code>withEnqueueTimeout</code>, <code>withSessionTimeout</code>,
         <code>withHeartbeatInterval</code>, <code>withMaxPollInterval</code>, <code>withRebalanceSafeCommits</code>, and
@@ -323,6 +339,56 @@
           </tbody>
         </table>
         <p>See <a href="producing.html">Producing</a> for each of them.</p>
+        
+        <h2 id="streams-settings" class="section"><a class="anchor-link left" href="#streams-settings"><i class="icofont-laika link">&#xef71;</i></a>Streams settings</h2>
+        <p>Beyond the client and the application&#39;s id, <code>StreamsSettings</code> carries:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>setting</th>
+              <th>default</th>
+              <th>meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>guarantee</code></td>
+              <td><code>ProcessingGuarantee.AtLeastOnce</code></td>
+              <td>whether a record can be processed again after work moves</td>
+            </tr>
+            <tr>
+              <td><code>commitInterval</code></td>
+              <td>unset, which is 30s at least once and 100ms exactly once</td>
+              <td>how often tasks commit</td>
+            </tr>
+            <tr>
+              <td><code>concurrency</code></td>
+              <td>1</td>
+              <td>how many tasks process records at once</td>
+            </tr>
+            <tr>
+              <td><code>closeTimeout</code></td>
+              <td>30s</td>
+              <td>how long releasing the application waits to give back its tasks and leave</td>
+            </tr>
+            <tr>
+              <td><code>topologyDescriptionPush</code></td>
+              <td><code>true</code></td>
+              <td>whether a member sends the program&#39;s description when the broker asks for it</td>
+            </tr>
+            <tr>
+              <td><code>queryEndpoint</code></td>
+              <td>unset, so other members cannot query this one</td>
+              <td>where this member answers other members&#39; <a href="streams/queries.html">queries</a></td>
+            </tr>
+            <tr>
+              <td><code>stateDirectory</code></td>
+              <td>unset, so stores are kept in memory</td>
+              <td>where the application keeps its stores on disk (<a href="streams/running.html#keeping-stores-on-disk">Keeping stores on disk</a>)</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>See <a href="streams/running.html#guarantees">Streams</a> for each of them.</p>
         
         <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
         <p><code>ClientSettings</code> applies to producers and consumers alike:</p>

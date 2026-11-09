@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Windows</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="../helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="../helium/site/laika-helium.css" />
+  <script src="../helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="../">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="../getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="../settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="../producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="../consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="../headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="../offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="../transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="index.html">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="branching.html">Branching</a></li>
+    <li class="level2 active nav-leaf"><a href="#">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Windows</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#final-results-only">Final results only</a></li>
+    <li class="level1 nav-leaf"><a href="#sliding-windows">Sliding windows</a></li>
+    <li class="level1 nav-leaf"><a href="#session-windows">Session windows</a></li>
+    <li class="level1 nav-leaf"><a href="#joining-windowed-tables">Joining windowed tables</a></li>
+    <li class="level1 nav-leaf"><a href="#writing-windowed-keys">Writing windowed keys</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="windows" class="title">Windows</h1>
+        <p>Windows split each key&#39;s records by time, so you can count, reduce or aggregate
+        them per minute, per hour, and so on. Group the records, then window them:</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s page views per minute, and write every new count
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">viewsPerMinute</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">page</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">windowedBy</span><span>(</span><span class="type-name">TimeWindows</span><span>.</span><span class="identifier">tumbling</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>))  </span><span class="comment">// One-minute windows, which accept late records for 10 more seconds
+</span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-minute&quot;</span><span>))          </span><span class="comment">// Count per user and window
+</span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
+    </span><span class="comment">// Write each key together with its window
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>This counts each user&#39;s page views per minute, writing a new count each time
+        one changes.</p>
+        <p><code>TimeWindows.tumbling</code> makes windows that follow one another without gaps or
+        overlap, so each record counts in exactly one. <code>TimeWindows.hopping</code> starts a
+        new window every <code>advance</code>, so windows overlap and a record counts in every
+        window it falls in.</p>
+        <p>Time here is the records&#39; own timestamps, not the clock. Records often arrive
+        out of order, so each window keeps accepting records for a <code>grace</code> period after
+        it ends. Once a record timestamped at or after a window&#39;s end plus its grace has
+        arrived, the window is closed and later records for it are dropped. Use
+        <code>tumblingWithNoGrace</code> or <code>hoppingWithNoGrace</code> to close windows as soon as they
+        end.</p>
+        <p>The result is keyed by <code>Windowed[K]</code>: the original key and its <code>Window</code>, from
+        <code>start</code> to <code>end</code> in epoch milliseconds. A time window does not include its end;
+        sliding windows and sessions, below, do.</p>
+        
+        <h2 id="final-results-only" class="section"><a class="anchor-link left" href="#final-results-only"><i class="icofont-laika link">&#xef71;</i></a>Final results only</h2>
+        <p>By default, every update to a window goes downstream. To send only each
+        window&#39;s final result, once the window has closed, add <code>emitOnWindowClose</code>:</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s page views per minute, and write only each final count
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">finalViewsPerMinute</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">page</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">windowedBy</span><span>(</span><span class="type-name">TimeWindows</span><span>.</span><span class="identifier">tumbling</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>))
+    .</span><span class="identifier">withRetention</span><span>(</span><span class="number-literal">10</span><span>.</span><span class="identifier">minutes</span><span>)  </span><span class="comment">// Keep windows until their results have been sent
+</span><span>    .</span><span class="identifier">emitOnWindowClose</span><span>          </span><span class="comment">// Send each result once its window closes
+</span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;final-views-per-minute&quot;</span><span>))
+    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>A closed window&#39;s result is sent when the next record arrives, at most once a
+        second, as in Java Kafka Streams. So results do not go out at the exact moment
+        a window closes, and while no records arrive, they wait.</p>
+        <p>If the work moves to another member, results that were already sent and
+        committed are not sent again.</p>
+        <p>By default a window is kept only for its size plus its grace, and with
+        <code>emitOnWindowClose</code> that can lose results. Take one-minute windows with ten
+        seconds of grace, which are kept for seventy seconds by default, and these
+        records, timestamped:</p>
+        <ul>
+          <li>12:00:30, counted in the window from 12:00;</li>
+          <li>12:02:05, the next record.</li>
+        </ul>
+        <p>The record at 12:02:05 closes the window from 12:00, whose grace ended at
+        12:01:10. But it also starts the window from 12:02, which is more than seventy
+        seconds after 12:00, so the window from 12:00 is removed before its result is
+        sent. Its count never goes downstream. The same can happen when the records in
+        between arrive quickly, since closed windows are looked for at most once a second.</p>
+        <p>Keeping windows longer, as <code>withRetention(10.minutes)</code> does in the example,
+        keeps the window from 12:00 until its result has been sent. Java Kafka Streams
+        has the same limit, and the same remedy.</p>
+        
+        <h2 id="sliding-windows" class="section"><a class="anchor-link left" href="#sliding-windows"><i class="icofont-laika link">&#xef71;</i></a>Sliding windows</h2>
+        <p>Sliding windows answer questions like &quot;how many times did this user fail to
+        log in within five minutes?&quot;. Each window covers records at most a time difference
+        apart. Windows are made only where records are, so there are no empty
+        windows:</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s failed logins within any five minutes
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">failedLogins</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>    = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">address</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;failed-logins&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">address</span><span>)
+    .</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">user</span><span>, </span><span class="identifier">address</span><span>)
+    .</span><span class="identifier">windowedBy</span><span>(</span><span class="type-name">SlidingWindows</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>))  </span><span class="comment">// Records at most five minutes apart share a window
+</span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-failures&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;failures-within-five-minutes&quot;</span><span>))
+    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;failure-counts&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-failure-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>Each record ends a window, and a window also starts just after a record when
+        later records follow it within the time difference. For example, with a
+        five-second difference, records of one key at 10:00:00 and 10:00:01 give three
+        windows:</p>
+        <ul>
+          <li>the window ending at 10:00:00, with a count of 1;</li>
+          <li>the window ending at 10:00:01, holding both records, with a count of 2;</li>
+          <li>the window starting just after 10:00:00, holding only the later record, with
+          a count of 1.</li>
+        </ul>
+        <p>Records that arrive late within the grace update every window they fall in.
+        Use <code>SlidingWindows.withNoGrace</code> for no grace.</p>
+        <p>By default, windows are kept for twice the time difference plus the grace,
+        because a new record can need windows that far back. That is also the shortest
+        <code>withRetention</code> accepts. <code>emitOnWindowClose</code> works as for time windows.</p>
+        
+        <h2 id="session-windows" class="section"><a class="anchor-link left" href="#session-windows"><i class="icofont-laika link">&#xef71;</i></a>Session windows</h2>
+        <p>Session windows group each key&#39;s records into bursts of activity, such as a
+        user&#39;s visits: a session lasts as long as records keep arriving within an
+        inactivity gap of each other, and ends once the gap passes with none.</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s page views per visit
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">visits</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">page</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">windowedBy</span><span>(</span><span class="type-name">SessionWindows</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>))  </span><span class="comment">// A visit ends after five minutes with no views
+</span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-visit&quot;</span><span>))
+    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
+    </span><span class="comment">// A replaced session is written as a tombstone
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">sessionWindowed</span><span>(</span><span class="identifier">user</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>)</span></code></pre>
+        <p>A new record within the gap of two separate sessions merges them into one, so a
+        session already sent downstream can be replaced. A table of
+        sessions is therefore a table that can delete keys (see <a href="tables.html">Tables</a>): its
+        <code>toStream</code> gives <code>None</code> for each replaced session, then the merged session with
+        its value. For example, with a five-minute gap, records of one key at 10:00 and
+        10:02 first give the session from 10:00 to 10:00 with a count of 1; the second
+        record then gives <code>None</code> for that session and a count of 2 for the session from
+        10:00 to 10:02.</p>
+        <p>Write session results with an <code>option</code> serde, such as <code>Serde.long[IO].option</code>:
+        <code>None</code> is written as a record with no value, a tombstone, exactly as Java Kafka
+        Streams writes a replaced session.</p>
+        <p><code>count</code> and <code>reduce</code> know how to merge sessions. <code>aggregate</code> takes a function
+        for it as well, given the two sessions&#39; values. Over a stream of purchases in
+        cents, keyed by user, this adds up what each user spends per visit:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add up spending per visit. The last function combines two visits when they merge
+</span><span>.</span><span class="identifier">aggregate</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;add-spending&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;spending-per-visit&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])(</span><span class="number-literal">0L</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">cents</span><span>, </span><span class="identifier">total</span><span>) =&gt; </span><span class="identifier">total</span><span> + </span><span class="identifier">cents</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">first</span><span>, </span><span class="identifier">second</span><span>) =&gt; </span><span class="identifier">first</span><span> + </span><span class="identifier">second</span><span>)</span></code></pre>
+        <p>A session closes once a record arrives timestamped later than its end plus the
+        inactivity gap plus the grace, and later records no longer join it. By
+        default, sessions are kept for the gap plus the grace after they end, which is
+        also the shortest <code>withRetention</code> accepts. With <code>emitOnWindowClose</code>, only each
+        session&#39;s final value goes downstream, and no <code>None</code> values are sent.</p>
+        
+        <h2 id="joining-windowed-tables" class="section"><a class="anchor-link left" href="#joining-windowed-tables"><i class="icofont-laika link">&#xef71;</i></a>Joining windowed tables</h2>
+        <p>Two windowed tables join window by window, as other tables join key by key. This
+        joins each page&#39;s clicks per minute with its views in the same minute:</p>
+        <pre><code class="nohighlight"><span class="comment">// Each page&#39;s clicks and views per minute, joined minute by minute into a click rate
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">clickRates</span><span>(</span><span class="identifier">clicks</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">views</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">page</span><span>    = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">minute</span><span>  = </span><span class="type-name">TimeWindows</span><span>.</span><span class="identifier">tumbling</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>)
+  </span><span class="keyword">val</span><span> </span><span class="identifier">clicked</span><span> = </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;clicks&quot;</span><span>), </span><span class="identifier">clicks</span><span>, </span><span class="identifier">page</span><span>, </span><span class="identifier">page</span><span>).</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">page</span><span>, </span><span class="identifier">page</span><span>).</span><span class="identifier">windowedBy</span><span>(</span><span class="identifier">minute</span><span>).</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-clicks&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;clicks&quot;</span><span>))
+  </span><span class="keyword">val</span><span> </span><span class="identifier">viewed</span><span>  = </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;views&quot;</span><span>), </span><span class="identifier">views</span><span>, </span><span class="identifier">page</span><span>, </span><span class="identifier">page</span><span>).</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">page</span><span>, </span><span class="identifier">page</span><span>).</span><span class="identifier">windowedBy</span><span>(</span><span class="identifier">minute</span><span>).</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views&quot;</span><span>))
+  </span><span class="identifier">clicked</span><span>
+    .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;click-rate&quot;</span><span>), </span><span class="identifier">viewed</span><span>)((</span><span class="identifier">c</span><span>, </span><span class="identifier">v</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">${c.toDouble / v}</span><span class="string-literal">&quot;</span><span>)  </span><span class="comment">// Each page and minute meets the same page and minute
+</span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;rates&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-rates&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">page</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="identifier">page</span><span>.</span><span class="identifier">option</span><span>)</span></code></pre>
+        <p>A window meets only the same window of the other table: the same key and the same
+        start, and for sessions the same end too. A window the other table has already
+        dropped, once its retention has passed, finds nothing. <code>join</code>, <code>leftJoin</code> and
+        <code>outerJoin</code> all work this way, and so does keeping the result in a store. A stream
+        keyed by window, such as a windowed table&#39;s <code>toStream</code>, joins a windowed table in the
+        same way.</p>
+        <p>Both tables&#39; topics must have the same number of partitions, as for any table join.
+        Windowed tables cannot join on a foreign key.</p>
+        
+        <h2 id="writing-windowed-keys" class="section"><a class="anchor-link left" href="#writing-windowed-keys"><i class="icofont-laika link">&#xef71;</i></a>Writing windowed keys</h2>
+        <p>To write windowed keys to a topic, use <code>Serde.timeWindowed(key, size)</code>, with the
+        window size for time windows and the time difference for sliding windows. It
+        writes the same bytes as Java&#39;s <code>WindowedSerdes.timeWindowedSerdeFrom</code>, so Java
+        applications can read them. Only the window&#39;s start is written, which is why
+        reading it back needs the size.</p>
+        <p>For sessions, use <code>Serde.sessionWindowed(key)</code>, which writes both the start and
+        the end, as Java&#39;s <code>WindowedSerdes.sessionWindowedSerdeFrom</code> does.</p>
+        <p>Like Java Kafka Streams, xkafka sends windowed results to the partition of their
+        key alone, not of the key and window together. All of a key&#39;s windows are then
+        in one partition, in order, and in the same partition as that key in topics
+        that are not windowed. A plain Kafka producer hashes the whole windowed key
+        instead, so other producers writing to the same topic need to choose the partition
+        from the key alone too.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

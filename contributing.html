@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -121,11 +130,7 @@
         broker and its volume. Name a backend, <code>jvm</code>, <code>js</code> or <code>native</code>, to run only that
         one, as CI does with each on a runner of its own:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh native</span></code></pre>
-        <p>The streams engine&#39;s tests run separately, against a broker of each Kafka
-        release it supports and beside a Java Kafka Streams application, as CI does in
-        a job of their own:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh --streams</span></code></pre>
-        <p>Three suites need it:</p>
+        <p>The suites it runs include:</p>
         <ul>
           <li><code>KafkaIntegrationSuite</code> covers produce, consume, and commit round trips.</li>
           <li><code>KafkaConformanceSuite</code> asserts behaviour every backend is expected to share,
@@ -135,6 +140,10 @@
         <p>A case listed as divergent in the conformance suite is marked as expected to
         fail on the named backends. Fixing the backend makes the marked case fail, so a
         marker cannot outlive the divergence it records.</p>
+        <p>The streams engine&#39;s tests run separately, against a broker of each Kafka
+        release it supports and beside a Java Kafka Streams application, as CI does in
+        a job of their own:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh --streams</span></code></pre>
         
         <h2 id="librdkafka-for-the-native-build" class="section"><a class="anchor-link left" href="#librdkafka-for-the-native-build"><i class="icofont-laika link">&#xef71;</i></a>librdkafka for the Native build</h2>
         <p>The build downloads librdkafka, verifies its SHA-256 checksum, builds it, and

@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Streams</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="../helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="../helium/site/laika-helium.css" />
+  <script src="../helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="../">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="../getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="../settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="../producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="../consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="../headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="../offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="../transactions.html">Transactions</a></li>
+    <li class="level1 active nav-node"><a href="#">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Streams</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-node"><a href="#programs">Programs</a></li>
+    <li class="level2 nav-leaf"><a href="#steps-that-see-the-whole-record">Steps that see the whole record</a></li>
+    <li class="level2 nav-leaf"><a href="#choosing-partitions">Choosing partitions</a></li>
+    <li class="level2 nav-leaf"><a href="#describing-a-program">Describing a program</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="streams" class="title">Streams</h1>
+        <p><code>KafkaClient.streams</code> runs a Kafka Streams program. Each running instance is one
+        member of the application, and the application can mix xkafka members with Java
+        Kafka Streams instances running the same program. Members share the work and
+        take it over from each other as they start and stop.</p>
+        <p>Streams applications need brokers of Kafka 4.2 or newer.</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each page&#39;s views across all users, and write every new count to a topic
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+</span><span class="keyword">val</span><span> </span><span class="identifier">page</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+</span><span class="keyword">val</span><span> </span><span class="identifier">views</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">input</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">output</span><span>   &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">pipeline</span><span>  = </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+                  </span><span class="comment">// Key each view by its page, through a repartition topic
+</span><span>                  .</span><span class="identifier">groupBy</span><span>(</span><span class="type-name">Repartition</span><span>(</span><span class="string-literal">&quot;views-by-page&quot;</span><span>), </span><span class="identifier">page</span><span>, </span><span class="identifier">page</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">viewed</span><span>) =&gt; </span><span class="identifier">viewed</span><span>)
+                  .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>))  </span><span class="comment">// Keep each page&#39;s count in a store
+</span><span>                  .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))                        </span><span class="comment">// Turn each change to a count into a record
+</span><span>                  .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">page</span><span>, </span><span class="identifier">views</span><span>)   </span><span class="comment">// Write each change to the output topic
+</span><span>    </span><span class="identifier">topology</span><span> &lt;- </span><span class="type-name">Topology</span><span>.</span><span class="identifier">of</span><span>(</span><span class="identifier">pipeline</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]                         </span><span class="comment">// Check the program for problems
+</span><span>    </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">id</span><span>       &lt;- </span><span class="type-name">ApplicationId</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;page-view-counter&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">StreamsSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">id</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">streams</span><span>(</span><span class="identifier">settings</span><span>, </span><span class="identifier">topology</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">run</span><span>)  </span><span class="comment">// Join the application and keep processing
+</span><span>  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <p>The input topic holds a record for each page a user views, keyed by the user.
+        The program counts the views of each page, and writes every new count to
+        <code>views-per-page</code>, keyed by the page.</p>
+        <p>Acquiring the resource joins the application and starts processing. <code>run</code> waits
+        while the application runs, and fails with the error that stops it. Releasing
+        the resource commits the member&#39;s work, hands it back to the application, and
+        leaves, waiting at most <code>closeTimeout</code>.</p>
+        
+        <h2 id="programs" class="section"><a class="anchor-link left" href="#programs"><i class="icofont-laika link">&#xef71;</i></a>Programs</h2>
+        <p>A program is a <code>Topology</code> of pipelines. A pipeline starts by reading a topic, as a
+        <code>KStream</code> or as a <code>KTable</code> (see <a href="tables.html">Tables</a>), and is built with:</p>
+        <ul>
+          <li><code>filter</code>, <code>filterNot</code>, <code>map</code>, <code>mapValues</code>, <code>flatMap</code>, <code>flatMapValues</code>,
+          <code>selectKey</code> and <code>peek</code>;</li>
+          <li><code>evalFilter</code>, <code>evalMap</code> and <code>evalMapValues</code>, which run an effect;</li>
+          <li><code>filterRecord</code>, <code>mapRecord</code>, <code>mapRecordValue</code> and others like them, which also
+          see each record&#39;s time and headers (see <a href="#steps-that-see-the-whole-record">Steps that see the whole record</a>);</li>
+          <li><code>repartition</code>, which sends records through a repartition topic you name, with as
+          many partitions as you choose (see <a href="#choosing-partitions">Choosing partitions</a>);</li>
+          <li><code>groupByKey</code> or <code>groupBy</code>, followed by <code>count</code>, <code>reduce</code> or <code>aggregate</code> into a
+          named <code>Store</code>. This gives a <code>KTable</code>, and its <code>toStream</code> is every change to it.
+          A table can be grouped too (see <a href="tables.html#grouping-a-table">Grouping a table</a>),
+          and several groups can be folded together
+          (see <a href="tables.html#folding-streams-together">Folding streams together</a>);</li>
+          <li><code>toTable</code>, which keeps each key&#39;s latest value as a <code>KTable</code>;</li>
+          <li><code>join</code>, <code>leftJoin</code> and <code>outerJoin</code>, which combine it with a table or a stream,
+          and <code>join</code> and <code>leftJoin</code> with a global table, and <code>joinOnForeignKey</code> and
+          <code>leftJoinOnForeignKey</code>, which join a table with the rows its values name (see <a href="joins.html">Joins</a>);</li>
+          <li><code>fork</code>, <code>forkMerge</code>, <code>merge</code>, <code>split</code> and <code>into</code>, which send records down
+          several paths or bring them together (see <a href="branching.html">Branching</a>);</li>
+          <li><code>to</code>, which ends a path at an output topic, or <code>foreach</code> and <code>print</code>, which end
+          it by acting on each record or printing it.</li>
+        </ul>
+        <p>A <code>KStream</code> can read several topics as one source, given as a <code>NonEmptyList</code>, as
+        Java&#39;s <code>stream</code> can given several topics. A record is read with the same serdes
+        whichever topic it came from, and each deserializer is told that topic. A topic
+        listed twice is read once. Partitions with the same number are processed together,
+        so to keep a key&#39;s records together for grouping or joining, give the topics the
+        same number of partitions.</p>
+        <p>Every step has a name, given as a <code>Named</code>: a pipeline&#39;s source, each step, and
+        its <code>to</code>. Names label the program&#39;s nodes in
+        <a href="#describing-a-program">its description</a>, as <code>Named</code>, <code>Consumed</code> and <code>Produced</code>
+        names do in Java Kafka Streams. A step that keeps a store also takes the store&#39;s
+        name, as Java takes a <code>Named</code> and a <code>Materialized</code> name. Two steps cannot share a
+        name.</p>
+        <p>Grouping records whose key may have changed, after <code>map</code>, <code>flatMap</code>, <code>selectKey</code>
+        or <code>evalMap</code>, sends them through a repartition topic first. Name it with a
+        <code>Repartition</code>: <code>groupBy</code> always takes one, and <code>groupByKey</code> takes one after such
+        a step. As with Java&#39;s <code>Grouped</code>, the step that gives <code>groupBy</code>&#39;s records their
+        new key takes the repartition&#39;s name.</p>
+        <p>In the first example, <code>groupBy</code> keys each view by its page, so the views of a
+        page, from every user, are counted together. They go through the repartition
+        topic <code>&lt;application id&gt;-views-by-page-repartition</code>. Choosing the key first
+        with <code>selectKey</code> gives the same counts, with <code>groupByKey</code> naming the
+        repartition:</p>
+        <pre><code class="nohighlight"><span class="comment">// The same counts, choosing the key first and naming the repartition when grouping
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">viewsPerPage</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">page</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">page</span><span>)
+    .</span><span class="identifier">selectKey</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;by-page&quot;</span><span>))((</span><span class="identifier">_</span><span>, </span><span class="identifier">viewed</span><span>) =&gt; </span><span class="identifier">viewed</span><span>)    </span><span class="comment">// Key each view by its page
+</span><span>    .</span><span class="identifier">groupByKey</span><span>(</span><span class="type-name">Repartition</span><span>(</span><span class="string-literal">&quot;views-by-page&quot;</span><span>), </span><span class="identifier">page</span><span>, </span><span class="identifier">page</span><span>)  </span><span class="comment">// The key changed, so this takes a Repartition
+</span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>))
+    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">page</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>Without the <code>Repartition</code>, this does not compile: the views of a page must
+        reach one partition before they can be counted together. A stream&#39;s type says
+        whether its records are keyed as they were read, so the compiler knows which
+        <code>groupByKey</code> applies. <code>KStream(...)</code> and <code>filter</code>, <code>filterNot</code>, <code>mapValues</code>,
+        <code>flatMapValues</code>, <code>peek</code>, <code>evalFilter</code> and <code>evalMapValues</code> after it keep the key as
+        read, and <code>groupByKey(key, value)</code> groups the records where they are. After <code>map</code>,
+        <code>flatMap</code>, <code>selectKey</code> or <code>evalMap</code>, only <code>groupByKey(repartition, key, value)</code>
+        compiles. Each fails to compile where the other applies, with a message saying
+        which to use.</p>
+        <p>The stream&#39;s <code>Keying</code> type member carries this: <code>KeyState.AsRead</code> or
+        <code>KeyState.Changed</code>. Types are inferred, so a program rarely names it. To
+        annotate a stream without losing it, use <code>KStream.Of</code>, as in
+        <code>KStream.Of[IO, String, String, KeyState.AsRead]</code>. A
+        <code>KStream.Unkeyed[IO, String, String]</code> is a stream read from a topic whose type does
+        not say how it is keyed, and it is taken to have changed its key: grouping it by
+        key takes a <code>Repartition</code>, and if its key had not changed after all, <code>Topology.of</code>
+        refuses the name with <code>TopologyError.UnusedRepartition</code>.</p>
+        <p><code>repartition</code> sends records through a repartition topic whenever you ask, whether
+        or not their key has changed. Afterwards they are keyed as read from that topic,
+        so <code>groupByKey</code> needs no name for them.</p>
+        <p><code>foreach</code> runs an effect for each record, and runs it again for records processed
+        again, such as after a crash, as <code>peek</code> does. <code>print</code> writes each record as
+        <code>[label]: key, value</code> to the <code>Console[F]</code> in scope, labelled with the name of the
+        step before it unless you give a label, or with its own name if it starts a
+        <a href="branching.html#paths-that-share-what-follows">flow</a>. Java&#39;s <code>print</code> writes the same lines.</p>
+        <p>The application&#39;s own topics are named after its id: a store&#39;s changelog is
+        <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, and a repartition topic is
+        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>. The broker creates them when the
+        application first starts.</p>
+        <p><code>Topology.of</code> checks the program and reports every problem at once, such as two
+        stores or steps with the same name, or one topic read twice. <code>liftTo</code>
+        raises them in <code>F</code> as an <code>InvalidTopology</code>, and refused settings as an
+        <code>InvalidStreamsSettings</code>.</p>
+        <p>A <code>Serde</code> holds the serializer and deserializer of one type, since a streams
+        application both reads and writes its topics. <code>Serde.utf8</code>, <code>Serde.long</code> and
+        <code>Serde.bytes</code> write the same bytes as Java&#39;s <code>Serdes.String()</code>, <code>Serdes.Long()</code>
+        and <code>Serdes.ByteArray()</code>.</p>
+        
+        <h3 id="steps-that-see-the-whole-record" class="section"><a class="anchor-link left" href="#steps-that-see-the-whole-record"><i class="icofont-laika link">&#xef71;</i></a>Steps that see the whole record</h3>
+        <p><code>filter</code>, <code>mapValues</code> and the steps like them see a record&#39;s key and value. To read
+        or change its headers or time, or see where it was read from, use a step that is
+        given the whole record:</p>
+        <pre><code class="nohighlight"><span class="comment">// Drop test orders, and put the tenant named in a header into each order&#39;s value
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">tenantOrders</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">id</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">item</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">id</span><span>, </span><span class="identifier">item</span><span>)
+    .</span><span class="identifier">filterRecord</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;real-orders&quot;</span><span>))(</span><span class="identifier">_</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">getAll</span><span>(</span><span class="string-literal">&quot;x-test&quot;</span><span>).</span><span class="identifier">isEmpty</span><span>)  </span><span class="comment">// Test orders carry an x-test header
+</span><span>    .</span><span class="identifier">mapRecordValue</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;with-tenant&quot;</span><span>)): </span><span class="identifier">record</span><span> =&gt;
+      </span><span class="keyword">val</span><span> </span><span class="identifier">tenant</span><span> = </span><span class="identifier">record</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">String</span><span>](</span><span class="string-literal">&quot;tenant&quot;</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">toOption</span><span>).</span><span class="identifier">getOrElse</span><span>(</span><span class="string-literal">&quot;unknown&quot;</span><span>)  </span><span class="comment">// Read the tenant header, or use unknown if it is missing or unreadable
+</span><span>      </span><span class="identifier">record</span><span>.</span><span class="identifier">withValue</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">$tenant</span><span class="string-literal">: </span><span class="substitution">${record.value}</span><span class="string-literal">&quot;</span><span>).</span><span class="identifier">withHeaders</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">remove</span><span>(</span><span class="string-literal">&quot;tenant&quot;</span><span>))  </span><span class="comment">// Change the value and headers
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">id</span><span>, </span><span class="identifier">item</span><span>)</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>To</th>
+              <th>Use</th>
+              <th>With an effect</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Keep some records</td>
+              <td><code>filterRecord</code></td>
+              <td><code>evalFilterRecord</code></td>
+            </tr>
+            <tr>
+              <td>Act on each record and leave it as it is</td>
+              <td></td>
+              <td><code>peekRecord</code></td>
+            </tr>
+            <tr>
+              <td>Change the value, time or headers</td>
+              <td><code>mapRecordValue</code></td>
+              <td><code>evalMapRecordValue</code></td>
+            </tr>
+            <tr>
+              <td>Change those or the key</td>
+              <td><code>mapRecord</code></td>
+              <td><code>evalMapRecord</code></td>
+            </tr>
+            <tr>
+              <td>Make any number of records, keeping the key</td>
+              <td><code>flatMapRecordValue</code></td>
+              <td></td>
+            </tr>
+            <tr>
+              <td>Make any number of records, with any key</td>
+              <td><code>flatMapRecord</code></td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Each is given a <code>Record</code>, or a <code>FixedKeyRecord</code> where the key cannot change, as a
+        <a href="processors.html">processor</a> is. <code>withValue</code> and <code>withKey</code> keep the record&#39;s time and
+        headers, and <code>withTimestamp</code> and <code>withHeaders</code> change them. <code>record.origin</code> gives the
+        topic, partition and offset the record was read from. See
+        <a href="../headers.html">Headers</a> for reading and changing headers.</p>
+        <p>Grouping or joining after <code>mapRecord</code>, <code>evalMapRecord</code> or <code>flatMapRecord</code> needs a
+        repartition topic, as it does after <code>map</code>. The other steps keep the key.</p>
+        <p>To make any number of records with an effect, or to use a store, write a
+        <a href="processors.html">processor</a>. If some members run Java Kafka Streams, write these steps
+        in the Java program as <code>process</code> where the key can change and <code>processValues</code> where
+        it cannot, under the same names.</p>
+        
+        <h3 id="choosing-partitions" class="section"><a class="anchor-link left" href="#choosing-partitions"><i class="icofont-laika link">&#xef71;</i></a>Choosing partitions</h3>
+        <p>By default, each record goes to the partition Kafka&#39;s producers choose for its key,
+        so all of a key&#39;s records are in one partition, in order. A <code>Partitioner</code> chooses
+        some other way. You can give one in three places:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Where</th>
+              <th>What you can give</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>to</code></td>
+              <td><code>partitioner</code>, which chooses each record&#39;s partition in the output topic</td>
+            </tr>
+            <tr>
+              <td><code>repartition</code></td>
+              <td><code>partitions</code>, how many the repartition topic has, and <code>partitioner</code></td>
+            </tr>
+            <tr>
+              <td><code>KTable(...)</code>, read from a topic</td>
+              <td><code>partitioner</code>, saying how that topic is partitioned</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre><code class="nohighlight"><span class="comment">// Keep each region&#39;s orders together: through a repartition topic of twelve partitions, then to the output, both partitioned by region.
+// An order&#39;s key starts with its region, as in &quot;eu-1042&quot;.
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersByRegion</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">region</span><span> = </span><span class="type-name">Partitioner</span><span>.</span><span class="identifier">byKey</span><span>((</span><span class="identifier">key</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">count</span><span>: </span><span class="type-name">Int</span><span>) =&gt; </span><span class="type-name">Math</span><span>.</span><span class="identifier">floorMod</span><span>(</span><span class="identifier">key</span><span>.</span><span class="identifier">takeWhile</span><span>(</span><span class="identifier">_</span><span> != </span><span class="char-literal">&#39;-&#39;</span><span>).</span><span class="identifier">hashCode</span><span>, </span><span class="identifier">count</span><span>))  </span><span class="comment">// The same region, the same partition
+</span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
+    .</span><span class="identifier">repartition</span><span>(</span><span class="type-name">Repartition</span><span>(</span><span class="string-literal">&quot;orders-by-region&quot;</span><span>), </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">partitions</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">12</span><span>), </span><span class="identifier">partitioner</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="identifier">region</span><span>))      </span><span class="comment">// Twelve partitions, by region
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Some</span><span>(</span><span class="identifier">region</span><span>))                                                   </span><span class="comment">// The output is partitioned by region too</span></code></pre>
+        <p>Without <code>partitions</code>, the broker chooses how many partitions a repartition topic has,
+        as it does for every repartition topic. A count under one is refused when you call
+        <code>Topology.of</code>.</p>
+        
+        <h4 id="writing-a-partitioner" class="section"><a class="anchor-link left" href="#writing-a-partitioner"><i class="icofont-laika link">&#xef71;</i></a>Writing a partitioner</h4>
+        <p>A partitioner is given a record&#39;s key, value and headers, and how many partitions
+        the topic has. It gives back a partition, from 0 up to one less than that number.
+        Any other number stops the application, with an error naming the topic.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Two partitioners: one that goes by the key alone, and one that also reads a header
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="comment">// Customers&#39; ids are numbers after a letter, as in &quot;c42&quot;: spread customers by that number, each customer always in the same partition
+</span><span class="keyword">val</span><span> </span><span class="identifier">byCustomer</span><span> = </span><span class="type-name">Partitioner</span><span>.</span><span class="identifier">byKey</span><span>((</span><span class="identifier">key</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">count</span><span>: </span><span class="type-name">Int</span><span>) =&gt; </span><span class="type-name">Math</span><span>.</span><span class="identifier">floorMod</span><span>(</span><span class="identifier">key</span><span>.</span><span class="identifier">drop</span><span>(</span><span class="number-literal">1</span><span>).</span><span class="identifier">toIntOption</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="number-literal">0</span><span>), </span><span class="identifier">count</span><span>))
+
+</span><span class="comment">// Records with the header priority=urgent go to partition 0, and the rest are spread by key over the other partitions
+</span><span class="keyword">val</span><span> </span><span class="identifier">urgentFirst</span><span> = </span><span class="type-name">Partitioner</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>]: (</span><span class="identifier">key</span><span>, </span><span class="identifier">_</span><span>, </span><span class="identifier">headers</span><span>, </span><span class="identifier">count</span><span>) =&gt;
+  </span><span class="keyword">val</span><span> </span><span class="identifier">urgent</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">String</span><span>](</span><span class="string-literal">&quot;priority&quot;</span><span>).</span><span class="identifier">contains</span><span>(</span><span class="type-name">Right</span><span>(</span><span class="string-literal">&quot;urgent&quot;</span><span>))
+  </span><span class="keyword">if</span><span> </span><span class="identifier">urgent</span><span> || </span><span class="identifier">count</span><span> == </span><span class="number-literal">1</span><span> </span><span class="keyword">then</span><span> </span><span class="number-literal">0</span><span> </span><span class="keyword">else</span><span> </span><span class="number-literal">1</span><span> + </span><span class="type-name">Math</span><span>.</span><span class="identifier">floorMod</span><span>(</span><span class="identifier">key</span><span>.</span><span class="identifier">hashCode</span><span>, </span><span class="identifier">count</span><span> - </span><span class="number-literal">1</span><span>)</span></code></pre>
+        <ul>
+          <li>Use <code>Partitioner.byKey</code> when the key alone decides, and <code>Partitioner(...)</code> when the
+          value or headers do too.</li>
+          <li>Only records in the same partition stay in order, so a partitioner that does not
+          go by the key alone can put one key&#39;s records out of order.</li>
+          <li>Give the same answer for the same record every time. Records processed again, such
+          as after a crash, should land where they did before.</li>
+          <li><code>hashCode</code> can be negative: <code>Math.floorMod</code>, unlike <code>%</code>, always gives a number
+          from 0 up.</li>
+        </ul>
+        
+        <h4 id="java-partitioners-jvm-only" class="section"><a class="anchor-link left" href="#java-partitioners-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Java partitioners (JVM only)</h4>
+        <p>On the JVM, a <code>StreamPartitioner</code> written for Java Kafka Streams can be used as a
+        partitioner. It comes with the <code>xkafka-streams-java</code> module, which also depends on
+        Java Kafka Streams:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %% </span><span class="string-literal">&quot;xkafka-streams-java&quot;</span><span> % </span><span class="string-literal">&quot;0.6.0&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Turn a StreamPartitioner your Java Kafka Streams application already uses into a partitioner for xkafka
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">processor</span><span>.</span><span class="type-name">StreamPartitioner</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">interop</span><span>.*                                       </span><span class="comment">// Adds Partitioner.fromJava, on the JVM only
+</span><span>
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">sameAsJava</span><span>(</span><span class="identifier">java</span><span>: </span><span class="type-name">StreamPartitioner</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>]): </span><span class="type-name">Partitioner</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>] = </span><span class="type-name">Partitioner</span><span>.</span><span class="identifier">fromJava</span><span>(</span><span class="identifier">java</span><span>)</span></code></pre>
+        <p>It is given each record&#39;s topic, key, value, headers and partition count, as in Java.
+        Where it chooses no partition, the record goes where Kafka&#39;s default puts it. Where
+        it chooses several partitions, or an empty set, the application stops with an error
+        naming the topic, since xkafka sends each record to one partition.</p>
+        
+        <h4 id="tables-whose-topic-is-partitioned-its-own-way" class="section"><a class="anchor-link left" href="#tables-whose-topic-is-partitioned-its-own-way"><i class="icofont-laika link">&#xef71;</i></a>Tables whose topic is partitioned its own way</h4>
+        <p>A table&#39;s topic may be written by another application that partitions it its own
+        way. Give the table that partitioner, made with <code>Partitioner.byKey</code>, since a table
+        needs each key to stay in one partition whatever its value. xkafka then uses it
+        whenever it sends records to be looked up in that table: a stream joined with the
+        table after the stream&#39;s key changed, and a
+        <a href="joins.html#joining-on-a-foreign-key">foreign-key join</a> looking up the table&#39;s rows.
+        Without it, those records go to partitions that do not hold their keys, and find
+        nothing.</p>
+        
+        <h4 id="with-java-members" class="section"><a class="anchor-link left" href="#with-java-members"><i class="icofont-laika link">&#xef71;</i></a>With Java members</h4>
+        <p>If some members run Java Kafka Streams, give them a <code>StreamPartitioner</code> that chooses
+        the same partitions, in <code>Produced</code>, <code>Repartitioned</code>, and a foreign-key join&#39;s
+        <code>TableJoined</code>. Java has no way to repartition a stream joined with a table by the
+        table&#39;s partitioner, so an application with Java members cannot rely on that.</p>
+        
+        <h3 id="describing-a-program" class="section"><a class="anchor-link left" href="#describing-a-program"><i class="icofont-laika link">&#xef71;</i></a>Describing a program</h3>
+        <p><code>describe</code> shows what a program will run: the topics it reads and writes, the
+        order of its steps, the stores each step uses, and where a repartition divides
+        it. It needs no broker, so a program can be printed or checked in a test before
+        it runs. Here is the first example&#39;s:</p>
+        <pre><code class="nohighlight"><span class="comment">// Build the first example&#39;s program, and describe it
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">described</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">input</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>).</span><span class="identifier">toOption</span><span>
+    </span><span class="identifier">output</span><span>   &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>).</span><span class="identifier">toOption</span><span>
+    </span><span class="identifier">topology</span><span> &lt;- </span><span class="type-name">Topology</span><span>.</span><span class="identifier">of</span><span>(
+                  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])
+                    .</span><span class="identifier">groupBy</span><span>(</span><span class="type-name">Repartition</span><span>(</span><span class="string-literal">&quot;views-by-page&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])((</span><span class="identifier">_</span><span>, </span><span class="identifier">viewed</span><span>) =&gt; </span><span class="identifier">viewed</span><span>)
+                    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>))
+                    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
+                    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])
+                ).</span><span class="identifier">toOption</span><span>
+  </span><span class="keyword">yield</span><span> </span><span class="identifier">topology</span><span>.</span><span class="identifier">describe</span><span>  </span><span class="comment">// Describing a program needs no broker</span></code></pre>
+        <pre><code class="nohighlight"><span class="comment">// Print the description
+</span><span class="identifier">described</span><span>.</span><span class="identifier">foreach</span><span>(</span><span class="identifier">println</span><span>)
+</span><span class="comment">// Topologies:
+//    Sub-topology: 0
+//     Source: page-views (topics: [page-views])
+//       --&gt; views-by-page
+//     Processor: views-by-page (stores: [])
+//       --&gt; views-by-page-repartition-filter
+//       &lt;-- page-views
+//     Processor: views-by-page-repartition-filter (stores: [])
+//       --&gt; views-by-page-repartition-sink
+//       &lt;-- views-by-page
+//     Sink: views-by-page-repartition-sink (topic: views-by-page-repartition)
+//       &lt;-- views-by-page-repartition-filter
+// 
+//   Sub-topology: 1
+//     Source: views-by-page-repartition-source (topics: [views-by-page-repartition])
+//       --&gt; count-views
+//     Processor: count-views (stores: [views-per-page])
+//       --&gt; view-counts
+//       &lt;-- views-by-page-repartition-source
+//     Processor: view-counts (stores: [])
+//       --&gt; write-view-counts
+//       &lt;-- count-views
+//     Sink: write-view-counts (topic: views-per-page)
+//       &lt;-- view-counts
+// 
+//</span></code></pre>
+        <p>Each sub-topology is a part of the program that runs as tasks of its own, and a
+        repartition topic joins two of them: here the first writes
+        <code>views-by-page-repartition</code> and the second reads it. <code>--&gt;</code> points to the nodes a
+        node passes its records to, and <code>&lt;--</code> to the nodes it gets them from.</p>
+        <p>Each step appears under its name. A repartition adds the nodes that write and
+        read its topic, named after it. The topic is shown without the application&#39;s id,
+        so on the broker this one is <code>&lt;application id&gt;-views-by-page-repartition</code>.</p>
+        <p>Java Kafka Streams&#39; <code>Topology.describe</code> writes the same text for the same
+        program, which lets you compare the two when moving a program between them.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

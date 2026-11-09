@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -94,7 +103,8 @@
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#provided-codecs">Provided codecs</a></li>
     <li class="level1 nav-leaf"><a href="#nulls-and-tombstones">Nulls and tombstones</a></li>
-    <li class="level1 nav-leaf"><a href="#header-values">Header values</a></li>
+    <li class="level1 nav-leaf"><a href="#codecs-written-for-java-jvm-only">Codecs written for Java (JVM only)</a></li>
+    <li class="level1 nav-leaf"><a href="#headers">Headers</a></li>
     <li class="level1 nav-leaf"><a href="#instances">Instances</a></li>
   </ul>
 
@@ -115,7 +125,8 @@
         <h2 id="nulls-and-tombstones" class="section"><a class="anchor-link left" href="#nulls-and-tombstones"><i class="icofont-laika link">&#xef71;</i></a>Nulls and tombstones</h2>
         <p>The <code>.option</code> combinator represents Kafka null keys and values explicitly as
         <code>None</code>:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Codecs that read and write a Kafka null as None
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 
@@ -123,50 +134,33 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">value</span><span> = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span></code></pre>
         <p>A tombstone is a record whose value is <code>None</code>.</p>
         
-        <h2 id="header-values" class="section"><a class="anchor-link left" href="#header-values"><i class="icofont-laika link">&#xef71;</i></a>Header values</h2>
-        <p>A header value is bytes. <code>HeaderSerializer</code> and <code>HeaderDeserializer</code> encode and
-        decode them, so a call site does not have to name a charset or a byte order:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+        <h2 id="codecs-written-for-java-jvm-only" class="section"><a class="anchor-link left" href="#codecs-written-for-java-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Codecs written for Java (JVM only)</h2>
+        <p>On the JVM, a serializer, deserializer or streams serde written for Kafka&#39;s Java
+        client can be turned into xkafka&#39;s, and used wherever xkafka takes one:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Make xkafka codecs from Java&#39;s: one for a producer, one for a consumer, and one for a streams program
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">serialization</span><span>.{</span><span class="type-name">Serdes</span><span>, </span><span class="type-name">StringDeserializer</span><span>, </span><span class="type-name">StringSerializer</span><span>}
 
-</span><span class="keyword">val</span><span> </span><span class="identifier">headers</span><span> = </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>.</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;trace&quot;</span><span>, </span><span class="string-literal">&quot;abc&quot;</span><span>).</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;attempt&quot;</span><span>, </span><span class="number-literal">2</span><span>)
-
-</span><span class="keyword">val</span><span> </span><span class="identifier">trace</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">values</span><span>.</span><span class="identifier">head</span><span>.</span><span class="identifier">as</span><span>[</span><span class="type-name">String</span><span>]</span></code></pre>
-        <table>
-          <thead>
-            <tr>
-              <th>type</th>
-              <th>encoding</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>String</code></td>
-              <td>UTF-8</td>
-            </tr>
-            <tr>
-              <td><code>Int</code></td>
-              <td>four bytes, most significant first</td>
-            </tr>
-            <tr>
-              <td><code>Long</code></td>
-              <td>eight bytes, most significant first</td>
-            </tr>
-            <tr>
-              <td><code>Chunk[Byte]</code></td>
-              <td>the bytes themselves</td>
-            </tr>
-          </tbody>
-        </table>
-        <p>Reading returns <code>Either[ValidationError, A]</code>. A header with no value fails as
-        <code>MissingHeaderValue</code>, and a numeric value of the wrong width fails as
-        <code>InvalidHeaderLength</code> rather than being truncated.</p>
-        <p>Kafka permits a header to have no value, represented as <code>Header(name, None)</code>.
-        Every backend preserves it, and <code>Header(name, Some(Chunk.empty))</code> stays a
-        distinct empty value.</p>
-        <p><code>contramap</code> and <code>map</code> adapt a codec to another type, and <code>emap</code> rejects values
-        the bytes can carry but the type cannot.</p>
-        <p>Header codecs are plain functions, not effects. A header value is already in
-        memory by the time one is applied.</p>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">interop</span><span>.*                                                 </span><span class="comment">// Adds fromJava, on the JVM only
+</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">write</span><span> = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="keyword">new</span><span> </span><span class="type-name">StringSerializer</span><span>)               </span><span class="comment">// Writes values as Java&#39;s StringSerializer does
+</span><span class="keyword">val</span><span> </span><span class="identifier">read</span><span>  = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="keyword">new</span><span> </span><span class="type-name">StringDeserializer</span><span>).</span><span class="identifier">option</span><span>    </span><span class="comment">// Reads them back, with None for a record without a value
+</span><span class="keyword">val</span><span> </span><span class="identifier">serde</span><span> = </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">Serde</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>())          </span><span class="comment">// Both at once, as a streams program takes them</span></code></pre>
+        <ul>
+          <li>The Java codec is given each record&#39;s topic and headers, as it is in Java.</li>
+          <li>Configure it before you pass it in, and close it once nothing uses it: xkafka calls
+          neither <code>configure</code> nor <code>close</code>.</li>
+          <li>Headers a Java serializer adds are not written: it is given a copy of the record&#39;s
+          headers. Configure a serializer that can write headers of its own not to.</li>
+          <li>A record without a value fails a plain deserializer, as it does for xkafka&#39;s own;
+          read with <code>.option</code> to get <code>None</code> for it. If the Java deserializer returns <code>null</code>
+          for a value, the record fails with <code>JavaNullValueException</code>.</li>
+          <li>Whatever the Java codec throws fails the effect it runs in.</li>
+        </ul>
+        
+        <h2 id="headers" class="section"><a class="anchor-link left" href="#headers"><i class="icofont-laika link">&#xef71;</i></a>Headers</h2>
+        <p>A record&#39;s headers have codecs of their own. See <a href="headers.html">Headers</a>.</p>
         
         <h2 id="instances" class="section"><a class="anchor-link left" href="#instances"><i class="icofont-laika link">&#xef71;</i></a>Instances</h2>
         <p>With <code>F</code> fixed, <code>Serializer[F, A]</code> has a Cats <code>Contravariant</code> instance and

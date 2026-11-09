@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Running a program</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="../helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="../helium/site/laika-helium.css" />
+  <script src="../helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="../">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="../getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="../settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="../producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="../consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="../headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="../offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="../transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="index.html">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
+    <li class="level2 active nav-leaf"><a href="#">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Running a program</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#guarantees">Guarantees</a></li>
+    <li class="level1 nav-leaf"><a href="#tasks">Tasks</a></li>
+    <li class="level1 nav-leaf"><a href="#concurrency">Concurrency</a></li>
+    <li class="level1 nav-leaf"><a href="#state">State</a></li>
+    <li class="level1 nav-node"><a href="#stores-and-standbys">Stores and standbys</a></li>
+    <li class="level2 nav-leaf"><a href="#keeping-stores-on-disk">Keeping stores on disk</a></li>
+    <li class="level2 nav-leaf"><a href="#keeping-a-store-in-memory">Keeping a store in memory</a></li>
+    <li class="level2 nav-leaf"><a href="#standby-copies">Standby copies</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="running-a-program" class="title">Running a program</h1>
+        <p>How a running application processes records, what it guarantees, and how to
+        watch it.</p>
+        
+        <h2 id="guarantees" class="section"><a class="anchor-link left" href="#guarantees"><i class="icofont-laika link">&#xef71;</i></a>Guarantees</h2>
+        <p>With <code>ProcessingGuarantee.AtLeastOnce</code>, the default, a member commits its
+        progress every 30 seconds. If its work moves to another member, the records read
+        since the last commit are processed and written again.</p>
+        <p>With <code>ProcessingGuarantee.ExactlyOnce</code>, a member writes its output and commits
+        its progress together in one transaction, every 100ms. Each record then counts
+        exactly once in the application&#39;s stores and output topics, even when work
+        moves between members. Input is read with <code>IsolationLevel.ReadCommitted</code>.</p>
+        <p>These are the same intervals Java Kafka Streams uses. Change them with
+        <code>commitInterval</code>.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>Under either guarantee, an effectful step can run more than once for the same
+          record, such as after a member stops without committing. Exactly once applies to
+          what the application writes to Kafka, not to what its effects do elsewhere.</p>
+        </div>
+        
+        <h2 id="tasks" class="section"><a class="anchor-link left" href="#tasks"><i class="icofont-laika link">&#xef71;</i></a>Tasks</h2>
+        <p>A program&#39;s work is divided into tasks. Each
+        <a href="index.html#describing-a-program">sub-topology</a> has one task for each partition
+        number of the topics it reads, and each member is given some of the tasks. A task
+        keeps its own part of the program&#39;s stores. Tasks move between members as members
+        start and stop.</p>
+        
+        <h2 id="concurrency" class="section"><a class="anchor-link left" href="#concurrency"><i class="icofont-laika link">&#xef71;</i></a>Concurrency</h2>
+        <p>By default a member processes one task at a time, like a single Java Kafka
+        Streams thread. Set <code>concurrency</code> higher to process up to that many tasks at
+        once. Records within each task stay in order. This helps when an effectful step
+        waits on something outside Kafka.</p>
+        
+        <h2 id="state" class="section"><a class="anchor-link left" href="#state"><i class="icofont-laika link">&#xef71;</i></a>State</h2>
+        <p><code>state</code> streams the application&#39;s current phase, and then each change to it:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>phase</th>
+              <th>meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Joining</code></td>
+              <td>waiting to be given work</td>
+            </tr>
+            <tr>
+              <td><code>Restoring</code></td>
+              <td>refilling its stores from their changelogs before processing</td>
+            </tr>
+            <tr>
+              <td><code>Running</code></td>
+              <td>processing</td>
+            </tr>
+            <tr>
+              <td><code>Lost</code></td>
+              <td>its work was taken away, and it is joining again</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Each state also lists the <code>problems</code> the broker reports, such as a missing
+        input topic or the application not being allowed to use its topics
+        (<code>StreamsProblem.TopicAuthorizationFailed</code>). Like Java Kafka Streams, a member
+        keeps going for as long as it can. To stop on a problem, watch for it:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Run the application, and stop it if the broker says it may not use its topics
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">runUntilRefused</span><span>(</span><span class="identifier">streams</span><span>: </span><span class="type-name">KafkaStreams</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="comment">// Ends once such a problem is reported
+</span><span>  </span><span class="keyword">val</span><span> </span><span class="identifier">refused</span><span> = </span><span class="identifier">streams</span><span>.</span><span class="identifier">state</span><span>.</span><span class="identifier">find</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">problems</span><span>.</span><span class="identifier">exists</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">isInstanceOf</span><span>[</span><span class="type-name">StreamsProblem</span><span>.</span><span class="type-name">TopicAuthorizationFailed</span><span>])).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+  </span><span class="type-name">IO</span><span>.</span><span class="identifier">race</span><span>(</span><span class="identifier">streams</span><span>.</span><span class="identifier">run</span><span>, </span><span class="identifier">refused</span><span>).</span><span class="identifier">void</span><span>  </span><span class="comment">// Whichever ends first stops the other</span></code></pre>
+        <p>Some brokers are configured to ask applications for a description of their
+        topology. A member sends the program&#39;s description when asked, as Java Kafka
+        Streams does, and the broker keeps it for whoever describes the group, such as
+        Java&#39;s <code>Admin.describeStreamsGroups</code> with <code>includeTopologyDescription</code>.
+        <code>StreamsSettings</code>&#39; <code>withoutTopologyDescriptionPush</code> stops members sending it:
+        the application keeps working, and the group&#39;s description has none.</p>
+        
+        <h2 id="stores-and-standbys" class="section"><a class="anchor-link left" href="#stores-and-standbys"><i class="icofont-laika link">&#xef71;</i></a>Stores and standbys</h2>
+        <p>By default, stores are kept in memory, and a member refills them from their
+        changelogs each time it starts or is given new work.</p>
+        
+        <h3 id="keeping-stores-on-disk" class="section"><a class="anchor-link left" href="#keeping-stores-on-disk"><i class="icofont-laika link">&#xef71;</i></a>Keeping stores on disk</h3>
+        <p>Give a state directory to keep stores on disk instead:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Keep the application&#39;s stores on disk, so a restarted member does not refill them from the start
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">ValidatedNel</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">onDisk</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">ClientSettings</span><span>, </span><span class="identifier">id</span><span>: </span><span class="type-name">ApplicationId</span><span>): </span><span class="type-name">ValidatedNel</span><span>[</span><span class="type-name">StreamsSettingsError</span><span>, </span><span class="type-name">StreamsSettings</span><span>] =
+  </span><span class="type-name">StreamsSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">id</span><span>).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withStateDirectory</span><span>(</span><span class="string-literal">&quot;/var/lib/orders&quot;</span><span>))  </span><span class="comment">// Stores go under /var/lib/orders/&lt;application id&gt;</span></code></pre>
+        <p>A member started again over the same directory usually gets back the work it
+        had, and reads only the changelog records written since it stopped. The same
+        goes for work that moves to another member and comes back. Give each running
+        member a directory of its own: a second member started over a directory already
+        in use fails to start.</p>
+        <p>Stores on disk are kept by RocksDB 10.1.3. What each platform needs:</p>
+        <ul>
+          <li>
+            <strong>JVM:</strong> add RocksDB to the application&#39;s dependencies. Without it, an
+            application given a state directory fails to start, saying what to add.
+            <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In build.sbt
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;org.rocksdb&quot;</span><span> % </span><span class="string-literal">&quot;rocksdbjni&quot;</span><span> % </span><span class="string-literal">&quot;10.1.3&quot;</span></code></pre>
+          </li>
+          <li><strong>Scala.js:</strong> nothing; RocksDB comes from npm with xkafka.</li>
+          <li><strong>Scala Native:</strong> the RocksDB library file where the application runs, as
+          <a href="../platform-notes.html#stores-on-disk">Platform notes</a> describe.</li>
+        </ul>
+        
+        <h3 id="keeping-a-store-in-memory" class="section"><a class="anchor-link left" href="#keeping-a-store-in-memory"><i class="icofont-laika link">&#xef71;</i></a>Keeping a store in memory</h3>
+        <p>A small store that is quick to refill, or one you would rather not write to disk,
+        can stay in memory while the others go to disk. Name it with <code>inMemory</code>:</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s orders in a store on disk, and each user&#39;s page views in a store kept in memory
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">counts</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">views</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">orderCounts</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">viewCounts</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">List</span><span>[</span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>]] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">List</span><span>(
+    </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;read-orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>).</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
+      .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-orders&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>))                  </span><span class="comment">// On disk, where a state directory is given
+</span><span>      .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders-changes&quot;</span><span>)).</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">orderCounts</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]),
+    </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;read-views&quot;</span><span>), </span><span class="identifier">views</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>).</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
+      .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views&quot;</span><span>).</span><span class="identifier">inMemory</span><span>)           </span><span class="comment">// In memory, refilled from its changelog on each start
+</span><span>      .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;views-changes&quot;</span><span>)).</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-views&quot;</span><span>), </span><span class="identifier">viewCounts</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])
+  )</span></code></pre>
+        <p>The buffers that <a href="holding-back-updates.html">holding back updates</a> uses are always
+        kept in memory.</p>
+        
+        <h3 id="standby-copies" class="section"><a class="anchor-link left" href="#standby-copies"><i class="icofont-laika link">&#xef71;</i></a>Standby copies</h3>
+        <p>If the broker&#39;s <code>streams.num.standby.replicas</code> setting asks for standby
+        replicas, members also keep up-to-date copies of other members&#39; stores. When
+        work moves to a member holding a copy, it only needs to catch up on what the
+        copy has not yet read.</p>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p>A copy that is no longer needed is kept for 10 minutes, in case the work comes
+          back. So are the stores on disk of work that moved to another member.</p>
+        </div>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

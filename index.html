@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -108,7 +117,7 @@
           <thead>
             <tr>
               <th>Platform</th>
-              <th>Backend</th>
+              <th>Kafka client</th>
               <th>Runtime</th>
             </tr>
           </thead>
@@ -120,7 +129,7 @@
             </tr>
             <tr>
               <td>Scala.js</td>
-              <td><a href="https://github.com/confluentinc/librdkafka">librdkafka</a>, called through <a href="https://koffi.dev">koffi</a></td>
+              <td><a href="https://github.com/confluentinc/librdkafka">librdkafka</a></td>
               <td>Node.js 24</td>
             </tr>
             <tr>
@@ -132,8 +141,10 @@
         </table>
         <p>The API uses <code>Resource</code> for producer and consumer lifecycles, <code>Stream</code> for
         consumer records, effectful serializers and deserializers, and explicit offset
-        commits. Scala.js targets Node.js rather than browsers.</p>
-        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+        commits. Scala.js targets Node.js rather than browsers. xkafka also runs
+        <a href="streams/">Kafka Streams programs</a>, alongside Java Kafka Streams instances.</p>
+        <pre><code class="nohighlight"><span class="comment">// Write one record to the topic &quot;events&quot;, and wait until it is delivered
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.{</span><span class="type-name">IO</span><span>, </span><span class="type-name">IOApp</span><span>}
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -148,8 +159,9 @@
   </span><span class="keyword">override</span><span> </span><span class="keyword">def</span><span> </span><span class="declaration-name">run</span><span>: </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
     </span><span class="keyword">for</span><span>
       </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-      </span><span class="identifier">producer</span><span> &lt;- </span><span class="identifier">settings</span><span>.</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-      </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">producer</span><span>(</span><span class="identifier">producer</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">produceAndAwait</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">ProducerRecord</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="string-literal">&quot;key&quot;</span><span>, </span><span class="string-literal">&quot;value&quot;</span><span>))))
+      </span><span class="identifier">producer</span><span> &lt;- </span><span class="identifier">settings</span><span>.</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]  </span><span class="comment">// Raise invalid settings as a failure
+</span><span>      </span><span class="comment">// Acquire a producer, send the record, and release the producer
+</span><span>      </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">producer</span><span>(</span><span class="identifier">producer</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">produceAndAwait</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">ProducerRecord</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="string-literal">&quot;key&quot;</span><span>, </span><span class="string-literal">&quot;value&quot;</span><span>))))
     </span><span class="keyword">yield</span><span> ()</span></code></pre>
 
         

@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -108,18 +117,21 @@
         <h1 id="getting-started" class="title">Getting started</h1>
         
         <h2 id="dependency" class="section"><a class="anchor-link left" href="#dependency"><i class="icofont-laika link">&#xef71;</i></a>Dependency</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.6.0&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add xkafka to your build; %%% picks the artifact for your platform
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.6.0&quot;</span></code></pre>
         <p>The <code>%%%</code> operator selects the artifact for the platform being built. The same
         code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
         each one runs on its platform&#39;s Kafka client.</p>
         <p>Two modules are published:</p>
         <ul>
-          <li><code>xkafka-kernel</code> holds the data types and the producer, consumer, and
-          administration interfaces, with no backend.</li>
-          <li><code>xkafka-client</code> holds <code>KafkaClient</code> and the three backends, and depends on the
-          kernel.</li>
+          <li><code>xkafka-kernel</code> holds the data types, the producer, consumer, and
+          administration interfaces, and the streams DSL, and connects to nothing itself.</li>
+          <li><code>xkafka-client</code> holds <code>KafkaClient</code>, which connects to Kafka on each platform,
+          and depends on the kernel.</li>
         </ul>
-        <p>Most applications need <code>xkafka-client</code> alone.</p>
+        <p>Most applications need <code>xkafka-client</code> alone. On the JVM, <code>xkafka-streams-java</code> lets
+        streams programs use code written for Java Kafka Streams, such as its partitioners;
+        it depends on Java Kafka Streams itself.</p>
         
         <h2 id="versioning" class="section"><a class="anchor-link left" href="#versioning"><i class="icofont-laika link">&#xef71;</i></a>Versioning</h2>
         <p>xkafka follows early semantic versioning.</p>
@@ -134,7 +146,8 @@
         warns about it.</p>
         
         <h2 id="constructing-a-client" class="section"><a class="anchor-link left" href="#constructing-a-client"><i class="icofont-laika link">&#xef71;</i></a>Constructing a client</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Construct the client, in the same way on every platform
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 
@@ -143,17 +156,17 @@
         described below.</p>
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>The backend is librdkafka, the same release Scala Native uses, and it runs on
+        <p>xkafka uses librdkafka here, the same release as on Scala Native, and runs on
         Node.js 24. It comes from npm as <code>@xkafka/librdkafka</code>, which brings a prebuilt
         library for the platform it runs on. sbt-scalajs-bundler installs it, so enable
         that plugin in the Scala.js project:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// project/plugins.sbt
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In project/plugins.sbt: add the plugin that installs the npm package
 </span><span class="identifier">addSbtPlugin</span><span>(</span><span class="string-literal">&quot;ch.epfl.scala&quot;</span><span> % </span><span class="string-literal">&quot;sbt-scalajs-bundler&quot;</span><span> % </span><span class="string-literal">&quot;0.21.1&quot;</span><span>)</span></code></pre>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// build.sbt
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In build.sbt: enable that plugin for the Scala.js project
 </span><span>.</span><span class="identifier">jsConfigure</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">enablePlugins</span><span>(</span><span class="type-name">ScalaJSBundlerPlugin</span><span>))</span></code></pre>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
-        <p>The backend is librdkafka, which must be installed where the application&#39;s
+        <p>xkafka uses librdkafka here, which must be installed where the application&#39;s
         compiler and linker can find it. See <a href="platform-notes.html">Platform notes</a> for the linking recipes,
         including the flags a static link requires.</p>
 

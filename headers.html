@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Headers</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="helium/site/laika-helium.css" />
+  <script src="helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="index.html">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 active nav-leaf"><a href="#">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Headers</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#reading-and-changing-headers">Reading and changing headers</a></li>
+    <li class="level1 nav-leaf"><a href="#how-values-are-written">How values are written</a></li>
+    <li class="level1 nav-leaf"><a href="#headers-with-no-value">Headers with no value</a></li>
+    <li class="level1 nav-leaf"><a href="#java-s-headers-jvm-only">Java&#39;s headers (JVM only)</a></li>
+    <li class="level1 nav-leaf"><a href="#your-own-types">Your own types</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="headers" class="title">Headers</h1>
+        <p>A header is a named value carried alongside a record&#39;s key and value, such as a
+        trace id or the tenant a record belongs to. A record can have several headers with
+        the same name, and they stay in the order they were added.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Attach headers to a record you send, and read one from a record you receive
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">traced</span><span>(</span><span class="identifier">topic</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">ProducerRecord</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">headers</span><span> = </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>.</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;trace&quot;</span><span>, </span><span class="string-literal">&quot;abc&quot;</span><span>).</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;attempt&quot;</span><span>, </span><span class="number-literal">2</span><span>)  </span><span class="comment">// Each value is encoded by its type
+</span><span>  </span><span class="type-name">ProducerRecord</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="string-literal">&quot;key&quot;</span><span>, </span><span class="string-literal">&quot;value&quot;</span><span>, </span><span class="identifier">headers</span><span> = </span><span class="identifier">headers</span><span>)
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">traceOf</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>]](</span><span class="identifier">received</span><span>: </span><span class="type-name">CommittableConsumerRecord</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>]): </span><span class="type-name">Option</span><span>[</span><span class="type-name">Either</span><span>[</span><span class="type-name">ValidationError</span><span>, </span><span class="type-name">String</span><span>]] =
+  </span><span class="identifier">received</span><span>.</span><span class="identifier">record</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">String</span><span>](</span><span class="string-literal">&quot;trace&quot;</span><span>)  </span><span class="comment">// Read the header named trace as a String</span></code></pre>
+        <p>In a streams program, <a href="streams/#steps-that-see-the-whole-record">steps that see the whole record</a>
+        and <a href="streams/processors.html">processors</a> read and change headers in the same way.</p>
+        
+        <h2 id="reading-and-changing-headers" class="section"><a class="anchor-link left" href="#reading-and-changing-headers"><i class="icofont-laika link">&#xef71;</i></a>Reading and changing headers</h2>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Read, replace and remove headers by name
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">headers</span><span> = </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>.</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;trace&quot;</span><span>, </span><span class="string-literal">&quot;abc&quot;</span><span>).</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;attempt&quot;</span><span>, </span><span class="number-literal">2</span><span>).</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;trace&quot;</span><span>, </span><span class="string-literal">&quot;def&quot;</span><span>)
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">trace</span><span>   = </span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">String</span><span>](</span><span class="string-literal">&quot;trace&quot;</span><span>)   </span><span class="comment">// Some(Right(&quot;def&quot;)): the last header with this name
+</span><span class="keyword">val</span><span> </span><span class="identifier">missing</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">String</span><span>](</span><span class="string-literal">&quot;tenant&quot;</span><span>)  </span><span class="comment">// None: no header has this name
+</span><span class="keyword">val</span><span> </span><span class="identifier">invalid</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">Long</span><span>](</span><span class="string-literal">&quot;attempt&quot;</span><span>)   </span><span class="comment">// Some(Left(...)): this value is not a Long
+</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">retried</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">set</span><span>(</span><span class="string-literal">&quot;attempt&quot;</span><span>, </span><span class="number-literal">3</span><span>)      </span><span class="comment">// One &quot;attempt&quot; header, in place of any there were
+</span><span class="keyword">val</span><span> </span><span class="identifier">cleaned</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">remove</span><span>(</span><span class="string-literal">&quot;trace&quot;</span><span>)        </span><span class="comment">// No &quot;trace&quot; headers</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>To</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Read the last header with a name</td>
+              <td><code>get[A](name)</code></td>
+            </tr>
+            <tr>
+              <td>Read the raw bytes of every header with a name</td>
+              <td><code>getAll(name)</code></td>
+            </tr>
+            <tr>
+              <td>Read every header</td>
+              <td><code>values</code>, then <code>as[A]</code> on each</td>
+            </tr>
+            <tr>
+              <td>Add a header, keeping the others</td>
+              <td><code>append(name, value)</code></td>
+            </tr>
+            <tr>
+              <td>Replace all headers with a name by one, at the end</td>
+              <td><code>set(name, value)</code></td>
+            </tr>
+            <tr>
+              <td>Remove all headers with a name</td>
+              <td><code>remove(name)</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p><code>get</code> and <code>as</code> fail with <code>InvalidHeaderLength</code> when a number has the wrong width, not
+        by cutting it short, and with <code>MissingHeaderValue</code> when the header has no value.</p>
+        
+        <h2 id="how-values-are-written" class="section"><a class="anchor-link left" href="#how-values-are-written"><i class="icofont-laika link">&#xef71;</i></a>How values are written</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>type</th>
+              <th>written as</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>String</code></td>
+              <td>UTF-8</td>
+            </tr>
+            <tr>
+              <td><code>Int</code></td>
+              <td>four bytes, most significant first</td>
+            </tr>
+            <tr>
+              <td><code>Long</code></td>
+              <td>eight bytes, most significant first</td>
+            </tr>
+            <tr>
+              <td><code>Chunk[Byte]</code></td>
+              <td>the bytes themselves</td>
+            </tr>
+          </tbody>
+        </table>
+        
+        <h2 id="headers-with-no-value" class="section"><a class="anchor-link left" href="#headers-with-no-value"><i class="icofont-laika link">&#xef71;</i></a>Headers with no value</h2>
+        <p>Kafka allows a header to have no value, which is <code>Header(name, None)</code>. Every platform
+        keeps it, and it stays different from an empty value, <code>Header(name, Some(Chunk.empty))</code>.</p>
+        
+        <h2 id="java-s-headers-jvm-only" class="section"><a class="anchor-link left" href="#java-s-headers-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Java&#39;s headers (JVM only)</h2>
+        <p>On the JVM, <code>xkafka.interop</code> also converts headers to and from Kafka&#39;s Java client,
+        for code that works with both:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Hand headers to Java code, and take them back
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">header</span><span>.</span><span class="type-name">Headers</span><span> </span><span class="keyword">as</span><span> </span><span class="type-name">JavaHeaders</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">interop</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">roundTrip</span><span>(</span><span class="identifier">headers</span><span>: </span><span class="type-name">Headers</span><span>): </span><span class="type-name">Headers</span><span> =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">java</span><span>: </span><span class="type-name">JavaHeaders</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">toJava</span><span>                    </span><span class="comment">// A copy, in the same order
+</span><span>  </span><span class="type-name">Headers</span><span>.</span><span class="identifier">fromJava</span><span>(</span><span class="identifier">java</span><span>)                                    </span><span class="comment">// Back again, with a header with no value kept as one</span></code></pre>
+        
+        <h2 id="your-own-types" class="section"><a class="anchor-link left" href="#your-own-types"><i class="icofont-laika link">&#xef71;</i></a>Your own types</h2>
+        <p><code>HeaderSerializer</code> and <code>HeaderDeserializer</code> write and read a type. <code>contramap</code> and
+        <code>map</code> adapt one to another type, and <code>emap</code> rejects values the bytes can carry but
+        the type cannot:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Read and write a tenant, stored in a header as its name
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Tenant</span><span>(</span><span class="identifier">name</span><span>: </span><span class="type-name">String</span><span>)
+
+</span><span class="keyword">given</span><span> </span><span class="type-name">HeaderSerializer</span><span>[</span><span class="type-name">Tenant</span><span>]   = </span><span class="type-name">HeaderSerializer</span><span>.</span><span class="identifier">utf8</span><span>.</span><span class="identifier">contramap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">name</span><span>)  </span><span class="comment">// Write the name
+</span><span class="keyword">given</span><span> </span><span class="type-name">HeaderDeserializer</span><span>[</span><span class="type-name">Tenant</span><span>] = </span><span class="type-name">HeaderDeserializer</span><span>.</span><span class="identifier">utf8</span><span>.</span><span class="identifier">map</span><span>(</span><span class="type-name">Tenant</span><span>(</span><span class="identifier">_</span><span>))   </span><span class="comment">// Read the name
+</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">tenant</span><span> = </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>.</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;tenant&quot;</span><span>, </span><span class="type-name">Tenant</span><span>(</span><span class="string-literal">&quot;acme&quot;</span><span>)).</span><span class="identifier">get</span><span>[</span><span class="type-name">Tenant</span><span>](</span><span class="string-literal">&quot;tenant&quot;</span><span>)</span></code></pre>
+        <p>These are plain functions, not effects, because a header value is already in memory
+        by the time one is applied.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

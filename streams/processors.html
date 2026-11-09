@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Processors</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="../helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="../helium/site/laika-helium.css" />
+  <script src="../helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="../">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="../getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="../settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="../producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="../consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="../headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="../offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="../transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="index.html">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 active nav-leaf"><a href="#">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Processors</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#what-comes-out">What comes out</a></li>
+    <li class="level1 nav-leaf"><a href="#keeping-the-key">Keeping the key</a></li>
+    <li class="level1 nav-leaf"><a href="#stores">Stores</a></li>
+    <li class="level1 nav-leaf"><a href="#window-stores">Window stores</a></li>
+    <li class="level1 nav-leaf"><a href="#session-stores">Session stores</a></li>
+    <li class="level1 nav-leaf"><a href="#running-on-a-schedule">Running on a schedule</a></li>
+    <li class="level1 nav-leaf"><a href="#sharing-a-store">Sharing a store</a></li>
+    <li class="level1 nav-leaf"><a href="#java-processors-jvm-only">Java processors (JVM only)</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="processors" class="title">Processors</h1>
+        <p>A processor is a step you write yourself, for logic that the other steps cannot
+        express. It sees one record at a time with its time and headers, can read and
+        write its own stores, and returns the records to send on.</p>
+        <pre><code class="nohighlight"><span class="comment">// Keep a running total per user, and send on each new total
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">runningTotals</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">amount</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">totals</span><span> = </span><span class="type-name">KeyValueStore</span><span>.</span><span class="identifier">of</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;totals&quot;</span><span>), </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)  </span><span class="comment">// Declare the store
+</span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;payments&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)
+    .</span><span class="identifier">process</span><span>(
+      </span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;add-to-total&quot;</span><span>),
+      </span><span class="type-name">Processor</span><span>.</span><span class="identifier">withStore</span><span>(</span><span class="identifier">totals</span><span>): </span><span class="identifier">store</span><span> =&gt;        </span><span class="comment">// Give the processor the store
+</span><span>        </span><span class="type-name">Processor</span><span>.</span><span class="identifier">onRecord</span><span>: </span><span class="identifier">record</span><span> =&gt;              </span><span class="comment">// Runs for each record
+</span><span>          </span><span class="identifier">store</span><span>.</span><span class="identifier">get</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>).</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">total</span><span> =&gt;  </span><span class="comment">// Read this user&#39;s total
+</span><span>            </span><span class="keyword">val</span><span> </span><span class="identifier">updated</span><span> = </span><span class="identifier">total</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="number-literal">0L</span><span>) + </span><span class="identifier">record</span><span>.</span><span class="identifier">value</span><span>
+            </span><span class="identifier">store</span><span>.</span><span class="identifier">put</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="identifier">updated</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">List</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">withValue</span><span>(</span><span class="identifier">updated</span><span>)))  </span><span class="comment">// Save the new total, and send it on
+</span><span>    )
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-totals&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)</span></code></pre>
+        <p><code>Processor.withStore</code> hands your code the store already typed, so you cannot
+        read a store you did not declare. Use <code>Processor.withStores</code> for two or three
+        stores, and <code>Processor.withoutStores</code> for none.</p>
+        
+        <h2 id="what-comes-out" class="section"><a class="anchor-link left" href="#what-comes-out"><i class="icofont-laika link">&#xef71;</i></a>What comes out</h2>
+        <p>Each record you return goes on to the next step. A record made with <code>withKey</code> or
+        <code>withValue</code> keeps the time and headers of the one it was made from, and
+        <code>withTimestamp</code> and <code>withHeaders</code> change them. Return an empty list to send
+        nothing, or several records to send them all, in order.</p>
+        <p>The records you read also say where they came from: <code>record.origin</code> gives the
+        topic, partition and offset.</p>
+        <p>Since a processor can give a record any key, grouping its results needs a
+        repartition topic, so <code>groupByKey</code> asks you to name one.</p>
+        
+        <h2 id="keeping-the-key" class="section"><a class="anchor-link left" href="#keeping-the-key"><i class="icofont-laika link">&#xef71;</i></a>Keeping the key</h2>
+        <p>If your processor never changes the key, use <code>processValues</code> with a
+        <code>FixedKeyProcessor</code>. Its records have <code>withValue</code>, <code>withTimestamp</code> and
+        <code>withHeaders</code> but no <code>withKey</code>, so a change of key does not compile.</p>
+        <pre><code class="nohighlight"><span class="comment">// Number each user&#39;s payments, then count them, without ever changing the key
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">numbered</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">amount</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">seen</span><span>   = </span><span class="type-name">KeyValueStore</span><span>.</span><span class="identifier">of</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;seen&quot;</span><span>), </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;payments&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)
+    .</span><span class="identifier">processValues</span><span>(  </span><span class="comment">// A step that cannot change the key
+</span><span>      </span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;number-payments&quot;</span><span>),
+      </span><span class="type-name">FixedKeyProcessor</span><span>.</span><span class="identifier">withStore</span><span>(</span><span class="identifier">seen</span><span>): </span><span class="identifier">store</span><span> =&gt;
+        </span><span class="type-name">FixedKeyProcessor</span><span>.</span><span class="identifier">onRecord</span><span>: </span><span class="identifier">record</span><span> =&gt;
+          </span><span class="identifier">store</span><span>.</span><span class="identifier">get</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>).</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">last</span><span> =&gt;
+            </span><span class="keyword">val</span><span> </span><span class="identifier">number</span><span> = </span><span class="identifier">last</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="number-literal">0L</span><span>) + </span><span class="number-literal">1</span><span>
+            </span><span class="identifier">store</span><span>.</span><span class="identifier">put</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="identifier">number</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">List</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">withValue</span><span>(</span><span class="identifier">number</span><span>)))  </span><span class="comment">// This record has no withKey, so the key cannot change
+</span><span>    )
+    .</span><span class="identifier">groupByKey</span><span>(</span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)  </span><span class="comment">// The key did not change, so this needs no repartition topic
+</span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-payments&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;counts&quot;</span><span>))
+    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;counts-stream&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>Since the key stays, <code>groupByKey</code> needs no repartition topic here, unless an
+        earlier step changed the key. <code>FixedKeyProcessor</code> declares its stores with
+        <code>withStore</code>, <code>withStores</code> and <code>withoutStores</code>, and its stores work as described
+        above.</p>
+        
+        <h2 id="stores" class="section"><a class="anchor-link left" href="#stores"><i class="icofont-laika link">&#xef71;</i></a>Stores</h2>
+        <p>A <code>KeyValueStore</code> has <code>get</code>, <code>put</code>, <code>putIfAbsent</code>, <code>putAll</code> and <code>delete</code>, and
+        reads many keys with <code>all</code>, <code>range</code>, <code>prefixScan</code>, <code>reverseAll</code> and
+        <code>reverseRange</code>, which give an <code>fs2.Stream</code>.</p>
+        <p>Those reads follow the order of the keys&#39; serialized bytes, which is not always
+        the order of the keys themselves. A number written as text, for example, sorts
+        <code>&quot;10&quot;</code> before <code>&quot;9&quot;</code>.</p>
+        <p>Your code reads what it has written straight away. The writes are saved at
+        each commit, along with the records you returned and the offsets read, to a topic
+        named <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>. A member that takes over the work
+        restores the store from it. If your handler fails, nothing it wrote for that
+        record is saved.</p>
+        <p>Anything else your handler does, such as calling another service, runs again for
+        records that are processed again after a crash or when another member takes over.</p>
+        
+        <h2 id="window-stores" class="section"><a class="anchor-link left" href="#window-stores"><i class="icofont-laika link">&#xef71;</i></a>Window stores</h2>
+        <p>A <code>WindowStore</code> holds one value for each key and window, and forgets windows once
+        they are old enough. You choose each window&#39;s start, usually by rounding a record&#39;s
+        time down. This one counts each user&#39;s failed logins per minute, and sends on the
+        total for the last ten minutes once it passes five:</p>
+        <pre><code class="nohighlight"><span class="comment">// Count failed logins per user and minute, and flag a user with over five in ten minutes
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">repeatedFailures</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>     = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">count</span><span>    = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="comment">// Holds one count per user and minute, and keeps each for an hour
+</span><span>  </span><span class="keyword">val</span><span> </span><span class="identifier">failures</span><span> = </span><span class="type-name">WindowStore</span><span>.</span><span class="identifier">of</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;failures&quot;</span><span>), </span><span class="identifier">user</span><span>, </span><span class="identifier">count</span><span>, </span><span class="identifier">size</span><span> = </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="identifier">retention</span><span> = </span><span class="number-literal">1</span><span>.</span><span class="identifier">hour</span><span>)
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;failed-logins&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])
+    .</span><span class="identifier">process</span><span>(
+      </span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;flag-repeats&quot;</span><span>),
+      </span><span class="type-name">Processor</span><span>.</span><span class="identifier">withStore</span><span>(</span><span class="identifier">failures</span><span>): </span><span class="identifier">store</span><span> =&gt;
+        </span><span class="type-name">Processor</span><span>.</span><span class="identifier">onRecord</span><span>: </span><span class="identifier">record</span><span> =&gt;
+          </span><span class="keyword">val</span><span> </span><span class="identifier">now</span><span>    = </span><span class="identifier">record</span><span>.</span><span class="identifier">timestamp</span><span>.</span><span class="identifier">epochMillis</span><span>
+          </span><span class="keyword">val</span><span> </span><span class="identifier">minute</span><span> = </span><span class="type-name">Timestamp</span><span>.</span><span class="identifier">fromEpochMillis</span><span>(</span><span class="identifier">now</span><span> - </span><span class="identifier">now</span><span> % </span><span class="number-literal">60000</span><span>)  </span><span class="comment">// Round down to the start of this minute&#39;s window
+</span><span>          </span><span class="keyword">for</span><span>
+            </span><span class="identifier">seen</span><span>   &lt;- </span><span class="identifier">store</span><span>.</span><span class="identifier">fetch</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="identifier">minute</span><span>)                        </span><span class="comment">// This minute&#39;s count so far
+</span><span>            </span><span class="identifier">_</span><span>      &lt;- </span><span class="identifier">store</span><span>.</span><span class="identifier">put</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="identifier">seen</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="number-literal">0L</span><span>) + </span><span class="number-literal">1</span><span>, </span><span class="identifier">minute</span><span>)  </span><span class="comment">// Save it under this minute&#39;s window
+</span><span>            </span><span class="comment">// Add up the counts of the last ten minutes
+</span><span>            </span><span class="identifier">recent</span><span> &lt;- </span><span class="identifier">store</span><span>.</span><span class="identifier">fetch</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="type-name">Timestamp</span><span>.</span><span class="identifier">fromEpochMillis</span><span>(</span><span class="identifier">now</span><span> - </span><span class="number-literal">600000</span><span>), </span><span class="identifier">record</span><span>.</span><span class="identifier">timestamp</span><span>).</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span class="number-literal">._2</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">foldMonoid</span><span>
+          </span><span class="keyword">yield</span><span> </span><span class="keyword">if</span><span> </span><span class="identifier">recent</span><span> &gt; </span><span class="number-literal">5</span><span> </span><span class="keyword">then</span><span> </span><span class="type-name">List</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">withValue</span><span>(</span><span class="identifier">recent</span><span>)) </span><span class="keyword">else</span><span> </span><span class="type-name">Nil</span><span>   </span><span class="comment">// Send the total on only once it passes five
+</span><span>    )
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-flags&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">count</span><span>)</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>To read</th>
+              <th>Use</th>
+              <th>You get</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>One key&#39;s window</td>
+              <td><code>fetch(key, start)</code></td>
+              <td>an <code>Option</code> of its value</td>
+            </tr>
+            <tr>
+              <td>One key&#39;s windows between two starts</td>
+              <td><code>fetch(key, from, to)</code>, <code>reverseFetch</code></td>
+              <td>each window&#39;s start and value</td>
+            </tr>
+            <tr>
+              <td>A range of keys between two starts</td>
+              <td><code>fetchRange(first, last, from, to)</code>, <code>reverseFetchRange</code></td>
+              <td>each <code>Windowed</code> key and value</td>
+            </tr>
+            <tr>
+              <td>Every key between two starts</td>
+              <td><code>fetchAll(from, to)</code>, <code>reverseFetchAll</code></td>
+              <td>each <code>Windowed</code> key and value</td>
+            </tr>
+            <tr>
+              <td>Everything</td>
+              <td><code>all</code>, <code>reverseAll</code></td>
+              <td>each <code>Windowed</code> key and value</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Both ends of a range are included. Reads over several keys go by window start, then
+        by the order of the keys&#39; serialized bytes, and the <code>reverse</code> reads give the exact
+        opposite order. <code>delete(key, start)</code> removes one window.</p>
+        <p><code>retention</code> decides how long a window lasts. A window has expired once the latest
+        start written to the store, by a <code>put</code> or a <code>delete</code>, is a whole retention past its
+        own start. Reads do not find an expired window, and a <code>put</code> to one keeps nothing and
+        raises no error, so choose a retention at least as long as the oldest window you
+        still write to or read.</p>
+        <p><code>size</code> is only what the <code>end</code> of a <code>Windowed</code> key says: a <code>put</code> does not check that
+        starts are a size apart. A size under a millisecond, or a retention shorter than the
+        size, is refused when you call <code>Topology.of</code>.</p>
+        <p>Writes are saved and restored as for a <code>KeyValueStore</code>, to the topic
+        <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, which keeps records for the retention plus a
+        day.</p>
+        
+        <h2 id="session-stores" class="section"><a class="anchor-link left" href="#session-stores"><i class="icofont-laika link">&#xef71;</i></a>Session stores</h2>
+        <p>A <code>SessionStore</code> holds one value for each session: a key with a start and an end.
+        You decide what a session is, and how sessions merge. This one counts each user&#39;s
+        page views per visit, where a visit ends after five minutes with no views. A view
+        within five minutes of two visits joins them into one:</p>
+        <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s page views per visit. A view within five minutes of two visits joins them into one
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">syntax</span><span>.</span><span class="identifier">all</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">viewsPerVisit</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">count</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">visits</span><span> = </span><span class="type-name">SessionStore</span><span>.</span><span class="identifier">of</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;visits&quot;</span><span>), </span><span class="identifier">user</span><span>, </span><span class="identifier">count</span><span>, </span><span class="identifier">retention</span><span> = </span><span class="number-literal">1</span><span>.</span><span class="identifier">hour</span><span>)  </span><span class="comment">// Holds one count per user and visit, and keeps each visit for an hour
+</span><span>  </span><span class="keyword">val</span><span> </span><span class="identifier">gap</span><span>    = </span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>.</span><span class="identifier">toMillis</span><span>                                                 </span><span class="comment">// A visit ends after five minutes with no views
+</span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;page-views&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])
+    .</span><span class="identifier">process</span><span>(
+      </span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-visits&quot;</span><span>),
+      </span><span class="type-name">Processor</span><span>.</span><span class="identifier">withStore</span><span>(</span><span class="identifier">visits</span><span>): </span><span class="identifier">store</span><span> =&gt;
+        </span><span class="type-name">Processor</span><span>.</span><span class="identifier">onRecord</span><span>: </span><span class="identifier">record</span><span> =&gt;
+          </span><span class="keyword">val</span><span> </span><span class="identifier">at</span><span> = </span><span class="identifier">record</span><span>.</span><span class="identifier">timestamp</span><span>.</span><span class="identifier">epochMillis</span><span>
+          </span><span class="keyword">for</span><span>
+            </span><span class="comment">// Find this user&#39;s visits within five minutes of this view
+</span><span>            </span><span class="identifier">nearby</span><span> &lt;- </span><span class="identifier">store</span><span>.</span><span class="identifier">findSessions</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="type-name">Timestamp</span><span>.</span><span class="identifier">fromEpochMillis</span><span>(</span><span class="identifier">at</span><span> - </span><span class="identifier">gap</span><span>), </span><span class="type-name">Timestamp</span><span>.</span><span class="identifier">fromEpochMillis</span><span>(</span><span class="identifier">at</span><span> + </span><span class="identifier">gap</span><span>)).</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>
+            </span><span class="identifier">_</span><span>      &lt;- </span><span class="identifier">nearby</span><span>.</span><span class="identifier">traverse_</span><span>((</span><span class="identifier">session</span><span>, </span><span class="identifier">_</span><span>) =&gt; </span><span class="identifier">store</span><span>.</span><span class="identifier">remove</span><span>(</span><span class="identifier">session</span><span>))     </span><span class="comment">// Remove those visits, because one merged visit replaces them
+</span><span>            </span><span class="identifier">start</span><span>   = (</span><span class="identifier">at</span><span> :: </span><span class="identifier">nearby</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span class="number-literal">._1</span><span>.</span><span class="identifier">window</span><span>.</span><span class="identifier">start</span><span>)).</span><span class="identifier">min</span><span>                   </span><span class="comment">// The merged visit starts at the earliest start
+</span><span>            </span><span class="identifier">end</span><span>     = (</span><span class="identifier">at</span><span> :: </span><span class="identifier">nearby</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span class="number-literal">._1</span><span>.</span><span class="identifier">window</span><span>.</span><span class="identifier">end</span><span>)).</span><span class="identifier">max</span><span>                     </span><span class="comment">// The merged visit ends at the latest end
+</span><span>            </span><span class="identifier">total</span><span>   = </span><span class="identifier">nearby</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span class="number-literal">._2</span><span>).</span><span class="identifier">sum</span><span> + </span><span class="number-literal">1</span><span>                                    </span><span class="comment">// Its count is their counts plus this view
+</span><span>            </span><span class="identifier">_</span><span>      &lt;- </span><span class="identifier">store</span><span>.</span><span class="identifier">put</span><span>(</span><span class="type-name">Windowed</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="type-name">Window</span><span>(</span><span class="identifier">start</span><span>, </span><span class="identifier">end</span><span>)), </span><span class="identifier">total</span><span>)  </span><span class="comment">// Save the merged visit
+</span><span>          </span><span class="keyword">yield</span><span> </span><span class="type-name">List</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">withValue</span><span>(</span><span class="identifier">total</span><span>))
+    )
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-visits&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">count</span><span>)</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>To read</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>One exact session</td>
+              <td><code>fetchSession(key, start, end)</code></td>
+            </tr>
+            <tr>
+              <td>Every session of a key</td>
+              <td><code>fetch(key)</code>, <code>reverseFetch</code></td>
+            </tr>
+            <tr>
+              <td>Every session of a range of keys</td>
+              <td><code>fetchRange(first, last)</code>, <code>reverseFetchRange</code></td>
+            </tr>
+            <tr>
+              <td>A key&#39;s sessions overlapping a stretch of time</td>
+              <td><code>findSessions(key, earliestEnd, latestStart)</code>, <code>reverseFindSessions</code></td>
+            </tr>
+            <tr>
+              <td>The same for a range of keys</td>
+              <td><code>findSessionsRange(first, last, earliestEnd, latestStart)</code>, <code>reverseFindSessionsRange</code></td>
+            </tr>
+            <tr>
+              <td>Every key&#39;s sessions ending within a stretch of time</td>
+              <td><code>findSessionsEnding(earliestEnd, latestEnd)</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Reads go by each session&#39;s end, then by the order of the keys&#39; serialized bytes, then
+        with the latest start first, and the <code>reverse</code> reads give the exact opposite order.
+        Both ends of a range are included, and a range the wrong way round finds nothing. A
+        <code>put</code> or <code>remove</code> of a session that ends before it starts fails your handler.</p>
+        <p><code>retention</code> decides how long a session lasts. A session has expired once the latest
+        end written to the store is a whole retention past its own end. Reads do not find an
+        expired session, and a <code>put</code> to one keeps nothing and raises no error, so choose a
+        retention at least as long as the oldest session you still write to or read.</p>
+        <p>A <code>remove</code> does not count towards the latest end while
+        the store runs, but it does once the store is restored. So a restart can expire a
+        session you could read just before it, if you removed a session ending later than
+        any you have written. Java Kafka Streams&#39; session stores do the same.</p>
+        <p>A retention under a millisecond is refused when you call <code>Topology.of</code>. Writes are
+        saved and restored as for a <code>KeyValueStore</code>, to the topic
+        <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, which keeps records for the retention plus a
+        day.</p>
+        
+        <h2 id="running-on-a-schedule" class="section"><a class="anchor-link left" href="#running-on-a-schedule"><i class="icofont-laika link">&#xef71;</i></a>Running on a schedule</h2>
+        <p>A punctuator is code a processor runs on a schedule, between records. Wrap the
+        handler in <code>Processor.every</code> with a schedule and what to do. It is given the
+        time it runs at, and the records it returns go on to the next step, as a
+        handler&#39;s do.</p>
+        <pre><code class="nohighlight"><span class="comment">// Add up each user&#39;s payments, and send all the totals each time record timestamps pass another minute
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">totalsEveryMinute</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">amount</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">totals</span><span> = </span><span class="type-name">KeyValueStore</span><span>.</span><span class="identifier">of</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;totals&quot;</span><span>), </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;payments&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)
+    .</span><span class="identifier">process</span><span>(
+      </span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;report-totals&quot;</span><span>),
+      </span><span class="type-name">Processor</span><span>.</span><span class="identifier">withStore</span><span>(</span><span class="identifier">totals</span><span>): </span><span class="identifier">store</span><span> =&gt;
+        </span><span class="type-name">Processor</span><span>.</span><span class="identifier">every</span><span>(</span><span class="type-name">Punctuation</span><span>.</span><span class="identifier">streamTime</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>)): </span><span class="identifier">at</span><span> =&gt;                         </span><span class="comment">// The schedule, and what to do each time
+</span><span>          </span><span class="identifier">store</span><span>.</span><span class="identifier">all</span><span>.</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">map</span><span>((</span><span class="identifier">name</span><span>, </span><span class="identifier">total</span><span>) =&gt; </span><span class="type-name">Record</span><span>(</span><span class="identifier">name</span><span>, </span><span class="identifier">total</span><span>, </span><span class="identifier">at</span><span>)))  </span><span class="comment">// Send on every total in this task&#39;s part of the store
+</span><span>        .</span><span class="identifier">apply</span><span>:
+          </span><span class="type-name">Processor</span><span>.</span><span class="identifier">onRecord</span><span>: </span><span class="identifier">record</span><span> =&gt;  </span><span class="comment">// Runs for each record
+</span><span>            </span><span class="identifier">store</span><span>.</span><span class="identifier">get</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>).</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">total</span><span> =&gt;
+              </span><span class="identifier">store</span><span>.</span><span class="identifier">put</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="identifier">total</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="number-literal">0L</span><span>) + </span><span class="identifier">record</span><span>.</span><span class="identifier">value</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">Nil</span><span>)  </span><span class="comment">// Save the total, and send nothing on
+</span><span>    )
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-totals&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)</span></code></pre>
+        <p>A punctuator runs separately in each <a href="running.html#tasks">task</a>, and reads only
+        that task&#39;s part of the stores. Nest <code>every</code> to declare several. There are two
+        schedules:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Schedule</th>
+              <th>Goes by</th>
+              <th>Runs</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Punctuation.streamTime(interval)</code></td>
+              <td>The latest record timestamp the task has read, its stream time</td>
+              <td>With the first record, then whenever stream time reaches the next multiple of the interval. Not while no records arrive</td>
+            </tr>
+            <tr>
+              <td><code>Punctuation.wallClock(interval)</code></td>
+              <td>The clock</td>
+              <td>Each time the interval passes, from when the task starts, whether or not records arrive</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>With <code>Punctuation.streamTime(1.minute)</code> and a first record timestamped 12:00:30,
+        it runs at 12:00:30, and next for the first record timestamped 12:01:00 or later.
+        If several intervals have passed, it runs once. It is given the stream time or
+        clock time it runs at. An interval below a millisecond is refused when you call
+        <code>Topology.of</code>.</p>
+        <p>What a punctuator writes to a store is saved at the next commit, as a handler&#39;s
+        writes are. Under exactly-once processing, a wall-clock punctuator that runs while no records arrive
+        commits a transaction each time, so avoid very short intervals.</p>
+        <p>Schedules are not saved. When a task starts again, here or on another member, a
+        stream-time punctuator runs as soon as the task has a stream time, even if its
+        interval has not passed, and a wall-clock interval starts afresh. To remember when
+        something is due, keep it in a store.</p>
+        <p>A <code>FixedKeyProcessor</code>&#39;s punctuators, declared with <code>FixedKeyProcessor.every</code>, can
+        write to its stores but cannot send records on. To send records on a schedule, use
+        <code>Processor</code>.</p>
+        
+        <h2 id="sharing-a-store" class="section"><a class="anchor-link left" href="#sharing-a-store"><i class="icofont-laika link">&#xef71;</i></a>Sharing a store</h2>
+        <p>Give two processors the same <code>KeyValueStore.of</code> value and they share one store.
+        One task then handles the same-numbered partition of both inputs, and both
+        processors see the same part of the store. Two separate values with the same store
+        name are refused when you call <code>Topology.of</code>.</p>
+        
+        <h2 id="java-processors-jvm-only" class="section"><a class="anchor-link left" href="#java-processors-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Java processors (JVM only)</h2>
+        <p>On the JVM, a <code>Processor</code> or <code>FixedKeyProcessor</code> written for Java Kafka Streams can
+        run as a step. It comes with the <code>xkafka-streams-java</code> module (see
+        <a href="index.html#java-partitioners-jvm-only">Java partitioners</a>).</p>
+        <pre><code class="nohighlight"><span class="comment">// Run a processor written for Java Kafka Streams as a step, with the store it uses
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">processor</span><span>.</span><span class="identifier">api</span><span>.</span><span class="type-name">Processor</span><span> </span><span class="keyword">as</span><span> </span><span class="type-name">JavaProcessor</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">interop</span><span>.*                                        </span><span class="comment">// Adds Processor.fromJava and JavaStore, on the JVM only
+</span><span>
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">withJava</span><span>(</span><span class="identifier">input</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">make</span><span>: () =&gt; </span><span class="type-name">JavaProcessor</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>]): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">counts</span><span> = </span><span class="type-name">JavaStore</span><span>.</span><span class="identifier">keyValue</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;counts&quot;</span><span>), </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)         </span><span class="comment">// The Java code finds it with getStateStore(&quot;counts&quot;)
+</span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;read&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
+    .</span><span class="identifier">process</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count&quot;</span><span>), </span><span class="type-name">Processor</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">make</span><span>, </span><span class="identifier">counts</span><span>))     </span><span class="comment">// Each task makes an instance of its own with make
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)</span></code></pre>
+        <p>The processor runs as it does in Java Kafka Streams:</p>
+        <ul>
+          <li>Each task makes its own instance, calls <code>init</code> when the task starts, and <code>close</code>
+          when the task stops or moves to another member. Fields keep their values in
+          between.</li>
+          <li><code>forward</code> sends records on, with the times and headers they are given.</li>
+          <li><code>schedule</code> runs punctuators by stream time or by the clock, from the start time
+          given where there is one, and <code>cancel</code> stops them. Each task&#39;s instance schedules
+          its own.</li>
+          <li><code>recordMetadata</code> gives the topic, partition and offset of the record being read,
+          and <code>taskId</code>, <code>applicationId</code>, <code>currentStreamTimeMs</code> and <code>currentSystemTimeMs</code>
+          give what they do in Java.</li>
+        </ul>
+        <p>Declare each store the Java code reads with <code>JavaStore.keyValue</code>, which it takes as a
+        <code>KeyValueStore&lt;K, V&gt;</code>, or <code>JavaStore.timestamped</code>, which it takes as a
+        <code>TimestampedKeyValueStore&lt;K, V&gt;</code>. Keys and values must be objects, such as <code>String</code>
+        or <code>java.lang.Long</code>. Window and session stores cannot be given yet, and a store given
+        to a Java processor cannot also be given to one of xkafka&#39;s.</p>
+        <p>Each call into the Java code runs on a thread meant for waiting, since its calls to
+        stores wait for them. That can cost a switch of threads for each record such a step
+        handles; xkafka&#39;s own steps do not pay it.</p>
+        <p>These fail with an error saying so: writing to a store or sending records on in
+        <code>init</code>, sending records to a named next step, <code>stateDir</code>, <code>keySerde</code> and <code>valueSerde</code>.
+        <code>commit()</code> does nothing, since commits happen at the commit interval anyway, and
+        sensors from <code>metrics()</code> record what they are given, which nothing reports.</p>
+        <p>If some members run Java Kafka Streams, give their program the same processor under
+        the same name, with the same stores.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

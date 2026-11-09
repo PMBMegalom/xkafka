@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Querying stores</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="../helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="../helium/site/laika-helium.css" />
+  <script src="../helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="../">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="../getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="../settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="../producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="../consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="../headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="../offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="../transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="index.html">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 active nav-leaf"><a href="#">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Querying stores</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#setting-up">Setting up</a></li>
+    <li class="level1 nav-leaf"><a href="#asking">Asking</a></li>
+    <li class="level1 nav-leaf"><a href="#window-and-session-stores">Window and session stores</a></li>
+    <li class="level1 nav-leaf"><a href="#when-a-query-cannot-be-answered">When a query cannot be answered</a></li>
+    <li class="level1 nav-leaf"><a href="#standby-copies">Standby copies</a></li>
+    <li class="level1 nav-leaf"><a href="#java-members">Java members</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="querying-stores" class="title">Querying stores</h1>
+        <p>A running application can answer questions from its stores: a user&#39;s latest
+        balance in a table, the count of a page&#39;s views, and so on. Each member holds only
+        part of each store, so the member you ask may not hold the key. xkafka finds the
+        member that does and asks it, through a connection your application provides.</p>
+        
+        <h2 id="setting-up" class="section"><a class="anchor-link left" href="#setting-up"><i class="icofont-laika link">&#xef71;</i></a>Setting up</h2>
+        <p>Every member of the application needs:</p>
+        <ol class="arabic">
+          <li><strong>An endpoint</strong>, the host and port other members reach it at, given with
+          <code>withQueries</code>. A member without one cannot be asked, so the keys it holds
+          cannot be answered by any other member.</li>
+          <li><strong>A <code>Forward</code></strong>, which sends the bytes of a query to another member&#39;s endpoint
+          and gives back the bytes it answers.</li>
+          <li><strong>An internal route</strong> on that endpoint, which passes the bytes it receives to
+          <code>answer</code> and sends back what <code>answer</code> returns.</li>
+        </ol>
+        <p>xkafka does not choose how members talk to each other. Here they use HTTP, with
+        <a href="https://http4s.org">http4s</a>:</p>
+        <pre><code class="nohighlight"><span class="comment">// Run a member that answers other members&#39; queries over HTTP, and asks them for the keys they hold
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">comcast</span><span>.</span><span class="identifier">ip4s</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="type-name">Chunk</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">dsl</span><span>.</span><span class="identifier">io</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">ember</span><span>.</span><span class="identifier">client</span><span>.</span><span class="type-name">EmberClientBuilder</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">ember</span><span>.</span><span class="identifier">server</span><span>.</span><span class="type-name">EmberServerBuilder</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">member</span><span>(</span><span class="identifier">settings</span><span>: </span><span class="type-name">StreamsSettings</span><span>, </span><span class="identifier">topology</span><span>: </span><span class="type-name">Topology</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="type-name">Endpoint</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;orders-3.internal&quot;</span><span>, </span><span class="number-literal">8080</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">here</span><span> =&gt;
+    </span><span class="type-name">EmberClientBuilder</span><span>.</span><span class="identifier">default</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">build</span><span>.</span><span class="identifier">use</span><span>: </span><span class="identifier">http</span><span> =&gt;
+      </span><span class="comment">// Post a query&#39;s bytes to the member that holds the key, and give back what it answers
+</span><span>      </span><span class="keyword">val</span><span> </span><span class="identifier">forward</span><span>: </span><span class="type-name">Forward</span><span>[</span><span class="type-name">IO</span><span>] = (</span><span class="identifier">member</span><span>, </span><span class="identifier">query</span><span>) =&gt;
+        </span><span class="keyword">val</span><span> </span><span class="identifier">route</span><span> = </span><span class="type-name">Uri</span><span>.</span><span class="identifier">unsafeFromString</span><span>(</span><span class="string-literal">s&quot;http://</span><span class="substitution">${member.host}</span><span class="string-literal">:</span><span class="substitution">${member.port}</span><span class="string-literal">/xkafka-query&quot;</span><span>)
+        </span><span class="identifier">http</span><span>.</span><span class="identifier">expect</span><span>[</span><span class="type-name">Array</span><span>[</span><span class="type-name">Byte</span><span>]](</span><span class="type-name">Request</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="type-name">Method</span><span>.</span><span class="type-name">POST</span><span>, </span><span class="identifier">route</span><span>).</span><span class="identifier">withEntity</span><span>(</span><span class="identifier">query</span><span>.</span><span class="identifier">toArray</span><span>)).</span><span class="identifier">map</span><span>(</span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="identifier">_</span><span>))
+      </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">streams</span><span>(</span><span class="identifier">settings</span><span>.</span><span class="identifier">withQueries</span><span>(</span><span class="identifier">here</span><span>), </span><span class="identifier">topology</span><span>, </span><span class="identifier">forward</span><span>).</span><span class="identifier">use</span><span>: </span><span class="identifier">streams</span><span> =&gt;
+        </span><span class="comment">// Answer the queries other members post here
+</span><span>        </span><span class="keyword">val</span><span> </span><span class="identifier">internal</span><span> = </span><span class="type-name">HttpRoutes</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>]:
+          </span><span class="keyword">case</span><span> </span><span class="identifier">request</span><span> @ </span><span class="type-name">POST</span><span> -&gt; </span><span class="type-name">Root</span><span> / </span><span class="string-literal">&quot;xkafka-query&quot;</span><span> =&gt;
+            </span><span class="identifier">request</span><span>.</span><span class="identifier">as</span><span>[</span><span class="type-name">Array</span><span>[</span><span class="type-name">Byte</span><span>]].</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">query</span><span> =&gt; </span><span class="identifier">streams</span><span>.</span><span class="identifier">answer</span><span>(</span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="identifier">query</span><span>))).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">answer</span><span> =&gt; </span><span class="type-name">Ok</span><span>(</span><span class="identifier">answer</span><span>.</span><span class="identifier">toArray</span><span>))
+        </span><span class="keyword">val</span><span> </span><span class="identifier">server</span><span> = </span><span class="type-name">EmberServerBuilder</span><span>.</span><span class="identifier">default</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">withHost</span><span>(</span><span class="identifier">ipv4</span><span class="string-literal">&quot;0.0.0.0&quot;</span><span>).</span><span class="identifier">withPort</span><span>(</span><span class="string-literal">port&quot;8080&quot;</span><span>).</span><span class="identifier">withHttpApp</span><span>(</span><span class="identifier">internal</span><span>.</span><span class="identifier">orNotFound</span><span>).</span><span class="identifier">build</span><span>
+        </span><span class="identifier">server</span><span>.</span><span class="identifier">surround</span><span>(</span><span class="identifier">streams</span><span>.</span><span class="identifier">run</span><span>)                       </span><span class="comment">// Serve the route for as long as the member runs</span></code></pre>
+        <p>Keep the internal route away from the outside world: it answers any query, for
+        any store.</p>
+        
+        <h2 id="asking" class="section"><a class="anchor-link left" href="#asking"><i class="icofont-laika link">&#xef71;</i></a>Asking</h2>
+        <p>Describe a key-value store with <code>QueryableStore.keyValue</code>, giving its name and the
+        serdes its keys and values are written with, then pass a query to <code>query</code>. The call
+        is the same whichever member holds the key. Here a public route answers with a
+        user&#39;s balance:</p>
+        <pre><code class="nohighlight"><span class="comment">// Answer GET /balance/&lt;user&gt; with the user&#39;s balance, wherever it is held
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">dsl</span><span>.</span><span class="identifier">io</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">`Retry-After`</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">balances</span><span> = </span><span class="type-name">QueryableStore</span><span>.</span><span class="identifier">keyValue</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;balances&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">public</span><span>(</span><span class="identifier">streams</span><span>: </span><span class="type-name">KafkaStreams</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">HttpRoutes</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="type-name">HttpRoutes</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>]:
+    </span><span class="keyword">case</span><span> </span><span class="type-name">GET</span><span> -&gt; </span><span class="type-name">Root</span><span> / </span><span class="string-literal">&quot;balance&quot;</span><span> / </span><span class="identifier">user</span><span> =&gt;
+      </span><span class="identifier">streams</span><span>.</span><span class="identifier">query</span><span>(</span><span class="identifier">balances</span><span>.</span><span class="identifier">get</span><span>(</span><span class="identifier">user</span><span>)).</span><span class="identifier">flatMap</span><span>:
+        </span><span class="keyword">case</span><span> </span><span class="type-name">Right</span><span>(</span><span class="type-name">Some</span><span>(</span><span class="identifier">balance</span><span>))           =&gt; </span><span class="type-name">Ok</span><span>(</span><span class="identifier">balance</span><span>.</span><span class="identifier">toString</span><span>)
+        </span><span class="keyword">case</span><span> </span><span class="type-name">Right</span><span>(</span><span class="type-name">None</span><span>)                    =&gt; </span><span class="type-name">NotFound</span><span>()
+        </span><span class="keyword">case</span><span> </span><span class="type-name">Left</span><span>(</span><span class="type-name">QueryProblem</span><span>.</span><span class="type-name">Rebalancing</span><span>) =&gt; </span><span class="type-name">ServiceUnavailable</span><span>().</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">putHeaders</span><span>(</span><span class="identifier">`Retry-After`</span><span>.</span><span class="identifier">unsafeFromLong</span><span>(</span><span class="number-literal">1</span><span>))) </span><span class="comment">// Moving: ask again shortly
+</span><span>        </span><span class="keyword">case</span><span> </span><span class="type-name">Left</span><span>(</span><span class="identifier">problem</span><span>)                  =&gt; </span><span class="type-name">BadGateway</span><span>(</span><span class="identifier">problem</span><span>.</span><span class="identifier">toString</span><span>)</span></code></pre>
+        <p>These stores can be queried:</p>
+        <ul>
+          <li>a table&#39;s store, given when the table is read or made;</li>
+          <li>the store of an aggregation, such as <code>count</code>, <code>reduce</code> or <code>aggregate</code>;</li>
+          <li>a processor&#39;s <code>KeyValueStore</code>;</li>
+          <li>a global table&#39;s store, which every member holds whole, so it is always
+          answered by the member you ask.</li>
+        </ul>
+        <p>Each store offers:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>query</th>
+              <th>answer</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>get(key)</code></td>
+              <td>what the store holds for the key, if anything</td>
+            </tr>
+            <tr>
+              <td><code>range(from, to)</code></td>
+              <td>the keys from <code>from</code> to <code>to</code>, both included, with their values</td>
+            </tr>
+            <tr>
+              <td><code>all</code></td>
+              <td>every key with its value</td>
+            </tr>
+          </tbody>
+        </table>
+        <p><code>range</code> and <code>all</code> ask every member holding part of the store. Their keys come in
+        the order of their serialized bytes. For text keys that is the order of their
+        characters, capitals before lower-case letters, so <code>Zoe</code> comes before <code>adam</code>. For
+        numbers written with <code>Serde.long</code>, negative numbers come after the positive ones.</p>
+        
+        <h2 id="window-and-session-stores" class="section"><a class="anchor-link left" href="#window-and-session-stores"><i class="icofont-laika link">&#xef71;</i></a>Window and session stores</h2>
+        <p>A windowed aggregation keeps a value for each key and window, and a session
+        aggregation one for each key and session. Query them with
+        <code>QueryableStore.window</code> and <code>QueryableStore.session</code>, giving the serdes of the key
+        itself, not the windowed serde your output topic uses:</p>
+        <pre><code class="nohighlight"><span class="comment">// Look up a page&#39;s views per minute over the last hour, and a user&#39;s visits
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">perMinute</span><span> = </span><span class="type-name">QueryableStore</span><span>.</span><span class="identifier">window</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-minute&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])
+</span><span class="keyword">val</span><span> </span><span class="identifier">visits</span><span>    = </span><span class="type-name">QueryableStore</span><span>.</span><span class="identifier">session</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;visits&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">lastHour</span><span>(</span><span class="identifier">streams</span><span>: </span><span class="type-name">KafkaStreams</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="identifier">page</span><span>: </span><span class="type-name">String</span><span>): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Either</span><span>[</span><span class="type-name">QueryProblem</span><span>, </span><span class="type-name">Vector</span><span>[(</span><span class="type-name">Long</span><span>, </span><span class="type-name">Long</span><span>)]]] =
+  </span><span class="type-name">IO</span><span>.</span><span class="identifier">realTime</span><span>.</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">now</span><span> =&gt;
+    </span><span class="keyword">val</span><span> </span><span class="identifier">from</span><span> = </span><span class="type-name">Timestamp</span><span>.</span><span class="identifier">fromEpochMillis</span><span>((</span><span class="identifier">now</span><span> - </span><span class="number-literal">1</span><span>.</span><span class="identifier">hour</span><span>).</span><span class="identifier">toMillis</span><span>)
+    </span><span class="identifier">streams</span><span>.</span><span class="identifier">query</span><span>(</span><span class="identifier">perMinute</span><span>.</span><span class="identifier">fetch</span><span>(</span><span class="identifier">page</span><span>, </span><span class="identifier">from</span><span>, </span><span class="type-name">Timestamp</span><span>.</span><span class="identifier">fromEpochMillis</span><span>(</span><span class="identifier">now</span><span>.</span><span class="identifier">toMillis</span><span>))) </span><span class="comment">// Each window&#39;s start, with its count
+</span><span>
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">visitsOf</span><span>(</span><span class="identifier">streams</span><span>: </span><span class="type-name">KafkaStreams</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="identifier">user</span><span>: </span><span class="type-name">String</span><span>): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Either</span><span>[</span><span class="type-name">QueryProblem</span><span>, </span><span class="type-name">Vector</span><span>[(</span><span class="type-name">Window</span><span>, </span><span class="type-name">Long</span><span>)]]] =
+  </span><span class="identifier">streams</span><span>.</span><span class="identifier">query</span><span>(</span><span class="identifier">visits</span><span>.</span><span class="identifier">fetch</span><span>(</span><span class="identifier">user</span><span>))                                                    </span><span class="comment">// Each visit&#39;s window, with its count</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>store</th>
+              <th>query</th>
+              <th>answer</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>window</td>
+              <td><code>fetch(key, from, to)</code></td>
+              <td>the key&#39;s windows starting from <code>from</code> to <code>to</code>, both included: each window&#39;s start time with its value, earliest first</td>
+            </tr>
+            <tr>
+              <td>window</td>
+              <td><code>fetchAll(from, to)</code></td>
+              <td>the windows of every key starting in that time: each key and window with its value, earliest start first, then by key</td>
+            </tr>
+            <tr>
+              <td>session</td>
+              <td><code>fetch(key)</code></td>
+              <td>the key&#39;s sessions: each session&#39;s window with its value, the earliest ending first</td>
+            </tr>
+          </tbody>
+        </table>
+        <p><code>fetchAll</code> gives each window&#39;s start and end; the end is the start plus the window
+        size your program sets. A window store keeps windows only for its retention, so
+        older windows are no longer found.</p>
+        
+        <h2 id="when-a-query-cannot-be-answered" class="section"><a class="anchor-link left" href="#when-a-query-cannot-be-answered"><i class="icofont-laika link">&#xef71;</i></a>When a query cannot be answered</h2>
+        <p><code>query</code> returns a <code>QueryProblem</code> when it cannot answer:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>problem</th>
+              <th>meaning</th>
+              <th>what to do</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Rebalancing</code></td>
+              <td>the part of the store the query needs is moving between members, or is still being filled</td>
+              <td>ask again shortly</td>
+            </tr>
+            <tr>
+              <td><code>Unreachable(member, reason)</code></td>
+              <td>the member holding it could not be reached, or failed to answer</td>
+              <td>check that member and your <code>Forward</code></td>
+            </tr>
+            <tr>
+              <td><code>NotXkafka(member)</code></td>
+              <td>the member holding it answered in a format xkafka does not read</td>
+              <td>see <a href="#java-members">Java members</a></td>
+            </tr>
+            <tr>
+              <td><code>UnknownStore(store)</code></td>
+              <td>the program has no store of that name of the kind queried</td>
+              <td>check the store&#39;s name, and that it is a key-value, window or session store as queried</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>A range fails as a whole if any member it needs cannot answer, so you never get
+        part of a store without being told.</p>
+        
+        <h2 id="standby-copies" class="section"><a class="anchor-link left" href="#standby-copies"><i class="icofont-laika link">&#xef71;</i></a>Standby copies</h2>
+        <p>Where the broker keeps <a href="running.html#standby-copies">standby copies</a> of the
+        stores, <code>query(..., allowStandby = true)</code> lets a copy answer. A copy can be a
+        little behind, but it can answer while its store is moving between members.</p>
+        
+        <h2 id="java-members" class="section"><a class="anchor-link left" href="#java-members"><i class="icofont-laika link">&#xef71;</i></a>Java members</h2>
+        <p>An application can mix xkafka and Java Kafka Streams members. A Java member
+        answers xkafka&#39;s queries through <code>JavaQueries</code>, from the
+        <a href="index.html#java-partitioners-jvm-only"><code>xkafka-streams-java</code> module</a>. Give it the
+        instance, the application&#39;s id, and each store that can be queried with its Java
+        serdes, then call its <code>answer</code> from the internal route. The member&#39;s
+        <code>application.server</code> setting is the endpoint xkafka members reach it at.</p>
+        <pre><code class="nohighlight"><span class="comment">// Let a Java member answer xkafka members&#39; queries of its page view counts
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">serialization</span><span>.</span><span class="type-name">Serdes</span><span>;
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">KafkaStreams</span><span>;
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">interop</span><span>.</span><span class="type-name">JavaQueries</span><span>;
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Answering</span><span> {
+  </span><span class="keyword">private</span><span> </span><span class="keyword">final</span><span> </span><span class="type-name">JavaQueries</span><span> </span><span class="identifier">queries</span><span>;
+
+  </span><span class="type-name">Answering</span><span>(</span><span class="type-name">KafkaStreams</span><span> </span><span class="identifier">streams</span><span>) {
+    </span><span class="identifier">queries</span><span> =
+        </span><span class="type-name">JavaQueries</span><span>.</span><span class="identifier">of</span><span>(</span><span class="identifier">streams</span><span>, </span><span class="string-literal">&quot;page-view-counter&quot;</span><span>)
+            .</span><span class="identifier">keyValue</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>, </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>(), </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">Long</span><span>())   </span><span class="comment">// A table or a count
+</span><span>            .</span><span class="identifier">window</span><span>(</span><span class="string-literal">&quot;views-per-minute&quot;</span><span>, </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>(), </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">Long</span><span>());  </span><span class="comment">// A windowed count
+</span><span>  }
+
+  </span><span class="comment">// Call this from the internal route: the bytes posted to it in, the answer&#39;s bytes out
+</span><span>  </span><span class="type-name">byte</span><span>[] </span><span class="identifier">answer</span><span>(</span><span class="type-name">byte</span><span>[] </span><span class="identifier">query</span><span>) {
+    </span><span class="keyword">return</span><span> </span><span class="identifier">queries</span><span>.</span><span class="identifier">answer</span><span>(</span><span class="identifier">query</span><span>);
+  }
+}</span></code></pre>
+        <p><code>JavaQueries</code> also takes <code>session</code> stores. It reads each store through Java&#39;s own
+        interactive queries on that instance. A Java member without it does not answer
+        in a format xkafka reads, so a query that needs it fails with <code>NotXkafka</code>, or with
+        <code>Unreachable</code> where nothing answers at its endpoint.</p>
+        <p>A Java member asks with <code>JavaQuerying</code>, giving it the instance, its topology, the
+        application&#39;s id, and how to send a query to another member. It finds the member
+        holding a key through Java&#39;s own metadata, which lists xkafka members too, and
+        sends the query to that member&#39;s internal route, even when that member is itself:</p>
+        <pre><code class="nohighlight"><span class="comment">// Let a Java member ask for a page&#39;s view count, wherever it is held
+</span><span class="keyword">import</span><span> </span><span class="identifier">java</span><span>.</span><span class="identifier">util</span><span>.</span><span class="type-name">Optional</span><span>;
+</span><span class="keyword">import</span><span> </span><span class="identifier">java</span><span>.</span><span class="identifier">util</span><span>.</span><span class="identifier">function</span><span>.</span><span class="type-name">BiFunction</span><span>;
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">serialization</span><span>.</span><span class="type-name">Serdes</span><span>;
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">KafkaStreams</span><span>;
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">Topology</span><span>;
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">state</span><span>.</span><span class="type-name">HostInfo</span><span>;
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">interop</span><span>.</span><span class="type-name">JavaQuerying</span><span>;
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Asking</span><span> {
+  </span><span class="keyword">private</span><span> </span><span class="keyword">final</span><span> </span><span class="type-name">JavaQuerying</span><span> </span><span class="identifier">querying</span><span>;
+
+  </span><span class="comment">// `post` is your HTTP client: it posts the bytes to the member&#39;s internal route and returns what it answers
+</span><span>  </span><span class="type-name">Asking</span><span>(</span><span class="type-name">KafkaStreams</span><span> </span><span class="identifier">streams</span><span>, </span><span class="type-name">Topology</span><span> </span><span class="identifier">topology</span><span>, </span><span class="type-name">BiFunction</span><span>&lt;</span><span class="type-name">HostInfo</span><span>, </span><span class="type-name">byte</span><span>[], </span><span class="type-name">byte</span><span>[]&gt; </span><span class="identifier">post</span><span>) {
+    </span><span class="identifier">querying</span><span> = </span><span class="type-name">JavaQuerying</span><span>.</span><span class="identifier">of</span><span>(</span><span class="identifier">streams</span><span>, </span><span class="identifier">topology</span><span>, </span><span class="string-literal">&quot;page-view-counter&quot;</span><span>, </span><span class="identifier">post</span><span>);
+  }
+
+  </span><span class="comment">// Throws a QueryProblemException when it cannot answer, whose problem says why, as xkafka&#39;s queries do
+</span><span>  </span><span class="type-name">Optional</span><span>&lt;</span><span class="type-name">Long</span><span>&gt; </span><span class="identifier">views</span><span>(</span><span class="type-name">String</span><span> </span><span class="identifier">page</span><span>) {
+    </span><span class="keyword">return</span><span> </span><span class="identifier">querying</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>, </span><span class="identifier">page</span><span>, </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>(), </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">Long</span><span>());
+  }
+}</span></code></pre>
+        <table>
+          <thead>
+            <tr>
+              <th>method</th>
+              <th>answer</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>get(store, key, ...)</code></td>
+              <td>what a key-value store holds for the key, if anything</td>
+            </tr>
+            <tr>
+              <td><code>range(store, from, to, ...)</code></td>
+              <td>the keys of a key-value store from <code>from</code> to <code>to</code>, both included, as a list of Kafka&#39;s <code>KeyValue</code></td>
+            </tr>
+            <tr>
+              <td><code>all(store, ...)</code></td>
+              <td>every key of a key-value store with its value, as a list of Kafka&#39;s <code>KeyValue</code></td>
+            </tr>
+            <tr>
+              <td><code>fetch(store, key, from, to, ...)</code></td>
+              <td>a key&#39;s windows starting in that time: each window&#39;s start time with its value</td>
+            </tr>
+            <tr>
+              <td><code>fetchAll(store, from, to, windowSize, ...)</code></td>
+              <td>the windows of every key starting in that time, each as a <code>Windowed</code> key with its value</td>
+            </tr>
+            <tr>
+              <td><code>sessions(store, key, ...)</code></td>
+              <td>a key&#39;s sessions, each as a <code>Windowed</code> key with its value</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Java&#39;s metadata does not say how long a store&#39;s windows are, so <code>fetchAll</code> needs
+        the size from you, and ends each window that long after it starts. Give it the
+        size your program&#39;s windows have: a wrong size gives wrong ends, and nothing can
+        tell.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

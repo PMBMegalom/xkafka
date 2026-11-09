@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Joins</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="../helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="../helium/site/laika-helium.css" />
+  <script src="../helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="../">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="../getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="../settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="../producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="../consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="../headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="../offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="../transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="index.html">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="tables.html">Tables</a></li>
+    <li class="level2 active nav-leaf"><a href="#">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Joins</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#joining-tables">Joining tables</a></li>
+    <li class="level1 nav-leaf"><a href="#joining-on-a-foreign-key">Joining on a foreign key</a></li>
+    <li class="level1 nav-leaf"><a href="#joining-streams">Joining streams</a></li>
+    <li class="level1 nav-leaf"><a href="#joining-a-global-table">Joining a global table</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="joins" class="title">Joins</h1>
+        <p><code>join</code> pairs each record of a stream with its key&#39;s value in a table, as Java
+        Kafka Streams&#39; stream-table join does. Here each order, keyed by the user who
+        placed it, is joined with that user&#39;s name:</p>
+        <pre><code class="nohighlight"><span class="comment">// Join each order with the name of the user who placed it
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersWithNames</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">users</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">item</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">name</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">item</span><span>)
+    </span><span class="comment">// Look up each order&#39;s key in the table
+</span><span>    .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;with-name&quot;</span><span>), </span><span class="type-name">KTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;users&quot;</span><span>), </span><span class="identifier">users</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">name</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;users&quot;</span><span>)))((</span><span class="identifier">bought</span><span>, </span><span class="identifier">buyer</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$bought</span><span class="string-literal"> for </span><span class="substitution">$buyer</span><span class="string-literal">&quot;</span><span>)
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>Each record is joined with the value the table holds for its key when the record
+        is processed; later changes to the table do not change records already joined.
+        A record whose key the table holds no value for, never set or deleted, is
+        dropped. <code>leftJoin</code> keeps it, passing <code>None</code> instead of the table&#39;s value. The
+        result keeps each record&#39;s timestamp and headers.</p>
+        <p>The table can be read from a topic, made by <code>count</code>, <code>reduce</code>, <code>aggregate</code> or
+        <code>toTable</code>, or come from another table&#39;s <code>filter</code>, <code>mapValues</code> or join. A join with a
+        suppressed table sees, for a key whose update is held back, the value from before
+        that update, as in Java.</p>
+        <p>A stream and the table it joins are processed together, so their topics must
+        have the same number of partitions, as in Java. If they do not, the broker
+        refuses the application&#39;s topics, which shows up in <code>state</code> as
+        <code>StreamsProblem.IncorrectlyPartitionedTopics</code>. A member processes the records
+        it has read from both topics earliest timestamp first, as Java does.</p>
+        <p>An application whose members all run xkafka can run any join. If some members run
+        Java Kafka Streams, the broker requires every member to describe the application
+        in the same way, and may refuse the Java members otherwise. For some pairs of
+        joined topic names, xkafka cannot tell whether its description will match Java&#39;s.
+        The application&#39;s <code>state</code> then lists <code>StreamsProblem.JavaMembersMayBeRefused</code>,
+        naming the topics. Joining topics with other names avoids it.</p>
+        <p><code>state</code> lists the same problem for a join with an input that has sub-topologies of
+        its own, for example a table counted after a repartition. To keep the Java members,
+        build what <code>join</code> is called on first in the Java program, before anything of the
+        other input:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In the Java program: build the stream that join is called on first
+</span><span class="type-name">KStream</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">orders</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">stream</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>);
+</span><span class="type-name">KTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">Long</span><span>&gt; </span><span class="identifier">visits</span><span> = </span><span class="identifier">builder</span><span>.&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt;</span><span class="identifier">stream</span><span>(</span><span class="string-literal">&quot;visits&quot;</span><span>)
+    .</span><span class="identifier">groupBy</span><span>((</span><span class="identifier">key</span><span>, </span><span class="identifier">page</span><span>) -&gt; </span><span class="identifier">page</span><span>, </span><span class="type-name">Grouped</span><span>.</span><span class="identifier">as</span><span>(</span><span class="string-literal">&quot;by-page&quot;</span><span>))
+    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Materialized</span><span>.</span><span class="identifier">as</span><span>(</span><span class="string-literal">&quot;visits&quot;</span><span>));
+</span><span class="identifier">orders</span><span>.</span><span class="identifier">join</span><span>(</span><span class="identifier">visits</span><span>, (</span><span class="identifier">order</span><span>, </span><span class="identifier">count</span><span>) -&gt; </span><span class="identifier">order</span><span> + </span><span class="identifier">count</span><span>).</span><span class="identifier">to</span><span>(</span><span class="string-literal">&quot;out&quot;</span><span>);</span></code></pre>
+        <p>If the stream&#39;s key may have changed since it was read, for example after
+        <code>selectKey</code>, its records first go through a repartition topic, and <code>join</code> and
+        <code>leftJoin</code> compile only with serdes to write it with, as <code>groupByKey</code> compiles
+        only with a name. The topic is named after the join,
+        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>, as Java names it after its <code>Joined</code> name:</p>
+        <pre><code class="nohighlight"><span class="comment">// Key orders by user, then join them with the users table
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersByUser</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">users</span><span>: </span><span class="type-name">KTable</span><span>.</span><span class="type-name">Of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>, </span><span class="type-name">Option</span><span>], </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">id</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">item</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">id</span><span>, </span><span class="identifier">item</span><span>)
+    .</span><span class="identifier">selectKey</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;by-user&quot;</span><span>))((</span><span class="identifier">order</span><span>, </span><span class="identifier">_</span><span>) =&gt; </span><span class="identifier">order</span><span>.</span><span class="identifier">takeWhile</span><span>(</span><span class="identifier">_</span><span> != </span><span class="char-literal">&#39;/&#39;</span><span>))  </span><span class="comment">// The key changes here
+</span><span>    </span><span class="comment">// So the join takes serdes to write a repartition topic
+</span><span>    .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders-by-user&quot;</span><span>), </span><span class="identifier">users</span><span>, </span><span class="identifier">id</span><span>, </span><span class="identifier">item</span><span>)((</span><span class="identifier">bought</span><span>, </span><span class="identifier">buyer</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$bought</span><span class="string-literal"> for </span><span class="substitution">$buyer</span><span class="string-literal">&quot;</span><span>)
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">id</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p>Here the orders are keyed by an order id such as <code>alice/1042</code>, and <code>selectKey</code>
+        keys them by the user before the join.</p>
+        
+        <h2 id="joining-tables" class="section"><a class="anchor-link left" href="#joining-tables"><i class="icofont-laika link">&#xef71;</i></a>Joining tables</h2>
+        <p>Two tables with the same key join into a table, as Java Kafka Streams&#39; table-table
+        joins do. Every change to either table updates the result for its key:</p>
+        <pre><code class="nohighlight"><span class="comment">// Join users and plans into one account per user, whichever of the two a user has
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">Ior</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">accounts</span><span>(</span><span class="identifier">users</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">plans</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">user</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">name</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">plan</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">names</span><span> = </span><span class="type-name">KTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;users&quot;</span><span>), </span><span class="identifier">users</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">name</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;users&quot;</span><span>))
+  </span><span class="keyword">val</span><span> </span><span class="identifier">paid</span><span>  = </span><span class="type-name">KTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;plans&quot;</span><span>), </span><span class="identifier">plans</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">plan</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;plans&quot;</span><span>))
+  </span><span class="identifier">names</span><span>
+    .</span><span class="identifier">outerJoin</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;accounts&quot;</span><span>), </span><span class="identifier">paid</span><span>) {                   </span><span class="comment">// Every change to either table updates the result
+</span><span>      </span><span class="keyword">case</span><span> </span><span class="type-name">Ior</span><span>.</span><span class="type-name">Left</span><span>(</span><span class="identifier">who</span><span>)       =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$who</span><span class="string-literal">, no plan&quot;</span><span>          </span><span class="comment">// A user with no plan
+</span><span>      </span><span class="keyword">case</span><span> </span><span class="type-name">Ior</span><span>.</span><span class="type-name">Right</span><span>(</span><span class="identifier">tier</span><span>)     =&gt; </span><span class="string-literal">s&quot;unknown user on </span><span class="substitution">$tier</span><span class="string-literal">&quot;</span><span>  </span><span class="comment">// A plan with no user
+</span><span>      </span><span class="keyword">case</span><span> </span><span class="type-name">Ior</span><span>.</span><span class="type-name">Both</span><span>(</span><span class="identifier">who</span><span>, </span><span class="identifier">tier</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$who</span><span class="string-literal"> on </span><span class="substitution">$tier</span><span class="string-literal">&quot;</span><span>          </span><span class="comment">// A user with a plan
+</span><span>    }
+    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;account-changes&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-accounts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>)</span></code></pre>
+        <ul>
+          <li><code>join</code> holds a value for each key both tables hold a value for.</li>
+          <li><code>leftJoin</code> holds one for each key the left table holds, passing the right
+          table&#39;s value as an <code>Option</code>.</li>
+          <li><code>outerJoin</code> holds one for each key either table holds, passing the values as
+          an <code>Ior</code>: the left, the right, or both.</li>
+        </ul>
+        <p>The result can delete keys, whichever tables were joined, so its changes are
+        <code>Option</code> values, and <code>toStream</code> writes a delete as a tombstone. As in Java, a
+        delete on either side of <code>join</code> deletes the key from the result, even a key the
+        result never held. The joining function cannot delete a key itself. Each
+        result takes the later timestamp of the two values it was made from.</p>
+        <p>The result is computed when needed and kept in no store. To keep it in one, pass
+        the store&#39;s name and a serde for its values; a table that holds the result back
+        with <code>suppress</code> needs this:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Keep the joined table in a store, so that its updates can be held back
+</span><span class="identifier">names</span><span>
+  </span><span class="comment">// Keep the result in the store named accounts
+</span><span>  .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;accounts&quot;</span><span>), </span><span class="identifier">paid</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;accounts&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])((</span><span class="identifier">who</span><span>, </span><span class="identifier">tier</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$who</span><span class="string-literal"> on </span><span class="substitution">$tier</span><span class="string-literal">&quot;</span><span>)
+  .</span><span class="identifier">suppress</span><span>(</span><span class="type-name">Suppressed</span><span>.</span><span class="identifier">untilTimeLimit</span><span>(</span><span class="string-literal">&quot;accounts-calm&quot;</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">second</span><span>))  </span><span class="comment">// Holding back updates needs the result kept in a store</span></code></pre>
+        <p>Like a stream and a table, two joined tables are processed together, so their
+        topics must have the same number of partitions. To join a table with itself, see
+        <a href="branching.html#joining-a-stream-or-a-table-with-itself">Joining a stream or a table with itself</a>.</p>
+        
+        <h2 id="joining-on-a-foreign-key" class="section"><a class="anchor-link left" href="#joining-on-a-foreign-key"><i class="icofont-laika link">&#xef71;</i></a>Joining on a foreign key</h2>
+        <p>The tables above share a key. Often a row instead names a row of another table in
+        its value: an order names its customer. <code>joinOnForeignKey</code> joins them, and keeps the
+        result up to date when either table changes. The tables can have different keys and
+        different numbers of partitions.</p>
+        <pre><code class="nohighlight"><span class="comment">// Keep each order joined with the name of the customer it belongs to, updated whenever the order or the customer changes.
+// Orders are keyed by order id, with values such as &quot;c42:3 books&quot;: the customer&#39;s id, a colon, then what was ordered.
+// Customers are keyed by customer id, with the customer&#39;s name as the value.
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersWithCustomers</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">customers</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span>          = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">customerNames</span><span> = </span><span class="type-name">KTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;customers&quot;</span><span>), </span><span class="identifier">customers</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;customers&quot;</span><span>))
+  </span><span class="type-name">KTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>))
+    </span><span class="comment">// Name the join, then give the serdes for the orders&#39; values, the customers&#39; keys and the customers&#39; values
+</span><span>    .</span><span class="identifier">joinOnForeignKey</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;order-customer&quot;</span><span>), </span><span class="identifier">customerNames</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)(
+      (</span><span class="identifier">_</span><span>, </span><span class="identifier">order</span><span>) =&gt; </span><span class="type-name">Option</span><span>.</span><span class="identifier">when</span><span>(</span><span class="identifier">order</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="char-literal">&#39;:&#39;</span><span>))(</span><span class="identifier">order</span><span>.</span><span class="identifier">takeWhile</span><span>(</span><span class="identifier">_</span><span> != </span><span class="char-literal">&#39;:&#39;</span><span>))  </span><span class="comment">// Find the customer&#39;s id, or none if there is no colon
+</span><span>    )((</span><span class="identifier">order</span><span>, </span><span class="identifier">name</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$order</span><span class="string-literal"> for </span><span class="substitution">$name</span><span class="string-literal">&quot;</span><span>)                                      </span><span class="comment">// Make the result, kept under the order&#39;s id
+</span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;order-changes&quot;</span><span>))
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>.</span><span class="identifier">option</span><span>)                       </span><span class="comment">// Write each change; a deleted result becomes a tombstone</span></code></pre>
+        <p>The result is keyed as the table <code>joinOnForeignKey</code> is called on, here by order id,
+        and changes in these cases:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>What happens</th>
+              <th><code>joinOnForeignKey</code></th>
+              <th><code>leftJoinOnForeignKey</code></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>An order names a customer that exists</td>
+              <td>The order gets a result</td>
+              <td>The order gets a result</td>
+            </tr>
+            <tr>
+              <td>An order names no customer, or one that does not exist</td>
+              <td>The order has no result, and loses any it had</td>
+              <td>The order gets a result, with <code>None</code> for the customer</td>
+            </tr>
+            <tr>
+              <td>A customer changes</td>
+              <td>Each order naming the customer gets a new result</td>
+              <td>The same</td>
+            </tr>
+            <tr>
+              <td>A customer is deleted</td>
+              <td>Each order naming the customer loses its result</td>
+              <td>Each order naming the customer gets a result with <code>None</code></td>
+            </tr>
+            <tr>
+              <td>An order is deleted</td>
+              <td>Its result is deleted</td>
+              <td>Its result is deleted</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>When an order changes, its result takes the later timestamp of the order and the
+        customer. When a customer changes, the results take the time of that change. If an
+        order changes again before the answer for its previous value arrives, that answer
+        is dropped.</p>
+        <p>The result is kept in no store. To group it, or to join it with something else, keep
+        it in one, by passing the store&#39;s name and a serde for its values:
+        <code>joinOnForeignKey(named, other, value, otherKey, otherValue, Store(&quot;results&quot;), serde)</code>.
+        <code>Topology.of</code> refuses a program that needs this and does not do it.</p>
+        <p>With the name <code>order-customer</code>, the join adds these to the application:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>What</th>
+              <th>Name</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>A topic</td>
+              <td><code>&lt;application id&gt;-order-customer-subscription-registration-topic</code></td>
+            </tr>
+            <tr>
+              <td>A topic</td>
+              <td><code>&lt;application id&gt;-order-customer-subscription-response-topic</code></td>
+            </tr>
+            <tr>
+              <td>A store</td>
+              <td><code>order-customer-subscription-store</code>, with its changelog</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Windowed tables cannot join on a foreign key, and there is no outer version. (Other
+        joins of windowed tables are in <a href="windows.html#joining-windowed-tables">Windows</a>.) If the
+        other table&#39;s topic is partitioned some other way than by Kafka&#39;s default, give that
+        table its partitioner (see <a href="index.html#choosing-partitions">Choosing partitions</a>).</p>
+        <p>If some members run Java Kafka Streams, name the join with <code>TableJoined.as</code> and build
+        the left table first, or the broker may refuse the Java members:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In the Java program: build the left table first, and name the join as the xkafka program does
+</span><span class="type-name">KTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">orders</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">table</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>);
+</span><span class="type-name">KTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">customers</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">table</span><span>(</span><span class="string-literal">&quot;customers&quot;</span><span>);
+</span><span class="identifier">orders</span><span>.</span><span class="identifier">join</span><span>(</span><span class="identifier">customers</span><span>, </span><span class="identifier">order</span><span> -&gt; </span><span class="identifier">order</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="string-literal">&quot;:&quot;</span><span>) ? </span><span class="identifier">order</span><span>.</span><span class="identifier">split</span><span>(</span><span class="string-literal">&quot;:&quot;</span><span>)[</span><span class="number-literal">0</span><span>] : </span><span class="literal-value">null</span><span>, (</span><span class="identifier">order</span><span>, </span><span class="identifier">customer</span><span>) -&gt; </span><span class="identifier">order</span><span> + </span><span class="string-literal">&quot; for &quot;</span><span> + </span><span class="identifier">customer</span><span>,
+    </span><span class="type-name">TableJoined</span><span>.</span><span class="identifier">as</span><span>(</span><span class="string-literal">&quot;order-customer&quot;</span><span>)).</span><span class="identifier">toStream</span><span>().</span><span class="identifier">to</span><span>(</span><span class="string-literal">&quot;out&quot;</span><span>);</span></code></pre>
+        
+        <h2 id="joining-streams" class="section"><a class="anchor-link left" href="#joining-streams"><i class="icofont-laika link">&#xef71;</i></a>Joining streams</h2>
+        <p>Two streams with the same key join within windows of time, as Java Kafka
+        Streams&#39; stream-stream joins do. Each record joins every record of the other
+        stream with its key whose time is close enough to its own. Here orders and
+        payments are both keyed by the order, and each order should be paid within
+        five minutes:</p>
+        <pre><code class="nohighlight"><span class="comment">// Join orders with payments made within five minutes, and keep the unmatched ones too
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">Ior</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">payments</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">payments</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">order</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">item</span><span>  = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">cents</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">order</span><span>, </span><span class="identifier">item</span><span>)
+    .</span><span class="identifier">outerJoin</span><span>(
+      </span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;pay&quot;</span><span>),
+      </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;payments&quot;</span><span>), </span><span class="identifier">payments</span><span>, </span><span class="identifier">order</span><span>, </span><span class="identifier">cents</span><span>),
+      </span><span class="type-name">JoinWindows</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>),  </span><span class="comment">// At most five minutes apart, either way
+</span><span>      </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;payments&quot;</span><span>),                           </span><span class="comment">// Names the stores that hold each stream&#39;s records
+</span><span>      </span><span class="identifier">order</span><span>,
+      </span><span class="identifier">item</span><span>,
+      </span><span class="identifier">cents</span><span>
+    ) {
+      </span><span class="keyword">case</span><span> </span><span class="type-name">Ior</span><span>.</span><span class="type-name">Left</span><span>(</span><span class="identifier">bought</span><span>)       =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$bought</span><span class="string-literal">, unpaid&quot;</span><span>                </span><span class="comment">// An order with no payment, written once its window and grace have passed
+</span><span>      </span><span class="keyword">case</span><span> </span><span class="type-name">Ior</span><span>.</span><span class="type-name">Right</span><span>(</span><span class="identifier">paid</span><span>)        =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$paid</span><span class="string-literal"> cents paid for no order&quot;</span><span>  </span><span class="comment">// A payment with no order, written once its window and grace have passed
+</span><span>      </span><span class="keyword">case</span><span> </span><span class="type-name">Ior</span><span>.</span><span class="type-name">Both</span><span>(</span><span class="identifier">bought</span><span>, </span><span class="identifier">paid</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$bought</span><span class="string-literal">, paid </span><span class="substitution">$paid</span><span class="string-literal"> cents&quot;</span><span>      </span><span class="comment">// An order and a payment at most five minutes apart
+</span><span>    }
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-payments&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">order</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+        <p><code>JoinWindows(5.minutes, grace = 30.seconds)</code> joins records at most five minutes
+        apart, either way. <code>withBefore</code> and <code>withAfter</code> set how far back and how far
+        ahead of a record the other stream&#39;s records may be, so the windows can reach
+        further one way than the other. A record that arrives more than the grace after
+        the latest time either stream has read may find that the other stream&#39;s records
+        in its window have already been dropped.</p>
+        <ul>
+          <li><code>join</code> writes a result for each pair of records in a window.</li>
+          <li><code>leftJoin</code> also writes each record of the left stream that matched nothing,
+          passing the right stream&#39;s value as <code>None</code>.</li>
+          <li><code>outerJoin</code> also writes each record of either stream that matched nothing,
+          passing the values as an <code>Ior</code>.</li>
+        </ul>
+        <p>Each pair takes the later timestamp of its two records. A record that matched
+        nothing is held until its window and grace have passed, in case a match
+        arrives, and is then written alone with its own timestamp. Such records are
+        written when a later record arrives, at most once a second, so while no records
+        arrive they wait.</p>
+        <p>Each stream&#39;s records are kept in a store for the windows&#39; size and grace, and
+        a left or outer join keeps the records that matched nothing in a third store.
+        The stores are named from the store&#39;s name, as Java names them:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Join</th>
+              <th>Stores</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>join</code></td>
+              <td><code>&lt;name&gt;-this-join-store</code>, <code>&lt;name&gt;-other-join-store</code></td>
+            </tr>
+            <tr>
+              <td><code>leftJoin</code></td>
+              <td><code>&lt;name&gt;-this-join-store</code>, <code>&lt;name&gt;-outer-other-join-store</code>, <code>&lt;name&gt;-left-shared-join-store</code></td>
+            </tr>
+            <tr>
+              <td><code>outerJoin</code></td>
+              <td><code>&lt;name&gt;-outer-this-join-store</code>, <code>&lt;name&gt;-outer-other-join-store</code>, <code>&lt;name&gt;-outer-shared-join-store</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>The three serdes write the key and each stream&#39;s values to the stores. A
+        stream whose key has changed is written first to a repartition topic named
+        after the join, <code>&lt;application id&gt;-&lt;join&gt;-left-repartition</code> or
+        <code>&lt;application id&gt;-&lt;join&gt;-right-repartition</code>, with the same serdes. A Java
+        program names everything the same way with
+        <code>StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(join).withStoreName(store)</code>.</p>
+        <p>A record without a key, one whose key serde writes none, is written alone at
+        once by a left join&#39;s left stream and by either stream of an outer join, and
+        is otherwise dropped.</p>
+        <p>The two streams are processed together, so their topics must have the same
+        number of partitions. To join a stream with itself, see
+        <a href="branching.html#joining-a-stream-or-a-table-with-itself">Joining a stream or a table with itself</a>.</p>
+        
+        <h2 id="joining-a-global-table" class="section"><a class="anchor-link left" href="#joining-a-global-table"><i class="icofont-laika link">&#xef71;</i></a>Joining a global table</h2>
+        <p>A <code>GlobalKTable</code> holds the latest value of each key of a topic, and every member
+        of the application keeps all of it, as with Java Kafka Streams&#39; <code>GlobalKTable</code>. It
+        suits reference data small enough for each member to hold. A stream joins it by a
+        key taken from each record, so the two need not share a key or a number of
+        partitions. Here each order is joined with the product named in its value:</p>
+        <pre><code class="nohighlight"><span class="comment">// Join each order with the product named in its value
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersWithProducts</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">products</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span>    = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">val</span><span> </span><span class="identifier">catalog</span><span> = </span><span class="type-name">GlobalKTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>), </span><span class="identifier">products</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>))  </span><span class="comment">// Every running instance holds all of this table
+</span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
+    </span><span class="comment">// Find the table&#39;s key in each record, then make the result
+</span><span>    .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;with-product&quot;</span><span>), </span><span class="identifier">catalog</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">product</span><span>) =&gt; </span><span class="identifier">product</span><span>)((</span><span class="identifier">product</span><span>, </span><span class="identifier">details</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$product</span><span class="string-literal">: </span><span class="substitution">$details</span><span class="string-literal">&quot;</span><span>)
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)</span></code></pre>
+        <p>The first function gives the table&#39;s key for each record, and the second makes the
+        result. <code>join</code> drops a record whose key the table holds no value for, and <code>leftJoin</code>
+        keeps it, passing <code>None</code>. The stream keeps its own key through the join, so what
+        follows needs no repartition topic on account of it. Later changes to the table do
+        not change records already joined.</p>
+        <p>A member reads the table&#39;s topic to its end as it starts, before it joins the
+        application, so acquiring the resource waits for that, and fails if the topic does
+        not exist. It then follows the topic for as long as it runs. If it cannot read a
+        record it finds there, <code>run</code> fails. The table&#39;s topic is all that backs it, so it has
+        no changelog. <code>Topology.of</code> refuses a program that also reads that topic elsewhere.</p>
+        <p>When some members run Java Kafka Streams, the Java program must build the table
+        after the stream that first joins it, or the broker may refuse the Java members. The
+        application&#39;s <code>state</code> lists <code>StreamsProblem.JavaMembersMayBeRefused</code> as a reminder:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In the Java program: build the global table after the stream that joins it
+</span><span class="type-name">KStream</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">orders</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">stream</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>);
+</span><span class="type-name">GlobalKTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">catalog</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">globalTable</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>);
+</span><span class="identifier">orders</span><span>.</span><span class="identifier">join</span><span>(</span><span class="identifier">catalog</span><span>, (</span><span class="identifier">order</span><span>, </span><span class="identifier">product</span><span>) -&gt; </span><span class="identifier">product</span><span>, (</span><span class="identifier">product</span><span>, </span><span class="identifier">details</span><span>) -&gt; </span><span class="identifier">product</span><span> + </span><span class="string-literal">&quot;: &quot;</span><span> + </span><span class="identifier">details</span><span>).</span><span class="identifier">to</span><span>(</span><span class="string-literal">&quot;out&quot;</span><span>);</span></code></pre>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

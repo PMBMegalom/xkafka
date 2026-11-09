@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 active nav-leaf"><a href="#">Errors</a></li>
@@ -92,6 +101,7 @@
   <p class="header"><a href="#">Errors</a></p>
 
   <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#streams">Streams</a></li>
     <li class="level1 nav-leaf"><a href="#backend-failures">Backend failures</a></li>
     <li class="level1 nav-leaf"><a href="#portable-codes">Portable codes</a></li>
   </ul>
@@ -104,9 +114,9 @@
 
         <h1 id="errors" class="title">Errors</h1>
         <p>Failures Kafka reports, and values or settings xkafka rejects, are
-        <code>KafkaException</code> values. User-supplied effects keep their own failures, and
-        ordinary method precondition failures such as a non-positive partition-stream
-        queue threshold use their usual exception type.</p>
+        <code>KafkaException</code> values, except for the <a href="#streams">streams</a> ones below. A failure raised by your own
+        serializer, handler or other effect stays as it is, and an invalid argument, such
+        as a <code>maxQueuedRecords</code> that is not positive, raises <code>IllegalArgumentException</code>.</p>
         <table>
           <thead>
             <tr>
@@ -117,7 +127,7 @@
           <tbody>
             <tr>
               <td><code>BackendFailure</code></td>
-              <td>the backend reported a failure</td>
+              <td>Kafka or the platform&#39;s client reported a failure</td>
             </tr>
             <tr>
               <td><code>InvalidBackendResponse</code></td>
@@ -153,6 +163,14 @@
         <code>InvalidSettings</code> carries every <code>SettingsError</code>, so accumulated validation
         survives being lifted into an effect.</p>
         
+        <h2 id="streams" class="section"><a class="anchor-link left" href="#streams"><i class="icofont-laika link">&#xef71;</i></a>Streams</h2>
+        <p>A streams program or its settings being refused raises an exception of its own,
+        when <code>liftTo</code> carries the refusal into the effect:</p>
+        <ul>
+          <li><code>InvalidTopology</code> carries every <code>TopologyError</code> in <code>errors</code>.</li>
+          <li><code>InvalidStreamsSettings</code> carries every <code>StreamsSettingsError</code> in <code>errors</code>.</li>
+        </ul>
+        
         <h2 id="backend-failures" class="section"><a class="anchor-link left" href="#backend-failures"><i class="icofont-laika link">&#xef71;</i></a>Backend failures</h2>
         <p><code>BackendFailure</code> keeps the original failure as its cause, where there is one,
         and carries an <code>ErrorCode</code> with three flags: <code>retriable</code>, <code>fatal</code>, and
@@ -160,7 +178,8 @@
         it is the same on every platform, and <code>None</code> only where there is no code.
         <code>fatal</code> and <code>transactionAbortRequired</code> are <code>None</code> where the platform&#39;s client
         does not report them. <code>fatal</code> is always <code>true</code> for <code>ErrorCode.Fenced</code>.</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Retry only a failure that can clear on its own
+</span><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
         <p><code>ErrorCode.retriable</code> is true for an unavailable or loading coordinator, a
         leader that has moved, a rebalance in progress, a network failure, and a timed
         out request.</p>
@@ -171,7 +190,8 @@
         request. <code>ErrorCode.Other(value)</code> carries a code xkafka does not name. Its value
         comes from the platform&#39;s client and can differ between the JVM and Scala.js or
         Native, so code meant for every platform should not match on it.</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span> </span><span class="keyword">match</span><span>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Choose what to do by the failure&#39;s code
+</span><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span> </span><span class="keyword">match</span><span>
   </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">ErrorCode</span><span>.</span><span class="type-name">OffsetOutOfRange</span><span>)        =&gt; </span><span class="identifier">resetPosition</span><span>
   </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">ErrorCode</span><span>.</span><span class="type-name">SaslAuthenticationFailed</span><span>) =&gt; </span><span class="identifier">refreshCredentials</span><span>
   </span><span class="keyword">case</span><span> </span><span class="identifier">_</span><span>                                        =&gt; </span><span class="identifier">giveUp</span></code></pre>

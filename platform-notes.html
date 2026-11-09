@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -95,6 +104,7 @@
     <li class="level1 nav-leaf"><a href="#record-delivery">Record delivery</a></li>
     <li class="level1 nav-node"><a href="#scala-native">Scala Native</a></li>
     <li class="level2 nav-leaf"><a href="#linking-an-application">Linking an application</a></li>
+    <li class="level2 nav-leaf"><a href="#stores-on-disk">Stores on disk</a></li>
     <li class="level1 nav-leaf"><a href="#scala-js">Scala.js</a></li>
     <li class="level1 nav-leaf"><a href="#transformations">Transformations</a></li>
   </ul>
@@ -106,7 +116,8 @@
       <main class="content">
 
         <h1 id="platform-notes" class="title">Platform notes</h1>
-        <p>The API is the same everywhere. These are the places the runtimes differ.</p>
+        <p>The API is the same everywhere. These notes cover what each platform needs, and
+        how the API carries across platforms and effects.</p>
         
         <h2 id="record-delivery" class="section"><a class="anchor-link left" href="#record-delivery"><i class="icofont-laika link">&#xef71;</i></a>Record delivery</h2>
         <p>On every platform a consumer joins its group and takes its share of the
@@ -118,43 +129,93 @@
         <p>On the JVM each consumer uses one thread of its own.</p>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
-        <p>The Native backend needs librdkafka 2.16.0, the release xkafka is built and
-        tested with. Older releases lack calls xkafka makes, so an application linked
-        against one, such as Ubuntu 24.04&#39;s own librdkafka 2.3.0, does not compile.
+        <p>Scala Native needs librdkafka 2.16.0, the release xkafka is built and tested
+        with. An application does not compile against an older one, such as Ubuntu
+        24.04&#39;s own librdkafka 2.3.0.
         Confluent publishes each release for Debian and Ubuntu. On Ubuntu 24.04:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sudo mkdir -p /etc/apt/keyrings
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment"># Install librdkafka 2.16.0 from Confluent&#39;s packages on Ubuntu 24.04
+</span><span>sudo mkdir -p /etc/apt/keyrings
 curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --dearmor -o /etc/apt/keyrings/confluent-clients.gpg
 </span><span class="identifier">echo</span><span> </span><span class="string-literal">&quot;deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb </span><span class="substitution">$(lsb_release -cs)</span><span class="string-literal"> main&quot;</span><span> | sudo tee /etc/apt/sources.list.d/confluent-clients.list
 sudo apt-get update
-sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span> librdkafka</span><span class="number-literal">1</span><span>=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span></code></pre>
-        <p>The librdkafka the Native backend expects is built with TLS, SASL SCRAM and
+sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span> librdkafka</span><span class="number-literal">1</span><span>=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span>  </span><span class="comment"># Install exactly this release</span></code></pre>
+        <p>Use a librdkafka built with TLS, SASL SCRAM and
         OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
         and read and write records in any compression.</p>
-        <p>librdkafka links these against system libraries, so any application linking the
-        Native backend needs OpenSSL, zlib, and zstd available:
+        <p>librdkafka links these against system libraries, so a Scala Native application
+        needs OpenSSL, zlib, and zstd available:
         <code>libssl-dev</code>, <code>zlib1g-dev</code>, and <code>libzstd-dev</code> on Debian and Ubuntu, or
         <code>brew install openssl@3 zstd zlib</code> on macOS. Homebrew keeps them keg-only, so
         on macOS their locations have to be named when linking.</p>
         
         <h3 id="linking-an-application" class="section"><a class="anchor-link left" href="#linking-an-application"><i class="icofont-laika link">&#xef71;</i></a>Linking an application</h3>
-        <p>Published Native artifacts contain the C glue code, which includes the headers
-        of librdkafka and OpenSSL, and request <code>-lrdkafka</code> and <code>-lcrypto</code>. Applications
-        with both installed in standard compiler and linker locations need no
-        additional xkafka settings. For a nonstandard installation:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
+        <p>Compiling an application needs the headers of librdkafka and OpenSSL, and xkafka
+        asks the linker for <code>-lrdkafka</code> and <code>-lcrypto</code>. With both installed where the
+        compiler and linker look by default, no further settings are needed. For an
+        installation elsewhere:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Tell the compiler and the linker where librdkafka is installed
+</span><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
   .</span><span class="identifier">withCompileOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-I/path/to/librdkafka/include&quot;</span><span>)
   .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>)</span></code></pre>
         <p>Linking the static <code>librdkafka.a</code> also needs the libraries it was built
         against, named in this order:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Link the static librdkafka, with the libraries it was built against, in this order
+</span><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
   .</span><span class="identifier">withCompileOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-I/path/to/librdkafka/include&quot;</span><span>)
   .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> ++ </span><span class="type-name">Seq</span><span>(
     </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>, </span><span class="string-literal">&quot;-lrdkafka&quot;</span><span>, </span><span class="string-literal">&quot;-lssl&quot;</span><span>, </span><span class="string-literal">&quot;-lcrypto&quot;</span><span>, </span><span class="string-literal">&quot;-lz&quot;</span><span>, </span><span class="string-literal">&quot;-lzstd&quot;</span><span>
   ))</span></code></pre>
         <p>On macOS add a <code>-L</code> for the OpenSSL installation as well.</p>
         
+        <h3 id="stores-on-disk" class="section"><a class="anchor-link left" href="#stores-on-disk"><i class="icofont-laika link">&#xef71;</i></a>Stores on disk</h3>
+        <p>An application that keeps its streams stores on disk, with a
+        <a href="streams/running.html#keeping-stores-on-disk">state directory</a>, also needs RocksDB
+        10.1.3 when it runs. Take it from the <code>org.rocksdb:rocksdbjni:10.1.3</code> jar on
+        Maven Central, which carries it for each platform:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Platform</th>
+              <th>File in the jar</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>macOS on Apple silicon</td>
+              <td><code>librocksdbjni-osx-arm64.jnilib</code></td>
+            </tr>
+            <tr>
+              <td>macOS on Intel</td>
+              <td><code>librocksdbjni-osx-x86_64.jnilib</code></td>
+            </tr>
+            <tr>
+              <td>Linux x64 with glibc</td>
+              <td><code>librocksdbjni-linux64.so</code></td>
+            </tr>
+            <tr>
+              <td>Linux arm64 with glibc</td>
+              <td><code>librocksdbjni-linux-aarch64.so</code></td>
+            </tr>
+            <tr>
+              <td>Linux x64 with musl, such as Alpine</td>
+              <td><code>librocksdbjni-linux64-musl.so</code></td>
+            </tr>
+            <tr>
+              <td>Linux arm64 with musl</td>
+              <td><code>librocksdbjni-linux-aarch64-musl.so</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment"># Put this platform&#39;s RocksDB next to the application, here for Linux x64 with glibc
+</span><span>unzip -j rocksdbjni-</span><span class="number-literal">10.1.3</span><span>.jar librocksdbjni-linux</span><span class="number-literal">64</span><span>.so -d path/to/app/bin</span></code></pre>
+        <p>The application looks for the file in the directory of its executable, then
+        wherever the system looks for libraries. To keep it somewhere else, set
+        <code>XKAFKA_ROCKSDB_LIBRARY</code> to its path. Any other RocksDB release is refused when
+        the application opens its first store. Nothing more is needed to compile or
+        link.</p>
+        
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>The backend is librdkafka, the same release Scala Native uses. It runs on
+        <p>xkafka uses librdkafka here, the same release as on Scala Native. It runs on
         Node.js, not in browsers.</p>
         <p>The library comes from npm as <code>@xkafka/librdkafka</code>, which sbt-scalajs-bundler
         installs. npm adds the prebuilt library for the platform it runs on:</p>
@@ -193,7 +254,9 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
           </tbody>
         </table>
         <p>Nothing else needs installing: each library carries its own OpenSSL, zlib and
-        zstd. Each xkafka release needs the exact <code>@xkafka/librdkafka</code> version it was
+        zstd. Stores kept on disk use RocksDB, which comes the same way, from
+        <code>@xkafka/rocksdb</code> and its package for the platform, such as
+        <code>@xkafka/rocksdb-darwin-arm64</code>. Each xkafka release needs the exact <code>@xkafka/librdkafka</code> version it was
         published with, so do not pin or override that package. With any other version,
         acquiring a client fails with a <code>BackendFailure</code> naming both versions.</p>
         
@@ -205,6 +268,12 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         <code>Functor</code> for the target effect, and so no <code>FunctorK</code> instance. <code>KafkaClient.imapK</code> transforms a complete
         client between effects in both directions while preserving <code>Resource</code>
         cancellation semantics.</p>
+        <p>A streams <code>Pipeline</code> or <code>Topology</code> changes effect with <code>imapK</code>, which also needs
+        both directions: a <a href="streams/processors.html">processor</a> runs its handler in one
+        effect and its stores in the other. They have cats-tagless <code>InvariantK</code>
+        instances, as do <code>Transaction</code> and <code>KafkaTransactionalProducer</code>, and a streams
+        <code>Serde</code> has a <code>FunctorK</code> instance. <code>KafkaStreams</code> changes effect with <code>imapK</code>, as its
+        queries go both ways, and has an <code>InvariantK</code> instance.</p>
 
         
 <hr class="footer-rule"/>

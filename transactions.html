@@ -72,9 +72,18 @@
     <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
     <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
     <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
     <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
     <li class="level1 active nav-leaf"><a href="#">Transactions</a></li>
-    <li class="level1 nav-leaf"><a href="streams.html">Streams</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
@@ -107,7 +116,8 @@
         <p>A transactional producer writes records and consumer offsets as one unit.
         Everything it wrote becomes visible together when the transaction commits, and
         none of it becomes visible if the transaction aborts.</p>
-        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+        <pre><code class="nohighlight"><span class="comment">// Write a record in a transaction, which commits when the body succeeds
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -117,11 +127,12 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span> =
   </span><span class="keyword">for</span><span>
     </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="identifier">id</span><span>       &lt;- </span><span class="type-name">TransactionalId</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;order-writer&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">TransactionalProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">id</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">id</span><span>       &lt;- </span><span class="type-name">TransactionalId</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;order-writer&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]  </span><span class="comment">// Give each producer running alongside another its own id
+</span><span>    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">TransactionalProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">id</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">record</span><span>    = </span><span class="type-name">ProducerRecord</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="string-literal">&quot;key&quot;</span><span>, </span><span class="string-literal">&quot;value&quot;</span><span>)
-    </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">transactionalProducer</span><span>(</span><span class="identifier">settings</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">transactionally</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">record</span><span>))))
+    </span><span class="comment">// Commits if this succeeds, and aborts if it fails or is cancelled
+</span><span>    </span><span class="identifier">_</span><span>        &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">transactionalProducer</span><span>(</span><span class="identifier">settings</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">transactionally</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">record</span><span>))))
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         <p><code>transactionally</code> commits the transaction if its body succeeds, and aborts it if
         the body fails or is cancelled.</p>
@@ -141,7 +152,8 @@
         <p>Records written by an open transaction are already in the log, and a consumer
         delivers them by default. To read only committed records, set the isolation
         level:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">settings</span><span>.</span><span class="identifier">withIsolationLevel</span><span>(</span><span class="type-name">IsolationLevel</span><span>.</span><span class="type-name">ReadCommitted</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Read only the records of committed transactions
+</span><span class="identifier">settings</span><span>.</span><span class="identifier">withIsolationLevel</span><span>(</span><span class="type-name">IsolationLevel</span><span>.</span><span class="type-name">ReadCommitted</span><span>)</span></code></pre>
         <p>The default is <code>IsolationLevel.ReadUncommitted</code>, which is also Kafka&#39;s default.
         It delivers every record as soon as it is written, including records from a
         transaction that later aborts.</p>
@@ -150,10 +162,11 @@
         <p><code>commitOffsets</code> adds the offsets a consumer has reached to the transaction, so
         the records produced and the position they were produced from are committed
         together:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">chunks</span><span>.</span><span class="identifier">evalMap</span><span>: </span><span class="identifier">chunk</span><span> =&gt;
-  </span><span class="keyword">val</span><span> </span><span class="identifier">batch</span><span> = </span><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">chunk</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">offset</span><span>))
-  </span><span class="identifier">producer</span><span>.</span><span class="identifier">transactionally</span><span>: </span><span class="identifier">transaction</span><span> =&gt;
-    </span><span class="identifier">transaction</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">derive</span><span>(</span><span class="identifier">chunk</span><span>)) *&gt; </span><span class="identifier">transaction</span><span>.</span><span class="identifier">commitOffsets</span><span>(</span><span class="identifier">batch</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Write each chunk&#39;s results and consumed offsets in one transaction
+</span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">chunks</span><span>.</span><span class="identifier">evalMap</span><span>: </span><span class="identifier">chunk</span><span> =&gt;
+  </span><span class="keyword">val</span><span> </span><span class="identifier">batch</span><span> = </span><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">chunk</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">offset</span><span>))  </span><span class="comment">// The offsets to commit for these records
+</span><span>  </span><span class="identifier">producer</span><span>.</span><span class="identifier">transactionally</span><span>: </span><span class="identifier">transaction</span><span> =&gt;
+    </span><span class="identifier">transaction</span><span>.</span><span class="identifier">produce</span><span>(</span><span class="identifier">derive</span><span>(</span><span class="identifier">chunk</span><span>)) *&gt; </span><span class="identifier">transaction</span><span>.</span><span class="identifier">commitOffsets</span><span>(</span><span class="identifier">batch</span><span>)  </span><span class="comment">// Both become visible together, or neither does</span></code></pre>
         <p>The batch already identifies the consumer its offsets came from, so
         <code>commitOffsets</code> needs no consumer argument and cannot record them against the
         wrong group.</p>
