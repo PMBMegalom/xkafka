@@ -37,19 +37,53 @@ mkdir -p "$output"
 cc -std=gnu11 -g -Wall -Wextra -Werror $sanitizer -o "$harness" "$script_dir/rocksdb-shim-test.c" "$shim" \
   -Wl,-rpath,"$(dirname "$shim")" -lpthread
 
+# A run takes seconds; one still going after this many is stuck, and its threads' stacks show where.
+limit=300
+
+# Prints the stack of every thread of the process given and of its children: leaks and the harness it started.
+stacks() {
+  local pid task
+  for pid in "$1" $(pgrep -P "$1" || true); do
+    echo "=== process $pid: $(ps -o command= -p "$pid" || true)"
+    case "$platform" in
+      Darwin) sample "$pid" 5 -file /dev/stdout || true ;;
+      Linux)
+        # A leak checker that stopped the threads holds them, so the kernel's view is read as well as the debugger's.
+        for task in /proc/"$pid"/task/*; do
+          echo "--- thread ${task##*/} $(cat "$task/comm" 2>/dev/null) state $(awk '{print $3}' "$task/stat" 2>/dev/null) in $(cat "$task/wchan" 2>/dev/null)"
+          sudo cat "$task/stack" 2>/dev/null || true
+        done
+        timeout 60 sudo gdb -p "$pid" -batch -ex "thread apply all bt" 2>&1 || true
+        ;;
+    esac
+  done
+}
+
 # leaks answers for the leaks it found and not for how the program exited, so on macOS the harness's
 # report of its own checks is what tells whether they passed.
 run() {
-  local directory log
+  local directory log pid waited=0
   directory="$(mktemp -d "$output/store.XXXXXX")"
+  log="$directory.log"
   case "$platform" in
-    Darwin)
-      log="$directory.log"
-      leaks --quiet --atExit -- "$harness" "$@" "$directory" 2>&1 | tee "$log"
-      grep -q "every check passed" "$log"
-      ;;
-    Linux) "$harness" "$@" "$directory" ;;
+    Darwin) leaks --quiet --atExit -- "$harness" "$@" "$directory" > "$log" 2>&1 & pid=$! ;;
+    Linux)  "$harness" "$@" "$directory" > "$log" 2>&1 & pid=$! ;;
   esac
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= limit )); then
+      cat "$log"
+      echo "the harness was still running after $limit seconds; the stacks of its threads follow" >&2
+      stacks "$pid"
+      pkill -9 -P "$pid" || true
+      kill -9 "$pid" || true
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" || { cat "$log"; return 1; }
+  cat "$log"
+  grep -q "every check passed" "$log"
 }
 
 echo "Testing every call with the library named by path"

@@ -475,6 +475,9 @@ int main(int argc, char **argv) {
         char *error = NULL;
         const char *directory;
 
+        /* Each line is written as soon as it is printed, so a run that stops on the way shows how far it got. */
+        setvbuf(stdout, NULL, _IOLBF, 0);
+
         if (argc == 4 && strcmp(argv[1], "--search") == 0) {
                 directory = argv[3];
                 CHECK(xkafka_rocksdb_load(NULL, argv[2], &error) == 0, "loading with no path failed: %s", error);
