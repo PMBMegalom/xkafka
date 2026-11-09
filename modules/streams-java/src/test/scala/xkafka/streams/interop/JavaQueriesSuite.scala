@@ -26,11 +26,15 @@ package interop
 import java.nio.file.Files
 import java.util.Properties
 
+import scala.util.Using
+
 import fs2.Chunk
 import munit.FunSuite
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.common.serialization.Serdes as JavaSerdes
 import org.apache.kafka.streams.{KafkaStreams as JavaKafkaStreams, StreamsBuilder, StreamsConfig}
 import org.apache.kafka.streams.kstream.Materialized
+import org.apache.kafka.streams.state.HostInfo
 import internal.streams.{Answered, Asked, QueryWire}
 
 /** What a Java member answers before it runs, and for stores it was not given, without a broker. */
@@ -73,10 +77,21 @@ final class JavaQueriesSuite extends FunSuite:
 
   test("a Java member asking before it runs is told the store is moving, and asking of a store its program lacks is told the store is unknown"):
     val streams = notStarted()
-    try
-      val asking               = JavaQuerying.of(streams, topology(), "app", (_, _) => throw new AssertionError("nothing is asked of other members"))
-      def problem(ask: => Any) = intercept[QueryProblemException](ask).problem
-      assertEquals(problem(asking.get("counts", "k", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.Rebalancing)
-      assertEquals(problem(asking.all("counts", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.Rebalancing)
-      assertEquals(problem(asking.all("other", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.UnknownStore("other"))
+    try Using.resource(Admin.create(java.util.Map.of[String, AnyRef](AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1"))): admin =>
+        val asking = JavaQuerying.of(streams, topology(), "app", admin, (_, _) => throw new AssertionError("nothing is asked of other members"))
+        def problem(ask: => Any) = intercept[QueryProblemException](ask).problem
+        assertEquals(problem(asking.get("counts", "k", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.Rebalancing)
+        assertEquals(problem(asking.all("counts", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.Rebalancing)
+        assertEquals(problem(asking.all("other", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.UnknownStore("other"))
     finally streams.close()
+
+  test("a partition no member holds, as while it moves, has no holder, and a store is whole only when each of its partitions is held once"):
+    val (a, b) = (new HostInfo("a", 1), new HostInfo("b", 2))
+    // Four partitions, the last moving: Java's metadata lists three, which a count taken from it would call whole.
+    val moving = List(a -> List(0, 1), b -> List(2))
+    assertEquals(JavaQuerying.holderOf(2, moving), Some(b))
+    assertEquals(JavaQuerying.holderOf(3, moving), None)
+    assertEquals(JavaQuerying.covers(4, moving), false)
+    assertEquals(JavaQuerying.covers(4, List(a -> List(0, 1), b -> List(2, 3))), true)
+    assertEquals(JavaQuerying.covers(4, List(a -> List(0, 1, 2), b -> List(2, 3))), false)
+    assertEquals(JavaQuerying.covers(4, Nil), false)

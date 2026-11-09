@@ -130,6 +130,20 @@ final class QueryingSuite extends CatsEffectSuite:
       List(Left(QueryProblem.Rebalancing), Left(QueryProblem.Rebalancing), Left(QueryProblem.Rebalancing))
     )
 
+  test("a key asked of a partition it does not hash to, as a miscounting asker sends it, answers as rebalancing, and of its own is read"):
+    val key                        = keys(3).head
+    def ask(asked: Asked)          = (answering: Querying[IO]) => answering.answer(QueryWire.encode(asked)).map(QueryWire.answered)
+    def get(partitions: List[Int]) = Asked(QueryRequest.Get("latest", bytes(key)), partitions, false)
+    member(Holder("b", Set(2, 3)), Nil, StreamsPhase.Running, Forward.none[IO], there).flatMap: answering =>
+      (ask(get(List(2)))(answering), ask(get(List(3)))(answering), ask(Asked(QueryRequest.Range("latest", None, None), List(2), false))(answering))
+        .tupled.map: (elsewhere, own, ranged) =>
+          assertEquals(elsewhere, Some(Answered.Refused(QueryProblem.Rebalancing)))
+          assertEquals(own, Some(Answered.Found(Vector(bytes(key) -> bytes(s"b:$key")))))
+          assertEquals(
+            ranged,
+            Some(Answered.Found(keys(2).map(held => bytes(held) -> bytes(s"b:$held")).toVector.sortBy(_._1)(using StoreContents.keys)))
+          )
+
   test("a member that cannot be reached, or answers in another format, says which, and a store the program lacks is named"):
     val failing: Forward[IO] = (_, _) => IO.raiseError(new RuntimeException("refused"))
     val foreign: Forward[IO] = (_, _) => IO.pure(bytes("{\"error\":\"not found\"}"))

@@ -170,6 +170,7 @@ serdes, then call its `answer` from the internal route. The member's
 
 ```java
 // Let a Java member answer xkafka members' queries of its page view counts
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 
@@ -198,15 +199,19 @@ in a format xkafka reads, so a query that needs it fails with `NotXkafka`, or wi
 `Unreachable` where nothing answers at its endpoint.
 
 A Java member asks with `JavaQuerying`, giving it the instance, its topology, the
-application's id, and how to send a query to another member. It finds the member
-holding a key through Java's own metadata, which lists xkafka members too, and
-sends the query to that member's internal route, even when that member is itself:
+application's id, a Kafka `Admin`, and how to send a query to another member. It
+works out a key's partition from how many partitions the topic has, which it asks
+the `Admin` once for each topic. It finds the member holding that partition through
+Java's own metadata, which lists xkafka members too, and sends the query to that
+member's internal route, even when that member is itself. While a partition moves
+between members, a query that needs it fails with `Rebalancing`:
 
 ```java
 // Let a Java member ask for a page's view count, wherever it is held
 import java.util.Optional;
 import java.util.function.BiFunction;
 
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.Topology;
@@ -217,9 +222,10 @@ import xkafka.streams.interop.JavaQuerying;
 final class Asking {
   private final JavaQuerying querying;
 
+  // `admin` is an Admin for the same cluster, which you close after the instance.
   // `post` is your HTTP client: it posts the bytes to the member's internal route and returns what it answers
-  Asking(KafkaStreams streams, Topology topology, BiFunction<HostInfo, byte[], byte[]> post) {
-    querying = JavaQuerying.of(streams, topology, "page-view-counter", post);
+  Asking(KafkaStreams streams, Topology topology, Admin admin, BiFunction<HostInfo, byte[], byte[]> post) {
+    querying = JavaQuerying.of(streams, topology, "page-view-counter", admin, post);
   }
 
   // Throws a QueryProblemException when it cannot answer, whose problem says why, as xkafka's queries do

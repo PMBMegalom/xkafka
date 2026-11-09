@@ -35,6 +35,7 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.common.serialization.Serdes as JavaSerdes
 import org.apache.kafka.streams.{KafkaStreams as JavaKafkaStreams, StreamsBuilder, StreamsConfig, Topology as JavaTopology}
 import org.apache.kafka.streams.kstream.{Materialized, Produced, SessionWindows as JavaSessionWindows, TimeWindows as JavaTimeWindows, WindowedSerdes}
@@ -69,6 +70,9 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
     Resource.make(IO.blocking { val streams = new JavaKafkaStreams(topology, properties); streams.start(); streams })(streams =>
       IO.blocking(streams.close(java.time.Duration.ofSeconds(30))).void
     )
+
+  private def javaAdmin(broker: String): Resource[IO, Admin] =
+    Resource.fromAutoCloseable(IO.blocking(Admin.create(java.util.Map.of[String, AnyRef](AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, broker))))
 
   /** Runs an xkafka member and a Java member of one application, each key's records written to each `<application>-<input>` of `inputs`, until every
     * key `answered` checks answers right from the xkafka member, which asks the Java member through the stores `registered` gives it.
@@ -105,7 +109,7 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
         PlatformKafkaClient().admin(client).use: admin =>
           val known = admin.describeTopics(made.map(_.topic)).map(_.toSortedMap.values.forall(_.isRight))
           admin.createTopics(made) *> (IO.sleep(100.millis) *> known).iterateUntil(identity)
-      created *> javaMember(broker, application, program).use: running =>
+      created *> (javaMember(broker, application, program), javaAdmin(broker)).tupled.use: (running, admin) =>
         val handler              = registered(JavaQueries.of(running, application))
         val forward: Forward[IO] =
           (to, request) =>
@@ -117,7 +121,7 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
             (to, request) =>
               if to.host == "java" then handler.answer(request)
               else streams.answer(Chunk.array(request)).unsafeRunSync()(using cats.effect.unsafe.implicits.global).toArray
-          val asking   = JavaQuerying.of(running, program, application, back)
+          val asking   = JavaQuerying.of(running, program, application, admin, back)
           def javaSide = IO.blocking(scala.util.Try(javaAnswered(asking)).getOrElse(false))
           streams.run.background.surround(produced *> eventually("the xkafka member")(answered(streams)) *> eventually("the Java member")(javaSide))
             .map(_ => assert(asked.get > 0, "the Java member was never asked"))
