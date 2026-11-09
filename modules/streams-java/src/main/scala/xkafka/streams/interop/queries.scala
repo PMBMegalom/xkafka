@@ -38,7 +38,7 @@ import org.apache.kafka.streams.errors.{InvalidStateStoreException, StreamsNotSt
 import org.apache.kafka.streams.kstream.Windowed as JavaWindowed
 import org.apache.kafka.streams.kstream.internals.{SessionWindow, TimeWindow}
 import org.apache.kafka.streams.query.{FailureReason, KeyQuery, Query as JavaQuery, RangeQuery, StateQueryRequest, WindowKeyQuery, WindowRangeQuery}
-import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, WindowStoreIterator}
+import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, ValueAndTimestamp, WindowStoreIterator}
 import internal.streams.{Answered, Asked, QueryWire}
 
 /** Lets a Java Kafka Streams instance answer the queries xkafka members of its application forward to it, for the stores registered here, through
@@ -94,6 +94,12 @@ object JavaQueries:
 
   private def long(value: Long): Chunk[Byte] = Chunk.array(ByteBuffer.allocate(8).putLong(value).array)
 
+  /** The value a window query found: the DSL's window stores keep each value with its timestamp and give back both, other stores the value alone. */
+  private def plain[V](held: V): V =
+    held match
+      case stamped: ValueAndTimestamp[V @unchecked] => stamped.value
+      case value                                    => value
+
   /** A store registered with its serdes, which runs the queries of its kind and answers none of another. */
   private sealed trait Kept:
     def run(on: Run): Option[Answered]
@@ -123,16 +129,17 @@ object JavaQueries:
         case QueryRequest.Windows(_, Some(bytes), from, to) =>
           val query = WindowKeyQuery.withKeyAndWindowStartRange[K, V](on.read(key, bytes), Instant.ofEpochMilli(from), Instant.ofEpochMilli(to))
           Some(on.ran(query)((found: WindowStoreIterator[V]) =>
-            Using
-              .resource(found)(_.asScala.map(kv => (bytes ++ long(kv.key) ++ Chunk.array(new Array[Byte](4))) -> on.bytes(value, kv.value)).toVector)
+            Using.resource(found)(
+              _.asScala.map(kv => (bytes ++ long(kv.key) ++ Chunk.array(new Array[Byte](4))) -> on.bytes(value, plain(kv.value))).toVector
+            )
           ))
         case QueryRequest.Windows(_, None, from, to) =>
           val query = WindowRangeQuery.withWindowStartRange[K, V](Instant.ofEpochMilli(from), Instant.ofEpochMilli(to))
           Some(on.ran(query)((found: KeyValueIterator[JavaWindowed[K], V]) =>
             Using.resource(found)(
-              _.asScala
-                .map(kv => (on.bytes(key, kv.key.key) ++ long(kv.key.window.start) ++ Chunk.array(new Array[Byte](4))) -> on.bytes(value, kv.value))
-                .toVector
+              _.asScala.map(kv =>
+                (on.bytes(key, kv.key.key) ++ long(kv.key.window.start) ++ Chunk.array(new Array[Byte](4))) -> on.bytes(value, plain(kv.value))
+              ).toVector
             )
           ))
         case _ => None

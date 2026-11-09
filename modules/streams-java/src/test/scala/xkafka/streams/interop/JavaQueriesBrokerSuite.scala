@@ -94,8 +94,8 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
       def produced    =
         PlatformKafkaClient().producer(ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).orFail)
           .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(records)).void)
-      def eventually(condition: IO[Boolean]): IO[Unit] = (IO.sleep(500.millis) *> condition).iterateUntil(identity)
-        .timeoutTo(2.minutes, IO.raiseError(new AssertionError("not every key was answered"))).void
+      def eventually(who: String)(condition: IO[Boolean]): IO[Unit] = (IO.sleep(500.millis) *> condition).iterateUntil(identity)
+        .timeoutTo(2.minutes, IO.raiseError(new AssertionError(s"$who never had every key answered"))).void
       val builder = new StreamsBuilder()
       javaProgram(builder, application)
       val program = builder.build()
@@ -119,7 +119,7 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
               else streams.answer(Chunk.array(request)).unsafeRunSync()(using cats.effect.unsafe.implicits.global).toArray
           val asking   = JavaQuerying.of(running, program, application, back)
           def javaSide = IO.blocking(scala.util.Try(javaAnswered(asking)).getOrElse(false))
-          streams.run.background.surround(produced *> eventually(answered(streams)) *> eventually(javaSide))
+          streams.run.background.surround(produced *> eventually("the xkafka member")(answered(streams)) *> eventually("the Java member")(javaSide))
             .map(_ => assert(asked.get > 0, "the Java member was never asked"))
 
   for broker <- server.toList do
