@@ -25,6 +25,7 @@ package xkafka.streams.interop;
 import java.util.Optional;
 import java.util.function.BiFunction;
 
+import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.Topology;
@@ -33,8 +34,8 @@ import org.apache.kafka.streams.state.HostInfo;
 final class Asking {
   private final JavaQuerying querying;
 
-  Asking(KafkaStreams streams, Topology topology, BiFunction<HostInfo, byte[], byte[]> post) {
-    querying = JavaQuerying.of(streams, topology, "page-view-counter", post);
+  Asking(KafkaStreams streams, Topology topology, Admin admin, BiFunction<HostInfo, byte[], byte[]> post) {
+    querying = JavaQuerying.of(streams, topology, "page-view-counter", admin, post);
   }
 
   // Throws a QueryProblemException when it cannot answer, whose problem says why, as xkafka's queries do

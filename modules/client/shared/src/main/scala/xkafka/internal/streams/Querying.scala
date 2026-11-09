@@ -165,9 +165,12 @@ private[xkafka] final class Querying[F[_]](
       val found =
         globalFor(asked.request) match
           case Some(global) => read(global, asked.request).map(Answered.Found(_))
-          case None         => keptFor(asked.request).fold(F.pure(Answered.Refused(QueryProblem.UnknownStore(store)))): (subtopology, _) =>
-              locally(subtopology, store, asked.partitions, asked.request, asked.allowStandby)
-                .map(_.fold(Answered.Refused(QueryProblem.Rebalancing))(Answered.Found(_)))
+          case None         => keptFor(asked.request).fold(F.pure(Answered.Refused(QueryProblem.UnknownStore(store)))): (subtopology, topic) =>
+              misrouted(asked, topic).ifM(
+                F.pure(Answered.Refused(QueryProblem.Rebalancing)),
+                locally(subtopology, store, asked.partitions, asked.request, asked.allowStandby)
+                  .map(_.fold(Answered.Refused(QueryProblem.Rebalancing))(Answered.Found(_)))
+              )
       found.map(QueryWire.encode)
 
   /** The entries `request` finds in `store`: what a key holds, or the keys of a range, `to` included. */
@@ -208,6 +211,13 @@ private[xkafka] final class Querying[F[_]](
       stores.filter(_ => now == StreamsPhase.Running)
         .traverse(_.traverse(read(_, request)).map(_.flatten.toVector.sortBy(_._1)(using StoreContents.keys)))
 
+  /** Whether `asked` names a key the partitions it asks of do not hold. A member reckoning partitions from the group's metadata while a task moves
+    * can miscount them (KAFKA-20887), and the partition it then asks of answers as if the key were not there.
+    */
+  private def misrouted(asked: Asked, topic: String): F[Boolean] =
+    Querying.keyOf(asked.request)
+      .fold(F.pure(false))(key => topicNamed(topic).flatMap(partitions).map(count => !asked.partitions.contains(Murmur2.partition(key, count))))
+
   /** The entries `request` finds in a store `kept` names, read here where this member holds them, and asked of the members holding the rest. */
   private def routed(
       request: QueryRequest,
@@ -216,12 +226,7 @@ private[xkafka] final class Querying[F[_]](
   ): F[Either[QueryProblem, Vector[(Chunk[Byte], Chunk[Byte])]]] =
     val (subtopology, topic) = kept
     topicNamed(topic).flatMap(partitions).flatMap: count =>
-      val wanted =
-        request match
-          case QueryRequest.Get(_, key)                 => List(Murmur2.partition(key, count))
-          case QueryRequest.Windows(_, Some(key), _, _) => List(Murmur2.partition(key, count))
-          case QueryRequest.Sessions(_, key)            => List(Murmur2.partition(key, count))
-          case _                                        => (0 until count).toList
+      val wanted = Querying.keyOf(request).fold((0 until count).toList)(key => List(Murmur2.partition(key, count)))
       (member.get, holding.get).tupled.flatMap: (joined, held) =>
         val here  = joined.owned.active ++ (if allowStandby then joined.owned.standby else Set.empty)
         val local =
@@ -259,6 +264,14 @@ private[xkafka] object Querying:
   /** The kinds of store a query asks of. */
   enum Kind derives CanEqual:
     case KeyValue, Window, Session
+
+  /** The key `request` asks for, where it asks for one, which only the partition the key hashes to holds. */
+  def keyOf(request: QueryRequest): Option[Chunk[Byte]] =
+    request match
+      case QueryRequest.Get(_, key)                 => Some(key)
+      case QueryRequest.Windows(_, Some(key), _, _) => Some(key)
+      case QueryRequest.Sessions(_, key)            => Some(key)
+      case _                                        => None
 
   def kindOf(request: QueryRequest): Kind =
     request match

@@ -25,21 +25,22 @@ package interop
 
 import java.nio.ByteBuffer
 import java.time.Instant
+import java.util.concurrent.ExecutionException
 
+import scala.collection.concurrent.TrieMap
 import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success, Try, Using}
 
 import fs2.Chunk
+import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.common.serialization.Serde as JavaSerde
-import org.apache.kafka.streams.{
-  KafkaStreams as JavaKafkaStreams, KeyQueryMetadata, KeyValue as JavaKeyValue, Topology as JavaTopology, TopologyDescription
-}
+import org.apache.kafka.streams.{KafkaStreams as JavaKafkaStreams, KeyValue as JavaKeyValue, Topology as JavaTopology, TopologyDescription}
 import org.apache.kafka.streams.errors.{InvalidStateStoreException, StreamsNotStartedException, UnknownStateStoreException}
 import org.apache.kafka.streams.kstream.Windowed as JavaWindowed
 import org.apache.kafka.streams.kstream.internals.{SessionWindow, TimeWindow}
 import org.apache.kafka.streams.query.{FailureReason, KeyQuery, Query as JavaQuery, RangeQuery, StateQueryRequest, WindowKeyQuery, WindowRangeQuery}
 import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, ValueAndTimestamp, WindowStoreIterator}
-import internal.streams.{Answered, Asked, QueryWire}
+import internal.streams.{Answered, Asked, Murmur2, QueryWire}
 
 /** Lets a Java Kafka Streams instance answer the queries xkafka members of its application forward to it, for the stores registered here, through
   * Java's own interactive queries. Mount [[answer]] on the route the instance's `application.server` names.
@@ -161,14 +162,15 @@ object JavaQueries:
 final class QueryProblemException(val problem: QueryProblem) extends RuntimeException(problem.toString)
 
 /** Lets a Java Kafka Streams instance ask the members of its application for what their stores hold, xkafka and Java members alike, wherever each key
-  * is held: Java's own metadata says which member holds it, and `forward` sends it the query, to the route where it answers, as an xkafka member's
-  * `answer` and [[JavaQueries]] do. Every query goes to the member holding what it needs, this one included. A query that cannot be answered throws a
-  * [[QueryProblemException]].
+  * is held: Java's own metadata says which member holds each partition, and `forward` sends it the query, to the route where it answers, as an xkafka
+  * member's `answer` and [[JavaQueries]] do. Every query goes to the member holding what it needs, this one included. A query that cannot be answered
+  * throws a [[QueryProblemException]].
   */
 final class JavaQuerying private (
     streams: JavaKafkaStreams,
     topology: TopologyDescription,
     application: String,
+    partitions: String => Int,
     forward: java.util.function.BiFunction[HostInfo, Array[Byte], Array[Byte]]
 ):
   /** What the key-value store `store` holds for `key`, if anything. */
@@ -248,25 +250,28 @@ final class JavaQuerying private (
 
   private def read[A](store: String, serde: JavaSerde[A], bytes: Chunk[Byte]): A = serde.deserializer.deserialize(topicOf(store), bytes.toArray)
 
-  /** The entries the member holding `key` finds for `request`. */
+  /** The entries the member holding `key` finds for `request`. The key's partition is reckoned from the topic's own count of them: Java's metadata
+    * counts only the partitions some member holds, which miss one while it moves (KAFKA-20887).
+    */
   private def keyed[K](store: String, key: K, serde: JavaSerde[K], request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
-    val held = settled(streams.queryMetadataForKey(store, key, serde.serializer))
-    if held == null || held == KeyQueryMetadata.NOT_AVAILABLE || held.activeHost.port < 0 then
-      throw new QueryProblemException(QueryProblem.Rebalancing)
-    asked(held.activeHost, Asked(request, List(held.partition), false))
+    val holders        = holdersOf(store)
+    val (topic, count) = sourcesOf(store).toList.map(topic => topic -> partitions(topic)).maxBy(_._2)
+    val partition      = Murmur2.partition(Chunk.array(serde.serializer.serialize(topic, key)), count)
+    JavaQuerying.holderOf(partition, holders)
+      .fold(throw new QueryProblemException(QueryProblem.Rebalancing))(at => asked(at, Asked(request, List(partition), false)))
 
   /** The entries every member holding part of `store` finds for `request`, each asked for its partitions of the topic the store is filled from. */
   private def everywhere(store: String, request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
-    val topics  = sourcesOf(store)
-    val holders =
-      settled(streams.streamsMetadataForStore(store)).asScala.toList
-        .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(held => topics(held.topic)).map(_.partition).toList.sorted.distinct)
-        .filter(_._2.nonEmpty)
-    val covered = holders.flatMap(_._2)
-    // Every partition up to the last one held must be held by someone, or part of the store is moving.
-    if holders.isEmpty || covered.distinct.size != covered.size || covered.toSet != (0 to covered.max).toSet then
-      throw new QueryProblemException(QueryProblem.Rebalancing)
+    val holders = holdersOf(store)
+    if !JavaQuerying.covers(sourcesOf(store).toList.map(partitions).max, holders) then throw new QueryProblemException(QueryProblem.Rebalancing)
     holders.toVector.flatMap((at, partitions) => asked(at, Asked(request, partitions, false))).sortBy(_._1)(using QueryRequest.unsigned)
+
+  /** The members Java's metadata says hold part of `store`, each with the partitions it holds as an active task. */
+  private def holdersOf(store: String): List[(HostInfo, List[Int])] =
+    val topics = sourcesOf(store)
+    settled(streams.streamsMetadataForStore(store)).asScala.toList
+      .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(held => topics(held.topic)).map(_.partition).toList.sorted.distinct)
+      .filter((at, held) => held.nonEmpty && at.port >= 0)
 
   /** The topics the sub-topology keeping `store` reads. */
   private def sourcesOf(store: String): Set[String] =
@@ -289,10 +294,37 @@ final class JavaQuerying private (
       case None                            => throw new QueryProblemException(QueryProblem.NotXkafka(member))
 
 object JavaQuerying:
-  /** Queries asked by `streams`, an instance of `application` running `topology`, sent to other members through `forward`. */
+  /** Queries asked by `streams`, an instance of `application` running `topology`, sent to other members through `forward`. `admin` tells how many
+    * partitions each topic a store is filled from has, asked once for each.
+    */
   def of(
       streams: JavaKafkaStreams,
       topology: JavaTopology,
       application: String,
+      admin: Admin,
       forward: java.util.function.BiFunction[HostInfo, Array[Byte], Array[Byte]]
-  ): JavaQuerying = new JavaQuerying(streams, topology.describe(), application, forward)
+  ): JavaQuerying = new JavaQuerying(streams, topology.describe(), application, counting(admin), forward)
+
+  /** How many partitions each topic has, as `admin` describes it, kept once known. */
+  private def counting(admin: Admin): String => Int =
+    val known = TrieMap.empty[String, Int]
+    topic =>
+      known.getOrElseUpdate(
+        topic,
+        Try(admin.describeTopics(java.util.List.of(topic)).allTopicNames.get.get(topic).partitions.size).fold(
+          {
+            case failed: ExecutionException => throw failed.getCause
+            case other                      => throw other
+          },
+          identity
+        )
+      )
+
+  /** The member holding `partition`, of `holders` each with the partitions it holds. */
+  private[interop] def holderOf(partition: Int, holders: List[(HostInfo, List[Int])]): Option[HostInfo] =
+    holders.collectFirst { case (at, held) if held.contains(partition) => at }
+
+  /** Whether `holders` hold each of `count` partitions, once each: while one moves, no member holds it. */
+  private[interop] def covers(count: Int, holders: List[(HostInfo, List[Int])]): Boolean =
+    val covered = holders.flatMap(_._2)
+    covered.size == count && covered.toSet == (0 until count).toSet
