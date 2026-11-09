@@ -99,23 +99,28 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
       val builder = new StreamsBuilder()
       javaProgram(builder, application)
       val program = builder.build()
-      PlatformKafkaClient().admin(client).use(_.createTopics(NonEmptySet.of(topics.head, topics.tail*))) *>
-        javaMember(broker, application, program).use: running =>
-          val handler              = registered(JavaQueries.of(running, application))
-          val forward: Forward[IO] =
+      val made    = NonEmptySet.of(topics.head, topics.tail*)
+      // A Java member with an endpoint stops if it joins before the broker knows its topics, so it starts once the broker describes them.
+      val created =
+        PlatformKafkaClient().admin(client).use: admin =>
+          val known = admin.describeTopics(made.map(_.topic)).map(_.toSortedMap.values.forall(_.isRight))
+          admin.createTopics(made) *> (IO.sleep(100.millis) *> known).iterateUntil(identity)
+      created *> javaMember(broker, application, program).use: running =>
+        val handler              = registered(JavaQueries.of(running, application))
+        val forward: Forward[IO] =
+          (to, request) =>
+            if to == endpoint then IO(asked.incrementAndGet) *> IO.blocking(Chunk.array(handler.answer(request.toArray)))
+            else IO.raiseError(new RuntimeException(s"no member at $to"))
+        PlatformKafkaClient().streams(settings, xkafka(application), forward).use: streams =>
+          // The Java member asks through its own metadata, reaching the xkafka member's answer and its own handler.
+          val back: java.util.function.BiFunction[HostInfo, Array[Byte], Array[Byte]] =
             (to, request) =>
-              if to == endpoint then IO(asked.incrementAndGet) *> IO.blocking(Chunk.array(handler.answer(request.toArray)))
-              else IO.raiseError(new RuntimeException(s"no member at $to"))
-          PlatformKafkaClient().streams(settings, xkafka(application), forward).use: streams =>
-            // The Java member asks through its own metadata, reaching the xkafka member's answer and its own handler.
-            val back: java.util.function.BiFunction[HostInfo, Array[Byte], Array[Byte]] =
-              (to, request) =>
-                if to.host == "java" then handler.answer(request)
-                else streams.answer(Chunk.array(request)).unsafeRunSync()(using cats.effect.unsafe.implicits.global).toArray
-            val asking   = JavaQuerying.of(running, program, application, back)
-            def javaSide = IO.blocking(scala.util.Try(javaAnswered(asking)).getOrElse(false))
-            streams.run.background.surround(produced *> eventually(answered(streams)) *> eventually(javaSide))
-              .map(_ => assert(asked.get > 0, "the Java member was never asked"))
+              if to.host == "java" then handler.answer(request)
+              else streams.answer(Chunk.array(request)).unsafeRunSync()(using cats.effect.unsafe.implicits.global).toArray
+          val asking   = JavaQuerying.of(running, program, application, back)
+          def javaSide = IO.blocking(scala.util.Try(javaAnswered(asking)).getOrElse(false))
+          streams.run.background.surround(produced *> eventually(answered(streams)) *> eventually(javaSide))
+            .map(_ => assert(asked.get > 0, "the Java member was never asked"))
 
   for broker <- server.toList do
     test("an xkafka member and a Java member of one application each answer the other's queries of a count for the keys it holds"):

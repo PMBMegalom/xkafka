@@ -219,7 +219,9 @@ private[xkafka] final case class Member(
           case 0                             => accepted(response)
           case NotCoordinator | NotAvailable => retry(rediscover = true, backoff = false)
           case LoadInProgress                => retry(rediscover = false, backoff = true)
-          case FencedEpoch | UnknownMember   => fenced
+          // Brokers up to 4.4 fail the join of a member with an endpoint while a source topic is missing; the join wrote nothing, so it is asked again.
+          case UnknownServerError if phase == Phase.Joining => retry(rediscover = false, backoff = true)
+          case FencedEpoch | UnknownMember                  => fenced
           // Java Streams reports this and goes on heartbeating, so that the application can see it and decide.
           case TopicAuthorizationFailed =>
             val detail = response.errorMessage.getOrElse("the application may not use some of its topics")
@@ -308,6 +310,8 @@ private[xkafka] object Member:
   def apply(identity: MemberIdentity): Member = Member(identity, Phase.Idle, 0, -1, Assignment.empty, None, None, 0L, None, false, 0, Nil)
 
   private val LeaveEpoch = -1
+
+  private val UnknownServerError: Short = -1 // UNKNOWN_SERVER_ERROR
 
   private[streams] val LoadInProgress: Short = 14 // COORDINATOR_LOAD_IN_PROGRESS
   private[streams] val NotAvailable: Short   = 15 // COORDINATOR_NOT_AVAILABLE

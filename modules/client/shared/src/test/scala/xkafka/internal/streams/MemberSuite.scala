@@ -212,6 +212,14 @@ final class MemberSuite extends FunSuite:
       case other => fail(s"unexpected $other")
     assertEquals((steps(1), steps(2), after.phase), (Nil, Nil, Phase.Failed))
 
+  test("a join the coordinator fails with an unknown error is sent again whole after a backoff, and the same error stops a joined member"):
+    val (rejoined, steps) = run(Member(identity), Start, Answered(answer(0, error = -1)), Due, Answered(answer(1, Some(Set.empty))))
+    assertEquals(steps(1), List(Retry(1, rediscover = false, backoff = true)))
+    assertEquals(sent(steps(2)), sent(steps(0)))
+    assertEquals((rejoined.phase, rejoined.epoch, rejoined.failures), (Phase.Joined, 1, 0))
+    val (stopped, actions) = run(joined(Set(task("0", 0))), Answered(answer(2, error = -1)))
+    assertEquals((actions.flatten.headOption, stopped.phase), (Some(LoseAll), Phase.Failed))
+
   test("a failure that will not pass by itself stops the member"):
     val error        = new KafkaException.BackendFailure("bad", Some(ErrorCode.SaslAuthenticationFailed), Some(false))
     val (_, actions) = run(joined(Set.empty), RequestFailed(error))
