@@ -72,6 +72,29 @@ final class HeaderSerdeSuite extends FunSuite:
     assertEquals(headers.values(1).as[Int], Right(2))
     assertEquals(headers.values(2).as[Long], Right(5L))
 
+  test("get reads the last header of a name, none where there is none, and a failure where its value cannot be read"):
+    val headers = Headers.empty.append("trace", "first").append("attempt", 2).append("trace", "last").append(Header("empty", None))
+
+    assertEquals(headers.get[String]("trace"), Some(Right("last")))
+    assertEquals(headers.get[Int]("attempt"), Some(Right(2)))
+    assertEquals(headers.get[String]("absent"), None)
+    assertEquals(headers.get[String]("empty"), Some(Left(ValidationError.MissingHeaderValue)))
+    assertEquals(headers.get[Long]("attempt"), Some(Left(ValidationError.InvalidHeaderLength(8, 4))))
+
+  test("remove drops every header of a name, and leaves the others in order"):
+    val headers = Headers.empty.append("trace", "1").append("attempt", 2).append("trace", "3").append("at", 5L)
+
+    assertEquals(headers.remove("trace").values.map(_.key), Vector("attempt", "at"))
+    assertEquals(headers.remove("absent"), headers)
+
+  test("set replaces every header of a name with one at the end, and adds one where there was none"):
+    val headers = Headers.empty.append("trace", "1").append("attempt", 2).append("trace", "3")
+
+    assertEquals(headers.set("trace", "new").values.map(_.key), Vector("attempt", "trace"))
+    assertEquals(headers.set("trace", "new").getAll("trace").size, 1)
+    assertEquals(headers.set("trace", "new").get[String]("trace"), Some(Right("new")))
+    assertEquals(headers.set("at", 5L).values.map(_.key), Vector("trace", "attempt", "trace", "at"))
+
   test("a serializer is contravariant and a deserializer is a functor"):
     val fromLength = HeaderSerializer.int.contramap[String](_.length)
     val asLength   = HeaderDeserializer.utf8.map(_.length)

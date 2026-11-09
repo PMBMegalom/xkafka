@@ -43,3 +43,16 @@ final class PartitionTimeGoldenSuite extends FunSuite:
 
   test("Java reads the time from what the engine writes"):
     times.foreach(time => assertEquals(TopicPartitionMetadata.decode(PartitionTime.encode(time)).partitionTime, time))
+
+  test("the engine writes what Java writes for a window store's last emitted close time, and each reads the other's"):
+    val metadata = ProcessorMetadata(Map[String, java.lang.Long]("counts" -> 25000L).asJava)
+    times.foreach: time =>
+      assertEquals(PartitionTime.encode(time, Map("counts" -> 25000L)), TopicPartitionMetadata(time, metadata).encode())
+      assertEquals(PartitionTime.processors(TopicPartitionMetadata(time, metadata).encode()), Map("counts" -> 25000L))
+      assertEquals(TopicPartitionMetadata.decode(PartitionTime.encode(time, Map("counts" -> 25000L))).processorMetadata, metadata)
+
+  test("the engine reads every store's close time from what Java writes, and none from metadata without any"):
+    val metadata = ProcessorMetadata(Map[String, java.lang.Long]("store" -> 7L, "other" -> 9L).asJava)
+    assertEquals(PartitionTime.processors(TopicPartitionMetadata(42L, metadata).encode()), Map("store" -> 7L, "other" -> 9L))
+    assertEquals(PartitionTime.processors(TopicPartitionMetadata(42L, ProcessorMetadata()).encode()), Map.empty)
+    assertEquals(PartitionTime.processors("not base64!"), Map.empty)

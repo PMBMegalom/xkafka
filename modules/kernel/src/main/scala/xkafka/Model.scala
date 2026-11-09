@@ -238,6 +238,17 @@ object Headers:
       headers.collect:
         case Header(`key`, value) => value
 
+    /** The value of the last header named `key`, read as an `A`: none where no header has that name, and a failure where its value cannot be read. */
+    def get[A](key: String)(using deserializer: HeaderDeserializer[A]): Option[Either[ValidationError, A]] =
+      headers.findLast(_.key == key).map(_.as[A])
+
+    /** These headers without any named `key`. */
+    def remove(key: String): Headers = headers.filterNot(_.key == key)
+
+    /** These headers with one named `key`, holding `value`, in place of any they had. */
+    def set[A](key: String, value: A)(using serializer: HeaderSerializer[A]): Headers =
+      headers.filterNot(_.key == key) :+ Header(key, Some(serializer.serialize(value)))
+
 final case class ProducerRecord[K, V](
     topic: Topic,
     key: K,

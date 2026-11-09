@@ -1,8 +1,8 @@
 # Offsets
 
 Every record arrives as a `CommittableConsumerRecord`, pairing the record with
-the offset that commits it. Commits are explicit, so processing and commit
-policy stay in the calling effect.
+the offset that commits it. Nothing is committed until your code asks, so you
+decide when.
 
 A successful `record.offset.commit` stores `record.offset.nextOffset`, the
 offset after the one just handled.
@@ -14,6 +14,7 @@ also carry text of your own, which the broker stores beside it and `committed`
 returns:
 
 ```scala
+// Commit this record's offset, with a note of your own stored beside it
 record.offset.withMetadata("processed by worker 3").commit
 ```
 
@@ -30,6 +31,7 @@ Offsets can be accumulated and committed together while the consumer resource
 is active:
 
 ```scala
+// Commit several offsets together, keeping the greatest for each partition
 CommittableOffsetBatch.fromFoldable(offsets).commit
 ```
 
@@ -70,6 +72,7 @@ It commits them with no leader epoch and no metadata;
 To turn fencing off:
 
 ```scala
+// Let offsets commit even after their partition has moved
 settings.withoutAssignmentFencing
 ```
 
@@ -84,6 +87,7 @@ no longer be committed, so the consumer that gets the partition reads them
 again. Rebalance-safe commits give those records time to be committed first:
 
 ```scala
+// Give records up to 30 seconds to be committed before their partition moves
 settings.withRebalanceSafeCommits(30.seconds)
 ```
 
@@ -104,6 +108,7 @@ If the limit passes with records still uncommitted, the consumer gives up the
 partition anyway, and those records are read again. To stop consuming instead:
 
 ```scala
+// Wait in the same way, but fail the record stream if records are still uncommitted after 30 seconds
 settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail)
 ```
 
@@ -124,7 +129,8 @@ database transaction as its results, can tell the consumer where each partition
 starts:
 
 ```scala
-settings.withStartingOffsets(10.seconds): partitions =>
+// Start each assigned partition from the offset your application stored
+settings.withStartingOffsets(10.seconds): partitions =>  // The function must answer within 10 seconds
   loadPositions(partitions) // F[Map[TopicPartition, StartingOffset]]
 ```
 
@@ -152,10 +158,11 @@ you stored it.
 offsets or `d` elapses, whichever happens first:
 
 ```scala
+// Handle each record, and commit every 100 offsets or every 5 seconds, whichever comes first
 consumer.records
   .evalTap(handle)
-  .map(_.offset)
-  .through(commitBatchWithin(100, 5.seconds))
+  .map(_.offset)                               // Keep only each record's offset
+  .through(commitBatchWithin(100, 5.seconds))  // Collect and commit them in batches
 ```
 
 Only non-empty batches are committed.
@@ -167,9 +174,10 @@ or a group that is rebalancing. Others never will, and retrying them only delays
 the failure.
 
 `ConsumerSettings.commitRecovery` retries the first kind. `ErrorCode.retriable`
-decides which failures qualify, and it answers the same on every backend:
+decides which failures qualify, and it answers the same on every platform:
 
 ```scala mdoc:compile-only
+// Retry a failed commit, making up to five attempts and waiting longer between them
 import scala.concurrent.duration.*
 
 import cats.data.NonEmptyList
@@ -183,9 +191,10 @@ val settings =
   for
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     group    <- ConsumerGroup.from("workers").liftTo[IO]
+    // Delays start at 50ms, and stop growing at 2 seconds
     policy   <- CommitRecovery.exponential(maxAttempts = 5, initialDelay = 50.millis, maxDelay = 2.seconds).liftTo[IO]
     settings <- ConsumerSettings.from(client, group, utf8, utf8).liftTo[IO]
-  yield settings.withCommitRecovery(policy)
+  yield settings.withCommitRecovery(policy)  // Use the policy for this consumer's commits
 ```
 
 The default policy makes ten attempts, starting at 10ms, doubling each time, and
@@ -212,6 +221,7 @@ seconds. A commit that does not finish in time fails as
 tries again:
 
 ```scala mdoc:compile-only
+// Let a commit wait at most five seconds before it fails as timed out
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -222,7 +232,7 @@ def withCommitTimeout[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[Consu
   settings.withCommitTimeout(5.seconds).liftTo[IO]
 ```
 
-Like every duration wither, it revalidates and returns
+Like every method that sets a duration, it validates the settings again and returns
 `ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]`. See
 [Settings](settings.md).
 

@@ -8,19 +8,27 @@ their respective licenses and are not relicensed as part of xkafka.
 | Component | Version | License | Use |
 | --- | --- | --- | --- |
 | [Apache Kafka Java client](https://kafka.apache.org) (`kafka-clients`) | 4.4.0 | Apache-2.0 | JVM Kafka backend |
-| [lz4-java](https://github.com/yawkat/lz4-java) | 1.12.0 | Apache-2.0 | LZ4 compression for the JVM backend |
+| [lz4-java](https://github.com/yawkat/lz4-java) | 1.12.1 | Apache-2.0 | LZ4 compression for the JVM backend |
+| [snappy-java](https://github.com/xerial/snappy-java) | 1.1.10.12 | Apache-2.0 | Snappy compression for the JVM backend |
 | [librdkafka](https://github.com/confluentinc/librdkafka) | 2.16.0 | BSD-2-Clause | Kafka backend for Scala Native and Scala.js |
 | [koffi](https://koffi.dev) | 3.3.3 | MIT | Calls librdkafka from Node.js for the Scala.js backend |
 | [OpenSSL](https://www.openssl.org) | 3.5.8 | Apache-2.0 | TLS and SASL in the prebuilt Scala.js libraries |
 | [Zstandard](https://github.com/facebook/zstd) | 1.5.7 | BSD-3-Clause | Compression in the prebuilt Scala.js libraries |
 | [zlib](https://zlib.net) | 1.3.2 | Zlib | Compression in the prebuilt Scala.js libraries |
+| [RocksDB](https://rocksdb.org) (`rocksdbjni`) | 10.1.3 | Apache-2.0 or GPL-2.0 | State store engine on every platform |
+| [Snappy](https://github.com/google/snappy), [LZ4](https://github.com/lz4/lz4), [Zstandard](https://github.com/facebook/zstd), [zlib](https://zlib.net), [bzip2](https://sourceware.org/bzip2/) | 1.2.1, 1.9.4, 1.5.5, 1.3.1, 1.0.8 | BSD-3-Clause, BSD-2-Clause, BSD-3-Clause, Zlib, bzip2-1.0.6 | Compression inside the RocksDB libraries `rocksdbjni` carries |
 
 The `@xkafka/librdkafka-*` npm packages hold librdkafka with OpenSSL, zlib and
 zstd linked in. Each package's `LICENSES.txt` carries the notices of everything
 in its library, including the third-party components librdkafka bundles.
 
+The `@xkafka/rocksdb-*` npm packages hold the RocksDB library the `rocksdbjni`
+jar carries for their platform, unchanged, beside xkafka's shim for it. Each
+package's `LICENSES.txt` carries the notices of RocksDB and the compression
+libraries linked into it.
+
 On Node.js, xkafka depends only on koffi, which brings its own prebuilt binary
-for the platform, and on `@xkafka/librdkafka`. The npm tooling the build itself
+for the platform, and on `@xkafka/librdkafka` and `@xkafka/rocksdb`. The npm tooling the build itself
 uses, such as webpack, is not part of xkafka's published runtime API.
 
 Published xkafka library artifacts declare or download these dependencies; the

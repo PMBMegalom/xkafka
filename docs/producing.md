@@ -3,6 +3,7 @@
 A producer is a `Resource`. Records are produced in non-empty batches.
 
 ```scala mdoc:compile-only
+// Write one record to the topic "events", and wait until it is delivered
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -15,6 +16,7 @@ val program =
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     settings <- ProducerSettings.from(client, utf8, utf8).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
+    // Acquire a producer, send the record, and release the producer
     _        <- KafkaClient[IO].producer(settings).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "value"))))
   yield ()
 ```
@@ -22,17 +24,18 @@ val program =
 ## Two stages
 
 `produce` returns `F[F[NonEmptyList[Produced]]]`. The outer effect completes
-once the backend has accepted the records for delivery, and the inner one once
-the backend reports their delivery outcome. With acknowledgements enabled this
+once the client has accepted the records for delivery, and the inner one once
+it reports their delivery outcome. With acknowledgements enabled this
 includes the broker's response. Holding the inner effect lets several batches be
 in flight at once:
 
 ```scala
+// Send two batches without waiting between them, then wait for both to be delivered
 for
-  first  <- producer.produce(firstBatch)
-  second <- producer.produce(secondBatch)
-  _      <- first
-  _      <- second
+  first  <- producer.produce(firstBatch)   // Accepted, not yet delivered
+  second <- producer.produce(secondBatch)  // Accepted while the first is still being delivered
+  _      <- first                          // Wait for the first's outcome
+  _      <- second                         // Wait for the second's outcome
 yield ()
 ```
 
@@ -42,6 +45,7 @@ pipelining.
 For a stream of batches, use `pipe`:
 
 ```scala
+// Send a stream of batches, with at most 256 awaiting delivery at once
 batches.through(producer.pipe(maxInFlight = 256))
 ```
 
@@ -55,10 +59,11 @@ See [Transactions](transactions.md).
 
 ## Results
 
-Each `Produced` holds a record and the metadata its backend reported for it, in
+Each `Produced` holds a record and the metadata reported for it, in
 the order the records were given:
 
 ```scala
+// Send a batch, and read the offset each record was written at
 producer.produceAndAwait(batch).map(_.map(produced => produced.metadata.offset))
 ```
 
@@ -90,10 +95,11 @@ were delivered when others were not. Each `Attempted` holds a record and either
 its metadata or why it was not delivered:
 
 ```scala
+// Send a batch, then act on each record's own outcome
 producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
   attempts.toList.traverse_ :
-    case Attempted(record, Right(metadata)) => recordDelivered(record, metadata)
-    case Attempted(record, Left(failure))   => retryLater(record, failure)
+    case Attempted(record, Right(metadata)) => recordDelivered(record, metadata)  // Delivered
+    case Attempted(record, Left(failure))   => retryLater(record, failure)        // Not delivered, so retry this record later
 ```
 
 - If the client refuses a record as it is enqueued, that record fails with the
@@ -108,21 +114,22 @@ producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
 ## Records
 
 A `ProducerRecord` names its topic, key, and value, and optionally a partition,
-a timestamp, and headers. A key or value of `None`, through the `.option`
+a timestamp, and [headers](headers.md). A key or value of `None`, through the `.option`
 codecs, represents a Kafka null. Tombstones are produced this way.
 
 ## Partitions
 
 A record with a key and no partition goes to the partition given by the murmur2
-hash of its serialized key, modulo the topic's partition count. Every backend
+hash of its serialized key, modulo the topic's partition count. Every platform
 uses this hash, the same one the Java producer uses, so a key always lands on
-the same partition whichever backend produced it.
+the same partition whichever platform produced it.
 
 `partitionsFor` returns the partitions a topic currently has. Use it to pick a
 partition to produce to. Asking about a topic the cluster does not have creates
 it if the broker creates topics on request, which Kafka brokers do by default.
 
 ```scala mdoc:compile-only
+// List the partitions the topic "events" has now
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -135,7 +142,7 @@ val program =
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     settings <- ProducerSettings.from(client, utf8, utf8).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
-    found    <- KafkaClient[IO].producer(settings).use(_.partitionsFor(topic))
+    found    <- KafkaClient[IO].producer(settings).use(_.partitionsFor(topic))  // Creates the topic if the broker creates topics on request
   yield found
 ```
 
@@ -146,6 +153,7 @@ it. It defaults to `Acks.AllReplicas`. To use any other value, turn
 [idempotence](#idempotence) off first:
 
 ```scala
+// Have only the partition leader acknowledge a record, which needs idempotence off
 settings.withoutIdempotence.withAcks(Acks.Leader)
 ```
 
@@ -158,7 +166,7 @@ settings.withoutIdempotence.withAcks(Acks.Leader)
 ## Idempotence
 
 Producers are idempotent by default: xkafka turns on Kafka's
-`enable.idempotence` on every backend. See Kafka's documentation of that setting
+`enable.idempotence` on every platform. See Kafka's documentation of that setting
 for what it guarantees.
 
 Idempotence requires `Acks.AllReplicas`. Settings that combine it with another
@@ -177,10 +185,11 @@ to five milliseconds, and zero sends each batch as soon as it can. A longer
 linger makes larger batches, at the cost of that much delay per record.
 
 `compression` sets how each batch is compressed: `Compression.Uncompressed`,
-which is the default, `Gzip`, `Snappy`, `Lz4` or `Zstd`. Every backend supports
+which is the default, `Gzip`, `Snappy`, `Lz4` or `Zstd`. Every platform supports
 all five, and consumers read them all without being told which one was used.
 
 ```scala mdoc:compile-only
+// Compress batches with zstd, and let a record wait 20ms for others to join its batch
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -196,9 +205,9 @@ than `ProducerSettings.LingerLimit`, is rejected.
 
 A batch is sent as soon as it is full or its linger has passed, whichever comes
 first. `batchSize` sets how many bytes of records make a batch full. Unless it is
-set, each backend keeps its own default, and the two differ: 16384 bytes on the
-JVM, and 1000000 bytes on Scala.js and Scala Native. `withBatchSize` sets the same size on every backend, and
-`withoutBatchSize` goes back to each one's default.
+set, the default differs by platform: 16384 bytes on the JVM, and 1000000 bytes on
+Scala.js and Scala Native. `withBatchSize` sets the same size on every platform,
+and `withoutBatchSize` goes back to each one's default.
 
 ## Flushing
 
@@ -206,10 +215,11 @@ JVM, and 1000000 bytes on Scala.js and Scala Native. `withBatchSize` sets the sa
 and completes once each of them has been delivered or has failed:
 
 ```scala
+// Send the batch now, without waiting out the linger time, then read the results
 for
-  delivered <- producer.produce(batch)
-  _         <- producer.flush
-  results   <- delivered
+  delivered <- producer.produce(batch)  // Enqueue the batch
+  _         <- producer.flush           // Done once each record is delivered or has failed
+  results   <- delivered                // Each record's own outcome
 yield results
 ```
 
@@ -225,6 +235,7 @@ then closes the producer. `closeTimeout` bounds that delivery wait and defaults 
 sixty seconds:
 
 ```scala mdoc:compile-only
+// Wait at most ten seconds for undelivered records when a producer is released
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -235,7 +246,7 @@ def withCloseTimeout[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[Produc
   settings.withCloseTimeout(10.seconds).liftTo[IO]
 ```
 
-Like every duration wither, it revalidates and returns
+Like every method that sets a duration, it validates the settings again and returns
 `ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. See
 [Settings](settings.md).
 

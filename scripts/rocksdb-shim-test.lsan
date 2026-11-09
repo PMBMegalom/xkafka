@@ -1,0 +1,5 @@
+# The C++ runtime inside RocksDB's library records the destructors of the main
+# thread's thread_local variables when they are first used, and frees that record
+# when the thread ends, which is after the check at exit. Suppress only what is
+# allocated under that record; allocations made by the shim and RocksDB remain visible.
+leak:__cxa_thread_atexit

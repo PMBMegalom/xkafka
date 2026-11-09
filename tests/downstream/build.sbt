@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "3.3.8"
+ThisBuild / scalaVersion := "3.3.9"
 
 val xkafkaVersion = sys.env.getOrElse("XKAFKA_VERSION", sys.error("XKAFKA_VERSION must name the xkafka version to test"))
 

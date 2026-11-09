@@ -38,6 +38,18 @@ final class SerdeSuite extends FunSuite:
     new FunctionK[Option, ErrorOr]:
       override def apply[A](value: Option[A]): ErrorOr[A] = value.toRight("empty")
 
+  test("a windowed key is partitioned by its key alone, through mapK, contramap and option"):
+    val windowed = streams.Serde.timeWindowed(streams.Serde.utf8[ThrowableOr], scala.concurrent.duration.Duration(1, "s")).serializer
+    val key      = streams.Windowed("k", streams.Window(0L, 1000L))
+    val alone    = Some(Right(Some(Chunk.array("k".getBytes))))
+    def by[A](serializer: Serializer[ThrowableOr, A], value: A) = serializer.partitionedBy(topic, Headers.empty, value)
+    assertEquals(by(windowed, key), alone)
+    assertEquals(by(windowed.mapK(FunctionK.id[ThrowableOr]), key), alone)
+    assertEquals(by(windowed.contramap[String](streams.Windowed(_, streams.Window(0L, 1000L))), "k"), alone)
+    assertEquals(by(windowed.option, Some(key)), alone)
+    assertEquals(by(windowed.option, None), None)
+    assertEquals(by(Serializer.utf8[ThrowableOr], "k"), None)
+
   test("Serializer is contravariant in its input"):
     val serializer = Serializer.instance[Option, Int]((_, _, value) => Some(Some(Chunk.singleton(value.toByte))))
     val strings    = Contravariant[[A] =>> Serializer[Option, A]].contramap(serializer)((value: String) => value.length)

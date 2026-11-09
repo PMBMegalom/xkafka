@@ -39,6 +39,7 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       test("resume from batched offsets across topic-partitions".ignore)(IO.unit)
       test("inspect consumer offsets and seek".ignore)(IO.unit)
       test("consume partition-scoped streams".ignore)(IO.unit)
+      Compression.values.foreach(compression => test(s"read back what was produced under $compression".ignore)(IO.unit))
     case Some(bootstrapServer) =>
       test("resume from a committed offset against Kafka"):
         roundTrip(bootstrapServer)
@@ -48,6 +49,9 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
         controlRoundTrip(bootstrapServer)
       test("consume partition-scoped streams"):
         partitionedRoundTrip(bootstrapServer)
+      Compression.values.foreach: compression =>
+        test(s"read back what was produced under $compression"):
+          compressedRoundTrip(bootstrapServer, compression)
 
   private def roundTrip(bootstrapServer: String): IO[Unit] =
     Names.fresh:
@@ -200,6 +204,23 @@ final class KafkaIntegrationSuite extends CatsEffectSuite:
       yield
         assertEquals(consumed.map(_._1.topic).toSet, Set(firstTopic, secondTopic))
         assert(consumed.forall((topicPartition, record) => topicPartition == record.record.topicPartition))
+
+  private def compressedRoundTrip(bootstrapServer: String, compression: Compression): IO[Unit] =
+    Names.fresh:
+      val suffix         = s"${PlatformKafkaClient.name}-${summon[Names].id}"
+      val topic          = validTopic(s"xkafka-compressed-$suffix")
+      val clientSettings = ClientSettings.from(NonEmptyList.one(bootstrapServer), metadataRefreshInterval = 30.seconds).toOption.get
+      val settings       =
+        ProducerSettings.from(clientSettings, utf8Serializer, utf8Serializer, linger = Duration.Zero).toOption.get.withCompression(compression)
+      val consumer =
+        ConsumerSettings
+          .from(clientSettings, validConsumerGroup(s"xkafka-compressed-$suffix"), utf8Deserializer, utf8Deserializer, AutoOffsetReset.Earliest)
+          .toOption.get
+      val value = "a value that compresses well, " * 100
+      for
+        _        <- PlatformKafkaClient().producer(settings).use(_.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", value))))
+        consumed <- consumeOne(consumer, Selection.Topics(NonEmptySet.one(topic)))
+      yield assertEquals((consumed.record.key, consumed.record.value), ("key", value))
 
   private def consumeTwoAndCommitFirst(
       settings: ConsumerSettings[IO, String, String],

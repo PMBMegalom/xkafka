@@ -33,7 +33,10 @@ import cats.syntax.all.*
 import munit.CatsEffectSuite
 import scodec.bits.ByteVector
 import internal.group.{Connection, Crypto, Digest}
-import internal.protocol.{OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest, StreamsGroupHeartbeatResponse}
+import internal.protocol.{
+  OffsetCommitRequest, OffsetFetchRequest, Request, StreamsGroup, StreamsGroupHeartbeatRequest, StreamsGroupHeartbeatResponse,
+  StreamsGroupTopologyDescriptionUpdateRequest, StreamsGroupTopologyDescriptionUpdateResponse
+}
 
 /** How a streams group member paces its heartbeats, finds its coordinator and tells its engine, over a coordinator the tests script, in simulated
   * time, on every platform.
@@ -95,11 +98,13 @@ final class GroupMemberSuite extends CatsEffectSuite:
     val run     =
       Coordinator(
         (_, request) => IO.pure(answer(request, active = Some(Set.empty))),
-        {
-          case (0, _)                      => IO.raiseError(failure)
-          case (_, _: OffsetCommitRequest) => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
-          case (_, _: OffsetFetchRequest)  => IO.pure(OffsetFetchRequest.Answer(Nil, 0))
-        }
+        [R] =>
+          (n: Int, request: Request[R]) =>
+            request match
+              case _ if n == 0            => IO.raiseError(failure)
+              case _: OffsetCommitRequest => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
+              case _: OffsetFetchRequest  => IO.pure(OffsetFetchRequest.Answer(Nil, 0))
+              case other                  => Coordinator.unexpected(other)
       ).flatMap: coordinator =>
         member(coordinator).use: member =>
           for
@@ -269,6 +274,79 @@ final class GroupMemberSuite extends CatsEffectSuite:
       assertEquals(took, 100.millis)
       assertEquals(sent.map(_._2.memberEpoch), List(0, -1))
 
+  /** A coordinator that asks for the topology's description in its answers to the heartbeats `asks` picks, and answers the `n`th push with the error
+    * `push` gives, after `taking`, keeping the time each push came.
+    */
+  private def describing(asks: Int => Boolean, push: Int => Short, taking: FiniteDuration = Duration.Zero, interval: Int = 1000) =
+    IO.ref(Vector.empty[Long]).flatMap: pushes =>
+      Coordinator(
+        (n, request) => IO.pure(answer(request, active = Some(Set.empty), interval = interval, describe = asks(n))),
+        [R] =>
+          (n: Int, request: Request[R]) =>
+            request match
+              case _: StreamsGroupTopologyDescriptionUpdateRequest => IO.monotonic.flatMap(now => pushes.update(_ :+ now.toMillis)) *>
+                  IO.sleep(taking) *> IO.pure(StreamsGroupTopologyDescriptionUpdateResponse(0, push(n), None))
+              case other => Coordinator.unexpected(other)
+      ).map(_ -> pushes)
+
+  test("a member the coordinator asks for its topology's description pushes it once, under its id and its topology's epoch"):
+    val run =
+      describing(_ == 1, _ => 0).flatMap: (coordinator, pushes) =>
+        member(coordinator, described).use(_ => IO.sleep(3500.millis)) *> (coordinator.requests, pushes.get, coordinator.sent).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (made, at, sent) =>
+      assertEquals(made, List(StreamsGroupTopologyDescriptionUpdateRequest("app", "member", 0, description)))
+      assertEquals(at, Vector(1000L))
+      assertEquals(sent.map(_._1), List(0L, 1000L, 2000L, 3000L, 3500L))
+
+  test("a push the coordinator is loading for goes again after a wait, and one to a coordinator that moved goes again on a new connection"):
+    val run =
+      describing(_ == 0, n => if n == 0 then 14 else if n == 1 then 16 else 0).flatMap: (coordinator, pushes) =>
+        member(coordinator, described).use(_ => IO.sleep(2.seconds)) *> (pushes.get, coordinator.opened).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (at, opened) =>
+      assertEquals(at.size, 3)
+      assert(at(1) >= 80L && at(1) <= 120L, s"the second push went at ${at(1)} ms")
+      assert(at(2) - at(1) >= 160L && at(2) - at(1) <= 240L, s"the third push went ${at(2) - at(1)} ms after the second")
+      assertEquals(opened, 2)
+
+  test("a push refused for any other reason is not sent again until the coordinator asks again, and the member goes on"):
+    val run =
+      describing(n => n == 0 || n == 3, _ => 25).flatMap: (coordinator, pushes) =>
+        member(coordinator, described).use(_ => IO.sleep(3500.millis)) *> (pushes.get, coordinator.sent).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (at, sent) =>
+      assertEquals(at, Vector(0L, 3000L))
+      assertEquals(sent.map(_._2.memberEpoch), List(0, 1, 1, 1, -1))
+
+  test("a push that fails on the way goes again on a new connection after a wait"):
+    val failure = new KafkaException.BackendFailure("gone", Some(ErrorCode.RequestTimedOut), Some(true))
+    val run     =
+      IO.ref(Vector.empty[Long]).flatMap: pushes =>
+        Coordinator(
+          (n, request) => IO.pure(answer(request, active = Some(Set.empty), describe = n == 0)),
+          [R] =>
+            (n: Int, request: Request[R]) =>
+              request match
+                case _: StreamsGroupTopologyDescriptionUpdateRequest => IO.monotonic.flatMap(now => pushes.update(_ :+ now.toMillis)) *>
+                    (if n == 0 then IO.raiseError(failure) else IO.pure(StreamsGroupTopologyDescriptionUpdateResponse(0, 0, None)))
+                case other => Coordinator.unexpected(other)
+        ).flatMap: coordinator =>
+          member(coordinator, described).use(_ => IO.sleep(1.second)) *> (pushes.get, coordinator.opened).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (at, opened) =>
+      assertEquals(at.size, 2)
+      assert(at(1) >= 80L && at(1) <= 120L, s"the second push went at ${at(1)} ms")
+      assertEquals(opened, 2)
+
+  test("a member asked again while its push is under way sends no second push until the first is answered"):
+    val run =
+      describing(_ => true, _ => 0, taking = 1750.millis, interval = 500).flatMap: (coordinator, pushes) =>
+        member(coordinator, described).use(_ => IO.sleep(2500.millis)) *> pushes.get
+    TestControl.executeEmbed(run.timeout(1.minute)).map(at => assertEquals(at, Vector(0L, 2000L)))
+
+  test("a member that pushes no description pushes none when asked"):
+    val run =
+      describing(_ => true, _ => 0).flatMap: (coordinator, pushes) =>
+        member(coordinator).use(_ => IO.sleep(2500.millis)) *> pushes.get
+    TestControl.executeEmbed(run.timeout(1.minute)).map(at => assertEquals(at, Vector.empty))
+
   test("a member id is a random UUID in URL-safe base64 without padding, drawn again while it starts with a dash"):
     val dashed = UUID.fromString("fbffffff-ffff-ffff-ffff-ffffffffffff")
     val plain  = UUID.fromString("0123cdef-4567-89ab-cdef-0123456789ab")
@@ -307,7 +385,14 @@ object GroupMemberSuite:
       None
     )
 
-  def member(coordinator: Coordinator): Resource[IO, GroupMember[IO]] = GroupMember(coordinator.connect, identity, CloseTimeout)
+  val description: StreamsGroup.Description =
+    StreamsGroup.Description(List(StreamsGroup.DescribedSubtopology("0", List(StreamsGroup.DescribedNode("read", 1, List("input"), None, Nil, Nil)))))
+
+  /** The identity of a member that pushes `description`. */
+  val described: MemberIdentity = identity.copy(description = Some(description))
+
+  def member(coordinator: Coordinator, as: MemberIdentity = identity): Resource[IO, GroupMember[IO]] =
+    GroupMember(coordinator.connect, as, CloseTimeout)
 
   def uuids(left: Ref[IO, List[UUID]]): UUIDGen[IO] =
     new UUIDGen[IO]:
@@ -319,7 +404,8 @@ object GroupMemberSuite:
       error: Short = 0,
       active: Option[Set[TaskId]] = None,
       interval: Int = 5000,
-      offsetInterval: Int = 60000
+      offsetInterval: Int = 60000,
+      describe: Boolean = false
   ): StreamsGroupHeartbeatResponse =
     def wire(tasks: Set[TaskId]) =
       tasks.toList.sortBy(t => (t.subtopology, t.partition)).map(t => StreamsGroup.Tasks(t.subtopology, List(t.partition)))
@@ -338,7 +424,7 @@ object GroupMemberSuite:
       tasks.map(wire),
       tasks.map(_ => Nil),
       tasks.map(_ => Nil),
-      false,
+      describe,
       0,
       None
     )
@@ -348,7 +434,7 @@ object GroupMemberSuite:
     */
   final class Coordinator(
       script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
-      others: PartialFunction[(Int, Request[?]), IO[Any]],
+      others: [R] => (Int, Request[R]) => IO[R],
       log: Ref[IO, Vector[(Long, StreamsGroupHeartbeatRequest)]],
       made: Ref[IO, Vector[Request[?]]],
       counts: Ref[IO, (Int, Int)]
@@ -365,14 +451,15 @@ object GroupMemberSuite:
             request match
               case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
                   .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
-                  .map(_.asInstanceOf[R])
-              case other => made.modify(before => (before :+ other, before.size)).flatMap: n =>
-                  others.applyOrElse((n, other), _ => IO.raiseError(new AssertionError(s"unexpected request $other"))).map(_.asInstanceOf[R])
+              case other => made.modify(before => (before :+ other, before.size)).flatMap(others(_, other))
 
   object Coordinator:
+    /** A request the coordinator has no answer for, which fails the test. */
+    def unexpected[R](request: Request[R]): IO[R] = IO.raiseError(new AssertionError(s"unexpected request $request"))
+
     def apply(
         script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
-        others: PartialFunction[(Int, Request[?]), IO[Any]] = PartialFunction.empty
+        others: [R] => (Int, Request[R]) => IO[R] = [R] => (_: Int, request: Request[R]) => unexpected(request)
     ): IO[Coordinator] =
       (IO.ref(Vector.empty[(Long, StreamsGroupHeartbeatRequest)]), IO.ref(Vector.empty[Request[?]]), IO.ref((0, 0)))
         .mapN(new Coordinator(script, others, _, _, _))

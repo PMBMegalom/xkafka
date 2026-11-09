@@ -24,7 +24,8 @@ package streams
 
 import cats.Eq
 import cats.arrow.FunctionK
-import fs2.Stream
+import cats.tagless.InvariantK
+import fs2.{Chunk, Stream}
 
 /** A streams application running as one member of its group, until the resource that gave it is released. */
 trait KafkaStreams[F[_]]:
@@ -36,10 +37,25 @@ trait KafkaStreams[F[_]]:
   /** The application's state, first as it is and then each time it changes. */
   def state: Stream[F, StreamsState]
 
-  final def mapK[G[_]](fk: FunctionK[F, G]): KafkaStreams[G] =
+  /** Answers `query` from this member's stores where they hold what it needs, and otherwise from the members that do, asked through the application's
+    * [[Forward]]. With `allowStandby`, a standby copy may answer, which can be behind but is there while its task moves.
+    */
+  def query[A](query: Query[F, A], allowStandby: Boolean = false): F[Either[QueryProblem, A]]
+
+  /** The answer to a query another member forwarded here, as bytes to send back to it. */
+  def answer(request: Chunk[Byte]): F[Chunk[Byte]]
+
+  /** The application in `G`, its queries carried back with `gk`. */
+  final def imapK[G[_]](fk: FunctionK[F, G])(gk: FunctionK[G, F]): KafkaStreams[G] =
     new KafkaStreams[G]:
-      def run: G[Unit]                   = fk(self.run)
-      def state: Stream[G, StreamsState] = self.state.translate(fk)
+      def run: G[Unit]                                                                    = fk(self.run)
+      def state: Stream[G, StreamsState]                                                  = self.state.translate(fk)
+      def query[A](query: Query[G, A], allowStandby: Boolean): G[Either[QueryProblem, A]] = fk(self.query(query.mapK(gk), allowStandby))
+      def answer(request: Chunk[Byte]): G[Chunk[Byte]]                                    = fk(self.answer(request))
+
+object KafkaStreams:
+  given InvariantK[KafkaStreams] with
+    override def imapK[F[_], G[_]](streams: KafkaStreams[F])(fk: FunctionK[F, G])(gk: FunctionK[G, F]): KafkaStreams[G] = streams.imapK(fk)(gk)
 
 /** Where a streams application is, and what the group's coordinator reports wrong with the application as a whole. */
 final case class StreamsState(phase: StreamsPhase, problems: List[StreamsProblem])
@@ -85,6 +101,12 @@ enum StreamsProblem derives CanEqual:
 
   /** The application may not read or write some of its topics. */
   case TopicAuthorizationFailed(detail: String)
+
+  /** The application joins topics whose order xkafka cannot match exactly to a Java Streams application's, or joins inputs whose sub-topologies Java
+    * numbers by which input its program builds first, which xkafka takes to be the join's receiver; so the broker may refuse Java members of the same
+    * application. Members that all run xkafka are not affected. The detail names the topics.
+    */
+  case JavaMembersMayBeRefused(detail: String)
 
   /** A report this release does not know, by its code. */
   case Other(code: Int, detail: String)

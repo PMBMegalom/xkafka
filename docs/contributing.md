@@ -25,15 +25,7 @@ one, as CI does with each on a runner of its own:
 scripts/integration-test.sh native
 ```
 
-The streams engine's tests run separately, against a broker of each Kafka
-release it supports and beside a Java Kafka Streams application, as CI does in
-a job of their own:
-
-```sh
-scripts/integration-test.sh --streams
-```
-
-Three suites need it:
+The suites it runs include:
 
 - `KafkaIntegrationSuite` covers produce, consume, and commit round trips.
 - `KafkaConformanceSuite` asserts behaviour every backend is expected to share,
@@ -43,6 +35,14 @@ Three suites need it:
 A case listed as divergent in the conformance suite is marked as expected to
 fail on the named backends. Fixing the backend makes the marked case fail, so a
 marker cannot outlive the divergence it records.
+
+The streams engine's tests run separately, against a broker of each Kafka
+release it supports and beside a Java Kafka Streams application, as CI does in
+a job of their own:
+
+```sh
+scripts/integration-test.sh --streams
+```
 
 ## librdkafka for the Native build
 

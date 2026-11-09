@@ -3,9 +3,11 @@
 `ClientSettings` describes the connection. `ProducerSettings` and
 `ConsumerSettings` each build on it and add what their client needs.
 `TransactionalProducerSettings` wraps `ProducerSettings`, and is covered in
-[Transactions](transactions.md).
+[Transactions](transactions.md). `StreamsSettings` also builds on `ClientSettings`,
+and is [described below](#streams-settings).
 
 ```scala mdoc:compile-only
+// Validate the connection, then build producer settings on it
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -14,7 +16,7 @@ import xkafka.*
 val utf8 = Serializer.utf8[IO]
 
 val settings =
-  ClientSettings.from(NonEmptyList.one("localhost:9092")).andThen: client =>
+  ClientSettings.from(NonEmptyList.one("localhost:9092")).andThen: client =>  // Runs only if the connection settings are valid
     ProducerSettings.from(client, utf8, utf8)
 ```
 
@@ -27,6 +29,7 @@ can be constructed.
 `liftTo` carries the failure into the effect:
 
 ```scala mdoc:compile-only
+// Turn invalid values or settings into a failure of the effect
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -34,8 +37,8 @@ import xkafka.*
 
 val program =
   for
-    client <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
-    topic  <- Topic.from("events").liftTo[IO]
+    client <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]  // Fails with InvalidSettings
+    topic  <- Topic.from("events").liftTo[IO]                                     // Fails with InvalidValue
   yield (client, topic)
 ```
 
@@ -55,10 +58,11 @@ and the group membership intervals are limited by
 
 ## Properties
 
-Each settings type accepts an immutable `properties` map for backend
-configuration the portable model does not describe:
+Each settings type accepts an immutable `properties` map for Kafka client
+properties that have no typed setting:
 
 ```scala mdoc:compile-only
+// Pass Kafka properties that have no typed setting
 import cats.data.NonEmptyList
 import cats.effect.IO
 
@@ -69,14 +73,16 @@ val utf8 = Serializer.utf8[IO]
 val settings =
   ClientSettings.from(
     bootstrapServers = NonEmptyList.one("localhost:9092"),
-    properties = Map("client.rack" -> "eu-west-1a")
+    properties = Map("client.rack" -> "eu-west-1a")  // For everything built on this client
   ).andThen: client =>
+    // For this producer only, and overrides the client's
     ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 
-Producer or consumer properties override client properties. Names and values are
-interpreted by the selected backend, so portable applications should use only
-properties supported with the same meaning by each one.
+Producer or consumer properties override client properties. Each platform's client reads
+the names and values itself: the Java client on the JVM, and librdkafka on Scala.js
+and Scala Native. For code that runs on more than one platform, use only properties
+that both accept with the same meaning.
 
 ## Managed properties
 
@@ -85,12 +91,12 @@ settings, such as `bootstrap.servers`, `group.id`, `acks`, `linger.ms`, and the
 TLS and SASL names. Supplying one of them through the map is a `SettingsError`;
 use the typed setting instead.
 
-## Withers
+## Changing settings
 
 Each type has `with*` methods for deriving one value from another. Those that
 can invalidate the result, such as `withProperty`, return
 `ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
-duration wither: `withMetadataRefreshInterval`, `withCloseTimeout`,
+one that sets a duration: `withMetadataRefreshInterval`, `withCloseTimeout`,
 `withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
 `withRequestTimeout`, `withLinger`, `withEnqueueTimeout`, `withSessionTimeout`,
 `withHeartbeatInterval`, `withMaxPollInterval`, `withRebalanceSafeCommits`, and
@@ -141,6 +147,22 @@ Beyond the serializers, `ProducerSettings` carries:
 | `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 
 See [Producing](producing.md) for each of them.
+
+## Streams settings
+
+Beyond the client and the application's id, `StreamsSettings` carries:
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `guarantee` | `ProcessingGuarantee.AtLeastOnce` | whether a record can be processed again after work moves |
+| `commitInterval` | unset, which is 30s at least once and 100ms exactly once | how often tasks commit |
+| `concurrency` | 1 | how many tasks process records at once |
+| `closeTimeout` | 30s | how long releasing the application waits to give back its tasks and leave |
+| `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
+| `queryEndpoint` | unset, so other members cannot query this one | where this member answers other members' [queries](streams/queries.md) |
+| `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Keeping stores on disk](streams/running.md#keeping-stores-on-disk)) |
+
+See [Streams](streams/running.md#guarantees) for each of them.
 
 ## Client settings
 

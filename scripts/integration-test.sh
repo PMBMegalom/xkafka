@@ -15,6 +15,8 @@ fi
 
 if [[ "$streams" == true ]]; then
   suites='xkafka.internal.streams.GroupMemberBrokerSuite xkafka.internal.streams.RestoreSuite xkafka.internal.streams.EngineBrokerSuite xkafka.internal.streams.FleetBrokerSuite'
+  # Reads what the broker keeps back through Java's admin client, which only the JVM has.
+  jvm_suites="$suites xkafka.internal.streams.DescriptionBrokerSuite"
 else
   suites='xkafka.KafkaIntegrationSuite xkafka.KafkaConformanceSuite xkafka.KafkaSecuritySuite xkafka.PartitionPausingSuite xkafka.KafkaClusterSuite xkafka.StreamsDriverSuite xkafka.internal.group.GroupSocketSuite xkafka.internal.group.GroupConnectionSuite'
 fi
@@ -34,7 +36,9 @@ if [[ "$streams" == true ]]; then
 fi
 for backend in "${backends[@]}"; do
   case "$backend" in
-    jvm)    commands+=("clientJVM/Test/testOnly $suites") ;;
+    jvm)    commands+=("clientJVM/Test/testOnly ${jvm_suites:-$suites}")
+            # Java processors run through xkafka, against a broker, on the JVM alone.
+            if [[ "$streams" == true ]]; then commands+=("streamsJava/Test/testOnly xkafka.streams.interop.ProcessorFromJavaBrokerSuite xkafka.streams.interop.JavaQueriesBrokerSuite"); fi ;;
     js)     commands+=("clientJS/Test/testOnly $suites") ;;
     native) commands+=("clientNative/Test/testOnly $suites") ;;
   esac

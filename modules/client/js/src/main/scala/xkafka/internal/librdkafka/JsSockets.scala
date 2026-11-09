@@ -99,7 +99,7 @@ private[xkafka] object JsSockets:
   private def background[F[_]](function: Shim => js.Dynamic)(arguments: js.Any*)(using F: Async[F]): F[Unit] =
     shim.flatMap: loaded =>
       F.async_[Unit]: callback =>
-        val token   = Completions.expect(() => callback(Right(())))
+        val token   = Completions.expect(arguments)(() => callback(Right(())))
         val started = function(loaded)((arguments ++ Seq[js.Any](Completions.done, js.BigInt(token.toString)))*)
         if started.asInstanceOf[Int] != 0 then
           Completions.forget(token)

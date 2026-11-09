@@ -28,7 +28,7 @@ import scala.scalajs.js.typedarray.ArrayBuffer
 /** The parts of koffi the bindings use. Functions are declared from C prototypes and called dynamically, so they are left untyped here. */
 @js.native
 @JSImport("koffi", JSImport.Default)
-private[librdkafka] object Koffi extends js.Object:
+private[internal] object Koffi extends js.Object:
   def load(path: String): KoffiLibrary = js.native
 
   /** Declares a function type from its C prototype, so later prototypes can name it. */
@@ -40,10 +40,13 @@ private[librdkafka] object Koffi extends js.Object:
   /** The value at `pointer`, read as `type`. A pointer reads back as its address. */
   def decode(pointer: js.Any, `type`: String): js.Any = js.native
 
+  /** `length` values of `type` at `pointer`; a length of -1 reads a `char` string up to its terminating zero. */
+  def decode(pointer: js.Any, `type`: String, length: Int): js.Any = js.native
+
   /** A view of native memory without copying it, valid only while the memory is. */
   def view(pointer: js.Any, length: Double): ArrayBuffer = js.native
 
 @js.native
-private[librdkafka] trait KoffiLibrary extends js.Object:
+private[internal] trait KoffiLibrary extends js.Object:
   /** A function from its C prototype, which runs on the calling thread. */
   def func(prototype: String): js.Dynamic = js.native

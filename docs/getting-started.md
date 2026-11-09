@@ -3,6 +3,7 @@
 ## Dependency
 
 ```scala
+// Add xkafka to your build; %%% picks the artifact for your platform
 libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % "@VERSION@"
 ```
 
@@ -12,12 +13,14 @@ each one runs on its platform's Kafka client.
 
 Two modules are published:
 
-- `xkafka-kernel` holds the data types and the producer, consumer, and
-  administration interfaces, with no backend.
-- `xkafka-client` holds `KafkaClient` and the three backends, and depends on the
-  kernel.
+- `xkafka-kernel` holds the data types, the producer, consumer, and
+  administration interfaces, and the streams DSL, and connects to nothing itself.
+- `xkafka-client` holds `KafkaClient`, which connects to Kafka on each platform,
+  and depends on the kernel.
 
-Most applications need `xkafka-client` alone.
+Most applications need `xkafka-client` alone. On the JVM, `xkafka-streams-java` lets
+streams programs use code written for Java Kafka Streams, such as its partitioners;
+it depends on Java Kafka Streams itself.
 
 ## Versioning
 
@@ -40,6 +43,7 @@ warns about it.
 ## Constructing a client
 
 ```scala mdoc:compile-only
+// Construct the client, in the same way on every platform
 import cats.effect.IO
 
 import xkafka.*
@@ -52,23 +56,23 @@ described below.
 
 ## Scala.js
 
-The backend is librdkafka, the same release Scala Native uses, and it runs on
+xkafka uses librdkafka here, the same release as on Scala Native, and runs on
 Node.js 24. It comes from npm as `@xkafka/librdkafka`, which brings a prebuilt
 library for the platform it runs on. sbt-scalajs-bundler installs it, so enable
 that plugin in the Scala.js project:
 
 ```scala
-// project/plugins.sbt
+// In project/plugins.sbt: add the plugin that installs the npm package
 addSbtPlugin("ch.epfl.scala" % "sbt-scalajs-bundler" % "0.21.1")
 ```
 
 ```scala
-// build.sbt
+// In build.sbt: enable that plugin for the Scala.js project
 .jsConfigure(_.enablePlugins(ScalaJSBundlerPlugin))
 ```
 
 ## Scala Native
 
-The backend is librdkafka, which must be installed where the application's
+xkafka uses librdkafka here, which must be installed where the application's
 compiler and linker can find it. See [Platform notes](platform-notes.md) for the linking recipes,
 including the flags a static link requires.

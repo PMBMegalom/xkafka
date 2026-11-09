@@ -14,6 +14,7 @@ The `.option` combinator represents Kafka null keys and values explicitly as
 `None`:
 
 ```scala mdoc:compile-only
+// Codecs that read and write a Kafka null as None
 import cats.effect.IO
 
 import xkafka.*
@@ -24,39 +25,37 @@ val value = Deserializer.utf8[IO].option
 
 A tombstone is a record whose value is `None`.
 
-## Header values
+## Codecs written for Java (JVM only)
 
-A header value is bytes. `HeaderSerializer` and `HeaderDeserializer` encode and
-decode them, so a call site does not have to name a charset or a byte order:
+On the JVM, a serializer, deserializer or streams serde written for Kafka's Java
+client can be turned into xkafka's, and used wherever xkafka takes one:
 
 ```scala mdoc:compile-only
+// Make xkafka codecs from Java's: one for a producer, one for a consumer, and one for a streams program
+import cats.effect.IO
+import org.apache.kafka.common.serialization.{Serdes, StringDeserializer, StringSerializer}
+
 import xkafka.*
+import xkafka.interop.*                                                 // Adds fromJava, on the JVM only
 
-val headers = Headers.empty.append("trace", "abc").append("attempt", 2)
-
-val trace = headers.values.head.as[String]
+val write = Serializer.fromJava[IO](new StringSerializer)               // Writes values as Java's StringSerializer does
+val read  = Deserializer.fromJava[IO](new StringDeserializer).option    // Reads them back, with None for a record without a value
+val serde = xkafka.streams.Serde.fromJava[IO](Serdes.String())          // Both at once, as a streams program takes them
 ```
 
-| type | encoding |
-| --- | --- |
-| `String` | UTF-8 |
-| `Int` | four bytes, most significant first |
-| `Long` | eight bytes, most significant first |
-| `Chunk[Byte]` | the bytes themselves |
+- The Java codec is given each record's topic and headers, as it is in Java.
+- Configure it before you pass it in, and close it once nothing uses it: xkafka calls
+  neither `configure` nor `close`.
+- Headers a Java serializer adds are not written: it is given a copy of the record's
+  headers. Configure a serializer that can write headers of its own not to.
+- A record without a value fails a plain deserializer, as it does for xkafka's own;
+  read with `.option` to get `None` for it. If the Java deserializer returns `null`
+  for a value, the record fails with `JavaNullValueException`.
+- Whatever the Java codec throws fails the effect it runs in.
 
-Reading returns `Either[ValidationError, A]`. A header with no value fails as
-`MissingHeaderValue`, and a numeric value of the wrong width fails as
-`InvalidHeaderLength` rather than being truncated.
+## Headers
 
-Kafka permits a header to have no value, represented as `Header(name, None)`.
-Every backend preserves it, and `Header(name, Some(Chunk.empty))` stays a
-distinct empty value.
-
-`contramap` and `map` adapt a codec to another type, and `emap` rejects values
-the bytes can carry but the type cannot.
-
-Header codecs are plain functions, not effects. A header value is already in
-memory by the time one is applied.
+A record's headers have codecs of their own. See [Headers](headers.md).
 
 ## Instances
 

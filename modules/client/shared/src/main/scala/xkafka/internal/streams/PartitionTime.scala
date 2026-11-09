@@ -23,6 +23,10 @@ package xkafka
 package internal
 package streams
 
+import java.nio.charset.StandardCharsets.UTF_8
+
+import scala.util.Try
+
 import scodec.bits.ByteVector
 
 /** The partition time a task keeps in its committed offsets' metadata, the largest record timestamp it has processed on the partition, written as
@@ -32,8 +36,36 @@ private[xkafka] object PartitionTime:
   private val Version: Byte      = 2
   private val FirstVersion: Byte = 1
 
-  /** The metadata for `time`, with no processor metadata: only windowed aggregations that emit final results write any. */
-  def encode(time: Long): String = (ByteVector(Version) ++ ByteVector.fromLong(time)).toBase64
+  /** The metadata for `time`, with the processor metadata `processors`, by name, which only windowed aggregations that emit final results write: the
+    * number of entries, then each name's length, the name in UTF-8 and its value. Java writes none at all for no entries.
+    */
+  def encode(time: Long, processors: Map[String, Long] = Map.empty): String =
+    val entries =
+      processors.toList.sortBy(_._1).map: (name, value) =>
+        val bytes = ByteVector(name.getBytes(UTF_8))
+        ByteVector.fromInt(bytes.size.toInt) ++ bytes ++ ByteVector.fromLong(value)
+    val meta = if processors.isEmpty then ByteVector.empty else ByteVector.fromInt(processors.size) ++ entries.foldLeft(ByteVector.empty)(_ ++ _)
+    (ByteVector(Version) ++ ByteVector.fromLong(time) ++ meta).toBase64
+
+  /** The processor metadata of a task's partitions, each committed with its own: the largest value of each name, as Java's `ProcessorMetadata.update`
+    * merges them.
+    */
+  def merged(metadata: List[String]): Map[String, Long] = metadata.flatMap(processors).groupMapReduce(_._1)(_._2)(math.max)
+
+  /** The processor metadata in version 2 metadata, by name, or none where there is none or it cannot be read, as Java reads it then. */
+  def processors(metadata: String): Map[String, Long] =
+    ByteVector.fromBase64(metadata).filter(bytes => bytes.size > 9 && bytes(0) == Version).flatMap: bytes =>
+      Try:
+        val meta  = bytes.drop(9).toByteBuffer
+        val count = meta.getInt
+        Map.from(
+          List.fill(count):
+            val name = new Array[Byte](meta.getInt)
+            meta.get(name)
+            String(name, UTF_8) -> meta.getLong
+        )
+      .toOption
+    .getOrElse(Map.empty)
 
   /** The time in metadata Java or this engine wrote, or none where there is none or it cannot be read, which Java also takes as an unknown time. A
     * version 2 entry's processor metadata, after the time, is skipped.
