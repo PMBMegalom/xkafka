@@ -89,6 +89,8 @@ run() {
   wait "$pid" || { cat "$log"; return 1; }
   cat "$log"
   for child in $children; do
+    # leaks stops the harness as it exits to read its memory, and on some Macs leaves it stopped once it has, so it is let go on.
+    kill -CONT "$child" 2>/dev/null || true
     waited=0
     while kill -0 "$child" 2>/dev/null && (( waited < 10 )); do
       sleep 1
