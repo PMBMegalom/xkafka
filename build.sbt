@@ -96,14 +96,28 @@ val installNativeDependencies = WorkflowStep.Run(
 )
 
 // The JavaScript backend's library takes minutes to build, mostly compiling OpenSSL, so the librdkafka build behind it is kept between runs.
+// Only what linking the library and packaging it read is kept: the whole build is gigabytes, which pushes the repository's caches out.
 // The cache action takes its paths as one string, a path per line.
 def cacheLibrdkafkaLibrary = Def.setting {
-  val builds = Seq((client.js / librdkafkaLibraryBuild).value, (client.js / librdkafkaMuslBuild).value)
+  val built = Seq(
+    ".librdkafka-static-built",
+    "source/src/librdkafka-static.a",
+    "source/src/rdkafka.h",
+    "source/src/rdkafka_mock.h",
+    "source/mklove/deps/dest/usr/include"
+  )
+  val licenses = Seq(
+    "source/LICENSES.txt",
+    "source/mklove/deps/src/libcrypto/LICENSE.txt",
+    "source/mklove/deps/src/libzstd/LICENSE",
+    "source/mklove/deps/src/zlib/LICENSE"
+  )
+  val paths = (built ++ licenses).map((client.js / librdkafkaLibraryBuild).value / _) ++ built.map((client.js / librdkafkaMuslBuild).value / _)
   WorkflowStep.Use(
     UseRef.Public("actions", "cache", "v6"),
     name = Some("Cache the librdkafka library build"),
     params = Map(
-      "path" -> builds.map(repositoryPath).mkString("\n"),
+      "path" -> paths.map(repositoryPath).mkString("\n"),
       "key"  -> "librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}"
     )
   )
@@ -338,7 +352,8 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   javas = List(JavaSpec.temurin("17")),
   matrixAdds = Map("platform" -> List("jvm", "js", "native")),
   matrixFailFast = Some(true),
-  timeoutMinutes = Some(60)
+  // The JavaScript tests take about 50 minutes, and building the librdkafka library when the cache has none adds over 15.
+  timeoutMinutes = Some(75)
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
