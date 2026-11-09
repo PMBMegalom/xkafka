@@ -65,7 +65,7 @@ stacks() {
 # leaks answers for the leaks it found and not for how the program exited, so on macOS the harness's
 # report of its own checks is what tells whether they passed.
 run() {
-  local directory log pid waited=0
+  local directory log pid child children="" waited=0
   directory="$(mktemp -d "$output/store.XXXXXX")"
   log="$directory.log"
   case "$platform" in
@@ -73,6 +73,8 @@ run() {
     Linux)  "$harness" "$@" "$directory" > "$log" 2>&1 & pid=$! ;;
   esac
   while kill -0 "$pid" 2>/dev/null; do
+    # The harness leaks started, which must end with it.
+    children="$(pgrep -P "$pid" -f "$harness" || echo "$children")"
     if (( waited >= limit )); then
       cat "$log"
       echo "the harness was still running after $limit seconds; the stacks of its threads follow" >&2
@@ -86,6 +88,19 @@ run() {
   done
   wait "$pid" || { cat "$log"; return 1; }
   cat "$log"
+  for child in $children; do
+    waited=0
+    while kill -0 "$child" 2>/dev/null && (( waited < 10 )); do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$child" 2>/dev/null; then
+      echo "the harness was still running 10 seconds after leaks ended; the stacks of its threads follow" >&2
+      stacks "$child"
+      kill -9 "$child" || true
+      return 1
+    fi
+  done
   grep -q "every check passed" "$log"
 }
 
