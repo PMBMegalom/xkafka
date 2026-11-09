@@ -772,10 +772,11 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     // supports has one, so the script is declined.
     Compile / additionalNpmConfig += "allowScripts" -> scalajsbundler.util.JSON.obj(s"koffi@$koffiVersion" -> scalajsbundler.util.JSON.bool(false)),
     Test / additionalNpmConfig                      := (Compile / additionalNpmConfig).value,
-    librdkafkaLibraryBuild                          := target.value / "librdkafka-shared-build",
-    librdkafkaMuslBuild                             := target.value / "librdkafka-musl-build",
-    npmLibrdkafkaPackages                           := target.value / "npm",
-    npmLibrdkafkaLocal                              := npmLibrdkafkaPackages.value / "local" / librdkafkaShimId / "librdkafka",
+    // The build script reuses a build it finds, so each librdkafka release is built in a directory of its own.
+    librdkafkaLibraryBuild := target.value / s"librdkafka-shared-build-$librdkafkaVersion",
+    librdkafkaMuslBuild    := target.value / s"librdkafka-musl-build-$librdkafkaVersion",
+    npmLibrdkafkaPackages  := target.value / "npm",
+    npmLibrdkafkaLocal     := npmLibrdkafkaPackages.value / "local" / librdkafkaShimId / "librdkafka",
     // Built the way the published library is: librdkafka's own build compiles OpenSSL, zlib and zstd from source and links them in statically,
     // and the library exports only the shim's functions, so none of them can clash with the OpenSSL that Node itself carries.
     sharedLibrdkafka := {

@@ -85,20 +85,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            modules/client/js/target/librdkafka-shared-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-shared-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/dest/usr/include
-            modules/client/js/target/librdkafka-shared-build/source/LICENSES.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libcrypto/LICENSE.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libzstd/LICENSE
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/zlib/LICENSE
-            modules/client/js/target/librdkafka-musl-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-musl-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-musl-build/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/LICENSES.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libcrypto/LICENSE.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libzstd/LICENSE
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/zlib/LICENSE
+            modules/client/js/target/librdkafka-musl-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/mklove/deps/dest/usr/include
           key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Cache the rocksdbjni jar
@@ -340,20 +340,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            modules/client/js/target/librdkafka-shared-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-shared-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/dest/usr/include
-            modules/client/js/target/librdkafka-shared-build/source/LICENSES.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libcrypto/LICENSE.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libzstd/LICENSE
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/zlib/LICENSE
-            modules/client/js/target/librdkafka-musl-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-musl-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-musl-build/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/LICENSES.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libcrypto/LICENSE.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libzstd/LICENSE
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/zlib/LICENSE
+            modules/client/js/target/librdkafka-musl-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/mklove/deps/dest/usr/include
           key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Build this platform's library and load it through its npm package
@@ -457,20 +457,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            modules/client/js/target/librdkafka-shared-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-shared-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/dest/usr/include
-            modules/client/js/target/librdkafka-shared-build/source/LICENSES.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libcrypto/LICENSE.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libzstd/LICENSE
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/zlib/LICENSE
-            modules/client/js/target/librdkafka-musl-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-musl-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-musl-build/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/LICENSES.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libcrypto/LICENSE.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libzstd/LICENSE
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/zlib/LICENSE
+            modules/client/js/target/librdkafka-musl-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/mklove/deps/dest/usr/include
           key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Cache the rocksdbjni jar
@@ -594,20 +594,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            modules/client/js/target/librdkafka-shared-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-shared-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/dest/usr/include
-            modules/client/js/target/librdkafka-shared-build/source/LICENSES.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libcrypto/LICENSE.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libzstd/LICENSE
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/zlib/LICENSE
-            modules/client/js/target/librdkafka-musl-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-musl-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-musl-build/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/LICENSES.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libcrypto/LICENSE.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libzstd/LICENSE
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/zlib/LICENSE
+            modules/client/js/target/librdkafka-musl-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/mklove/deps/dest/usr/include
           key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Cache the rocksdbjni jar
@@ -677,20 +677,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            modules/client/js/target/librdkafka-shared-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-shared-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/dest/usr/include
-            modules/client/js/target/librdkafka-shared-build/source/LICENSES.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libcrypto/LICENSE.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libzstd/LICENSE
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/zlib/LICENSE
-            modules/client/js/target/librdkafka-musl-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-musl-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-musl-build/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/LICENSES.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libcrypto/LICENSE.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libzstd/LICENSE
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/zlib/LICENSE
+            modules/client/js/target/librdkafka-musl-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/mklove/deps/dest/usr/include
           key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Cache the rocksdbjni jar
@@ -793,20 +793,20 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            modules/client/js/target/librdkafka-shared-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-shared-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-shared-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/dest/usr/include
-            modules/client/js/target/librdkafka-shared-build/source/LICENSES.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libcrypto/LICENSE.txt
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/libzstd/LICENSE
-            modules/client/js/target/librdkafka-shared-build/source/mklove/deps/src/zlib/LICENSE
-            modules/client/js/target/librdkafka-musl-build/.librdkafka-static-built
-            modules/client/js/target/librdkafka-musl-build/source/src/librdkafka-static.a
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka.h
-            modules/client/js/target/librdkafka-musl-build/source/src/rdkafka_mock.h
-            modules/client/js/target/librdkafka-musl-build/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/dest/usr/include
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/LICENSES.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libcrypto/LICENSE.txt
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/libzstd/LICENSE
+            modules/client/js/target/librdkafka-shared-build-2.16.0/source/mklove/deps/src/zlib/LICENSE
+            modules/client/js/target/librdkafka-musl-build-2.16.0/.librdkafka-static-built
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/librdkafka-static.a
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/src/rdkafka_mock.h
+            modules/client/js/target/librdkafka-musl-build-2.16.0/source/mklove/deps/dest/usr/include
           key: librdkafka-library-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-librdkafka-library.sh', 'build.sbt') }}
 
       - name: Check the Scala.js library's asynchronous calls for leaks
