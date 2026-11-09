@@ -32,6 +32,7 @@ case "$platform" in
   Linux)  compiler=clang; sanitizer="-fsanitize=leak" ;;
   *)      echo "no leak checker configured for $platform" >&2; exit 2 ;;
 esac
+export LSAN_OPTIONS="suppressions=$script_dir/rocksdb-shim-test.lsan:print_suppressions=1${LSAN_OPTIONS:+:$LSAN_OPTIONS}"
 
 rm -rf "$output"
 mkdir -p "$output"
