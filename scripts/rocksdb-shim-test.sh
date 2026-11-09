@@ -25,16 +25,18 @@ output="$project_dir/target/rocksdb-shim-test"
 harness="$output/rocksdb-shim-test"
 platform="$(uname -s)"
 
+# GCC's LeakSanitizer is a shared library, which on x86_64 recurses without end through its own thread-local cache
+# once loading RocksDB grows the thread-local tables; clang links its LeakSanitizer into the program instead.
 case "$platform" in
-  Darwin) sanitizer="" ;;
-  Linux)  sanitizer="-fsanitize=leak" ;;
+  Darwin) compiler=cc;    sanitizer="" ;;
+  Linux)  compiler=clang; sanitizer="-fsanitize=leak" ;;
   *)      echo "no leak checker configured for $platform" >&2; exit 2 ;;
 esac
 
 rm -rf "$output"
 mkdir -p "$output"
 # shellcheck disable=SC2086
-cc -std=gnu11 -g -Wall -Wextra -Werror $sanitizer -o "$harness" "$script_dir/rocksdb-shim-test.c" "$shim" \
+"$compiler" -std=gnu11 -g -Wall -Wextra -Werror $sanitizer -o "$harness" "$script_dir/rocksdb-shim-test.c" "$shim" \
   -Wl,-rpath,"$(dirname "$shim")" -lpthread
 
 # A run takes seconds; one still going after this many is stuck, and its threads' stacks show where.
