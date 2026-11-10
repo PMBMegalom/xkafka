@@ -775,7 +775,6 @@ lazy val schemaRegistry = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 
 // The registry is reached through an HTTP client the application chooses; this module adapts http4s's.
 lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
-  .crossType(CrossType.Pure)
   .in(file("modules/schema-registry-http4s"))
   .dependsOn(schemaRegistry)
   .settings(commonSettings)
@@ -786,10 +785,7 @@ lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlat
   )
   // The broker tests reach a Confluent registry through Ember, which on Native needs s2n-tls, a library Ubuntu does not package, so they run on
   // the JVM and JavaScript.
-  .platformsSettings(JVMPlatform, JSPlatform)(
-    libraryDependencies += "org.http4s" %%% "http4s-ember-client" % http4sVersion % Test,
-    Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "jvm-js" / "src" / "test" / "scala"
-  )
+  .platformsSettings(JVMPlatform, JSPlatform)(libraryDependencies += "org.http4s" %%% "http4s-ember-client" % http4sVersion % Test)
   // Ember imports Node's own modules.
   .jsSettings(scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule)))
 

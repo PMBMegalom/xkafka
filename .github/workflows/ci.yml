@@ -136,11 +136,11 @@ jobs:
 
       - name: Make target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-        run: mkdir -p modules/schema-registry-http4s/.js/target modules/client/native/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/kernel/.js/target modules/streams-java/target modules/schema-registry-http4s/.native/target modules/kernel/.native/target modules/schema-registry-http4s/.jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target project/target
+        run: mkdir -p modules/schema-registry-http4s/js/target modules/client/native/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/kernel/.js/target modules/streams-java/target modules/schema-registry-http4s/native/target modules/kernel/.native/target modules/schema-registry-http4s/jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target project/target
 
       - name: Compress target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-        run: tar cf targets.tar modules/schema-registry-http4s/.js/target modules/client/native/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/kernel/.js/target modules/streams-java/target modules/schema-registry-http4s/.native/target modules/kernel/.native/target modules/schema-registry-http4s/.jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target project/target
+        run: tar cf targets.tar modules/schema-registry-http4s/js/target modules/client/native/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/kernel/.js/target modules/streams-java/target modules/schema-registry-http4s/native/target modules/kernel/.native/target modules/schema-registry-http4s/jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target project/target
 
       - name: Upload target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
