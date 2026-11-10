@@ -15,6 +15,11 @@ partitioned_topic="xkafka-partitioned"
 cluster_name="xkafka-cluster-$$"
 cluster_ports=("${XKAFKA_CLUSTER_PORT_1:-19096}" "${XKAFKA_CLUSTER_PORT_2:-19097}" "${XKAFKA_CLUSTER_PORT_3:-19098}")
 election_topic="xkafka-election"
+# A Confluent schema registry beside the cluster, keeping its schemas on the main broker. It shares the broker's network, so it reaches the
+# broker on the broker's own listener, and the broker publishes its port.
+registry_name="xkafka-registry-$$"
+registry_port="${XKAFKA_SCHEMA_REGISTRY_PORT:-18081}"
+registry_image="confluentinc/cp-schema-registry:8.4.1"
 # Brokers of the oldest and newest releases xkafka's streams groups support, beside the main broker's, for the streams group tests.
 streams_name="xkafka-streams-$$"
 streams_releases=(4.2.2 4.4.0)
@@ -52,6 +57,11 @@ cleanup() {
     docker logs "$container_name" >"$logs_dir/broker.log" 2>&1 || true
     docker logs --tail 200 "$container_name" || true
   fi
+  if [[ "$status" -ne 0 ]]; then
+    docker logs "$registry_name" >"$logs_dir/registry.log" 2>&1 || true
+    docker logs --tail 50 "$registry_name" || true
+  fi
+  docker rm --force --volumes "$registry_name" >/dev/null 2>&1 || true
   docker rm --force --volumes "$container_name" >/dev/null 2>&1 || true
   for node in 1 2 3; do
     if [[ "$status" -ne 0 ]]; then
@@ -129,6 +139,7 @@ docker run --detach --rm \
   --publish "127.0.0.1:$sasl_port:9094" \
   --publish "127.0.0.1:$mtls_port:9095" \
   --publish "127.0.0.1:$wrong_name_port:9099" \
+  --publish "127.0.0.1:$registry_port:8081" \
   --volume "$secrets_dir:/etc/kafka/secrets:ro" \
   --health-cmd "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1" \
   --health-interval 2s \
@@ -260,6 +271,26 @@ if [[ "$streams" == false ]]; then
   for node in 1 2 3; do
     await_healthy "$cluster_name-$node"
   done
+  docker run --detach --rm \
+    --name "$registry_name" \
+    --network "container:$container_name" \
+    --env SCHEMA_REGISTRY_HOST_NAME=localhost \
+    --env SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081 \
+    --env SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=PLAINTEXT://localhost:19092 \
+    "$registry_image" >/dev/null
+  # The registry answers once it has read its schemas topic, which it creates on the broker first.
+  registry_ready=false
+  for _ in $(seq 1 60); do
+    if curl --silent --fail "http://127.0.0.1:$registry_port/subjects" >/dev/null; then
+      registry_ready=true
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$registry_ready" != true ]]; then
+    docker logs "$registry_name"
+    exit 1
+  fi
 else
   for release in "${streams_releases[@]}"; do
     await_healthy "$streams_name-$release"
@@ -309,6 +340,9 @@ else
 fi
 
 export XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS="127.0.0.1:$host_port"
+if [[ "$streams" == false ]]; then
+  export XKAFKA_SCHEMA_REGISTRY_URL="http://127.0.0.1:$registry_port"
+fi
 export XKAFKA_INTEGRATION_PARTITIONED_TOPIC="$partitioned_topic"
 export XKAFKA_SECURITY_TLS_BOOTSTRAP_SERVERS="127.0.0.1:$tls_port"
 export XKAFKA_SECURITY_SASL_BOOTSTRAP_SERVERS="127.0.0.1:$sasl_port"
