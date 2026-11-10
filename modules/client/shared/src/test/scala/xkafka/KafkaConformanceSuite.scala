@@ -94,6 +94,10 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       val stamp = Timestamp.fromEpochMillis(1700000000000L)
 
       for
+        client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
+        // The record is stamped years ago, so a topic that keeps a week of records would drop it when the broker next checks retention.
+        newTopic <- NewTopic.from(topic, 1, 1, Map("retention.ms" -> "-1")).liftTo[IO]
+        _        <- PlatformKafkaClient().admin(client).use(admin => admin.createTopics(NonEmptySet.one(newTopic)) *> described(admin, topic, 1))
         _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), validPartition(0)).copy(timestamp = Some(stamp))))
         consumed <- consume(server, topic, 1)
       yield assertEquals(consumed.map(_.record.timestamp), List(Some(RecordTimestamp.CreateTime(stamp))))
