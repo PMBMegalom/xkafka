@@ -32,6 +32,7 @@ val catsTaglessVersion     = "0.16.5"
 val fs2Version             = "3.14.0"
 val circeVersion           = "0.14.17"
 val http4sVersion          = "0.23.38"
+val apacheAvroVersion      = "1.12.2"
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
 val lz4JavaVersion         = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
@@ -789,6 +790,17 @@ lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlat
   // Ember imports Node's own modules.
   .jsSettings(scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule)))
 
+lazy val avro = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .in(file("modules/avro"))
+  .dependsOn(schemaRegistry)
+  .settings(commonSettings)
+  .settings(
+    name        := "xkafka-avro",
+    description := "Avro schemas and codecs, derived from Scala types, for xkafka"
+  )
+  // Apache Avro, which xkafka's encoding and schema resolution are checked against, runs on the JVM alone.
+  .jvmSettings(libraryDependencies += "org.apache.avro" % "avro" % apacheAvroVersion % Test)
+
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/client"))
   .enablePlugins(BuildInfoPlugin)
@@ -1106,4 +1118,4 @@ lazy val docs = project
     )
   )
 
-lazy val root = tlCrossRootProject.aggregate(kernel, client, schemaRegistry, schemaRegistryHttp4s, streamsJava).settings(name := "xkafka")
+lazy val root = tlCrossRootProject.aggregate(kernel, client, schemaRegistry, schemaRegistryHttp4s, avro, streamsJava).settings(name := "xkafka")
