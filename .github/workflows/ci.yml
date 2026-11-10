@@ -148,6 +148,7 @@ jobs:
         with:
           name: target-${{ matrix.os }}-${{ matrix.java }}-${{ matrix.scala }}-${{ matrix.project }}
           path: targets.tar
+          retention-days: 7
 
   publish:
     name: Publish Artifacts
@@ -368,6 +369,7 @@ jobs:
         with:
           name: npm-librdkafka-${{ matrix.os }}
           path: modules/client/js/target/npm/librdkafka*
+          retention-days: 7
 
   npm-publish:
     name: Publish the prebuilt librdkafka libraries
@@ -498,6 +500,7 @@ jobs:
         with:
           name: npm-rocksdb-${{ matrix.os }}
           path: modules/client/js/target/npm/rocksdb*
+          retention-days: 7
 
   npm-publish-rocksdb:
     name: Publish the prebuilt RocksDB shims
@@ -623,6 +626,7 @@ jobs:
         with:
           name: broker-logs-${{ matrix.platform }}
           path: target/broker-logs
+          retention-days: 7
 
   streams-integration:
     name: Streams broker tests
@@ -706,6 +710,7 @@ jobs:
         with:
           name: streams-broker-logs-${{ matrix.platform }}
           path: target/broker-logs
+          retention-days: 7
 
   native-leaks:
     name: Native leak check
