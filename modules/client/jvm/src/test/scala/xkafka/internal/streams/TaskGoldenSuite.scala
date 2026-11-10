@@ -38,7 +38,8 @@ import org.apache.kafka.streams.{KeyValue, StreamsBuilder, StreamsConfig, Topolo
 import org.apache.kafka.streams.kstream.{Grouped, Materialized, Produced}
 import org.apache.kafka.streams.state.KeyValueStore
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{KStream, Named, Pipeline, Repartition, Serde, Store, Topology}
+import xkafka.Serde
+import xkafka.streams.{KStream, Named, Pipeline, Repartition, Store, Topology}
 
 /** What a task writes and keeps for a program, against what Java Streams' `TopologyTestDriver` writes and keeps for the same program and records,
   * with Java's record cache off so that it, too, passes on every change.

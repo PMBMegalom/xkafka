@@ -184,7 +184,7 @@ final class ForeignKeySuite extends CatsEffectSuite:
         .windowedBy(TimeWindows.tumbling(1.minute, grace = 1.second)).count(Named("counted"), Store("counts"))
     val onLeft = windowed.joinOnForeignKey(Named("fk"), users, Serde.long[IO], text, text)((_, _) => Some("a"))((_, r) => r)
     assertEquals(
-      Topology.of(onLeft.toStream(Named("changes")).to(Named("write"), out, Serde.timeWindowed(text, 1.minute), text.option)).left.toOption
+      Topology.of(onLeft.toStream(Named("changes")).to(Named("write"), out, Windowed.timeSerde(text, 1.minute), text.option)).left.toOption
         .map(_.toList.contains(TopologyError.WindowedJoin)),
       Some(true)
     )

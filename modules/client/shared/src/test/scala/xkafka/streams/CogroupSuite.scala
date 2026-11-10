@@ -109,7 +109,7 @@ final class CogroupSuite extends CatsEffectSuite:
     assertEquals(
       refused(
         two.windowedBy(negative).aggregate(Named("co"), Store("kept"), text)("s").toStream(Named("c"))
-          .to(Named("w"), topic("out"), Serde.timeWindowed(text, 1.second), text)
+          .to(Named("w"), topic("out"), Windowed.timeSerde(text, 1.second), text)
       ).size,
       1
     )
@@ -117,7 +117,7 @@ final class CogroupSuite extends CatsEffectSuite:
     assertEquals(
       refused(
         short.aggregate(Named("co"), Store("kept"), text)("s").toStream(Named("c"))
-          .to(Named("w"), topic("out"), Serde.timeWindowed(text, 10.seconds), text)
+          .to(Named("w"), topic("out"), Windowed.timeSerde(text, 10.seconds), text)
       ).size,
       1
     )
@@ -125,7 +125,7 @@ final class CogroupSuite extends CatsEffectSuite:
     assertEquals(
       refused(
         shortSession.aggregate(Named("co"), Store("kept"), text)("s")((_, x, y) => x + y).toStream(Named("c"))
-          .to(Named("w"), topic("out"), Serde.sessionWindowed(text), text.option)
+          .to(Named("w"), topic("out"), Windowed.sessionSerde(text), text.option)
       ).size,
       1
     )

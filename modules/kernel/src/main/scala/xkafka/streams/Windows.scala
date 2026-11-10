@@ -19,9 +19,16 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package xkafka.streams
+package xkafka
+package streams
+
+import java.nio.ByteBuffer
 
 import scala.concurrent.duration.FiniteDuration
+
+import cats.MonadThrow
+import cats.syntax.all.*
+import fs2.Chunk
 
 /** A span of time in epoch milliseconds from `start`, included, to `end`: excluded for a time window, included for a sliding window and a session, as
   * in Java Kafka Streams.
@@ -30,6 +37,63 @@ final case class Window(start: Long, end: Long)
 
 /** A key and the window its value covers. */
 final case class Windowed[K](key: K, window: Window)
+
+object Windowed:
+  /** A windowed key as Java's `TimeWindowedSerializer` writes it: the key as `key` writes it, then its window's start as eight big-endian bytes.
+    * Reading it back takes the windows' `size`, from which the window's end follows, as Java's deserializer is told the size.
+    */
+  def timeSerde[F[_], K](key: Serde[F, K], size: FiniteDuration)(using F: MonadThrow[F]): Serde[F, Windowed[K]] =
+    val serializer =
+      windowedSerializer(key.serializer): (topic, headers, windowed) =>
+        key.serializer.serialize(topic, headers, windowed.key).flatMap:
+          case Some(written) => F.pure(Some(written ++ Chunk.array(ByteBuffer.allocate(8).putLong(windowed.window.start).array)))
+          case None => F.raiseError(new IllegalArgumentException(s"a windowed key for topic '${topic.value}' has a key its serializer wrote as none"))
+    val deserializer =
+      Deserializer.instance[F, Windowed[K]]: (topic, headers, bytes) =>
+        bytes match
+          case Some(read) if read.size >= 8 =>
+            val start = ByteBuffer.wrap(read.drop(read.size - 8).toArray).getLong
+            val end   = start + size.toMillis
+            // Java truncates an end past the largest timestamp to it.
+            key.deserializer.deserialize(topic, headers, Some(read.take(read.size - 8)))
+              .map(Windowed(_, Window(start, if end < 0 then Long.MaxValue else end)))
+          case Some(read) => F.raiseError(new IllegalArgumentException(s"a windowed key is at least 8 bytes, but a record of topic '${topic
+                .value}' held ${read.size}"))
+          case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no windowed key"))
+    Serde(serializer, deserializer)
+
+  /** A session's key as Java's `SessionWindowedSerializer` writes it: the key as `key` writes it, then the session's end and its start, each as eight
+    * big-endian bytes.
+    */
+  def sessionSerde[F[_], K](key: Serde[F, K])(using F: MonadThrow[F]): Serde[F, Windowed[K]] =
+    val serializer =
+      windowedSerializer(key.serializer): (topic, headers, windowed) =>
+        key.serializer.serialize(topic, headers, windowed.key).flatMap:
+          case Some(written) => F
+              .pure(Some(written ++ Chunk.array(ByteBuffer.allocate(16).putLong(windowed.window.end).putLong(windowed.window.start).array)))
+          case None => F.raiseError(new IllegalArgumentException(s"a session key for topic '${topic.value}' has a key its serializer wrote as none"))
+    val deserializer =
+      Deserializer.instance[F, Windowed[K]]: (topic, headers, bytes) =>
+        bytes match
+          case Some(read) if read.size >= 16 =>
+            val times = ByteBuffer.wrap(read.drop(read.size - 16).toArray)
+            val end   = times.getLong
+            key.deserializer.deserialize(topic, headers, Some(read.take(read.size - 16))).map(Windowed(_, Window(times.getLong, end)))
+          case Some(read) => F.raiseError(new IllegalArgumentException(s"a session key is at least 16 bytes, but a record of topic '${topic
+                .value}' held ${read.size}"))
+          case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no session key"))
+    Serde(serializer, deserializer)
+
+  /** A windowed key's serializer, writing it as `write` does, whose records are partitioned by the key alone as `key` writes it, as Java's
+    * `WindowedStreamPartitioner` partitions them, so that every window of a key goes to one partition.
+    */
+  private def windowedSerializer[F[_], K](
+      key: Serializer[F, K]
+  )(write: (Topic, Headers, Windowed[K]) => F[Option[Chunk[Byte]]]): Serializer[F, Windowed[K]] =
+    new Serializer[F, Windowed[K]]:
+      override def serialize(topic: Topic, headers: Headers, value: Windowed[K]): F[Option[Chunk[Byte]]] = write(topic, headers, value)
+      override private[xkafka] def partitionedBy(topic: Topic, headers: Headers, value: Windowed[K]): Option[F[Option[Chunk[Byte]]]] =
+        Some(key.serialize(topic, headers, value.key))
 
 /** Windows of a fixed `size`, starting every `advance`: tumbling when the advance is the size, so each record falls in one window, and hopping when
   * it is shorter, so windows overlap. A record later than its window's end by more than `grace` no longer counts.

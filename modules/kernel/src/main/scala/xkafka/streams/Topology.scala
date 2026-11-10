@@ -350,6 +350,60 @@ private[xkafka] object TableChange:
       case _ => leaving.map((from, left) => from -> TableChange(None, Some(left))).toVector ++
           joining.map((to, joined) => to -> TableChange(Some(joined), None))
 
+  /** A change to a group of a table's values, as Java's `ChangedSerializer` writes it: a value alone followed by the byte 0 where it is leaving and 1
+    * where it is joining, and both, as the joining value's length as a zigzag varint and then the two values, followed by 2. A value its serializer
+    * writes as none counts as absent, as Java drops a null value before this topic, and a change with neither is written as none. Reading it also
+    * takes the 3, 4 and 5 that Java's `ChangedDeserializer` takes, which each have a byte saying if the change is the latest before their last.
+    */
+  def serde[F[_], V](value: Serde[F, V])(using F: ApplicativeThrow[F]): Serde[F, TableChange[V]] =
+    val serializer =
+      Serializer.instance[F, TableChange[V]]: (topic, headers, change) =>
+        val written = (side: Option[V]) => side.flatTraverse(value.serializer.serialize(topic, headers, _))
+        (written(change.current), written(change.old)).mapN:
+          case (Some(current), Some(old)) => Some(zigzag(current.size) ++ current ++ old ++ Chunk.singleton(2.toByte))
+          case (Some(current), None)      => Some(current ++ Chunk.singleton(1.toByte))
+          case (None, Some(old))          => Some(old ++ Chunk.singleton(0.toByte))
+          case (None, None)               => None
+    val deserializer =
+      Deserializer.instance[F, TableChange[V]]: (topic, headers, bytes) =>
+        def read(side: Chunk[Byte])       = value.deserializer.deserialize(topic, headers, Some(side))
+        def leaving(old: Chunk[Byte])     = read(old).map(left => TableChange[V](None, Some(left)))
+        def joining(current: Chunk[Byte]) = read(current).map(joined => TableChange[V](Some(joined), None))
+        def both(values: Chunk[Byte])     =
+          unzigzag(values).filter((length, used) => length >= 0 && length <= values.size - used) match
+            case Some((length, used)) =>
+              val rest = values.drop(used)
+              (read(rest.take(length)), read(rest.drop(length))).mapN((joined, left) => TableChange(Some(joined), Some(left)))
+            case None => F
+                .raiseError[TableChange[V]](new IllegalArgumentException(s"a record of topic '${topic.value}' has no valid length of a table change"))
+        bytes match
+          case None       => F.raiseError(new Deserializer.NullValueException(topic))
+          case Some(read) => read.last.fold(F.raiseError[TableChange[V]](new IllegalArgumentException(s"a record of topic '${topic
+                .value}' is empty, which no table change is"))):
+              case 0                   => leaving(read.dropRight(1))
+              case 1                   => joining(read.dropRight(1))
+              case 2                   => both(read.dropRight(1))
+              case 3 if read.size >= 2 => leaving(read.dropRight(2))
+              case 4 if read.size >= 2 => joining(read.dropRight(2))
+              case 5 if read.size >= 2 => both(read.dropRight(2))
+              case flag => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' ends in $flag, which ends no table change"))
+    Serde(serializer, deserializer)
+
+  /** A length as a zigzag varint, as Java's `ByteUtils.writeVarint`. */
+  private def zigzag(value: Int): Chunk[Byte] =
+    def unsigned(left: Int): List[Byte] = if (left & ~0x7f) == 0 then List(left.toByte) else ((left & 0x7f) | 0x80).toByte :: unsigned(left >>> 7)
+    Chunk.from(unsigned((value << 1) ^ (value >> 31)))
+
+  /** The number at the start of `bytes` read as a zigzag varint, as Java's `ByteUtils.readVarint`, with how many bytes it takes up, if it is one. */
+  private def unzigzag(bytes: Chunk[Byte]): Option[(Int, Int)] =
+    def from(at: Int, sofar: Int): Option[(Int, Int)] =
+      if at >= bytes.size || at >= 5 then None
+      else
+        val byte  = bytes(at)
+        val value = sofar | ((byte & 0x7f) << (7 * at))
+        if (byte & 0x80) == 0 then Some(((value >>> 1) ^ -(value & 1), at + 1)) else from(at + 1, value)
+    from(0, 0)
+
 /** When a suppression lets a held change to a key go on. */
 private[xkafka] enum Release[K]:
   /** Once the window the key names, which `end` gives the end of, has closed: `grace` after its end, the windows' grace, and for sessions also their
@@ -1468,7 +1522,7 @@ final class KGroupedTable[F[_], K, V, O] private[xkafka] (
       KStream.of[F, K, Option[A], KeyState.AsRead, O](
         next =>
           stream
-            .feed(Consumer.Repartitioning(repartition, key, Serde.tableChange(value), false, true, Consumer.Then(named, fold, next), Some(named))),
+            .feed(Consumer.Repartitioning(repartition, key, TableChange.serde(value), false, true, Consumer.Then(named, fold, next), Some(named))),
         named.value,
         false,
         stream.ending
@@ -1511,7 +1565,7 @@ final class TimeWindowedKStream[F[_], K, V, O] private[xkafka] (
     val (problems, keep) = TimeWindowedKStream.kept(windows, retention, store)
     val fold             = TimeWindowedKStream.fold(windows, store, keep, emitOnClose, key, serde, initial, start, add)
     val (size, grace)    = TimeWindowedKStream.sized(windows)
-    val view             = TableView.WindowedStored(store, key, Serde.timeWindowed(key, FiniteDuration(size, "ms")), serde, false)
+    val view             = TableView.WindowedStored(store, key, Windowed.timeSerde(key, FiniteDuration(size, "ms")), serde, false)
     KTable.updating(grouped.folded(named, fold, problems), TableKey.TimeWindowed(key, size), serde, Some(grace), Some(view))
 
   /** Keeps each window in the store for `retention` after its start, which must be at least the windows' size and grace, their default. A window that
@@ -1657,7 +1711,7 @@ final class TimeWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
             TimeWindowedKStream.fold(windows, store, keep, false, key, serde, Some(initial), (k: K, v: V) => add(k, v, initial), add),
         problems
       )
-    val view = TableView.WindowedStored(store, key, Serde.timeWindowed(key, FiniteDuration(size, "ms")), serde, false)
+    val view = TableView.WindowedStored(store, key, Windowed.timeSerde(key, FiniteDuration(size, "ms")), serde, false)
     KTable.updating(folding, TableKey.TimeWindowed(key, size), serde, Some(grace), Some(view))
 
 /** Groups of records split by key into sessions, ready to be folded into one session store, as for [[SessionWindowedKStream]], a record being dropped
@@ -1688,7 +1742,7 @@ final class SessionWindowedCogroupedKStream[F[_], K, A, O] private[xkafka] (
             Step.SessionAggregate(store, windows, keep, false, key, serde, Some(initial), (k: K, v: V) => add(k, v, initial), add, merge),
         problems
       )
-    val view = TableView.WindowedStored(store, key, Serde.sessionWindowed(key), serde, true)
+    val view = TableView.WindowedStored(store, key, Windowed.sessionSerde(key), serde, true)
     KTable.deleting(folding, TableKey.SessionWindowed(key), serde, Some(windows.graceMillis + windows.gapMillis), Some(view))
 
 /** Records grouped by key into sessions, ready to be folded into a session store. Each session's value goes downstream as it changes, and a session
@@ -1714,7 +1768,7 @@ final class SessionWindowedKStream[F[_], K, V, O] private[xkafka] (
   )(using F: MonadThrow[F]): KTable.Flowing[F, Windowed[K], A, Option, O] =
     val (problems, keep) = SessionWindowedKStream.kept(windows, retention, store)
     val fold             = Step.SessionAggregate(store, windows, keep, emitOnClose, key, serde, initial, start, add, merge)
-    val view             = TableView.WindowedStored(store, key, Serde.sessionWindowed(key), serde, true)
+    val view             = TableView.WindowedStored(store, key, Windowed.sessionSerde(key), serde, true)
     KTable.deleting(
       grouped.folded(named, fold, problems),
       TableKey.SessionWindowed(key),

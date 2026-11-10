@@ -37,7 +37,8 @@ import org.apache.kafka.common.errors.GroupIdNotFoundException
 import org.apache.kafka.common.message.StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription as Pushed
 import org.apache.kafka.common.serialization.Serdes
 import org.apache.kafka.streams.kstream.{Consumed, Grouped, Materialized, Named as JavaNamed, Produced}
-import xkafka.streams.{ApplicationId, JavaStreams, KStream, Named, Repartition, Serde, Store, StreamsSettings, Topology}
+import xkafka.Serde
+import xkafka.streams.{ApplicationId, JavaStreams, KStream, Named, Repartition, Store, StreamsSettings, Topology}
 
 /** A streams application's description as the broker keeps it, read back through Java's admin client, on each broker release from 4.4, where
   * `scripts/with-kafka.sh` starts brokers with a topology description plugin.

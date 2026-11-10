@@ -21,6 +21,7 @@
 
 package xkafka
 
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 
 import cats.{Applicative, ApplicativeThrow, Contravariant, Functor}
@@ -112,3 +113,32 @@ object Deserializer:
     instance((topic, _, value) => F.fromOption(value, new NullValueException(topic)))
 
   def utf8[F[_]: ApplicativeThrow]: Deserializer[F, String] = bytes[F].map(value => new String(value.toArray, StandardCharsets.UTF_8))
+
+/** How a program writes and reads one type, as a streams program needs for the topics it both writes and reads. */
+final case class Serde[F[_], A](serializer: Serializer[F, A], deserializer: Deserializer[F, A]):
+  def mapK[G[_]](fk: FunctionK[F, G]): Serde[G, A] = Serde(serializer.mapK(fk), deserializer.mapK(fk))
+
+  /** Values that may be absent, written as no value at all, as a tombstone. */
+  def option(using F: cats.Applicative[F]): Serde[F, Option[A]] = Serde(serializer.option, deserializer.option)
+
+object Serde:
+  given [A]: FunctorK[[F[_]] =>> Serde[F, A]] with
+    override def mapK[F[_], G[_]](serde: Serde[F, A])(fk: FunctionK[F, G]): Serde[G, A] = serde.mapK(fk)
+
+  /** Bytes as they are. */
+  def bytes[F[_]: ApplicativeThrow]: Serde[F, Chunk[Byte]] = Serde(Serializer.bytes[F], Deserializer.bytes[F])
+
+  /** Text as UTF-8, as Java's `Serdes.String()` writes it. */
+  def utf8[F[_]: ApplicativeThrow]: Serde[F, String] = Serde(Serializer.utf8[F], Deserializer.utf8[F])
+
+  /** A number as eight big-endian bytes, as Java's `Serdes.Long()` writes it. */
+  def long[F[_]](using F: ApplicativeThrow[F]): Serde[F, Long] =
+    val serializer   = Serializer.bytes[F].contramap[Long](value => Chunk.array(ByteBuffer.allocate(8).putLong(value).array))
+    val deserializer =
+      Deserializer.instance[F, Long]: (topic, _, value) =>
+        value match
+          case Some(read) if read.size == 8 => F.pure(ByteBuffer.wrap(read.toArray).getLong)
+          case Some(read)                   => F
+              .raiseError(new IllegalArgumentException(s"a long is 8 bytes, but a record of topic '${topic.value}' held ${read.size}"))
+          case None => F.raiseError(new Deserializer.NullValueException(topic))
+    Serde(serializer, deserializer)

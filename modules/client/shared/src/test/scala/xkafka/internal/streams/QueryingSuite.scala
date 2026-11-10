@@ -29,7 +29,8 @@ import fs2.Chunk
 import fs2.concurrent.SignallingRef
 import munit.CatsEffectSuite
 import protocol.StreamsGroup
-import xkafka.streams.{Endpoint, Forward, KTable, Named, QueryableStore, QueryProblem, QueryRequest, Serde, Store, StreamsPhase, Topology}
+import xkafka.Serde
+import xkafka.streams.{Endpoint, Forward, KTable, Named, QueryableStore, QueryProblem, QueryRequest, Store, StreamsPhase, Topology}
 
 /** Queries answered by two members in one process, each asking the other through its `answer`, over a table read from a topic of four partitions. */
 final class QueryingSuite extends CatsEffectSuite:

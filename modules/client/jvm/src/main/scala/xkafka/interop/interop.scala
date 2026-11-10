@@ -56,8 +56,8 @@ final class DeserializerFromJava[F[_]] private[interop] ():
 /** Makes streams serdes from Java's for the effect `F`, given the value type from what is passed. */
 final class SerdeFromJava[F[_]] private[interop] ():
   /** `java`'s serializer and deserializer, as [[Serializer.fromJava]] and [[Deserializer.fromJava]] make them. */
-  def apply[A](java: JavaSerde[A])(using F: Sync[F]): xkafka.streams.Serde[F, A] =
-    xkafka.streams.Serde(SerializerFromJava[F]()(java.serializer), DeserializerFromJava[F]()(java.deserializer))
+  def apply[A](java: JavaSerde[A])(using F: Sync[F]): xkafka.Serde[F, A] =
+    xkafka.Serde(SerializerFromJava[F]()(java.serializer), DeserializerFromJava[F]()(java.deserializer))
 
 extension (companion: Serializer.type)
   /** A serializer from a Java one, as in `Serializer.fromJava[IO](new StringSerializer)`. The Java serializer must already be configured. */
@@ -67,7 +67,7 @@ extension (companion: Deserializer.type)
   /** A deserializer from a Java one, as in `Deserializer.fromJava[IO](new StringDeserializer)`. The Java deserializer must already be configured. */
   def fromJava[F[_]]: DeserializerFromJava[F] = DeserializerFromJava[F]()
 
-extension (companion: xkafka.streams.Serde.type)
+extension (companion: xkafka.Serde.type)
   /** A streams serde from a Java one, as in `Serde.fromJava[IO](Serdes.String())`. The Java serde must already be configured. */
   def fromJava[F[_]]: SerdeFromJava[F] = SerdeFromJava[F]()
 

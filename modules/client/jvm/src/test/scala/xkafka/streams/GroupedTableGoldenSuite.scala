@@ -415,7 +415,7 @@ final class GroupedTableGoldenSuite extends CatsEffectSuite:
           .to("out", Produced.`with`(s, s).withName("write"))
     )
 
-  private val changeSerde = Serde.tableChange(text)
+  private val changeSerde = TableChange.serde(text)
   private val at          = topic("t")
 
   private val javaWriter = ChangedSerializer[String](StringSerializer())

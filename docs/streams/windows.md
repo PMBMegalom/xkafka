@@ -21,7 +21,7 @@ def viewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
     .count(Named("count-views"), Store("views-per-minute"))          // Count per user and window
     .toStream(Named("view-counts"))
     // Write each key together with its window
-    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
+    .to(Named("write-view-counts"), output, Windowed.timeSerde(user, 1.minute), Serde.long[IO])
 ```
 
 This counts each user's page views per minute, writing a new count each time
@@ -67,7 +67,7 @@ def finalViewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
     .emitOnWindowClose          // Send each result once its window closes
     .count(Named("count-views"), Store("final-views-per-minute"))
     .toStream(Named("view-counts"))
-    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
+    .to(Named("write-view-counts"), output, Windowed.timeSerde(user, 1.minute), Serde.long[IO])
 ```
 
 A closed window's result is sent when the next record arrives, at most once a
@@ -119,7 +119,7 @@ def failedLogins(input: Topic, output: Topic): Pipeline[IO] =
     .windowedBy(SlidingWindows(5.minutes, grace = 30.seconds))  // Records at most five minutes apart share a window
     .count(Named("count-failures"), Store("failures-within-five-minutes"))
     .toStream(Named("failure-counts"))
-    .to(Named("write-failure-counts"), output, Serde.timeWindowed(user, 5.minutes), Serde.long[IO])
+    .to(Named("write-failure-counts"), output, Windowed.timeSerde(user, 5.minutes), Serde.long[IO])
 ```
 
 Each record ends a window, and a window also starts just after a record when
@@ -163,7 +163,7 @@ def visits(input: Topic, output: Topic): Pipeline[IO] =
     .count(Named("count-views"), Store("views-per-visit"))
     .toStream(Named("view-counts"))
     // A replaced session is written as a tombstone
-    .to(Named("write-view-counts"), output, Serde.sessionWindowed(user), Serde.long[IO].option)
+    .to(Named("write-view-counts"), output, Windowed.sessionSerde(user), Serde.long[IO].option)
 ```
 
 A new record within the gap of two separate sessions merges them into one, so a
@@ -216,7 +216,7 @@ def clickRates(clicks: Topic, views: Topic, output: Topic): Pipeline[IO] =
   clicked
     .join(Named("click-rate"), viewed)((c, v) => s"${c.toDouble / v}")  // Each page and minute meets the same page and minute
     .toStream(Named("rates"))
-    .to(Named("write-rates"), output, Serde.timeWindowed(page, 1.minute), page.option)
+    .to(Named("write-rates"), output, Windowed.timeSerde(page, 1.minute), page.option)
 ```
 
 A window meets only the same window of the other table: the same key and the same
@@ -231,13 +231,13 @@ Windowed tables cannot join on a foreign key.
 
 ## Writing windowed keys
 
-To write windowed keys to a topic, use `Serde.timeWindowed(key, size)`, with the
+To write windowed keys to a topic, use `Windowed.timeSerde(key, size)`, with the
 window size for time windows and the time difference for sliding windows. It
 writes the same bytes as Java's `WindowedSerdes.timeWindowedSerdeFrom`, so Java
 applications can read them. Only the window's start is written, which is why
 reading it back needs the size.
 
-For sessions, use `Serde.sessionWindowed(key)`, which writes both the start and
+For sessions, use `Windowed.sessionSerde(key)`, which writes both the start and
 the end, as Java's `WindowedSerdes.sessionWindowedSerdeFrom` does.
 
 Like Java Kafka Streams, xkafka sends windowed results to the partition of their

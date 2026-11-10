@@ -45,9 +45,10 @@ import org.apache.kafka.streams.kstream.{
 import org.apache.kafka.streams.kstream.Suppressed.BufferConfig
 import org.apache.kafka.streams.state.{SessionStore, Stores, WindowStore}
 import org.apache.kafka.streams.test.TestRecord
+import xkafka.Serde
 import xkafka.streams.{
-  BufferLimit, JoinWindows, KStream, KTable, Named, Pipeline, Repartition, Serde, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows,
-  Topology
+  BufferLimit, JoinWindows, KStream, KTable, Named, Pipeline, Repartition, SessionWindows, SlidingWindows, Store, Suppressed, TimeWindows, Topology,
+  Windowed
 }
 
 /** What a windowed aggregation writes downstream and to its changelog, and keeps in its store, against what Java Streams' `TopologyTestDriver` does
@@ -125,7 +126,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("counting in tumbling windows writes, logs and keeps what Java does, dropping records past the grace"):
     same[java.lang.Long, Long](
       KStream(Named("read-1"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-1"), Store("counts"))
-        .toStream(Named("to-stream-1")).to(Named("write-1"), out, Serde.timeWindowed(text, 10.seconds), count),
+        .toStream(Named("to-stream-1")).to(Named("write-1"), out, Windowed.timeSerde(text, 10.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L)).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L), Serdes.Long)),
@@ -136,7 +137,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("reducing in hopping windows writes, logs and keeps what Java does, each record in every window it falls in"):
     same[String, String](
       KStream(Named("read-2"), in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Named("reduce-1"), Store("joined"))(_ + _)
-        .toStream(Named("to-stream-2")).to(Named("write-2"), out, Serde.timeWindowed(text, 10.seconds), text),
+        .toStream(Named("to-stream-2")).to(Named("write-2"), out, Windowed.timeSerde(text, 10.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L))
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -149,7 +150,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     same[java.lang.Long, Long](
       KStream(Named("read-3"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
         .windowedBy(tumbling).aggregate(Named("aggregate-1"), Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream(Named("to-stream-3"))
-        .to(Named("write-3"), out, Serde.timeWindowed(text, 10.seconds), count),
+        .to(Named("write-3"), out, Windowed.timeSerde(text, 10.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaWindows(10000L))
           .aggregate(
@@ -183,7 +184,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("a session key is written and read as Java's session serde writes and reads it, and an absent value as Java's null"):
     val java = WindowedSerdes.sessionWindowedSerdeFrom(classOf[String])
     val key  = org.apache.kafka.streams.kstream.Windowed[String]("key", org.apache.kafka.streams.kstream.internals.SessionWindow(30000L, 45000L))
-    val ours = Serde.sessionWindowed(text)
+    val ours = Windowed.sessionSerde(text)
     for
       written <- ours.serializer.serialize(in, Headers.empty, xkafka.streams.Windowed("key", xkafka.streams.Window(30000L, 45000L)))
       read    <- ours.deserializer.deserialize(in, Headers.empty, Some(Chunk.array(java.serializer.serialize("in", key))))
@@ -197,7 +198,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("a windowed key is written and read as Java's windowed serde writes and reads it"):
     val java = WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L)
     val key  = org.apache.kafka.streams.kstream.Windowed[String]("key", org.apache.kafka.streams.kstream.internals.TimeWindow(30000L, 40000L))
-    val ours = Serde.timeWindowed(text, 10.seconds)
+    val ours = Windowed.timeSerde(text, 10.seconds)
     for
       written <- ours.serializer.serialize(in, Headers.empty, xkafka.streams.Windowed("key", xkafka.streams.Window(30000L, 40000L)))
       read    <- ours.deserializer.deserialize(in, Headers.empty, Some(Chunk.array(java.serializer.serialize("in", key))))
@@ -208,7 +209,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("counting in tumbling windows emitted once they close writes what Java does, looking for closed windows at most once a second"):
     same[java.lang.Long, Long](
       KStream(Named("read-4"), in, text, text).groupByKey(text, text).windowedBy(tumbling).emitOnWindowClose.count(Named("count-2"), Store("counts"))
-        .toStream(Named("to-stream-4")).to(Named("write-4"), out, Serde.timeWindowed(text, 10.seconds), count),
+        .toStream(Named("to-stream-4")).to(Named("write-4"), out, Windowed.timeSerde(text, 10.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L)).emitStrategy(EmitStrategy.onWindowClose)
           .count(materialized("counts").withValueSerde(Serdes.Long)).toStream
@@ -226,7 +227,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     same[String, String](
       KStream(Named("read-5"), in, text, text).groupByKey(text, text).windowedBy(hopping).withRetention(1.minute).emitOnWindowClose
         .reduce(Named("reduce-2"), Store("joined"))(_ + _).toStream(Named("to-stream-5"))
-        .to(Named("write-5"), out, Serde.timeWindowed(text, 10.seconds), text),
+        .to(Named("write-5"), out, Windowed.timeSerde(text, 10.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L)).emitStrategy(EmitStrategy.onWindowClose)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -244,7 +245,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("counting in sliding windows writes, logs and keeps what Java does, early records in the window from 0 and late ones dropped"):
     same[java.lang.Long, Long](
       KStream(Named("read-6"), in, text, text).groupByKey(text, text).windowedBy(sliding).count(Named("count-3"), Store("counts"))
-        .toStream(Named("to-stream-6")).to(Named("write-6"), out, Serde.timeWindowed(text, 5.seconds), count),
+        .toStream(Named("to-stream-6")).to(Named("write-6"), out, Windowed.timeSerde(text, 5.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSliding).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 5000L), Serdes.Long)),
@@ -282,7 +283,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("reducing in sliding windows writes, logs and keeps what Java does, for records out of order, at equal times and early"):
     same[String, String](
       KStream(Named("read-7"), in, text, text).groupByKey(text, text).windowedBy(sliding).reduce(Named("reduce-3"), Store("joined"))(_ + _)
-        .toStream(Named("to-stream-7")).to(Named("write-7"), out, Serde.timeWindowed(text, 5.seconds), text),
+        .toStream(Named("to-stream-7")).to(Named("write-7"), out, Windowed.timeSerde(text, 5.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSliding)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -297,7 +298,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     same[String, String](
       KStream(Named("read-8"), in, text, text).groupByKey(text, text).windowedBy(sliding).withRetention(1.minute).emitOnWindowClose
         .reduce(Named("reduce-4"), Store("joined"))(_ + _).toStream(Named("to-stream-8"))
-        .to(Named("write-8"), out, Serde.timeWindowed(text, 5.seconds), text),
+        .to(Named("write-8"), out, Windowed.timeSerde(text, 5.seconds), text),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSliding).emitStrategy(EmitStrategy.onWindowClose)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -313,7 +314,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     same[java.lang.Long, Long](
       KStream(Named("read-9"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
         .windowedBy(sliding).aggregate(Named("aggregate-2"), Store("lengths"), count)(100L)((_, v, n) => n + v.length).toStream(Named("to-stream-9"))
-        .to(Named("write-9"), out, Serde.timeWindowed(text, 5.seconds), count),
+        .to(Named("write-9"), out, Windowed.timeSerde(text, 5.seconds), count),
       materialized =>
         _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaSliding).aggregate(
           () => java.lang.Long.valueOf(100L),
@@ -353,7 +354,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("sessions of a key that starts another key are its own, whichever came first"):
     sameSessions[java.lang.Long](
       KStream(Named("read-10"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-4"), Store("counts"))
-        .toStream(Named("to-stream-10")).to(Named("write-10"), out, Serde.sessionWindowed(text), count.option),
+        .toStream(Named("to-stream-10")).to(Named("write-10"), out, Windowed.sessionSerde(text), count.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
@@ -372,7 +373,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("counting in sessions writes and logs what Java does, merged sessions going on as tombstones"):
     sameSessions[java.lang.Long](
       KStream(Named("read-10"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-4"), Store("counts"))
-        .toStream(Named("to-stream-10")).to(Named("write-10"), out, Serde.sessionWindowed(text), count.option),
+        .toStream(Named("to-stream-10")).to(Named("write-10"), out, Windowed.sessionSerde(text), count.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).count(materialized("counts").withValueSerde(Serdes.Long)).toStream
           .to("out", Produced.`with`(WindowedSerdes.sessionWindowedSerdeFrom(classOf[String]), Serdes.Long)),
@@ -382,7 +383,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
   test("reducing in sessions merges them in Java's order, and writes and logs what Java does"):
     sameSessions[String](
       KStream(Named("read-11"), in, text, text).groupByKey(text, text).windowedBy(sessions).reduce(Named("reduce-5"), Store("joined"))(_ + _)
-        .toStream(Named("to-stream-11")).to(Named("write-11"), out, Serde.sessionWindowed(text), text.option),
+        .toStream(Named("to-stream-11")).to(Named("write-11"), out, Windowed.sessionSerde(text), text.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions)
           .reduce((a, b) => a + b, materialized("joined").withValueSerde(Serdes.String)).toStream
@@ -394,7 +395,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameSessions[String](
       KStream(Named("read-12"), in, text, text).groupBy(Repartition("by-value"), text, text)((k, v) => if v < "f" then k else s"$k!")
         .windowedBy(sessions).aggregate(Named("aggregate-3"), Store("trail"), text)("<")((_, v, acc) => acc + v)((_, a, b) => s"($a|$b)")
-        .toStream(Named("to-stream-12")).to(Named("write-12"), out, Serde.sessionWindowed(text), text.option),
+        .toStream(Named("to-stream-12")).to(Named("write-12"), out, Windowed.sessionSerde(text), text.option),
       materialized =>
         _.stream[String, String]("in").groupBy((k, v) => if v < "f" then k else s"$k!", Grouped.as("by-value")).windowedBy(javaSessions)
           .aggregate(() => "<", (_, v, acc) => acc + v, (_, a, b) => s"($a|$b)", materialized("trail").withValueSerde(Serdes.String)).toStream
@@ -406,7 +407,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameSessions[java.lang.Long](
       KStream(Named("read-13"), in, text, text).groupByKey(text, text).windowedBy(sessions).withRetention(1.minute).emitOnWindowClose
         .count(Named("count-5"), Store("counts")).toStream(Named("to-stream-13"))
-        .to(Named("write-13"), out, Serde.sessionWindowed(text), count.option),
+        .to(Named("write-13"), out, Windowed.sessionSerde(text), count.option),
       materialized =>
         _.stream[String, String]("in").groupByKey.windowedBy(javaSessions).emitStrategy(EmitStrategy.onWindowClose)
           .count(materialized("counts").withValueSerde(Serdes.Long)).toStream
@@ -443,7 +444,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameEverywhere(
       KStream(Named("read-14"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-6"), Store("counts"))
         .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-14"))
-        .to(Named("write-14"), out, Serde.timeWindowed(text, 10.seconds), count),
+        .to(Named("write-14"), out, Windowed.timeSerde(text, 10.seconds), count),
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -455,7 +456,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameEverywhere(
       KStream(Named("read-15"), in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Named("reduce-6"), Store("joined"))(_ + _)
         .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-15"))
-        .to(Named("write-15"), out, Serde.timeWindowed(text, 10.seconds), text),
+        .to(Named("write-15"), out, Windowed.timeSerde(text, 10.seconds), text),
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(5000L))
         .reduce((a, b) => a + b, Materialized.as("joined").withKeySerde(Serdes.String).withValueSerde(Serdes.String))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -467,7 +468,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameEverywhere(
       KStream(Named("read-16"), in, text, text).groupByKey(text, text).windowedBy(sliding).count(Named("count-7"), Store("counts"))
         .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-16"))
-        .to(Named("write-16"), out, Serde.timeWindowed(text, 5.seconds), count),
+        .to(Named("write-16"), out, Windowed.timeSerde(text, 5.seconds), count),
       _.stream[String, String]("in").groupByKey.windowedBy(javaSliding)
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -479,7 +480,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameEverywhere(
       KStream(Named("read-17"), in, text, text).groupByKey(text, text).windowedBy(sessions).count(Named("count-8"), Store("counts"))
         .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-17"))
-        .to(Named("write-17"), out, Serde.sessionWindowed(text), count.option),
+        .to(Named("write-17"), out, Windowed.sessionSerde(text), count.option),
       _.stream[String, String]("in").groupByKey.windowedBy(javaSessions)
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
@@ -545,7 +546,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     sameEverywhere(
       KStream(Named("read-22"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-10"), Store("counts"))
         .suppress(Suppressed.untilTimeLimit("calm", 2.seconds)).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-22"))
-        .to(Named("write-22"), out, Serde.timeWindowed(text, 10.seconds), count),
+        .to(Named("write-22"), out, Windowed.timeSerde(text, 10.seconds), count),
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
         .suppress(JavaSuppressed.untilTimeLimit(Duration.ofSeconds(2), BufferConfig.unbounded()).withName("calm"))
@@ -844,7 +845,7 @@ final class WindowGoldenSuite extends CatsEffectSuite:
     val held     = Suppressed.untilWindowCloses("final", BufferLimit.records(2).shutDownWhenFull)
     val pipeline =
       KStream(Named("read-24"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-14"), Store("counts")).suppress(held)
-        .toStream(Named("to-stream-36")).to(Named("write-42"), out, Serde.timeWindowed(text, 10.seconds), count)
+        .toStream(Named("to-stream-36")).to(Named("write-42"), out, Windowed.timeSerde(text, 10.seconds), count)
     val java: StreamsBuilder => Unit =
       _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
         .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long))
@@ -1214,12 +1215,12 @@ final class WindowGoldenSuite extends CatsEffectSuite:
         ).withKeySerde(windowKeys).withValueSerde(Serdes.Long)
     sameEverywhere(
       windowed.filter(Named("big"))((_, n) => n > 1).toStream(Named("changes"))
-        .to(Named("write"), out, Serde.timeWindowed(text, 10.seconds), count.option),
+        .to(Named("write"), out, Windowed.timeSerde(text, 10.seconds), count.option),
       builder => javaWindowed(builder).filter((_, n) => n > 1).toStream.to("out", Produced.`with`(windowKeys, Serdes.Long)),
       updates
     ) *> sameEverywhere(
       windowed.filter(Named("big"), Store("big"), count)((_, n) => n > 1).toStream(Named("changes"))
-        .to(Named("write"), out, Serde.timeWindowed(text, 10.seconds), count.option),
+        .to(Named("write"), out, Windowed.timeSerde(text, 10.seconds), count.option),
       builder => javaWindowed(builder).filter((_, n) => n > 1, big).toStream.to("out", Produced.`with`(windowKeys, Serdes.Long)),
       updates
     )

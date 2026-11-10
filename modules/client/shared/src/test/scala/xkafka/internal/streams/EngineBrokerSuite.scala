@@ -32,9 +32,10 @@ import cats.syntax.all.*
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
+import xkafka.Serde
 import xkafka.streams.{
-  ApplicationId, Flow, GlobalKTable, JoinWindows, KStream, KTable, Named, Partitioner, Pipeline, ProcessingGuarantee, Repartition, Serde,
-  SessionWindows, SlidingWindows, Store, StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology
+  ApplicationId, Flow, GlobalKTable, JoinWindows, KStream, KTable, Named, Partitioner, Pipeline, ProcessingGuarantee, Repartition, SessionWindows,
+  SlidingWindows, Store, StreamsPhase, StreamsProblem, StreamsSettings, Suppressed, TimeWindows, Topology, Windowed
 }
 
 /** The engine running a program against each broker release `scripts/integration-test.sh` starts with `--streams`, without Java members. */
@@ -67,19 +68,19 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def byMinute(input: Topic, output: Topic): Pipeline[IO] =
     KStream(Named("read-3"), input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 1.hour))
       .count(Named("count-3"), Store("counts")).toStream(Named("to-stream-3"))
-      .to(Named("write-3"), output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+      .to(Named("write-3"), output, Windowed.timeSerde(text, 1.minute), Serde.long[IO])
 
   /** Counts by key in tumbling windows of a minute, taking records up to ten seconds late, kept an hour, writing only each window's final count. */
   private def finalByMinute(input: Topic, output: Topic): Pipeline[IO] =
     KStream(Named("read-4"), input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
       .withRetention(1.hour).emitOnWindowClose.count(Named("count-4"), Store("counts")).toStream(Named("to-stream-4"))
-      .to(Named("write-4"), output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+      .to(Named("write-4"), output, Windowed.timeSerde(text, 1.minute), Serde.long[IO])
 
   /** Counts as `finalByMinute` does, passing on each window's final count once it closes through the suppression `final`. */
   private def suppressedByMinute(input: Topic, output: Topic): Pipeline[IO] =
     KStream(Named("read-5"), input, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
       .count(Named("count-5"), Store("counts")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-5"))
-      .to(Named("write-5"), output, Serde.timeWindowed(text, 1.minute), Serde.long[IO])
+      .to(Named("write-5"), output, Windowed.timeSerde(text, 1.minute), Serde.long[IO])
 
   /** Reads the input as a table into the store `counts`, writing each change, a delete as a tombstone. */
   private def asTable(input: Topic, output: Topic): Pipeline[IO] =
@@ -130,13 +131,13 @@ final class EngineBrokerSuite extends CatsEffectSuite:
   private def bySliding(input: Topic, output: Topic): Pipeline[IO] =
     KStream(Named("read-6"), input, text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.seconds, grace = 1.hour))
       .count(Named("count-6"), Store("counts")).toStream(Named("to-stream-7"))
-      .to(Named("write-7"), output, Serde.timeWindowed(text, 5.seconds), Serde.long[IO])
+      .to(Named("write-7"), output, Windowed.timeSerde(text, 5.seconds), Serde.long[IO])
 
   /** Counts by key in sessions with an inactivity gap of five seconds, taking records up to an hour late. */
   private def bySession(input: Topic, output: Topic): Pipeline[IO] =
     KStream(Named("read-7"), input, text, text).groupByKey(text, text).windowedBy(SessionWindows(5.seconds, grace = 1.hour))
       .count(Named("count-7"), Store("counts")).toStream(Named("to-stream-8"))
-      .to(Named("write-8"), output, Serde.sessionWindowed(text), Serde.long[IO].option)
+      .to(Named("write-8"), output, Windowed.sessionSerde(text), Serde.long[IO].option)
 
   /** Reads `topic` from its start until the latest count of each key in each session, by its start and end, or its tombstone, is `expected`. */
   private def sessionCounts(server: String, topic: Topic, expected: Map[(String, Long, Long), Option[Long]])(using
@@ -148,7 +149,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         ConsumerSettings.from(
           client(server),
           ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
-          Serde.sessionWindowed(text).deserializer,
+          Windowed.sessionSerde(text).deserializer,
           counts,
           AutoOffsetReset.Earliest,
           isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
@@ -246,7 +247,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         ConsumerSettings.from(
           client(server),
           ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
-          Serde.timeWindowed(text, 1.minute).deserializer,
+          Windowed.timeSerde(text, 1.minute).deserializer,
           counts,
           AutoOffsetReset.Earliest,
           isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted
@@ -264,7 +265,7 @@ final class EngineBrokerSuite extends CatsEffectSuite:
         ConsumerSettings.from(
           client(server),
           ConsumerGroup.from(summon[Names]("xkafka-engine-reader")).orFail,
-          Serde.timeWindowed(text, 1.minute).deserializer,
+          Windowed.timeSerde(text, 1.minute).deserializer,
           counts,
           AutoOffsetReset.Earliest,
           isolationLevel = if guarantee == ProcessingGuarantee.ExactlyOnce then IsolationLevel.ReadCommitted else IsolationLevel.ReadUncommitted

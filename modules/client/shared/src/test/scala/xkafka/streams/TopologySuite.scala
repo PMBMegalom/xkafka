@@ -46,11 +46,11 @@ final class TopologySuite extends CatsEffectSuite:
     val read     = KStream(Named("read-w"), topic("w"), text, text).groupByKey(text, text)
     val tumbling =
       read.windowedBy(TimeWindows.tumbling(10.seconds, grace = 1.hour)).count(Named("count-t"), Store("tumbling")).toStream(Named("changes-t"))
-        .to(Named("write-t"), topic("out-t"), Serde.timeWindowed(text, 10.seconds), count)
+        .to(Named("write-t"), topic("out-t"), Windowed.timeSerde(text, 10.seconds), count)
     val sliding =
       KStream(Named("read-s"), topic("s"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(2500.millis, grace = 1.hour))
         .count(Named("count-s"), Store("sliding")).toStream(Named("changes-s"))
-        .to(Named("write-s"), topic("out-s"), Serde.timeWindowed(text, 2500.millis), count)
+        .to(Named("write-s"), topic("out-s"), Windowed.timeSerde(text, 2500.millis), count)
     val declared  = WindowStore.of(Store("processed"), text, count, 5.seconds, 1.hour)
     val processed =
       KStream(Named("read-p"), topic("p"), text, text)

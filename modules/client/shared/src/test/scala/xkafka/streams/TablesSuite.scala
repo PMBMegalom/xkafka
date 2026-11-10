@@ -43,7 +43,7 @@ final class TablesSuite extends FunSuite:
       List[Pipeline[IO]](
         counted.to(Named("write-1"), topic, text, count),
         read.to(Named("write-2"), topic, text, text.option),
-        sessions.to(Named("write-3"), topic, Serde.sessionWindowed(text), count.option)
+        sessions.to(Named("write-3"), topic, Windowed.sessionSerde(text), count.option)
       )
     assertEquals(written.map(Topology.of(_).isRight), List(true, true, true))
 
@@ -52,7 +52,7 @@ final class TablesSuite extends FunSuite:
       compileErrors(
         "KTable(Named(\"users\"), topic, text, text, Store(\"users\")).toStream(Named(\"changes\")).to(Named(\"out\"), topic, text, text)"
       )
-    assert(missing.contains("Required: xkafka.streams.Serde[cats.effect.IO, Option[String]]"), missing)
+    assert(missing.contains("Required: xkafka.Serde[cats.effect.IO, Option[String]]"), missing)
     assert(
       compileErrors(
         "KStream(Named(\"in\"), topic, text, text).groupByKey(text, text).count(Named(\"count\"), Store(\"counts\")).toStream(Named(\"changes\")).to(Named(\"out\"), topic, text, count.option)"
@@ -99,8 +99,8 @@ final class TablesSuite extends FunSuite:
         .windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Named("count"), Store("visits"))
     assertEquals(
       refused(
-        KStream(Named("read"), Topic.from("windowed-reads").orFail, Serde.timeWindowed(text, 1.second), text)
-          .join(Named("join"), windowed)((v, n) => s"$v$n").to(Named("write"), topic, Serde.timeWindowed(text, 1.second), text)
+        KStream(Named("read"), Topic.from("windowed-reads").orFail, Windowed.timeSerde(text, 1.second), text)
+          .join(Named("join"), windowed)((v, n) => s"$v$n").to(Named("write"), topic, Windowed.timeSerde(text, 1.second), text)
       ),
       None
     )
@@ -134,7 +134,7 @@ final class TablesSuite extends FunSuite:
         .windowedBy(TimeWindows.tumbling(1.second, grace = 0.seconds)).count(Named(s"count-$name"), Store(name))
     val both =
       windowed("visits").join(Named("join-3"), windowed("clicks"))(_ + _).toStream(Named("to-stream-6"))
-        .to(Named("write-6"), Topic.from("out").orFail, Serde.timeWindowed(text, 1.second), count.option)
+        .to(Named("write-6"), Topic.from("out").orFail, Windowed.timeSerde(text, 1.second), count.option)
     assert(Topology.of(both).isRight, Topology.of(both).toString)
 
   test("the result of joining tables is suppressed only once it is kept in a store, which gives the suppression a serde"):

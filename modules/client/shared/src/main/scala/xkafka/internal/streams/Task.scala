@@ -370,7 +370,7 @@ private[xkafka] final class Task[F[_]](
 
   /** The record `origin` gives for `input`. */
   private def read[K, V](origin: Origin[F, K, V], input: TaskInput): F[Travelling[K, V]] =
-    def from(topic: F[Topic], key: xkafka.streams.Serde[F, K], value: xkafka.streams.Serde[F, V]) =
+    def from(topic: F[Topic], key: xkafka.Serde[F, K], value: xkafka.Serde[F, V]) =
       for
         source <- topic
         k      <- key.deserializer.deserialize(source, input.headers, input.key)
@@ -650,8 +650,8 @@ private[xkafka] final class Task[F[_]](
   private final case class JoinSide[X, Y, R](
       own: String,
       other: String,
-      values: xkafka.streams.Serde[F, X],
-      others: xkafka.streams.Serde[F, Y],
+      values: xkafka.Serde[F, X],
+      others: xkafka.Serde[F, Y],
       before: Long,
       after: Long,
       outer: Boolean,
@@ -991,7 +991,7 @@ private[xkafka] final class Task[F[_]](
   /** The change `next` makes to the key written as `bytes` in a table's `store`, logged to `changelog`, going on with the value it replaced. */
   private def tableKept[K, V](
       store: xkafka.streams.Store,
-      value: xkafka.streams.Serde[F, V],
+      value: xkafka.Serde[F, V],
       changelog: Topic,
       key: K,
       bytes: Chunk[Byte],
@@ -1012,7 +1012,7 @@ private[xkafka] final class Task[F[_]](
     * further, so it is not kept either.
     */
   private def keptResult[K, V](
-      kept: (xkafka.streams.Store, TableKey[F, K], xkafka.streams.Serde[F, V]),
+      kept: (xkafka.streams.Store, TableKey[F, K], xkafka.Serde[F, V]),
       key: K,
       next: Option[V],
       timestamp: Long,
@@ -1429,8 +1429,8 @@ private[xkafka] final class Task[F[_]](
     */
   private def sessionsClosed[K, V, A](
       store: String,
-      key: xkafka.streams.Serde[F, K],
-      value: xkafka.streams.Serde[F, A],
+      key: xkafka.Serde[F, K],
+      value: xkafka.Serde[F, A],
       state: TaskState,
       closeTime: Long,
       range: Long => Option[(Long, Long)],
@@ -1457,14 +1457,14 @@ private[xkafka] final class Task[F[_]](
           .map(emitted => (emitted, throttled.copy(lastEmitted = throttled.lastEmitted.updated(store, closeTime))))
 
   /** The serde a suppression's buffer writes a table's keys with: Java's windowed serdes for windowed tables. */
-  private def bufferKey[K](key: TableKey[F, K]): xkafka.streams.Serde[F, K] =
+  private def bufferKey[K](key: TableKey[F, K]): xkafka.Serde[F, K] =
     key match
       case TableKey.Plain(plain, _)           => plain
-      case TableKey.TimeWindowed(inner, size) => xkafka.streams.Serde.timeWindowed(inner, scala.concurrent.duration.FiniteDuration(size, "ms"))
-      case TableKey.SessionWindowed(inner)    => xkafka.streams.Serde.sessionWindowed(inner)
+      case TableKey.TimeWindowed(inner, size) => xkafka.streams.Windowed.timeSerde(inner, scala.concurrent.duration.FiniteDuration(size, "ms"))
+      case TableKey.SessionWindowed(inner)    => xkafka.streams.Windowed.sessionSerde(inner)
 
   /** The serde a suppression's buffer writes a table's values with, none written as a tombstone. */
-  private def bufferValue[V](value: TableValue[F, V]): xkafka.streams.Serde[F, V] =
+  private def bufferValue[V](value: TableValue[F, V]): xkafka.Serde[F, V] =
     value match
       case TableValue.Plain(plain)    => plain
       case TableValue.Optional(inner) => inner.option
@@ -1656,8 +1656,8 @@ private[xkafka] final class Task[F[_]](
     */
   private def closed[K, V, A](
       store: String,
-      key: xkafka.streams.Serde[F, K],
-      value: xkafka.streams.Serde[F, A],
+      key: xkafka.Serde[F, K],
+      value: xkafka.Serde[F, A],
       state: TaskState,
       closeTime: Long,
       width: Long,
@@ -1744,8 +1744,8 @@ private[xkafka] final class Task[F[_]](
 
   private def written[K, V](
       topic: F[Topic],
-      key: xkafka.streams.Serde[F, K],
-      value: xkafka.streams.Serde[F, V],
+      key: xkafka.Serde[F, K],
+      value: xkafka.Serde[F, V],
       repartitioning: Boolean,
       record: Travelling[K, V],
       partitioner: Option[xkafka.streams.Partitioner[K, V]]
@@ -1803,7 +1803,7 @@ private[xkafka] object Task:
       case Source.Exchanged(topic)     => s"$application-$topic"
 
   /** The serde a table view's values are written with, which the result of joining tables kept in no store does not have. */
-  def valuesOf[F[_], K, V](view: TableView[F, K, V]): Option[xkafka.streams.Serde[F, V]] =
+  def valuesOf[F[_], K, V](view: TableView[F, K, V]): Option[xkafka.Serde[F, V]] =
     view match
       case TableView.Stored(_, _, value)               => Some(value)
       case TableView.Held(_, parent)                   => valuesOf(parent)

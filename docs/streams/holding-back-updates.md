@@ -25,7 +25,7 @@ def finalViews(input: Topic, output: Topic): Pipeline[IO] =
     .count(Named("count-views"), Store("views-per-minute"))
     .suppress(Suppressed.untilWindowCloses("final-views"))  // Hold each window's updates until it closes
     .toStream(Named("view-counts"))
-    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
+    .to(Named("write-view-counts"), output, Windowed.timeSerde(user, 1.minute), Serde.long[IO])
 ```
 
 A window's result goes on once a record arrives timestamped at or after the

@@ -60,10 +60,10 @@ final class TopologyGoldenSuite extends FunSuite:
       ours(
         KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
           .count(Named("count-1"), Store("tumbling")).toStream(Named("to-stream-1"))
-          .to(Named("write-1"), topic("out"), Serde.timeWindowed(text, 10.seconds), count),
+          .to(Named("write-1"), topic("out"), Windowed.timeSerde(text, 10.seconds), count),
         KStream(Named("other"), topic("other"), text, text).groupBy(Repartition("by-value"), text, text)((_, v) => v)
           .windowedBy(TimeWindows.hoppingWithNoGrace(1.minute, advance = 20.seconds)).reduce(Named("reduce-1"), Store("hopping"))(_ + _)
-          .toStream(Named("to-stream-2")).to(Named("write-2"), topic("other-out"), Serde.timeWindowed(text, 1.minute), text)
+          .toStream(Named("to-stream-2")).to(Named("write-2"), topic("other-out"), Windowed.timeSerde(text, 1.minute), text)
       ),
       declaredByJava: builder =>
         builder.stream[String, String]("in").groupByKey
@@ -81,7 +81,7 @@ final class TopologyGoldenSuite extends FunSuite:
       ours(
         KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
           .withRetention(1.hour).count(Named("count-2"), Store("kept")).toStream(Named("to-stream-3"))
-          .to(Named("write-3"), topic("out"), Serde.timeWindowed(text, 10.seconds), count)
+          .to(Named("write-3"), topic("out"), Windowed.timeSerde(text, 10.seconds), count)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey
@@ -96,7 +96,7 @@ final class TopologyGoldenSuite extends FunSuite:
       ours(
         KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(10.seconds, grace = 5.seconds))
           .count(Named("count-3"), Store("sliding")).toStream(Named("to-stream-4"))
-          .to(Named("write-4"), topic("out"), Serde.timeWindowed(text, 10.seconds), count)
+          .to(Named("write-4"), topic("out"), Windowed.timeSerde(text, 10.seconds), count)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey
@@ -111,7 +111,7 @@ final class TopologyGoldenSuite extends FunSuite:
       ours(
         KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(SessionWindows(10.seconds, grace = 5.seconds))
           .count(Named("count-4"), Store("sessions")).toStream(Named("to-stream-5"))
-          .to(Named("write-5"), topic("out"), Serde.sessionWindowed(text), count.option)
+          .to(Named("write-5"), topic("out"), Windowed.sessionSerde(text), count.option)
       ),
       declaredByJava(
         _.stream[String, String]("in").groupByKey
@@ -126,7 +126,7 @@ final class TopologyGoldenSuite extends FunSuite:
       ours(
         KStream(Named("in"), topic("in"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
           .count(Named("count-5"), Store("counts")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-6"))
-          .to(Named("write-6"), topic("out"), Serde.timeWindowed(text, 10.seconds), count),
+          .to(Named("write-6"), topic("out"), Windowed.timeSerde(text, 10.seconds), count),
         KStream(Named("other"), topic("other"), text, text).groupByKey(text, text).count(Named("count-6"), Store("totals"))
           .suppress(Suppressed.untilTimeLimit("calm", 1.minute, BufferLimit.records(10).emitEarlyWhenFull)).toStream(Named("to-stream-7"))
           .to(Named("write-7"), topic("other-out"), text, count)

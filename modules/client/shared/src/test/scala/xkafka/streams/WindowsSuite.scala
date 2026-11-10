@@ -48,7 +48,7 @@ final class WindowsSuite extends CatsEffectSuite:
 
   private def windowed(windows: TimeWindows) =
     KStream(Named("read-1"), topic, text, text).groupByKey(text, text).windowedBy(windows).count(Named("count-1"), Store("counts"))
-      .toStream(Named("to-stream-1")).to(Named("write-1"), topic, Serde.timeWindowed(text, 1.second), count)
+      .toStream(Named("to-stream-1")).to(Named("write-1"), topic, Windowed.timeSerde(text, 1.second), count)
 
   test("windows of no size, no advance, an advance past their size, negative grace, or parts of a millisecond are refused"):
     def refused(windows: TimeWindows) = Topology.of(windowed(windows)).left.toOption.map(_.toList)
@@ -75,7 +75,7 @@ final class WindowsSuite extends CatsEffectSuite:
     assert(Topology.of(windowed(TimeWindows.hopping(10.seconds, advance = 10.seconds, grace = 0.seconds))).isRight)
 
   test("a windowed key is written as its key and its window's start, and read back with the end its size gives"):
-    val serde   = Serde.timeWindowed(text, 10.seconds)
+    val serde   = Windowed.timeSerde(text, 10.seconds)
     val written = Chunk.array("k".getBytes) ++ Chunk.array(Array[Byte](0, 0, 0, 0, 0, 0, 0x27, 0x10))
     for
       bytes <- serde.serializer.serialize(topic, Headers.empty, Windowed("k", Window(10000L, 20000L)))
@@ -98,7 +98,7 @@ final class WindowsSuite extends CatsEffectSuite:
       Topology.of(
         KStream(Named("read-2"), topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
           .withRetention(retention).count(Named("count-2"), Store("counts")).toStream(Named("to-stream-2"))
-          .to(Named("write-2"), topic, Serde.timeWindowed(text, 10.seconds), count)
+          .to(Named("write-2"), topic, Windowed.timeSerde(text, 10.seconds), count)
       ).left.toOption.map(_.toList)
     assertEquals(
       kept(14999.millis),
@@ -114,7 +114,7 @@ final class WindowsSuite extends CatsEffectSuite:
       val windowed = KStream(Named("read-3"), topic, text, text).groupByKey(text, text).windowedBy(windows)
       Topology.of(
         retention.fold(windowed)(windowed.withRetention).count(Named("count-3"), Store("counts")).toStream(Named("to-stream-3"))
-          .to(Named("write-3"), topic, Serde.timeWindowed(text, 1.second), count)
+          .to(Named("write-3"), topic, Windowed.timeSerde(text, 1.second), count)
       ).left.toOption.map(_.toList)
     assertEquals(
       refused(SlidingWindows.withNoGrace((-1).second)),
@@ -189,7 +189,7 @@ final class WindowsSuite extends CatsEffectSuite:
       val windowed = KStream(Named("read-6"), topic, text, text).groupByKey(text, text).windowedBy(windows)
       Topology.of(
         retention.fold(windowed)(windowed.withRetention).count(Named("count-6"), Store("counts")).toStream(Named("to-stream-6"))
-          .to(Named("write-6"), topic, Serde.sessionWindowed(text), count.option)
+          .to(Named("write-6"), topic, Windowed.sessionSerde(text), count.option)
       ).left.toOption.map(_.toList)
     assertEquals(
       refused(SessionWindows.withNoGrace((-1).second)),

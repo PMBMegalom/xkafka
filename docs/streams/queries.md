@@ -66,6 +66,7 @@ import org.http4s.*
 import org.http4s.dsl.io.*
 import org.http4s.headers.`Retry-After`
 
+import xkafka.Serde
 import xkafka.streams.*
 
 val balances = QueryableStore.keyValue(Store("balances"), Serde.utf8[IO], Serde.long[IO])

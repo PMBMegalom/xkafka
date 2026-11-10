@@ -40,7 +40,7 @@ import xkafka.interop.*                                                 // Adds 
 
 val write = Serializer.fromJava[IO](new StringSerializer)               // Writes values as Java's StringSerializer does
 val read  = Deserializer.fromJava[IO](new StringDeserializer).option    // Reads them back, with None for a record without a value
-val serde = xkafka.streams.Serde.fromJava[IO](Serdes.String())          // Both at once, as a streams program takes them
+val serde = Serde.fromJava[IO](Serdes.String())                         // Both at once, as a streams program takes them
 ```
 
 - The Java codec is given each record's topic and headers, as it is in Java.

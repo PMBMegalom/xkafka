@@ -103,8 +103,8 @@ final class InteropSuite extends CatsEffectSuite:
     pending.attempt.map(result => assertEquals(result, Left(failure)))
 
   test("a streams serde from Java's writes and reads what the matching xkafka serde does"):
-    val java = xkafka.streams.Serde.fromJava[IO](Serdes.String())
-    val ours = xkafka.streams.Serde.utf8[IO]
+    val java = xkafka.Serde.fromJava[IO](Serdes.String())
+    val ours = xkafka.Serde.utf8[IO]
     for
       written <- java.serializer.serialize(topic, headers, "é")
       expect  <- ours.serializer.serialize(topic, headers, "é")

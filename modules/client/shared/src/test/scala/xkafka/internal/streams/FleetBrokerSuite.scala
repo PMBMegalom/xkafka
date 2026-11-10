@@ -32,9 +32,10 @@ import cats.syntax.all.*
 import munit.CatsEffectSuite
 import internal.driver.StartAt
 // `streams` alone names this package, so the program's own package is named in full.
+import xkafka.Serde
 import xkafka.streams.{
-  GlobalKTable, JoinWindows, KStream, KTable, Named, ProcessingGuarantee, Repartition, Serde, SessionWindows, SlidingWindows, Store, TimeWindows,
-  Topology
+  GlobalKTable, JoinWindows, KStream, KTable, Named, ProcessingGuarantee, Repartition, SessionWindows, SlidingWindows, Store, TimeWindows, Topology,
+  Windowed
 }
 
 /** Java Streams and xkafka members in one application while records keep coming, as members join, leave, restart and are killed: counting records by
@@ -117,13 +118,13 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         case Program.Windows => Topology.of(
             KStream(Named("tumbling"), inputOf("tumbling"), text, text).groupByKey(text, text)
               .windowedBy(TimeWindows.tumbling(5.seconds, grace = 1.hour)).count(Named("count-2"), Store("tumbling")).toStream(Named("to-stream-2"))
-              .to(Named("write-2"), outputOf("tumbling"), Serde.timeWindowed(text, 5.seconds), Serde.long[IO]),
+              .to(Named("write-2"), outputOf("tumbling"), Windowed.timeSerde(text, 5.seconds), Serde.long[IO]),
             KStream(Named("sliding"), inputOf("sliding"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(2500.millis, grace = 1.hour))
               .count(Named("count-3"), Store("sliding")).toStream(Named("to-stream-3"))
-              .to(Named("write-3"), outputOf("sliding"), Serde.timeWindowed(text, 2500.millis), Serde.long[IO]),
+              .to(Named("write-3"), outputOf("sliding"), Windowed.timeSerde(text, 2500.millis), Serde.long[IO]),
             KStream(Named("sessions"), inputOf("sessions"), text, text).groupByKey(text, text).windowedBy(SessionWindows(1500.millis, grace = 1.hour))
               .count(Named("count-4"), Store("sessions")).toStream(Named("to-stream-4"))
-              .to(Named("write-4"), outputOf("sessions"), Serde.sessionWindowed(text), Serde.long[IO].option)
+              .to(Named("write-4"), outputOf("sessions"), Windowed.sessionSerde(text), Serde.long[IO].option)
           ).orFail
         case Program.ForeignKeys => Topology.of(
             KTable(Named("orders"), inputOf("orders"), text, text, Store("orders"))
@@ -339,9 +340,9 @@ final class FleetBrokerSuite extends CatsEffectSuite:
         case (window, count) if !seen.get(window).flatten.exists(matches(_, count)) => s"$window counted ${seen.get(window).flatten}, not $count"
     def stray(seen: Map[(String, Long, Long), Option[Long]]) =
       seen.toList.sortBy(_._1).collect { case (session, Some(count)) if !sessions.contains(session) => s"$session counted $count, not a tombstone" }
-    latest(fleet, fleet.outputOf("tumbling"), Serde.timeWindowed(text, 5.seconds).deserializer)(missed(tumbling)(_).isEmpty, missed(tumbling)) *>
-      latest(fleet, fleet.outputOf("sliding"), Serde.timeWindowed(text, 2500.millis).deserializer)(missed(sliding)(_).isEmpty, missed(sliding)) *>
-      latest(fleet, fleet.outputOf("sessions"), Serde.sessionWindowed(text).deserializer)(
+    latest(fleet, fleet.outputOf("tumbling"), Windowed.timeSerde(text, 5.seconds).deserializer)(missed(tumbling)(_).isEmpty, missed(tumbling)) *>
+      latest(fleet, fleet.outputOf("sliding"), Windowed.timeSerde(text, 2500.millis).deserializer)(missed(sliding)(_).isEmpty, missed(sliding)) *>
+      latest(fleet, fleet.outputOf("sessions"), Windowed.sessionSerde(text).deserializer)(
         seen => missed(sessions)(seen).isEmpty && stray(seen).isEmpty,
         seen => missed(sessions)(seen) ++ stray(seen)
       )
