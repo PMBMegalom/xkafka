@@ -154,3 +154,22 @@ class ConfluentAvroSuite extends CatsEffectSuite:
       theirs <- IO.blocking(Chunk.array(confluentSerializer(mock).serialize("orders", datum)))
       back   <- AvroSerde.of[IO, Line](bridged(mock), Part.Value).flatMap(_.deserializer.deserialize(topic, Headers.empty, Some(theirs)))
     yield assertEquals(back, Line("apple", 1))
+
+  test("records Confluent's serializer writes are read as written, and Confluent's deserializer reads generic values xkafka writes"):
+    val mock   = new MockSchemaRegistryClient()
+    val schema = new org.apache.avro.Schema.Parser().parse(AvroSchemaJson.render(AvroCodec[Line].schema))
+    val datum  = new org.apache.avro.generic.GenericData.Record(schema)
+    datum.put("sku", "apple")
+    datum.put("quantity", 4)
+    val value = AvroValue.Record(FullName(Some("xkafka.avro"), "Line"), Vector("sku" -> AvroValue.String("pear"), "quantity" -> AvroValue.Int(2)))
+    for
+      theirs  <- IO.blocking(Chunk.array(confluentSerializer(mock).serialize("orders", datum)))
+      written <- AvroSerde.asWritten[IO](bridged(mock)).flatMap(_.deserialize(topic, Headers.empty, Some(theirs)))
+      ours    <- AvroSerde.generic[IO](bridged(mock), AvroCodec[Line].schema, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, value))
+      read    <- IO.blocking(confluentDeserializer(mock).deserialize("orders", ours.get.toArray))
+    yield
+      assertEquals(written.value, ApacheValues.fromApache(datum, schema))
+      assertEquals(new org.apache.avro.Schema.Parser().parse(AvroSchemaJson.render(written.schema)), schema)
+      read match
+        case record: GenericRecord => assertEquals(ApacheValues.fromApache(record, record.getSchema), value)
+        case other                 => fail(s"expected a record, got $other")

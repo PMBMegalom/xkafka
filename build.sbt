@@ -795,7 +795,8 @@ lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlat
 
 lazy val avro = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/avro"))
-  .dependsOn(schemaRegistry)
+  // The registry's tests keep an in-memory registry, which the Avro serdes' tests use too.
+  .dependsOn(schemaRegistry % "compile->compile;test->test")
   .settings(commonSettings)
   .settings(
     name        := "xkafka-avro",

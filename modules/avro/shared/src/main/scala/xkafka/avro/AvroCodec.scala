@@ -72,6 +72,10 @@ object AvroCodec:
       override def encode(value: A): Either[String, AvroValue]                 = write(value)
       override def decode(value: AvroValue): Either[String, A]                 = read(value)
 
+  /** Values of `schema` as they are, for schemas known only as the program runs. A value that does not fit the schema is refused when it is written.
+    */
+  def generic(schema: AvroSchema): AvroCodec[AvroValue] = instance(schema, Right(_), Right(_))
+
   private def primitive[A](schema: AvroSchema)(write: A => AvroValue)(read: PartialFunction[AvroValue, A]): AvroCodec[A] =
     instance(
       schema,

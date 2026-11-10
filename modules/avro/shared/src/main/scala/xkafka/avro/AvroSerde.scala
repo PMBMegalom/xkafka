@@ -23,8 +23,11 @@ package xkafka.avro
 
 import cats.effect.Concurrent
 import fs2.Chunk
-import xkafka.Serde
+import xkafka.{Deserializer, Serde}
 import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
+
+/** A record as it was written: the schema its writer used, and its value in that schema. */
+final case class AvroWritten(schema: AvroSchema, value: AvroValue)
 
 /** Avro as one of the registry's schema languages: values are written with their codec's schema, and read with the schema they were written with,
   * resolved to the codec's. A schema that names schemas registered under other subjects is not read.
@@ -46,7 +49,7 @@ object AvroFormat:
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
         avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
 
-  private def avro(schema: Schema): Either[String, AvroSchema] =
+  private[avro] def avro(schema: Schema): Either[String, AvroSchema] =
     if schema.schemaType != SchemaType.Avro then Left(s"the schema is ${schema.schemaType.name}, not Avro")
     else if schema.references.nonEmpty then Left("the schema names schemas registered under other subjects, which xkafka does not read yet")
     else AvroSchemaJson.parse(schema.text)
@@ -59,3 +62,20 @@ object AvroSerde:
       naming: SubjectNaming = SubjectNaming.TopicName,
       writing: Writing = Writing.Register
   ): F[Serde[F, A]] = RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
+
+  /** Serdes of values of `schema`, a schema known only as the program runs: values are written with it, and records read as it describes them. */
+  def generic[F[_]: Concurrent](
+      registry: SchemaRegistry[F],
+      schema: AvroSchema,
+      part: Part,
+      naming: SubjectNaming = SubjectNaming.TopicName,
+      writing: Writing = Writing.Register
+  ): F[Serde[F, AvroValue]] = RegistrySerde.of(registry, AvroFormat(using AvroCodec.generic(schema)), part, naming, writing)
+
+  /** Reads each record as it was written, with the schema it names, whatever that schema is: for tools that show or copy any record. */
+  def asWritten[F[_]: Concurrent](registry: SchemaRegistry[F]): F[Deserializer[F, AvroWritten]] =
+    RegistrySerde.deserializer(
+      registry,
+      schema =>
+        AvroFormat.avro(schema).flatMap(writer => AvroBinary.decoder(writer, writer).map(read => bytes => read(bytes).map(AvroWritten(writer, _))))
+    )

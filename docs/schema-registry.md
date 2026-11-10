@@ -223,6 +223,53 @@ import xkafka.avro.{AvroAlias, AvroCodec, AvroDoc, AvroName, AvroNamespace}
 final case class Order(id: String, @AvroName("placed_at") placedAt: Instant) derives AvroCodec
 ```
 
+## Values known only at run time
+
+Where a program does not know the schema until it runs, such as a tool that
+copies or shows any topic's records, it works with `AvroValue`s, which describe
+any Avro value, and `AvroSchema`s.
+
+`AvroSerde.asWritten` reads each record as it was written, together with the
+schema its writer used:
+
+```scala mdoc:compile-only
+// Read any record of any schema, and show its schema and value
+import cats.effect.IO
+
+import xkafka.{Deserializer, Headers, Topic}
+import xkafka.avro.{AvroSchemaJson, AvroSerde, AvroWritten}
+import xkafka.schemaregistry.SchemaRegistry
+
+def show(registry: SchemaRegistry[IO], topic: Topic, bytes: fs2.Chunk[Byte]): IO[String] =
+  AvroSerde.asWritten[IO](registry).flatMap: (reading: Deserializer[IO, AvroWritten]) =>
+    reading.deserialize(topic, Headers.empty, Some(bytes)).map: written =>
+      s"${AvroSchemaJson.render(written.schema)}: ${written.value}"
+```
+
+`AvroSerde.generic` writes values of a schema you hold, and reads any record
+converted to that schema, as a derived serde does:
+
+```scala mdoc:compile-only
+// Write a line of an order, with a schema read from its JSON as the program runs
+import cats.effect.IO
+
+import xkafka.Serde
+import xkafka.avro.{AvroSchemaJson, AvroSerde, AvroValue, FullName}
+import xkafka.schemaregistry.{Part, SchemaRegistry}
+
+val text = """{"type":"record","name":"Line","namespace":"com.example","fields":[{"name":"sku","type":"string"},{"name":"quantity","type":"int"}]}"""
+
+def lines(registry: SchemaRegistry[IO]): IO[Serde[IO, AvroValue]] =
+  IO.fromEither(AvroSchemaJson.parse(text).left.map(new IllegalArgumentException(_))).flatMap: schema =>
+    AvroSerde.generic[IO](registry, schema, Part.Value)
+
+val line = AvroValue.Record(FullName(Some("com.example"), "Line"), Vector("sku" -> AvroValue.String("apple"), "quantity" -> AvroValue.Int(3)))
+```
+
+A value that does not fit the schema fails to write with
+`RegistryException.Unserializable`. A value of a logical type is its underlying
+value: a `date` is the `AvroValue.Int` of its days since 1970-01-01.
+
 ## Subjects
 
 A schema is kept under a subject, named as Confluent's subject name strategies

@@ -81,59 +81,63 @@ object RegistrySerde:
       naming: SubjectNaming = SubjectNaming.TopicName,
       writing: Writing = Writing.Register
   )(using F: Concurrent[F]): F[Serde[F, A]] =
-    (Ref.of[F, Map[SchemaId, A => Either[String, Chunk[Byte]]]](Map.empty), Ref.of[F, Map[SchemaId, Chunk[Byte] => Either[String, A]]](Map.empty))
-      .mapN: (writers, readers) =>
-        def unserializable(topic: Topic, reason: String): Throwable = new RegistryException.Unserializable(topic, reason)
+    (Ref.of[F, Map[SchemaId, A => Either[String, Chunk[Byte]]]](Map.empty), deserializer(registry, format.reader)).mapN: (writers, deserializer) =>
+      def subject(topic: Topic): F[Subject] =
+        val name =
+          naming match
+            case SubjectNaming.TopicName       => Right(s"${topic.value}-${suffix(part)}")
+            case SubjectNaming.RecordName      => format.recordName.toRight("the format names no record, which naming subjects by record needs")
+            case SubjectNaming.TopicRecordName => format.recordName.map(record => s"${topic.value}-$record")
+                .toRight("the format names no record, which naming subjects by record needs")
+        F.fromEither(name.flatMap(Subject.from(_).leftMap(_.message)).leftMap(unserializable(topic, _)))
 
-        def subject(topic: Topic): F[Subject] =
-          val name =
-            naming match
-              case SubjectNaming.TopicName       => Right(s"${topic.value}-${suffix(part)}")
-              case SubjectNaming.RecordName      => format.recordName.toRight("the format names no record, which naming subjects by record needs")
-              case SubjectNaming.TopicRecordName => format.recordName.map(record => s"${topic.value}-$record")
-                  .toRight("the format names no record, which naming subjects by record needs")
-          F.fromEither(name.flatMap(Subject.from(_).leftMap(_.message)).leftMap(unserializable(topic, _)))
+      /** The id of the schema a value of `topic` is written with, and the schema where it is not the format's own. */
+      def target(topic: Topic): F[(SchemaId, Option[Schema])] =
+        writing match
+          case Writing.Register          => subject(topic).flatMap(registry.register(_, format.schema)).map((_, None))
+          case Writing.AlreadyRegistered => subject(topic).flatMap: named =>
+              registry.lookup(named, format.schema).flatMap:
+                case Some(registered) => F.pure((registered.id, None))
+                case None             => F.raiseError(unserializable(topic, s"the format's schema is not registered under subject '${named.value}'"))
+          case Writing.Latest => subject(topic).flatMap: named =>
+              registry.latest(named).flatMap:
+                case Some(registered) => F.pure((registered.id, Some(registered.schema)))
+                case None             => F.raiseError(unserializable(topic, s"subject '${named.value}' has no versions"))
+          case Writing.Pinned(id) => registry.schema(id).map(schema => (id, Some(schema)))
 
-        /** The id of the schema a value of `topic` is written with, and the schema where it is not the format's own. */
-        def target(topic: Topic): F[(SchemaId, Option[Schema])] =
-          writing match
-            case Writing.Register          => subject(topic).flatMap(registry.register(_, format.schema)).map((_, None))
-            case Writing.AlreadyRegistered => subject(topic).flatMap: named =>
-                registry.lookup(named, format.schema).flatMap:
-                  case Some(registered) => F.pure((registered.id, None))
-                  case None => F.raiseError(unserializable(topic, s"the format's schema is not registered under subject '${named.value}'"))
-            case Writing.Latest => subject(topic).flatMap: named =>
-                registry.latest(named).flatMap:
-                  case Some(registered) => F.pure((registered.id, Some(registered.schema)))
-                  case None             => F.raiseError(unserializable(topic, s"subject '${named.value}' has no versions"))
-            case Writing.Pinned(id) => registry.schema(id).map(schema => (id, Some(schema)))
+      def writerFor(topic: Topic, id: SchemaId, schema: Option[Schema]): F[A => Either[String, Chunk[Byte]]] =
+        writers.get.map(_.get(id)).flatMap:
+          case Some(write) => F.pure(write)
+          case None        => F.fromEither(format.writer(schema.getOrElse(format.schema)).leftMap(unserializable(topic, _)))
+              .flatTap(write => writers.update(_.updated(id, write)))
 
-        def writerFor(topic: Topic, id: SchemaId, schema: Option[Schema]): F[A => Either[String, Chunk[Byte]]] =
-          writers.get.map(_.get(id)).flatMap:
-            case Some(write) => F.pure(write)
-            case None        => F.fromEither(format.writer(schema.getOrElse(format.schema)).leftMap(unserializable(topic, _)))
-                .flatTap(write => writers.update(_.updated(id, write)))
+      val serializer =
+        Serializer.instance[F, A]: (topic, _, value) =>
+          target(topic).flatMap: (id, schema) =>
+            writerFor(topic, id, schema)
+              .flatMap(write => F.fromEither(write(value).bimap(unserializable(topic, _), written => Some(Wire.write(id, written)))))
 
-        def readerFor(topic: Topic, id: SchemaId): F[Chunk[Byte] => Either[String, A]] =
-          readers.get.map(_.get(id)).flatMap:
-            case Some(read) => F.pure(read)
-            case None       => registry.schema(id).flatMap(schema => F.fromEither(format.reader(schema).leftMap(unserializable(topic, _))))
-                .flatTap(read => readers.update(_.updated(id, read)))
+      Serde(serializer, deserializer)
 
-        val serializer =
-          Serializer.instance[F, A]: (topic, _, value) =>
-            target(topic).flatMap: (id, schema) =>
-              writerFor(topic, id, schema)
-                .flatMap(write => F.fromEither(write(value).bimap(unserializable(topic, _), written => Some(Wire.write(id, written)))))
+  /** Reads records in Confluent's wire format, keys or values alike: each with the reader `read` makes of the schema the record names, made once for
+    * each schema. A deserializer alone suits reading records whose schema the reader does not choose, as a tool that shows any record does.
+    */
+  def deserializer[F[_], A](registry: SchemaRegistry[F], read: Schema => Either[String, Chunk[Byte] => Either[String, A]])(using
+      F: Concurrent[F]
+  ): F[Deserializer[F, A]] =
+    Ref.of[F, Map[SchemaId, Chunk[Byte] => Either[String, A]]](Map.empty).map: readers =>
+      def readerFor(topic: Topic, id: SchemaId): F[Chunk[Byte] => Either[String, A]] =
+        readers.get.map(_.get(id)).flatMap:
+          case Some(reader) => F.pure(reader)
+          case None         => registry.schema(id).flatMap(schema => F.fromEither(read(schema).leftMap(unserializable(topic, _))))
+              .flatTap(reader => readers.update(_.updated(id, reader)))
+      Deserializer.instance[F, A]: (topic, _, bytes) =>
+        bytes match
+          case None          => F.raiseError(new Deserializer.NullValueException(topic))
+          case Some(written) => F.fromEither(Wire.read(written).leftMap(unserializable(topic, _))).flatMap: (id, payload) =>
+              readerFor(topic, id).flatMap(reader => F.fromEither(reader(payload).leftMap(unserializable(topic, _))))
 
-        val deserializer =
-          Deserializer.instance[F, A]: (topic, _, bytes) =>
-            bytes match
-              case None          => F.raiseError(new Deserializer.NullValueException(topic))
-              case Some(written) => F.fromEither(Wire.read(written).leftMap(unserializable(topic, _))).flatMap: (id, payload) =>
-                  readerFor(topic, id).flatMap(read => F.fromEither(read(payload).leftMap(unserializable(topic, _))))
-
-        Serde(serializer, deserializer)
+  private def unserializable(topic: Topic, reason: String): Throwable = new RegistryException.Unserializable(topic, reason)
 
   private def suffix(part: Part): String =
     part match
