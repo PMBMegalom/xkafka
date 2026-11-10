@@ -130,6 +130,115 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
     assertEquals(confluent(ProtobufCodec[Grown]).isBackwardCompatible(older).asScala.toList, Nil)
     assert(confluent(ProtobufCodec[Retyped]).isBackwardCompatible(older).asScala.nonEmpty, "changing a field's type")
 
+  private val shop =
+    """syntax = "proto3";
+      |package com.example.shop;
+      |import "google/protobuf/timestamp.proto";
+      |message Order {
+      |  string id = 1;
+      |  google.protobuf.Timestamp placed = 2;
+      |  repeated Line lines = 3;
+      |  map<string, int64> tags = 4;
+      |  optional string note = 5;
+      |  repeated int32 counts = 6 [packed = false];
+      |  oneof payment {
+      |    Card card = 7;
+      |    string voucher = 8;
+      |  }
+      |  Status status = 13;
+      |  repeated Status history = 14;
+      |  uint32 weight = 15;
+      |  sint64 balance = 16;
+      |  fixed64 code = 17;
+      |  double ratio = 18;
+      |  bytes raw = 19;
+      |  message Line { string sku = 1; int32 quantity = 2; }
+      |  message Card { string last4 = 1; }
+      |}
+      |enum Status { STATUS_OPEN = 0; STATUS_PAID = 1; STATUS_OLD = -1; }
+      |""".stripMargin
+
+  private val legacy =
+    """syntax = "proto2";
+      |package legacy;
+      |message Item {
+      |  required string id = 1;
+      |  optional int32 count = 2 [default = -5];
+      |  repeated int32 sizes = 4 [packed = true];
+      |  repeated int32 marks = 5;
+      |  optional sfixed32 offset = 6;
+      |}
+      |""".stripMargin
+
+  /** The bytes protobuf-java writes of `json`, a message `full` of `text`, and the values xkafka reads from them with the file `text`. */
+  private def both(text: String, full: String, json: String): (Chunk[Byte], ProtobufValue.Message, Dynamic) =
+    val schema     = new ProtobufSchema(text)
+    val descriptor = schema.toDescriptor(full)
+    val builder    = DynamicMessage.newBuilder(descriptor)
+    JsonFormat.parser().merge(json, builder)
+    val written = Chunk.array(builder.build.toByteArray)
+    val file    = ProtobufSchemaText.parse(text).fold(fail(_), identity)
+    val dynamic = new Dynamic(Pool.of(file, Map.empty).fold(fail(_), identity))
+    (written, dynamic.decode(full, written).fold(fail(_), identity), dynamic)
+
+  test("xkafka reads protobuf-java's messages of a proto3 file as the values they hold, and writes them as the same bytes"):
+    val (written, value, dynamic) =
+      both(
+        shop,
+        "com.example.shop.Order",
+        """{"id":"b","placed":"2026-11-10T07:00:00.5Z","lines":[{"sku":"fig","quantity":-2}],"tags":{"a":"-9223372036854775808"},"note":"",
+          |"counts":[1,2],"voucher":"V1","status":"STATUS_PAID","history":["STATUS_PAID","STATUS_OLD"],"weight":4294967295,"balance":"-3",
+          |"code":"18446744073709551615","ratio":0.25,"raw":"AQI="}""".stripMargin
+      )
+    assertEquals(
+      value,
+      ProtobufValue.Message(
+        "com.example.shop.Order",
+        Vector(
+          "id"     -> ProtobufValue.String("b"),
+          "placed" ->
+            ProtobufValue
+              .Message("google.protobuf.Timestamp", Vector("seconds" -> ProtobufValue.Int64(1794294000L), "nanos" -> ProtobufValue.Int32(500000000))),
+          "lines" -> ProtobufValue.List(Vector(
+            ProtobufValue.Message("com.example.shop.Order.Line", Vector("sku" -> ProtobufValue.String("fig"), "quantity" -> ProtobufValue.Int32(-2)))
+          )),
+          "tags"    -> ProtobufValue.Map(Vector(ProtobufValue.String("a") -> ProtobufValue.Int64(Long.MinValue))),
+          "note"    -> ProtobufValue.String(""),
+          "counts"  -> ProtobufValue.List(Vector(ProtobufValue.Int32(1), ProtobufValue.Int32(2))),
+          "voucher" -> ProtobufValue.String("V1"),
+          "status"  -> ProtobufValue.Enum("STATUS_PAID"),
+          "history" -> ProtobufValue.List(Vector(ProtobufValue.Enum("STATUS_PAID"), ProtobufValue.Enum("STATUS_OLD"))),
+          "weight"  -> ProtobufValue.UInt32(4294967295L),
+          "balance" -> ProtobufValue.Int64(-3),
+          "code"    -> ProtobufValue.UInt64(BigInt("18446744073709551615")),
+          "ratio"   -> ProtobufValue.Double(0.25),
+          "raw"     -> ProtobufValue.Bytes(Chunk[Byte](1, 2))
+        )
+      )
+    )
+    assertEquals(dynamic.encode("com.example.shop.Order", value), Right(written))
+
+  test("xkafka reads protobuf-java's messages of a proto2 file, leaving out optional fields that are not set, and writes them as the same bytes"):
+    val (written, value, dynamic) = both(legacy, "legacy.Item", """{"id":"x","sizes":[1,2],"marks":[3,4],"offset":-7}""")
+    assertEquals(
+      value,
+      ProtobufValue.Message(
+        "legacy.Item",
+        Vector(
+          "id"     -> ProtobufValue.String("x"),
+          "sizes"  -> ProtobufValue.List(Vector(ProtobufValue.Int32(1), ProtobufValue.Int32(2))),
+          "marks"  -> ProtobufValue.List(Vector(ProtobufValue.Int32(3), ProtobufValue.Int32(4))),
+          "offset" -> ProtobufValue.Int32(-7)
+        )
+      )
+    )
+    assertEquals(dynamic.encode("legacy.Item", value), Right(written))
+
+  test("Confluent takes the files xkafka writes out as the files they were read from"):
+    List(shop, legacy).foreach: text =>
+      val rendered = ProtobufSchemaText.render(ProtobufSchemaText.parse(text).fold(fail(_), identity))
+      assertEquals(new ProtobufSchema(rendered).canonicalString, new ProtobufSchema(text).canonicalString)
+
   /** xkafka's registry operations on Confluent's registry in memory. */
   private def bridged(mock: MockSchemaRegistryClient): SchemaRegistry[IO] =
     def missing[A](run: => A): IO[Option[A]] = IO.blocking(Option(run)).recover { case error: RestClientException if error.getStatus == 404 => None }

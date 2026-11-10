@@ -379,9 +379,11 @@ message Line {
 }
 ```
 
-A record is the schema's id, then which of the file's messages it is, then the
-message, as Confluent's `KafkaProtobufSerializer` writes it. A Protobuf record
-is a message, so the type you write must be a case class or a sealed trait.
+Records are written as Confluent's `KafkaProtobufSerializer` writes them, so
+Java applications read them with Confluent's deserializer, and xkafka reads
+what they write. A Protobuf record is a message, so the type you write must be a
+case class or a sealed trait; for any other type, `ProtobufSerde.of` fails with
+`RegistryException.NoSchema`.
 
 Records carry each field's number, not its name, so the numbers are what must
 stay the same as your type changes:
@@ -451,6 +453,90 @@ was written with:
 
 Under the registry's default compatibility rules, adding a field is a
 compatible change, and changing a field's type is not.
+
+## Protobuf values known only at run time
+
+Where a program does not know the schema until it runs, such as a tool that
+copies or shows any topic's records, it works with `ProtobufValue`s, which
+describe any Protobuf value, and `ProtobufSchema.File`s, which describe .proto
+files.
+
+`ProtobufSerde.asWritten` reads each record as it was written, together with
+the .proto file its writer registered. Where that file imports files registered
+under other subjects, they are fetched from the registry. Protobuf's well-known
+types, such as `google/protobuf/timestamp.proto`, need no fetching.
+
+```scala mdoc:compile-only
+// Read any Protobuf record of any schema, and show its message and one of its fields
+import cats.effect.IO
+
+import xkafka.{Headers, Topic}
+import xkafka.protobuf.ProtobufSerde
+import xkafka.schemaregistry.SchemaRegistry
+
+def show(registry: SchemaRegistry[IO], topic: Topic, bytes: fs2.Chunk[Byte]): IO[String] =
+  ProtobufSerde.asWritten[IO](registry).flatMap: reading =>
+    reading.deserialize(topic, Headers.empty, Some(bytes)).map(written => s"${written.value.name}: ${written.value.field("id")}")
+```
+
+`ProtobufSerde.generic` writes messages of a .proto file you hold, which
+`ProtobufSchemaText.parse` reads from its text, and reads records by field
+number, as a derived serde does:
+
+```scala mdoc:compile-only
+// Write a line of an order, with a .proto file read as the program runs
+import cats.effect.IO
+
+import xkafka.Serde
+import xkafka.protobuf.{ProtobufSchemaText, ProtobufSerde, ProtobufValue}
+import xkafka.schemaregistry.{Part, SchemaRegistry}
+
+val text = "syntax = \"proto3\"; package com.example; message Line { string sku = 1; int32 quantity = 2; }"
+
+def lines(registry: SchemaRegistry[IO]): IO[Serde[IO, ProtobufValue]] =
+  IO.fromEither(ProtobufSchemaText.parse(text).left.map(new IllegalArgumentException(_))).flatMap: file =>
+    ProtobufSerde.generic[IO](registry, file, "com.example.Line", Part.Value)
+
+val line = ProtobufValue.Message("com.example.Line", Vector("sku" -> ProtobufValue.String("apple"), "quantity" -> ProtobufValue.Int32(3)))
+```
+
+The file may import only the well-known types, and must declare the message you
+name; otherwise `ProtobufSerde.generic` fails with `RegistryException.NoSchema`.
+`ProtobufSchemaText.render` turns a `ProtobufSchema.File` back into text.
+
+A message is named by its full name, such as `com.example.Line`, and holds its
+fields by name, in the order the file declares them; `field("sku")` gives one.
+When a record is read:
+
+- a proto3 field without a label, such as `int32 quantity = 2;`, that the record
+  lacks reads as its zero value, and a list or map as empty;
+- any other field the record lacks, such as one labelled `optional`, a message,
+  or a field of a `oneof`, is left out of the message;
+- fields whose numbers the file does not declare are kept in the message's
+  `unknown` fields, and written back as they were, so copying a record loses
+  nothing.
+
+Each number field holds the value its type calls for:
+
+| Protobuf | `ProtobufValue` |
+| --- | --- |
+| `int32`, `sint32`, `sfixed32` | `Int32` |
+| `int64`, `sint64`, `sfixed64` | `Int64` |
+| `uint32`, `fixed32` | `UInt32`, a `Long` from 0 to 4294967295 |
+| `uint64`, `fixed64` | `UInt64`, a `BigInt` from 0 to 2^64 - 1 |
+
+An enum's value is `Enum("STATUS_PAID")`, by name, or `EnumNumber(7)` where a
+record holds a number the enum has no name for, as one written by a newer
+version of the schema.
+
+Writing fails with `RegistryException.Unserializable` where a value does not fit
+its message: it has a field the message lacks, a value of the wrong type, two
+fields of one `oneof`, an unsigned number out of range, or lacks a proto2
+`required` field.
+
+`ProtobufSchemaText.parse` reads proto2 and proto3 files. It ignores services
+and options, except a field's `packed` and `default`, and refuses files that
+declare groups or extensions, or are written in an edition of Protobuf.
 
 ## Annotations
 
@@ -542,7 +628,10 @@ Failures are `RegistryException`s:
 ## Not yet supported
 
 - Avro and JSON Schema records whose schema names schemas registered under other
-  subjects (schema references) are refused when reading. Protobuf records are
-  read by field number, so their schema's references do not matter.
-- Protobuf values of a schema known only at run time: there is no generic
-  Protobuf serde yet.
+  subjects (schema references) are refused when reading. Protobuf records with
+  such schemas are read: derived serdes read by field number and do not need the
+  other schemas, and `ProtobufSerde.asWritten` fetches them.
+- Generic Protobuf serdes of files that import files other than the
+  well-known types.
+- Protobuf files that declare groups or extensions, or are written in an edition
+  of Protobuf.

@@ -34,7 +34,7 @@ import org.http4s.ember.client.EmberClientBuilder
 import xkafka.{Headers, Topic}
 import xkafka.avro.{AvroCodec, AvroSerde}
 import xkafka.jsonschema.{JsonSchemaCodec, JsonSchemaSerde}
-import xkafka.protobuf.{ProtobufCodec, ProtobufField, ProtobufSerde}
+import xkafka.protobuf.{ProtobufCodec, ProtobufField, ProtobufSerde, ProtobufValue}
 import xkafka.schemaregistry.*
 
 final case class Item(sku: String, quantity: Int = 1) derives AvroCodec
@@ -76,6 +76,12 @@ final case class ParcelRetyped(
     id: Long,
     @ProtobufField(2)
     sent: Instant
+) derives ProtobufCodec
+
+@SchemaName("Price")
+final case class Priced(
+    @ProtobufField(1)
+    sku: String
 ) derives ProtobufCodec
 
 sealed trait Event derives AvroCodec
@@ -283,3 +289,26 @@ class RegistryBrokerSuite extends CatsEffectSuite:
         retyped match
           case Left(error: RegistryException.Refused) => assertEquals(error.code, 40901)
           case other                                  => fail(s"expected the registry to refuse a field whose type changed, got $other")
+
+  registryTest("Protobuf records are read as written, with the schemas their schema's references name fetched from the registry"): (registry, name) =>
+    val topic = Topic.from(name).toOption.get
+    val money = Schema("syntax = \"proto3\";\npackage bank;\n\nmessage Money {\n  int64 cents = 1;\n}\n", SchemaType.Protobuf)
+    for
+      client <- registry
+      _      <- client.register(subject(s"$name-money"), money)
+      id     <-
+        client.register(
+          subject(s"$name-value"),
+          Schema(
+            "syntax = \"proto3\";\npackage shop;\n\nimport \"money.proto\";\n\nmessage Header {\n}\nmessage Price {\n  string sku = 1;\n  bank.Money amount = 2;\n}\n",
+            SchemaType.Protobuf,
+            List(SchemaReference("money.proto", subject(s"$name-money"), 1))
+          )
+        )
+      written <-
+        ProtobufSerde.of[IO, Priced](client, Part.Value, writing = Writing.Pinned(id))
+          .flatMap(_.serializer.serialize(topic, Headers.empty, Priced("fig")))
+      read <- ProtobufSerde.asWritten[IO](client).flatMap(_.deserialize(topic, Headers.empty, written))
+    yield
+      assertEquals(read.value, new ProtobufValue.Message("shop.Price", Vector("sku" -> ProtobufValue.String("fig"))))
+      assertEquals(read.schema.imports, List("money.proto"))

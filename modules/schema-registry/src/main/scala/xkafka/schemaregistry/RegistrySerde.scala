@@ -124,12 +124,17 @@ object RegistrySerde:
     */
   def deserializer[F[_], A](registry: SchemaRegistry[F], read: Schema => Either[String, Chunk[Byte] => Either[String, A]])(using
       F: Concurrent[F]
+  ): F[Deserializer[F, A]] = resolving(registry, schema => F.pure(read(schema)))
+
+  /** Reads records as [[deserializer]] does, with a reader whose making takes effects, such as fetching the schemas a schema names. */
+  def resolving[F[_], A](registry: SchemaRegistry[F], read: Schema => F[Either[String, Chunk[Byte] => Either[String, A]]])(using
+      F: Concurrent[F]
   ): F[Deserializer[F, A]] =
     Ref.of[F, Map[SchemaId, Chunk[Byte] => Either[String, A]]](Map.empty).map: readers =>
       def readerFor(topic: Topic, id: SchemaId): F[Chunk[Byte] => Either[String, A]] =
         readers.get.map(_.get(id)).flatMap:
           case Some(reader) => F.pure(reader)
-          case None         => registry.schema(id).flatMap(schema => F.fromEither(read(schema).leftMap(unserializable(topic, _))))
+          case None         => registry.schema(id).flatMap(read).flatMap(made => F.fromEither(made.leftMap(unserializable(topic, _))))
               .flatTap(reader => readers.update(_.updated(id, reader)))
       Deserializer.instance[F, A]: (topic, _, bytes) =>
         bytes match
