@@ -324,6 +324,7 @@
         serdes, then call its <code>answer</code> from the internal route. The member&#39;s
         <code>application.server</code> setting is the endpoint xkafka members reach it at.</p>
         <pre><code class="nohighlight"><span class="comment">// Let a Java member answer xkafka members&#39; queries of its page view counts
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">clients</span><span>.</span><span class="identifier">admin</span><span>.</span><span class="type-name">Admin</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">serialization</span><span>.</span><span class="type-name">Serdes</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">KafkaStreams</span><span>;
 
@@ -349,13 +350,17 @@
         in a format xkafka reads, so a query that needs it fails with <code>NotXkafka</code>, or with
         <code>Unreachable</code> where nothing answers at its endpoint.</p>
         <p>A Java member asks with <code>JavaQuerying</code>, giving it the instance, its topology, the
-        application&#39;s id, and how to send a query to another member. It finds the member
-        holding a key through Java&#39;s own metadata, which lists xkafka members too, and
-        sends the query to that member&#39;s internal route, even when that member is itself:</p>
+        application&#39;s id, a Kafka <code>Admin</code>, and how to send a query to another member. It
+        works out a key&#39;s partition from how many partitions the topic has, which it asks
+        the <code>Admin</code> once for each topic. It finds the member holding that partition through
+        Java&#39;s own metadata, which lists xkafka members too, and sends the query to that
+        member&#39;s internal route, even when that member is itself. While a partition moves
+        between members, a query that needs it fails with <code>Rebalancing</code>:</p>
         <pre><code class="nohighlight"><span class="comment">// Let a Java member ask for a page&#39;s view count, wherever it is held
 </span><span class="keyword">import</span><span> </span><span class="identifier">java</span><span>.</span><span class="identifier">util</span><span>.</span><span class="type-name">Optional</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">java</span><span>.</span><span class="identifier">util</span><span>.</span><span class="identifier">function</span><span>.</span><span class="type-name">BiFunction</span><span>;
 
+</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">clients</span><span>.</span><span class="identifier">admin</span><span>.</span><span class="type-name">Admin</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">serialization</span><span>.</span><span class="type-name">Serdes</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">KafkaStreams</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">Topology</span><span>;
@@ -366,9 +371,10 @@
 </span><span class="keyword">final</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Asking</span><span> {
   </span><span class="keyword">private</span><span> </span><span class="keyword">final</span><span> </span><span class="type-name">JavaQuerying</span><span> </span><span class="identifier">querying</span><span>;
 
-  </span><span class="comment">// `post` is your HTTP client: it posts the bytes to the member&#39;s internal route and returns what it answers
-</span><span>  </span><span class="type-name">Asking</span><span>(</span><span class="type-name">KafkaStreams</span><span> </span><span class="identifier">streams</span><span>, </span><span class="type-name">Topology</span><span> </span><span class="identifier">topology</span><span>, </span><span class="type-name">BiFunction</span><span>&lt;</span><span class="type-name">HostInfo</span><span>, </span><span class="type-name">byte</span><span>[], </span><span class="type-name">byte</span><span>[]&gt; </span><span class="identifier">post</span><span>) {
-    </span><span class="identifier">querying</span><span> = </span><span class="type-name">JavaQuerying</span><span>.</span><span class="identifier">of</span><span>(</span><span class="identifier">streams</span><span>, </span><span class="identifier">topology</span><span>, </span><span class="string-literal">&quot;page-view-counter&quot;</span><span>, </span><span class="identifier">post</span><span>);
+  </span><span class="comment">// `admin` is an Admin for the same cluster, which you close after the instance.
+</span><span>  </span><span class="comment">// `post` is your HTTP client: it posts the bytes to the member&#39;s internal route and returns what it answers
+</span><span>  </span><span class="type-name">Asking</span><span>(</span><span class="type-name">KafkaStreams</span><span> </span><span class="identifier">streams</span><span>, </span><span class="type-name">Topology</span><span> </span><span class="identifier">topology</span><span>, </span><span class="type-name">Admin</span><span> </span><span class="identifier">admin</span><span>, </span><span class="type-name">BiFunction</span><span>&lt;</span><span class="type-name">HostInfo</span><span>, </span><span class="type-name">byte</span><span>[], </span><span class="type-name">byte</span><span>[]&gt; </span><span class="identifier">post</span><span>) {
+    </span><span class="identifier">querying</span><span> = </span><span class="type-name">JavaQuerying</span><span>.</span><span class="identifier">of</span><span>(</span><span class="identifier">streams</span><span>, </span><span class="identifier">topology</span><span>, </span><span class="string-literal">&quot;page-view-counter&quot;</span><span>, </span><span class="identifier">admin</span><span>, </span><span class="identifier">post</span><span>);
   }
 
   </span><span class="comment">// Throws a QueryProblemException when it cannot answer, whose problem says why, as xkafka&#39;s queries do
