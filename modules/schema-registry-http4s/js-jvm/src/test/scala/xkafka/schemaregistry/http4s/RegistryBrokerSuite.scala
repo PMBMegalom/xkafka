@@ -31,7 +31,21 @@ import fs2.Chunk
 import munit.{CatsEffectSuite, TestOptions}
 import org.http4s.ember.client.EmberClientBuilder
 import xkafka.{Headers, Topic}
+import xkafka.avro.{AvroCodec, AvroName, AvroSerde}
 import xkafka.schemaregistry.*
+
+final case class Item(sku: String, quantity: Int = 1) derives AvroCodec
+
+@AvroName("Item")
+final case class ItemBefore(sku: String) derives AvroCodec
+
+@AvroName("Item")
+final case class ItemBroken(sku: String, price: Long) derives AvroCodec
+
+sealed trait Event derives AvroCodec
+final case class Added(item: Item)    extends Event
+final case class Removed(sku: String) extends Event
+case object Cleared                   extends Event
 
 /** The registry client against a Confluent schema registry, which scripts/with-kafka.sh starts and names in `XKAFKA_SCHEMA_REGISTRY_URL`. */
 class RegistryBrokerSuite extends CatsEffectSuite:
@@ -155,3 +169,40 @@ class RegistryBrokerSuite extends CatsEffectSuite:
       assertEquals(found.map(_.version), Some(1))
       assertEquals(written.take(5), Chunk.singleton(0.toByte) ++ Chunk.array(java.nio.ByteBuffer.allocate(4).putInt(found.get.id.value).array))
       assertEquals(back, "hello")
+
+  registryTest("Avro values derived from Scala types are registered, written and read back"): (registry, name) =>
+    val topic = Topic.from(name).toOption.get
+    for
+      client <- registry
+      items  <- AvroSerde.of[IO, Item](client, Part.Value)
+      events <- AvroSerde.of[IO, Event](client, Part.Key)
+      item   <-
+        items.serializer.serialize(topic, Headers.empty, Item("apple", 3))
+          .flatMap(written => items.deserializer.deserialize(topic, Headers.empty, written))
+      event <-
+        events.serializer.serialize(topic, Headers.empty, Added(Item("pear")))
+          .flatMap(written => events.deserializer.deserialize(topic, Headers.empty, written))
+      found <- client.latest(subject(s"$name-key"))
+    yield
+      assertEquals(item, Item("apple", 3))
+      assertEquals(event, Added(Item("pear")))
+      assertEquals(found.map(_.schema.schemaType), Some(SchemaType.Avro))
+
+  registryTest("a field added with a default is registered as a compatible version, and records written before it read with the default"):
+    (registry, name) =>
+      val topic = Topic.from(name).toOption.get
+      for
+        client  <- registry
+        before  <- AvroSerde.of[IO, ItemBefore](client, Part.Value)
+        written <- before.serializer.serialize(topic, Headers.empty, ItemBefore("apple"))
+        after   <- AvroSerde.of[IO, Item](client, Part.Value)
+        _       <- after.serializer.serialize(topic, Headers.empty, Item("pear", 2))
+        read    <- after.deserializer.deserialize(topic, Headers.empty, written)
+        latest  <- client.latest(subject(s"$name-value"))
+        broken <- AvroSerde.of[IO, ItemBroken](client, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, ItemBroken("fig", 1))).attempt
+      yield
+        assertEquals(read, Item("apple", 1))
+        assertEquals(latest.map(_.version), Some(2))
+        broken match
+          case Left(error: RegistryException.Refused) => assertEquals(error.code, 409)
+          case other                                  => fail(s"expected the registry to refuse a field added without a default, got $other")

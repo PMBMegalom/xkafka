@@ -22,112 +22,22 @@
 package xkafka.avro
 
 import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
-
-import scala.jdk.CollectionConverters.*
 
 import fs2.Chunk
 import munit.ScalaCheckSuite
 import org.apache.avro.{Schema as ApacheSchema, SchemaCompatibility}
 import org.apache.avro.generic.{GenericData, GenericDatumReader, GenericDatumWriter, GenericRecord}
 import org.apache.avro.io.{DecoderFactory, EncoderFactory}
-import org.apache.avro.util.Utf8
 import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
 
 /** xkafka's schemas, encoding and schema resolution against Apache Avro's. */
 class ApacheAvroSuite extends ScalaCheckSuite:
+  import ApacheValues.*
+
   private def parsed(text: String): AvroSchema = AvroSchemaJson.parse(text).fold(reason => fail(reason), identity)
 
   private def apache(text: String): ApacheSchema = new ApacheSchema.Parser().parse(text)
-
-  /** The datum Apache Avro writes for `value` of `schema`. */
-  private def toApache(value: AvroValue, schema: ApacheSchema): Any =
-    (value, schema.getType) match
-      case (_, ApacheSchema.Type.UNION) =>
-        val branch = schema.getTypes.asScala.find(branch => fits(value, branch)).getOrElse(fail(s"no branch of $schema fits $value"))
-        toApache(value, branch)
-      case (AvroValue.Null, _)            => null
-      case (AvroValue.Boolean(value), _)  => value
-      case (AvroValue.Int(value), _)      => value
-      case (AvroValue.Long(value), _)     => value
-      case (AvroValue.Float(value), _)    => value
-      case (AvroValue.Double(value), _)   => value
-      case (AvroValue.Bytes(bytes), _)    => ByteBuffer.wrap(bytes.toArray)
-      case (AvroValue.String(value), _)   => new Utf8(value)
-      case (AvroValue.Enum(_, symbol), _) => new GenericData.EnumSymbol(schema, symbol)
-      case (AvroValue.Fixed(_, bytes), _) => new GenericData.Fixed(schema, bytes.toArray)
-      case (AvroValue.Array(items), _)    => new GenericData.Array(schema, items.map(toApache(_, schema.getElementType)).asJava)
-      case (AvroValue.Map(entries), _)    =>
-        val map = new java.util.LinkedHashMap[Utf8, Any]()
-        entries.foreach((key, value) => map.put(new Utf8(key), toApache(value, schema.getValueType)))
-        map
-      case (AvroValue.Record(_, fields), _) =>
-        val record = new GenericData.Record(schema)
-        fields.foreach((name, value) => record.put(name, toApache(value, schema.getField(name).schema)))
-        record
-
-  private def fits(value: AvroValue, schema: ApacheSchema): Boolean =
-    (value, schema.getType) match
-      case (AvroValue.Null, ApacheSchema.Type.NULL)              => true
-      case (AvroValue.Boolean(_), ApacheSchema.Type.BOOLEAN)     => true
-      case (AvroValue.Int(_), ApacheSchema.Type.INT)             => true
-      case (AvroValue.Long(_), ApacheSchema.Type.LONG)           => true
-      case (AvroValue.Float(_), ApacheSchema.Type.FLOAT)         => true
-      case (AvroValue.Double(_), ApacheSchema.Type.DOUBLE)       => true
-      case (AvroValue.Bytes(_), ApacheSchema.Type.BYTES)         => true
-      case (AvroValue.String(_), ApacheSchema.Type.STRING)       => true
-      case (AvroValue.Array(_), ApacheSchema.Type.ARRAY)         => true
-      case (AvroValue.Map(_), ApacheSchema.Type.MAP)             => true
-      case (AvroValue.Record(name, _), ApacheSchema.Type.RECORD) => name.value == schema.getFullName
-      case (AvroValue.Enum(name, _), ApacheSchema.Type.ENUM)     => name.value == schema.getFullName
-      case (AvroValue.Fixed(name, _), ApacheSchema.Type.FIXED)   => name.value == schema.getFullName
-      case _                                                     => false
-
-  /** The value a datum Apache Avro read is, as xkafka describes it. */
-  private def fromApache(datum: Any, schema: ApacheSchema): AvroValue =
-    schema.getType match
-      case ApacheSchema.Type.UNION   => fromApache(datum, schema.getTypes.get(GenericData.get.resolveUnion(schema, datum)))
-      case ApacheSchema.Type.NULL    => AvroValue.Null
-      case ApacheSchema.Type.BOOLEAN => AvroValue.Boolean(datum == java.lang.Boolean.TRUE)
-      case ApacheSchema.Type.INT     => AvroValue.Int(datum.toString.toInt)
-      case ApacheSchema.Type.LONG    => AvroValue.Long(datum.toString.toLong)
-      case ApacheSchema.Type.FLOAT   => AvroValue.Float(datum.toString.toFloat)
-      case ApacheSchema.Type.DOUBLE  => AvroValue.Double(datum.toString.toDouble)
-      case ApacheSchema.Type.STRING  => AvroValue.String(datum.toString)
-      case ApacheSchema.Type.BYTES   =>
-        val buffer =
-          datum match
-            case buffer: ByteBuffer => buffer.duplicate;
-            case other              => fail(s"bytes as $other")
-        val array = new Array[Byte](buffer.remaining)
-        buffer.get(array)
-        AvroValue.Bytes(Chunk.array(array))
-      case ApacheSchema.Type.ENUM  => AvroValue.Enum(FullName.from(schema.getFullName), datum.toString)
-      case ApacheSchema.Type.FIXED => datum match
-          case fixed: GenericData.Fixed => AvroValue.Fixed(FullName.from(schema.getFullName), Chunk.array(fixed.bytes))
-          case other                    => fail(s"fixed as $other")
-      case ApacheSchema.Type.ARRAY => datum match
-          case items: java.util.Collection[?] => AvroValue.Array(items.asScala.map(fromApache(_, schema.getElementType)).toVector)
-          case other                          => fail(s"array as $other")
-      case ApacheSchema.Type.MAP => datum match
-          case map: java.util.Map[?, ?] => AvroValue
-              .Map(map.asScala.map((key, value) => key.toString -> fromApache(value, schema.getValueType)).toVector)
-          case other => fail(s"map as $other")
-      case ApacheSchema.Type.RECORD => datum match
-          case record: GenericRecord => AvroValue.Record(
-              FullName.from(schema.getFullName),
-              schema.getFields.asScala.map(field => field.name -> fromApache(record.get(field.name), field.schema)).toVector
-            )
-          case other => fail(s"record as $other")
-
-  /** The value with each map's entries in key order, since Apache Avro reads a map into a hash map, which keeps no order. */
-  private def sorted(value: AvroValue): AvroValue =
-    value match
-      case AvroValue.Map(entries)         => AvroValue.Map(entries.map((key, value) => key -> sorted(value)).sortBy(_._1))
-      case AvroValue.Array(items)         => AvroValue.Array(items.map(sorted))
-      case AvroValue.Record(name, fields) => AvroValue.Record(name, fields.map((key, value) => key -> sorted(value)))
-      case other                          => other
 
   private def apacheWrite(schema: ApacheSchema, datum: Any): Chunk[Byte] =
     val out     = new ByteArrayOutputStream()

@@ -33,6 +33,7 @@ val fs2Version             = "3.14.0"
 val circeVersion           = "0.14.17"
 val http4sVersion          = "0.23.38"
 val apacheAvroVersion      = "1.12.2"
+val confluentVersion       = "8.4.1"
 val scalaJavaTimeVersion   = "2.7.0"     // 2.8.0 and later are built with Scala 3.9, which xkafka on Scala 3.3 cannot read.
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
@@ -778,7 +779,8 @@ lazy val schemaRegistry = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 // The registry is reached through an HTTP client the application chooses; this module adapts http4s's.
 lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/schema-registry-http4s"))
-  .dependsOn(schemaRegistry)
+  // The broker tests write Avro through the registry.
+  .dependsOn(schemaRegistry, avro % Test)
   .settings(commonSettings)
   .settings(
     name                                 := "xkafka-schema-registry-http4s",
@@ -799,8 +801,15 @@ lazy val avro = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     name        := "xkafka-avro",
     description := "Avro schemas and codecs, derived from Scala types, for xkafka"
   )
-  // Apache Avro, which xkafka's encoding and schema resolution are checked against, runs on the JVM alone.
-  .jvmSettings(libraryDependencies += "org.apache.avro" % "avro" % apacheAvroVersion % Test)
+  // Apache Avro, which xkafka's encoding and schema resolution are checked against, and Confluent's Avro serializer, which its records are, run on
+  // the JVM alone.
+  .jvmSettings(
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies ++= Seq(
+      "org.apache.avro" % "avro"                  % apacheAvroVersion % Test,
+      "io.confluent"    % "kafka-avro-serializer" % confluentVersion  % Test
+    )
+  )
   // The JVM has java.time, which Avro's dates and times are read into; JavaScript and Native take it from scala-java-time.
   .platformsSettings(JSPlatform, NativePlatform)(libraryDependencies += "io.github.cquiroz" %%% "scala-java-time" % scalaJavaTimeVersion)
 
