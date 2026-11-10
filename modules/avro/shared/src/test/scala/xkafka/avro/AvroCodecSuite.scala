@@ -26,7 +26,7 @@ import java.util.UUID
 
 import fs2.Chunk
 import munit.FunSuite
-import xkafka.schemaregistry.{Schema, SchemaType}
+import xkafka.schemaregistry.{Schema, SchemaAlias, SchemaDoc, SchemaName, SchemaNamespace, SchemaNoDefault, SchemaType}
 
 final case class Line(sku: String, quantity: Int = 1) derives AvroCodec
 
@@ -38,14 +38,14 @@ final case class Card(last4: String) extends Payment
 case object Cash                     extends Payment
 final case class Transfer(
     iban: String,
-    @AvroDoc("When it cleared")
+    @SchemaDoc("When it cleared")
     cleared: Option[Instant] = None
 ) extends Payment
 
-@AvroNamespace("com.example") @AvroDoc("An order") @AvroAlias("Purchase")
+@SchemaNamespace("com.example") @SchemaDoc("An order") @SchemaAlias("Purchase")
 final case class Order(
     id: UUID,
-    @AvroName("placed_at")
+    @SchemaName("placed_at")
     placedAt: Instant,
     day: LocalDate,
     lines: List[Line],
@@ -53,7 +53,7 @@ final case class Order(
     payment: Payment,
     note: Option[String] = None,
     tags: Map[String, Long] = Map.empty,
-    @AvroNoDefault
+    @SchemaNoDefault
     retries: Int = 0
 ) derives AvroCodec
 
@@ -65,7 +65,7 @@ final case class Preferred(note: Option[String] = Some("none")) derives AvroCode
 
 final case class Maybe(note: Option[String]) derives AvroCodec
 
-@AvroName("Line")
+@SchemaName("Line")
 final case class LineBefore(sku: String) derives AvroCodec
 
 class AvroCodecSuite extends FunSuite:

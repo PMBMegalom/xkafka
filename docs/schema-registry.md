@@ -201,26 +201,27 @@ given AvroCodec[CustomerId] = AvroCodec[String].imap(CustomerId(_))(_.value)
 
 ### Annotations
 
-These change what a derived schema calls things. They have avro4s's names:
+These change what a derived schema calls things, in `xkafka.schemaregistry`:
 
 | Annotation | On | Effect |
 | --- | --- | --- |
-| `@AvroName("name")` | a type or field | names it in place of its Scala name |
-| `@AvroNamespace("com.example")` | a type | puts it in this namespace in place of its package's |
-| `@AvroDoc("text")` | a type or field | documents it |
-| `@AvroAlias("Old")` | a type or field | another name it was known by, so records written under that name are read |
-| `@AvroNoDefault` | a field | leaves its Scala default out of the schema |
+| `@SchemaName("name")` | a type or field | names it in place of its Scala name |
+| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's |
+| `@SchemaDoc("text")` | a type or field | documents it |
+| `@SchemaAlias("Old")` | a type or field | another name it was known by, so records written under that name are read |
+| `@SchemaNoDefault` | a field | leaves its Scala default out of the schema |
 
 ```scala mdoc:compile-only
 // An order renamed from Purchase, in the namespace com.example, with a field renamed for the schema
 import java.time.Instant
 
-import xkafka.avro.{AvroAlias, AvroCodec, AvroDoc, AvroName, AvroNamespace}
+import xkafka.avro.AvroCodec
+import xkafka.schemaregistry.{SchemaAlias, SchemaDoc, SchemaName, SchemaNamespace}
 
-@AvroNamespace("com.example")
-@AvroAlias("Purchase")
-@AvroDoc("An order a customer placed")
-final case class Order(id: String, @AvroName("placed_at") placedAt: Instant) derives AvroCodec
+@SchemaNamespace("com.example")
+@SchemaAlias("Purchase")
+@SchemaDoc("An order a customer placed")
+final case class Order(id: String, @SchemaName("placed_at") placedAt: Instant) derives AvroCodec
 ```
 
 ## Values known only at run time

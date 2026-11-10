@@ -31,15 +31,15 @@ import fs2.Chunk
 import munit.{CatsEffectSuite, TestOptions}
 import org.http4s.ember.client.EmberClientBuilder
 import xkafka.{Headers, Topic}
-import xkafka.avro.{AvroCodec, AvroName, AvroSerde}
+import xkafka.avro.{AvroCodec, AvroSerde}
 import xkafka.schemaregistry.*
 
 final case class Item(sku: String, quantity: Int = 1) derives AvroCodec
 
-@AvroName("Item")
+@SchemaName("Item")
 final case class ItemBefore(sku: String) derives AvroCodec
 
-@AvroName("Item")
+@SchemaName("Item")
 final case class ItemBroken(sku: String, price: Long) derives AvroCodec
 
 sealed trait Event derives AvroCodec

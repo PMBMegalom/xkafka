@@ -19,21 +19,21 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-package xkafka.avro
+package xkafka.schemaregistry
 
 import scala.annotation.StaticAnnotation
 
-/** The name a derived schema gives a record, enum or field in place of its Scala name, as avro4s's annotation of this name does. */
-final class AvroName(val name: String) extends StaticAnnotation
+/** The name a derived schema gives a type or field in place of its Scala name, in every schema language. */
+final class SchemaName(val name: String) extends StaticAnnotation
 
-/** The namespace a derived schema puts a record or enum in, in place of its Scala package. */
-final class AvroNamespace(val namespace: String) extends StaticAnnotation
+/** The namespace a derived schema puts a type in, in place of its Scala package. */
+final class SchemaNamespace(val namespace: String) extends StaticAnnotation
 
-/** The documentation a derived schema gives a record, enum or field. */
-final class AvroDoc(val doc: String) extends StaticAnnotation
+/** The documentation a derived schema gives a type or field. */
+final class SchemaDoc(val doc: String) extends StaticAnnotation
 
-/** Another name a record, enum or field was known by, so records written under that name are read; one annotation for each name. */
-final class AvroAlias(val alias: String) extends StaticAnnotation
+/** Another name a type or field was known by, so records written under that name are read; one annotation for each name. */
+final class SchemaAlias(val alias: String) extends StaticAnnotation
 
 /** Leaves a field's Scala default out of its schema, so a reader requires the field to have been written. */
-final class AvroNoDefault extends StaticAnnotation
+final class SchemaNoDefault extends StaticAnnotation

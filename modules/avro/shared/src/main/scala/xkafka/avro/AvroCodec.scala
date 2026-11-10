@@ -31,6 +31,7 @@ import scala.util.Try
 
 import cats.syntax.all.*
 import fs2.Chunk
+import xkafka.schemaregistry.{DefaultOf, Meta}
 
 /** How values of `A` are written as Avro values of a schema, and read back from them.
   *
@@ -193,8 +194,8 @@ object AvroCodec:
     )
 
   /** A codec for a case class, as a record of its fields, or for a sealed trait or enum: as an Avro enum where every case is an object, and as a
-    * union of its cases' records where not. Names come from the Scala names and packages, and [[AvroName]], [[AvroNamespace]], [[AvroDoc]],
-    * [[AvroAlias]] and [[AvroNoDefault]] change them; a field's Scala default is its default in the schema.
+    * union of its cases' records where not. Names come from the Scala names and packages, and [[SchemaName]], [[SchemaNamespace]], [[SchemaDoc]],
+    * [[SchemaAlias]] and [[SchemaNoDefault]] change them; a field's Scala default is its default in the schema.
     */
   inline def derived[A](using mirror: Mirror.Of[A]): AvroCodec[A] =
     inline mirror match
@@ -205,7 +206,7 @@ object AvroCodec:
           named,
           Meta.fields[A],
           summonInline[Fields[product.MirroredElemTypes]],
-          Meta.defaults[A],
+          Meta.defaults[A, AvroCodec, AvroValue],
           summonInline[Elements[A, product.MirroredElemTypes]].apply,
           product.fromTuple
         )
@@ -213,8 +214,8 @@ object AvroCodec:
         val named = Meta.named[A]
         SumCodec[A](FullName(named.namespace, named.name), named, summonInline[Cases[A, sum.MirroredElemTypes]].cases)
 
-  /** A field's default as its codec writes it. */
-  private[avro] def encodeDefault[A](value: A)(using resolved: Resolved[A]): Either[String, AvroValue] = resolved.codec.encode(value)
+  /** A field's default as its codec writes it, which derived schemas take. */
+  given [A](using resolved: Resolved[A]): DefaultOf[AvroCodec, AvroValue, A] = value => resolved.codec.encode(value)
 
 /** The values of a case class's fields, as a tuple of their types. */
 private[avro] trait Elements[A, T <: Tuple]:
