@@ -22,6 +22,7 @@
 package xkafka.schemaregistry.http4s
 
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 
 import cats.data.NonEmptyList
 import cats.effect.{IO, Resource, SyncIO}
@@ -33,6 +34,7 @@ import org.http4s.ember.client.EmberClientBuilder
 import xkafka.{Headers, Topic}
 import xkafka.avro.{AvroCodec, AvroSerde}
 import xkafka.jsonschema.{JsonSchemaCodec, JsonSchemaSerde}
+import xkafka.protobuf.{ProtobufCodec, ProtobufField, ProtobufSerde}
 import xkafka.schemaregistry.*
 
 final case class Item(sku: String, quantity: Int = 1) derives AvroCodec
@@ -50,6 +52,31 @@ final case class NoteLater(text: String, pinned: Boolean = false) derives JsonSc
 
 @SchemaName("Note")
 final case class NoteShorter(pinned: Boolean = false) derives JsonSchemaCodec
+
+final case class Parcel(
+    @ProtobufField(1)
+    id: String,
+    @ProtobufField(2)
+    sent: Instant
+) derives ProtobufCodec
+
+@SchemaName("Parcel")
+final case class ParcelLater(
+    @ProtobufField(1)
+    id: String,
+    @ProtobufField(2)
+    sent: Instant,
+    @ProtobufField(3)
+    weight: Int = 1
+) derives ProtobufCodec
+
+@SchemaName("Parcel")
+final case class ParcelRetyped(
+    @ProtobufField(1)
+    id: Long,
+    @ProtobufField(2)
+    sent: Instant
+) derives ProtobufCodec
 
 sealed trait Event derives AvroCodec
 final case class Added(item: Item)    extends Event
@@ -234,3 +261,25 @@ class RegistryBrokerSuite extends CatsEffectSuite:
         removed match
           case Left(error: RegistryException.Refused) => assertEquals(error.code, 40901)
           case other                                  => fail(s"expected the registry to refuse a field removed from a closed object, got $other")
+
+  registryTest("Protobuf values are registered and read back, a field added is a compatible version, and a field's type changed is not"):
+    (registry, name) =>
+      val topic = Topic.from(name).toOption.get
+      val sent  = Instant.parse("2026-11-10T07:00:00.5Z")
+      for
+        client  <- registry
+        written <- ProtobufSerde.of[IO, Parcel](client, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, Parcel("p1", sent)))
+        later   <- ProtobufSerde.of[IO, ParcelLater](client, Part.Value)
+        _       <- later.serializer.serialize(topic, Headers.empty, ParcelLater("p2", sent, 5))
+        read    <- later.deserializer.deserialize(topic, Headers.empty, written)
+        latest  <- client.latest(subject(s"$name-value"))
+        retyped <-
+          ProtobufSerde.of[IO, ParcelRetyped](client, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, ParcelRetyped(1L, sent)))
+            .attempt
+      yield
+        assertEquals(written.map(_.drop(5).take(1)), Some(Chunk.singleton(0.toByte)), "the first message of the schema")
+        assertEquals(read, ParcelLater("p1", sent))
+        assertEquals(latest.map(registered => (registered.version, registered.schema.schemaType)), Some((2, SchemaType.Protobuf)))
+        retyped match
+          case Left(error: RegistryException.Refused) => assertEquals(error.code, 40901)
+          case other                                  => fail(s"expected the registry to refuse a field whose type changed, got $other")

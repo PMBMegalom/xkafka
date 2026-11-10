@@ -55,7 +55,7 @@ val serde = Serde.fromJava[IO](Serdes.String())                         // Both 
 
 ## Schema registry
 
-Avro and JSON Schema values with schemas kept in a Confluent Schema Registry
+Avro, JSON Schema and Protobuf values with schemas kept in a Confluent Schema Registry
 have serdes of their own. See [Schema registry](schema-registry.md).
 
 ## Headers

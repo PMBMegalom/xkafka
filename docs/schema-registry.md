@@ -1,8 +1,8 @@
 # Schema registry
 
 xkafka can write records with schemas kept in a Confluent Schema Registry, and
-read them back, on the JVM, Scala.js and Scala Native. It supports Avro and JSON
-Schema. Records are written in Confluent's wire format, so Java applications
+read them back, on the JVM, Scala.js and Scala Native. It supports Avro, JSON
+Schema and Protobuf. Records are written in Confluent's wire format, so Java applications
 using Confluent's serializers and deserializers read what xkafka writes, and
 xkafka reads what they write.
 
@@ -17,9 +17,9 @@ libraryDependencies ++= Seq(
 )
 ```
 
-- `xkafka-avro` gives you Avro serdes for your types, and `xkafka-json-schema`
-  gives you JSON Schema serdes. Add the one you use, or both. Each brings in
-  `xkafka-schema-registry`, the registry client.
+- `xkafka-avro` gives you Avro serdes for your types, `xkafka-json-schema` JSON
+  Schema serdes, and `xkafka-protobuf` Protobuf serdes. Add the ones you use.
+  Each brings in `xkafka-schema-registry`, the registry client.
 - `xkafka-schema-registry-http4s` lets the registry client use any http4s
   client. Ember is shown here, but any http4s client works. To use an HTTP
   client that is not http4s's, see [Another HTTP client](#another-http-client).
@@ -328,9 +328,133 @@ For values known only at run time, `JsonSchemaSerde.generic` writes circe
 `Json` values of a schema you hold, and `JsonSchemaSerde.asWritten` reads each
 record's JSON with the schema it was written with.
 
+## Protobuf
+
+Derive a codec for your type, numbering every field with `@ProtobufField`, and
+make a serde from it:
+
+```scala mdoc:compile-only
+// Write orders as Protobuf messages, registering their .proto file under "orders-value" on the first write
+import java.time.Instant
+
+import cats.effect.IO
+
+import xkafka.Serde
+import xkafka.protobuf.{ProtobufCodec, ProtobufField, ProtobufSerde}
+import xkafka.schemaregistry.{Part, SchemaNamespace, SchemaRegistry}
+
+final case class Line(@ProtobufField(1) sku: String, @ProtobufField(2) quantity: Int = 1) derives ProtobufCodec
+
+@SchemaNamespace("com.example")
+final case class Order(
+    @ProtobufField(1) id: String,
+    @ProtobufField(2) placedAt: Instant,
+    @ProtobufField(3) lines: List[Line],
+    @ProtobufField(4) note: Option[String] = None
+) derives ProtobufCodec
+
+def orders(registry: SchemaRegistry[IO]): IO[Serde[IO, Order]] = ProtobufSerde.of[IO, Order](registry, Part.Value)
+```
+
+The schema registered for `Order` is this .proto file, which
+`ProtobufCodec[Order].schema` also gives:
+
+```proto
+syntax = "proto3";
+
+package com.example;
+
+import "google/protobuf/timestamp.proto";
+
+message Order {
+  string id = 1;
+  google.protobuf.Timestamp placedAt = 2;
+  repeated Line lines = 3;
+  optional string note = 4;
+}
+
+message Line {
+  string sku = 1;
+  optional int32 quantity = 2;
+}
+```
+
+A record is the schema's id, then which of the file's messages it is, then the
+message, as Confluent's `KafkaProtobufSerializer` writes it. A Protobuf record
+is a message, so the type you write must be a case class or a sealed trait.
+
+Records carry each field's number, not its name, so the numbers are what must
+stay the same as your type changes:
+
+- every field needs a number. A field without one, two fields sharing one, or a
+  number Protobuf does not allow (outside 1 to 536870911, or from 19000 to
+  19999) fails to compile;
+- renaming a field, or moving it, changes nothing a reader sees;
+- once a field is removed, do not give its number to another field.
+
+`derives ProtobufCodec` declares, in proto3:
+
+| Scala | Protobuf |
+| --- | --- |
+| `Boolean`, `Int`, `Long`, `Float`, `Double`, `String` | `bool`, `int32`, `int64`, `float`, `double`, `string` |
+| `fs2.Chunk[Byte]` | `bytes` |
+| `Option[A]` | an `optional` field; a field of a message, which records whether it is set, needs no label |
+| `List`, `Vector`, `Seq`, `Set` | a `repeated` field, packed where it holds numbers |
+| `Map[String, A]` | `map<string, A>` |
+| `java.util.UUID`, `BigDecimal` | `string`, holding the value as text |
+| `java.time.Instant` | `google.protobuf.Timestamp` |
+| `java.time.LocalDate`, `LocalTime`, `LocalDateTime` | `string`, holding ISO-8601 text, such as `2026-11-10` |
+| a case class | a `message` of its fields |
+| an enum or sealed trait whose cases are all objects | an `enum`, whose values carry its name and theirs, as `STATUS_OPEN` |
+| any other sealed trait or enum | a `message` whose one field, of a `oneof`, is the case's message |
+
+- Every message and enum is declared in the one file, in the package of the
+  message you write, by its simple name. Two types with the same name in
+  different namespaces cannot share the file.
+- Number each case of a sealed trait or enum with `@ProtobufField` on the case,
+  as on a field. An enum needs a case numbered 0, or it fails to compile: a field
+  of it that a record lacks reads as that case.
+- A field with a Scala default is labelled `optional` and written even where it
+  is zero, so a record that lacks it reads the default. Other fields are written
+  as proto3 writes them: left out where they are zero (`0`, `""`, `false`, an
+  empty list, an enum's case numbered 0), and read as zero where a record lacks
+  them. Lists, maps and options do not use a default: a record that lacks one
+  reads it as empty or `None`.
+- Protobuf has no field for a list of lists, a list or map of options, or an
+  option of a list. `ProtobufCodec[A].schema` says which field of `A` holds one,
+  and `ProtobufSerde.of` fails with `RegistryException.NoSchema`.
+
+`ProtobufCodec.sint32` and `ProtobufCodec.sint64` write numbers near zero,
+negative or not, in fewer bytes than `int32` and `int64`, which take ten bytes for
+any negative number. `fixed32`, `fixed64`, `sfixed32` and `sfixed64` write every
+number in four or eight bytes. Make one the given codec to use it:
+
+```scala mdoc:compile-only
+// Write a change of stock, often negative, as a sint32
+import xkafka.protobuf.{ProtobufCodec, ProtobufField}
+
+given ProtobufCodec[Int] = ProtobufCodec.sint32
+
+final case class StockChange(@ProtobufField(1) sku: String, @ProtobufField(2) change: Int) derives ProtobufCodec
+```
+
+For a type of your own, map it to one that has a codec with `imap` or `emap`,
+as for Avro.
+
+Reading takes a record's fields by number, whatever version of the schema it
+was written with:
+
+- a field the record lacks takes its default, or its zero where it has none;
+- fields your type does not have are skipped;
+- a record whose enum field holds a number your enum lacks fails to read with
+  `RegistryException.Unserializable`.
+
+Under the registry's default compatibility rules, adding a field is a
+compatible change, and changing a field's type is not.
+
 ## Annotations
 
-These change what a derived schema calls things, for Avro and JSON Schema alike.
+These change what a derived schema calls things, for every schema language.
 They are in `xkafka.schemaregistry`:
 
 | Annotation | On | Effect |
@@ -358,6 +482,10 @@ In JSON Schema, a type's name and namespace make its `title`, and a type's
 aliases are not used: JSON Schema has no way to record them. A field's aliases
 are read as other names for the field.
 
+In Protobuf, documentation becomes comments in the .proto file, and the
+namespace of the message you write is the file's package. Aliases are not used:
+records name fields by number, so a renamed field or type needs no alias.
+
 ## Subjects
 
 A schema is kept under a subject, named as Confluent's subject name strategies
@@ -366,12 +494,12 @@ name it:
 | `SubjectNaming` | Subject | Confluent's strategy |
 | --- | --- | --- |
 | `TopicName` (default) | `orders-value` or `orders-key` | `TopicNameStrategy` |
-| `RecordName` | `com.example.Order`, the record's full name or the JSON schema's `title` | `RecordNameStrategy` |
+| `RecordName` | `com.example.Order`, the record's full name, the JSON schema's `title` or the Protobuf message's full name | `RecordNameStrategy` |
 | `TopicRecordName` | `orders-com.example.Order` | `TopicRecordNameStrategy` |
 
 ## Which schema is written
 
-`AvroSerde.of` and `JsonSchemaSerde.of` take a `Writing`:
+`AvroSerde.of`, `JsonSchemaSerde.of` and `ProtobufSerde.of` take a `Writing`:
 
 - `Register` (default): writes with your codec's schema, registering it under
   the subject on the first write if it is not there yet, as Confluent's
@@ -384,7 +512,9 @@ name it:
 - `Latest`: writes with the subject's latest version, as Confluent's
   `use.latest.version` does. Use it when another team owns the schema. With
   Avro, fields the latest version lacks are left out, and those it adds take
-  their defaults; JSON is written as your codec writes it.
+  their defaults; JSON is written as your codec writes it. A Protobuf message
+  is written as your codec writes it, as the message of the latest version's
+  file with your type's name; a file without one is refused.
 - `Pinned(id)`: writes with the schema registered as `id`.
 
 ## Registry operations
@@ -407,9 +537,12 @@ Failures are `RegistryException`s:
 | `Refused` | the registry refused a request; `code` is its error code, such as 40901 for an incompatible schema |
 | `Unreadable` | the registry's answer could not be read, as one from a proxy in front of it |
 | `Unserializable` | a value could not be written, or a record read, with its schema |
+| `NoSchema` | your type has no schema in the serde's schema language, as a list of lists has none in Protobuf |
 
 ## Not yet supported
 
-- Schemas that name schemas registered under other subjects (schema
-  references) are refused when reading.
-- Protobuf.
+- Avro and JSON Schema records whose schema names schemas registered under other
+  subjects (schema references) are refused when reading. Protobuf records are
+  read by field number, so their schema's references do not matter.
+- Protobuf values of a schema known only at run time: there is no generic
+  Protobuf serde yet.

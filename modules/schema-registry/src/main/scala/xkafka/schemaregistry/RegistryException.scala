@@ -45,3 +45,6 @@ object RegistryException:
   /** A value of topic `topic` could not be written, or a record of it read, with the schemas the registry keeps. */
   final class Unserializable(val topic: Topic, val reason: String)
       extends RegistryException(s"a record of topic '${topic.value}' could not be written or read with its schema: $reason")
+
+  /** A type has no schema in the schema language a serde writes, as a list of lists has none in Protobuf; `reason` says why. */
+  final class NoSchema(val reason: String) extends RegistryException(s"the type has no schema in the serde's schema language: $reason")
