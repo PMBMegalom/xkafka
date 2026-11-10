@@ -32,6 +32,7 @@ import munit.{CatsEffectSuite, TestOptions}
 import org.http4s.ember.client.EmberClientBuilder
 import xkafka.{Headers, Topic}
 import xkafka.avro.{AvroCodec, AvroSerde}
+import xkafka.jsonschema.{JsonSchemaCodec, JsonSchemaSerde}
 import xkafka.schemaregistry.*
 
 final case class Item(sku: String, quantity: Int = 1) derives AvroCodec
@@ -41,6 +42,14 @@ final case class ItemBefore(sku: String) derives AvroCodec
 
 @SchemaName("Item")
 final case class ItemBroken(sku: String, price: Long) derives AvroCodec
+
+final case class Note(text: String) derives JsonSchemaCodec
+
+@SchemaName("Note")
+final case class NoteLater(text: String, pinned: Boolean = false) derives JsonSchemaCodec
+
+@SchemaName("Note")
+final case class NoteShorter(pinned: Boolean = false) derives JsonSchemaCodec
 
 sealed trait Event derives AvroCodec
 final case class Added(item: Item)    extends Event
@@ -206,3 +215,22 @@ class RegistryBrokerSuite extends CatsEffectSuite:
         broken match
           case Left(error: RegistryException.Refused) => assertEquals(error.code, 40901)
           case other                                  => fail(s"expected the registry to refuse a field added without a default, got $other")
+
+  registryTest("JSON Schema values are registered and read back, a field added with a default is a compatible version, and one removed is not"):
+    (registry, name) =>
+      val topic = Topic.from(name).toOption.get
+      for
+        client  <- registry
+        written <- JsonSchemaSerde.of[IO, Note](client, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, Note("hello")))
+        later   <- JsonSchemaSerde.of[IO, NoteLater](client, Part.Value)
+        _       <- later.serializer.serialize(topic, Headers.empty, NoteLater("pinned", pinned = true))
+        read    <- later.deserializer.deserialize(topic, Headers.empty, written)
+        latest  <- client.latest(subject(s"$name-value"))
+        removed <-
+          JsonSchemaSerde.of[IO, NoteShorter](client, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, NoteShorter())).attempt
+      yield
+        assertEquals(read, NoteLater("hello"))
+        assertEquals(latest.map(registered => (registered.version, registered.schema.schemaType)), Some((2, SchemaType.Json)))
+        removed match
+          case Left(error: RegistryException.Refused) => assertEquals(error.code, 40901)
+          case other                                  => fail(s"expected the registry to refuse a field removed from a closed object, got $other")

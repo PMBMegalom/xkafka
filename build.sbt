@@ -779,8 +779,8 @@ lazy val schemaRegistry = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 // The registry is reached through an HTTP client the application chooses; this module adapts http4s's.
 lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/schema-registry-http4s"))
-  // The broker tests write Avro through the registry.
-  .dependsOn(schemaRegistry, avro % Test)
+  // The broker tests write Avro and JSON Schema through the registry.
+  .dependsOn(schemaRegistry, avro % Test, jsonSchema % Test)
   .settings(commonSettings)
   .settings(
     name                                 := "xkafka-schema-registry-http4s",
@@ -812,6 +812,22 @@ lazy val avro = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     )
   )
   // The JVM has java.time, which Avro's dates and times are read into; JavaScript and Native take it from scala-java-time.
+  .platformsSettings(JSPlatform, NativePlatform)(libraryDependencies += "io.github.cquiroz" %%% "scala-java-time" % scalaJavaTimeVersion)
+
+lazy val jsonSchema = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .in(file("modules/json-schema"))
+  .dependsOn(schemaRegistry % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name        := "xkafka-json-schema",
+    description := "JSON Schema schemas and codecs, derived from Scala types, for xkafka"
+  )
+  // Confluent's JSON Schema serializer, which validates values against schemas and checks schemas' compatibility, runs on the JVM alone.
+  .jvmSettings(
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies += "io.confluent" % "kafka-json-schema-serializer" % confluentVersion % Test
+  )
+  // The JVM has java.time, which dates and times are read into; JavaScript and Native take it from scala-java-time.
   .platformsSettings(JSPlatform, NativePlatform)(libraryDependencies += "io.github.cquiroz" %%% "scala-java-time" % scalaJavaTimeVersion)
 
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
@@ -1121,7 +1137,7 @@ lazy val streamsFixture = project
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
-  .dependsOn(client.jvm, streamsJava, schemaRegistryHttp4s.jvm, avro.jvm)
+  .dependsOn(client.jvm, streamsJava, schemaRegistryHttp4s.jvm, avro.jvm, jsonSchema.jvm)
   .settings(
     // The examples of querying stores show an HTTP connection between members, so the site depends on http4s's server and Ember client; of the
     // published modules, only xkafka-schema-registry-http4s depends on http4s, and on its client alone.
@@ -1131,4 +1147,5 @@ lazy val docs = project
     )
   )
 
-lazy val root = tlCrossRootProject.aggregate(kernel, client, schemaRegistry, schemaRegistryHttp4s, avro, streamsJava).settings(name := "xkafka")
+lazy val root =
+  tlCrossRootProject.aggregate(kernel, client, schemaRegistry, schemaRegistryHttp4s, avro, jsonSchema, streamsJava).settings(name := "xkafka")

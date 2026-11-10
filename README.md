@@ -79,9 +79,10 @@ guarantees, state and standby tasks.
 
 ## Schema registry
 
-xkafka writes and reads Avro with schemas kept in a Confluent Schema Registry,
-on every platform, in the same bytes as Confluent's Java serializers. Derive a
-codec for your type and make a serde from it:
+xkafka writes and reads Avro and JSON Schema with schemas kept in a Confluent
+Schema Registry, on every platform, in Confluent's wire format, so Confluent's
+Java serializers read what it writes. Derive a codec for your type and make a
+serde from it:
 
 ```scala
 // Write orders as Avro, registering their schema under "orders-value" on the first write
@@ -100,7 +101,7 @@ The full documentation lives at
 [pmbmegalom.github.io/xkafka](https://pmbmegalom.github.io/xkafka/), covering
 settings and validation, producing and consuming, offsets and commits,
 transactions, streams, topic administration, transport security, the error
-model, headers, serialization, the schema registry and Avro, and the subtle
+model, headers, serialization, the schema registry with Avro and JSON Schema, and the subtle
 differences between the three runtimes.
 
 ## Versioning
@@ -124,8 +125,8 @@ To build xkafka or run its tests, see
   Scala.js, and Scala Native.
 - `xkafka-schema-registry` reaches a Confluent Schema Registry, and
   `xkafka-schema-registry-http4s` reaches it through an http4s client.
-- `xkafka-avro` writes and reads Avro with the registry's schemas, with codecs
-  derived from Scala types.
+- `xkafka-avro` and `xkafka-json-schema` write and read Avro and JSON Schema with
+  the registry's schemas, with codecs derived from Scala types.
 - `xkafka-streams-java`, on the JVM, lets streams programs use code written for
   Java Kafka Streams.
 

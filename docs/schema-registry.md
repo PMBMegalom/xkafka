@@ -1,10 +1,10 @@
 # Schema registry
 
 xkafka can write records with schemas kept in a Confluent Schema Registry, and
-read them back, on the JVM, Scala.js and Scala Native. Avro is the schema
-language it supports. Records are written in Confluent's wire format, so Java
-applications using Confluent's `KafkaAvroSerializer` and `KafkaAvroDeserializer`
-read what xkafka writes, and xkafka reads what they write.
+read them back, on the JVM, Scala.js and Scala Native. It supports Avro and JSON
+Schema. Records are written in Confluent's wire format, so Java applications
+using Confluent's serializers and deserializers read what xkafka writes, and
+xkafka reads what they write.
 
 ## Dependencies
 
@@ -17,7 +17,8 @@ libraryDependencies ++= Seq(
 )
 ```
 
-- `xkafka-avro` gives you Avro serdes for your types, and brings in
+- `xkafka-avro` gives you Avro serdes for your types, and `xkafka-json-schema`
+  gives you JSON Schema serdes. Add the one you use, or both. Each brings in
   `xkafka-schema-registry`, the registry client.
 - `xkafka-schema-registry-http4s` lets the registry client use any http4s
   client. Ember is shown here, but any http4s client works. To use an HTTP
@@ -128,7 +129,7 @@ does, so records written with an older or newer version of your type are read:
 A record that cannot be resolved this way fails with
 `RegistryException.Unserializable`.
 
-## Derived schemas
+## Derived Avro schemas
 
 `derives AvroCodec` makes a schema from the type:
 
@@ -199,32 +200,7 @@ given AvroCodec[CustomerId] = AvroCodec[String].imap(CustomerId(_))(_.value)
 
 `emap` does the same where reading can refuse a value.
 
-### Annotations
-
-These change what a derived schema calls things, in `xkafka.schemaregistry`:
-
-| Annotation | On | Effect |
-| --- | --- | --- |
-| `@SchemaName("name")` | a type or field | names it in place of its Scala name |
-| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's |
-| `@SchemaDoc("text")` | a type or field | documents it |
-| `@SchemaAlias("Old")` | a type or field | another name it was known by, so records written under that name are read |
-| `@SchemaNoDefault` | a field | leaves its Scala default out of the schema |
-
-```scala mdoc:compile-only
-// An order renamed from Purchase, in the namespace com.example, with a field renamed for the schema
-import java.time.Instant
-
-import xkafka.avro.AvroCodec
-import xkafka.schemaregistry.{SchemaAlias, SchemaDoc, SchemaName, SchemaNamespace}
-
-@SchemaNamespace("com.example")
-@SchemaAlias("Purchase")
-@SchemaDoc("An order a customer placed")
-final case class Order(id: String, @SchemaName("placed_at") placedAt: Instant) derives AvroCodec
-```
-
-## Values known only at run time
+## Avro values known only at run time
 
 Where a program does not know the schema until it runs, such as a tool that
 copies or shows any topic's records, it works with `AvroValue`s, which describe
@@ -271,6 +247,117 @@ A value that does not fit the schema fails to write with
 `RegistryException.Unserializable`. A value of a logical type is its underlying
 value: a `date` is the `AvroValue.Int` of its days since 1970-01-01.
 
+## JSON Schema
+
+Derive a codec for your type, and make a serde from it, as for Avro:
+
+```scala mdoc:compile-only
+// Write orders as JSON, registering their JSON Schema under "orders-value" on the first write
+import java.time.Instant
+
+import cats.effect.IO
+
+import xkafka.Serde
+import xkafka.jsonschema.{JsonSchemaCodec, JsonSchemaSerde}
+import xkafka.schemaregistry.{Part, SchemaRegistry}
+
+final case class Line(sku: String, quantity: Int = 1) derives JsonSchemaCodec
+final case class Order(id: String, placedAt: Instant, lines: List[Line], note: Option[String] = None) derives JsonSchemaCodec
+
+def orders(registry: SchemaRegistry[IO]): IO[Serde[IO, Order]] = JsonSchemaSerde.of[IO, Order](registry, Part.Value)
+```
+
+A record is the schema's id followed by the JSON as UTF-8 text, as Confluent's
+`KafkaJsonSchemaSerializer` writes it.
+
+`derives JsonSchemaCodec` makes a JSON Schema of draft 7 from the type:
+
+| Scala | JSON Schema | Written as |
+| --- | --- | --- |
+| `Boolean`, `String` | `boolean`, `string` | as they are |
+| `Int`, `Long` | `integer` | numbers |
+| `Float`, `Double`, `BigDecimal` | `number` | numbers; infinities and NaN are refused |
+| `fs2.Chunk[Byte]` | `string` with `contentEncoding` `base64` | base64 text |
+| `Option[A]` | `oneOf` `null` and `A` | `null` where it is `None` |
+| `List`, `Vector`, `Seq`, `Set` | `array` | arrays |
+| `Map[String, A]` | `object` whose properties are all `A` | objects |
+| `java.util.UUID` | `string` with `format` `uuid` | text |
+| `java.time.Instant` | `string` with `format` `date-time` | ISO-8601 text, such as `2026-11-10T07:00:00Z` |
+| `java.time.LocalDate` | `string` with `format` `date` | ISO-8601 text, such as `2026-11-10` |
+| `java.time.LocalTime`, `LocalDateTime` | `string` | ISO-8601 text, such as `07:00:00` |
+| a case class | `object` of its fields, closed to others | objects |
+| an enum or sealed trait whose cases are all objects | `string` with `enum` of the cases' names | the case's name |
+| any other sealed trait or enum | `oneOf` its cases' objects | the case's object, with its name in the property `type` |
+
+- An object's `title` is the type's full name, in the namespace of its package,
+  and naming subjects by record uses it, as Confluent's tools do.
+- A field with a default, or an optional one, may be left out of a record; the
+  others are required.
+- Objects are closed: their schema allows no other properties. Under the
+  registry's default compatibility rules, that lets you add a field with a
+  default, or an optional one, as a new version of the schema, and refuses to
+  let you remove a field.
+- A case of a sealed trait must not have a field named `type`: writing it fails.
+
+Reading takes a record's JSON as it is, whatever version of the schema it was
+written with:
+
+- a field the record lacks takes its default, or `None` where it is optional;
+- a field is also read under any name `@SchemaAlias` gives it;
+- properties your type does not have are ignored.
+
+Values are not checked against the schema when they are written or read, as
+Confluent's serializers do not check them by default.
+
+For a schema written by hand, give its JSON with circe's codecs for its values,
+which must write what the schema describes:
+
+```scala mdoc:compile-only
+// A temperature written as a bare number, with a schema written by hand
+import io.circe.{Decoder, Encoder, Json}
+
+import xkafka.jsonschema.JsonSchemaCodec
+
+final case class Celsius(degrees: Double)
+
+given JsonSchemaCodec[Celsius] =
+  JsonSchemaCodec.from(Json.obj("type" -> Json.fromString("number")), Encoder[Double].contramap(_.degrees), Decoder[Double].map(Celsius(_)))
+```
+
+For values known only at run time, `JsonSchemaSerde.generic` writes circe
+`Json` values of a schema you hold, and `JsonSchemaSerde.asWritten` reads each
+record's JSON with the schema it was written with.
+
+## Annotations
+
+These change what a derived schema calls things, for Avro and JSON Schema alike.
+They are in `xkafka.schemaregistry`:
+
+| Annotation | On | Effect |
+| --- | --- | --- |
+| `@SchemaName("name")` | a type or field | names it in place of its Scala name |
+| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's |
+| `@SchemaDoc("text")` | a type or field | documents it |
+| `@SchemaAlias("Old")` | a type or field | another name it was known by, so records written under that name are read |
+| `@SchemaNoDefault` | a field | leaves its Scala default out of the schema |
+
+```scala mdoc:compile-only
+// An order renamed from Purchase, in the namespace com.example, with a field renamed for the schema
+import java.time.Instant
+
+import xkafka.avro.AvroCodec
+import xkafka.schemaregistry.{SchemaAlias, SchemaDoc, SchemaName, SchemaNamespace}
+
+@SchemaNamespace("com.example")
+@SchemaAlias("Purchase")
+@SchemaDoc("An order a customer placed")
+final case class Order(id: String, @SchemaName("placed_at") placedAt: Instant) derives AvroCodec
+```
+
+In JSON Schema, a type's name and namespace make its `title`, and a type's
+aliases are not used: JSON Schema has no way to record them. A field's aliases
+are read as other names for the field.
+
 ## Subjects
 
 A schema is kept under a subject, named as Confluent's subject name strategies
@@ -279,12 +366,12 @@ name it:
 | `SubjectNaming` | Subject | Confluent's strategy |
 | --- | --- | --- |
 | `TopicName` (default) | `orders-value` or `orders-key` | `TopicNameStrategy` |
-| `RecordName` | `com.example.Order` | `RecordNameStrategy` |
+| `RecordName` | `com.example.Order`, the record's full name or the JSON schema's `title` | `RecordNameStrategy` |
 | `TopicRecordName` | `orders-com.example.Order` | `TopicRecordNameStrategy` |
 
 ## Which schema is written
 
-`AvroSerde.of` takes a `Writing`:
+`AvroSerde.of` and `JsonSchemaSerde.of` take a `Writing`:
 
 - `Register` (default): writes with your codec's schema, registering it under
   the subject on the first write if it is not there yet, as Confluent's
@@ -295,8 +382,9 @@ name it:
   registered. Use it when schemas are registered ahead of time, for example by a
   deployment pipeline, and applications must not register them.
 - `Latest`: writes with the subject's latest version, as Confluent's
-  `use.latest.version` does. Use it when another team owns the schema. Fields the
-  latest version lacks are left out, and those it adds take their defaults.
+  `use.latest.version` does. Use it when another team owns the schema. With
+  Avro, fields the latest version lacks are left out, and those it adds take
+  their defaults; JSON is written as your codec writes it.
 - `Pinned(id)`: writes with the schema registered as `id`.
 
 ## Registry operations
@@ -324,4 +412,4 @@ Failures are `RegistryException`s:
 
 - Schemas that name schemas registered under other subjects (schema
   references) are refused when reading.
-- JSON Schema and Protobuf.
+- Protobuf.
