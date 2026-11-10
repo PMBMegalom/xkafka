@@ -1120,7 +1120,7 @@ lazy val streamsFixture = project
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
-  .dependsOn(client.jvm, streamsJava)
+  .dependsOn(client.jvm, streamsJava, schemaRegistryHttp4s.jvm, avro.jvm)
   .settings(
     // The examples of querying stores show an HTTP connection between members, so the site depends on http4s's server and Ember client; of the
     // published modules, only xkafka-schema-registry-http4s depends on http4s, and on its client alone.

@@ -77,13 +77,31 @@ Topology.of(words).liftTo[IO].flatMap: topology =>
 See [Streams](https://pmbmegalom.github.io/xkafka/streams/index.html) for programs,
 guarantees, state and standby tasks.
 
+## Schema registry
+
+xkafka writes and reads Avro with schemas kept in a Confluent Schema Registry,
+on every platform, in the same bytes as Confluent's Java serializers. Derive a
+codec for your type and make a serde from it:
+
+```scala
+// Write orders as Avro, registering their schema under "orders-value" on the first write
+final case class Order(id: String, placedAt: Instant, note: Option[String] = None) derives AvroCodec
+
+AvroSerde.of[IO, Order](registry, Part.Value).flatMap: serde =>
+  ProducerSettings.from(client, Serializer.utf8[IO], serde.serializer).liftTo[IO]
+```
+
+See [Schema registry](https://pmbmegalom.github.io/xkafka/schema-registry.html) for
+connecting to the registry, derived schemas, schema evolution and subjects.
+
 ## Documentation
 
 The full documentation lives at
 [pmbmegalom.github.io/xkafka](https://pmbmegalom.github.io/xkafka/), covering
 settings and validation, producing and consuming, offsets and commits,
 transactions, streams, topic administration, transport security, the error
-model, headers, serialization, and the subtle differences between the three runtimes.
+model, headers, serialization, the schema registry and Avro, and the subtle
+differences between the three runtimes.
 
 ## Versioning
 
@@ -104,6 +122,12 @@ To build xkafka or run its tests, see
   administration interfaces, and the streams DSL, and connects to nothing itself.
 - `xkafka-client` contains `KafkaClient`, which connects to Kafka on the JVM,
   Scala.js, and Scala Native.
+- `xkafka-schema-registry` reaches a Confluent Schema Registry, and
+  `xkafka-schema-registry-http4s` reaches it through an http4s client.
+- `xkafka-avro` writes and reads Avro with the registry's schemas, with codecs
+  derived from Scala types.
+- `xkafka-streams-java`, on the JVM, lets streams programs use code written for
+  Java Kafka Streams.
 
 ## License
 

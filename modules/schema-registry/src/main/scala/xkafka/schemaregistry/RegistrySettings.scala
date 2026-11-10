@@ -23,7 +23,7 @@ package xkafka.schemaregistry
 
 import scala.concurrent.duration.FiniteDuration
 
-import cats.Show
+import cats.{ApplicativeThrow, Show}
 import cats.data.NonEmptyList
 import cats.syntax.all.*
 
@@ -67,3 +67,10 @@ enum SchemaRegistryError derives CanEqual:
 
 object SchemaRegistryError:
   given Show[SchemaRegistryError] = Show.show(_.message)
+
+  /** Carries the reason a setting or name was refused into `F`, as [[InvalidRegistrySetting]]. */
+  extension [A](result: Either[SchemaRegistryError, A])
+    def liftTo[F[_]](using F: ApplicativeThrow[F]): F[A] = F.fromEither(result.left.map(InvalidRegistrySetting(_)))
+
+/** A registry setting or name that was refused, for why. */
+final class InvalidRegistrySetting(val error: SchemaRegistryError) extends IllegalArgumentException(error.message)

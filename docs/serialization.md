@@ -53,6 +53,11 @@ val serde = Serde.fromJava[IO](Serdes.String())                         // Both 
   for a value, the record fails with `JavaNullValueException`.
 - Whatever the Java codec throws fails the effect it runs in.
 
+## Schema registry
+
+Avro values with schemas kept in a Confluent Schema Registry have serdes of
+their own. See [Schema registry](schema-registry.md).
+
 ## Headers
 
 A record's headers have codecs of their own. See [Headers](headers.md).

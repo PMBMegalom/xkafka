@@ -51,6 +51,11 @@ class SchemaRegistrySuite extends CatsEffectSuite:
     assertEquals(settings.withLatestCachedFor(1.minute).map(_.withoutLatestExpiry), Right(settings))
     assertEquals(Subject.from(""), Left(SchemaRegistryError.EmptySubject))
 
+  test("a refused setting is raised in an effect, carrying why"):
+    RegistrySettings.from(NonEmptyList.one("registry:8081")).liftTo[IO].attempt.map:
+      case Left(error: InvalidRegistrySetting) => assertEquals(error.error, SchemaRegistryError.InvalidUrl("registry:8081"))
+      case other                               => fail(s"expected an invalid setting, got $other")
+
   test("registering gives the schema's id, and asks the registry once for a schema it already registered"):
     for
       fake      <- FakeRegistry()

@@ -11,12 +11,15 @@ The `%%%` operator selects the artifact for the platform being built. The same
 code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
 each one runs on its platform's Kafka client.
 
-Two modules are published:
+The modules are:
 
 - `xkafka-kernel` holds the data types, the producer, consumer, and
   administration interfaces, and the streams DSL, and connects to nothing itself.
 - `xkafka-client` holds `KafkaClient`, which connects to Kafka on each platform,
   and depends on the kernel.
+- `xkafka-schema-registry`, `xkafka-schema-registry-http4s` and `xkafka-avro`
+  write and read Avro with the schemas a Confluent Schema Registry keeps. See
+  [Schema registry](schema-registry.md).
 
 Most applications need `xkafka-client` alone. On the JVM, `xkafka-streams-java` lets
 streams programs use code written for Java Kafka Streams, such as its partitioners;
