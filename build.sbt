@@ -425,6 +425,16 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   timeoutMinutes = Some(45)
 )
 
+// Artifacts only carry builds from one job to a later one in the same run, so a week leaves time to re-run a failed job.
+def expiring(step: WorkflowStep): WorkflowStep = step match {
+  case use: WorkflowStep.Use if uploadsArtifact(use.ref) => use.updatedParams("retention-days", "7")
+  case other                                             => other
+}
+def uploadsArtifact(ref: UseRef): Boolean = ref match {
+  case UseRef.Public("actions", "upload-artifact", _) => true
+  case _                                              => false
+}
+
 // sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
 val publishWaitsFor = List("integration", "streams-integration", "native-leaks", "js-leaks", "npm-publish", "npm-publish-rocksdb")
@@ -434,8 +444,12 @@ ThisBuild / githubWorkflowGeneratedCI := {
       job.withNeeds((job.needs ++ publishWaitsFor).distinct)
     else if (Set("dependency-submission", "site").contains(job.id)) job.withOses(List("ubuntu-24.04"))
     else job
-  }
+  }.map(job => job.withSteps(job.steps.map(expiring)))
 }
+
+// The Clean workflow deletes every artifact in the repository on each push, those of runs still going included, which
+// made the publish job of a run fail when another push came while it ran. Uploads expire instead.
+ThisBuild / githubWorkflowIncludeClean := false
 
 // librdkafka links TLS, SASL SCRAM/OAUTHBEARER, and gzip/zstd decompression against system libraries rather than
 // vendoring them, so both its build and the Scala Native link need to find them. Linux distributions install them
