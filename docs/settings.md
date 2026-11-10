@@ -99,8 +99,8 @@ can invalidate the result, such as `withProperty`, return
 one that sets a duration: `withMetadataRefreshInterval`, `withCloseTimeout`,
 `withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
 `withRequestTimeout`, `withLinger`, `withEnqueueTimeout`, `withSessionTimeout`,
-`withHeartbeatInterval`, `withMaxPollInterval`, `withRebalanceSafeCommits`, and
-`withStartingOffsets`.
+`withHeartbeatInterval`, `withMaxPollInterval`, `withFetchWait`,
+`withRebalanceSafeCommits`, and `withStartingOffsets`.
 
 ## Consumer settings
 
@@ -119,6 +119,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `sessionTimeout` | unset, which is 45s on every platform | how long the group waits to hear from the consumer before handing its partitions on |
 | `heartbeatInterval` | unset, which is 3s on every platform | how often the consumer tells the group it is alive |
 | `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
+| `fetchWait` | 500ms | how long the broker may hold a fetch waiting for records, from zero up to 5m |
 | `rebalanceSafeCommits` | none | how long a partition being taken away waits for the records handed out from it to be committed |
 | `startingOffsets` | none | where each assigned partition starts, from offsets the application keeps |
 
@@ -126,6 +127,16 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 `offsetsForTimes`, `partitionsFor`, `listTopics`, `seek`, `seekToBeginning`, and
 `seekToEnd`. Its default matches
 what Kafka's own clients use.
+
+`fetchWait` is the longest the broker holds a fetch while fewer than
+`fetch.min.bytes` of records are waiting, a property you can set, which is 1 by
+default. With that default the broker answers as soon as any record arrives, and
+the wait only sets how often a consumer with nothing to read asks again. Raise
+`fetch.min.bytes` to have the broker gather records into fewer, larger answers,
+and `fetchWait` then bounds how long a record can wait to be gathered. Setting
+`fetchWait` covers every platform: the Java client spells
+it `fetch.max.wait.ms` and librdkafka `fetch.wait.max.ms`, and either property is
+refused, so the two cannot disagree.
 
 See [Offsets](offsets.md) for commit recovery, the commit timeout, assignment
 fencing, rebalance-safe commits, and starting offsets, [Transactions](transactions.md) for the isolation level, and

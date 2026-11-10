@@ -31,8 +31,9 @@ private[xkafka] object ClientProperties:
   /** librdkafka hashes keys with CRC32 by default; Java's murmur2 sends each key to the partition a Java producer would. */
   val producer: Map[String, String] = Map("partitioner" -> "murmur2_random")
 
-  /** librdkafka bounds each call by the timeout it is given, so a consumer needs nothing more. */
-  def consumer[F[_], K, V](@scala.annotation.unused settings: ConsumerSettings[F, K, V]): Map[String, String] = Map.empty
+  /** librdkafka bounds each call by the timeout it is given, so a consumer needs only its fetch wait, which librdkafka names `fetch.wait.max.ms`. */
+  def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] =
+    Map("fetch.wait.max.ms" -> settings.fetchWait.toMillis.toString)
 
   def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.librdkafka(settings)
 
