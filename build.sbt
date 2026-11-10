@@ -30,6 +30,8 @@ ThisBuild / tlFatalWarnings := true
 val catsEffectVersion      = "3.7.1"
 val catsTaglessVersion     = "0.16.5"
 val fs2Version             = "3.14.0"
+val circeVersion           = "0.14.17"
+val http4sVersion          = "0.23.38"
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
 val lz4JavaVersion         = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
@@ -760,6 +762,29 @@ lazy val kernel = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     description := "Portable data types and algebras for xkafka"
   )
 
+lazy val schemaRegistry = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("modules/schema-registry"))
+  .dependsOn(kernel)
+  .settings(commonSettings)
+  .settings(
+    name        := "xkafka-schema-registry",
+    description := "Serdes that keep their schemas in a schema registry, for xkafka",
+    libraryDependencies ++= Seq("io.circe" %%% "circe-core" % circeVersion, "io.circe" %%% "circe-parser" % circeVersion)
+  )
+
+// The registry is reached through an HTTP client the application chooses; this module adapts http4s's.
+lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("modules/schema-registry-http4s"))
+  .dependsOn(schemaRegistry)
+  .settings(commonSettings)
+  .settings(
+    name                                 := "xkafka-schema-registry-http4s",
+    description                          := "Reaches a schema registry through an http4s client, for xkafka",
+    libraryDependencies += "org.http4s" %%% "http4s-client" % http4sVersion
+  )
+
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/client"))
   .enablePlugins(BuildInfoPlugin)
@@ -1069,11 +1094,12 @@ lazy val docs = project
   .enablePlugins(TypelevelSitePlugin)
   .dependsOn(client.jvm, streamsJava)
   .settings(
-    // The examples of querying stores show an HTTP connection between members; the site depends on http4s, the published modules do not.
-    libraryDependencies ++= Seq("ember-server", "ember-client", "dsl").map(module => "org.http4s" %% s"http4s-$module" % "0.23.38"),
+    // The examples of querying stores show an HTTP connection between members, so the site depends on http4s's server and Ember client; of the
+    // published modules, only xkafka-schema-registry-http4s depends on http4s, and on its client alone.
+    libraryDependencies ++= Seq("ember-server", "ember-client", "dsl").map(module => "org.http4s" %% s"http4s-$module" % http4sVersion),
     tlSiteHelium := tlSiteHelium.value.site.topNavigationBar(
       homeLink = IconLink.external("https://github.com/PMBMegalom/xkafka", HeliumIcon.home)
     )
   )
 
-lazy val root = tlCrossRootProject.aggregate(kernel, client, streamsJava).settings(name := "xkafka")
+lazy val root = tlCrossRootProject.aggregate(kernel, client, schemaRegistry, schemaRegistryHttp4s, streamsJava).settings(name := "xkafka")
