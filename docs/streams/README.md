@@ -44,7 +44,8 @@ The program counts the views of each page, and writes every new count to
 Acquiring the resource joins the application and starts processing. `run` waits
 while the application runs, and fails with the error that stops it. Releasing
 the resource commits the member's work, hands it back to the application, and
-leaves, waiting at most `closeTimeout`.
+leaves, waiting at most the settings' `closeTimeout`, 30 seconds by default.
+[Running a program](running.md) covers guarantees, concurrency and stores.
 
 ## Programs
 
@@ -78,6 +79,14 @@ whichever topic it came from, and each deserializer is told that topic. A topic
 listed twice is read once. Partitions with the same number are processed together,
 so to keep a key's records together for grouping or joining, give the topics the
 same number of partitions.
+
+Each topic and store is read and written with a `Serde`, which pairs a
+[serializer and a deserializer](../serialization.md) of one type, since a streams
+application both reads and writes. `Serde(serializer, deserializer)` makes one.
+`.option` turns a serde into one of `Option`s, which reads and writes a null as
+`None`, so a `None` value is written as a tombstone. `Serde.utf8`, `Serde.long`
+and `Serde.bytes` write the same bytes as Java's `Serdes.String()`,
+`Serdes.Long()` and `Serdes.ByteArray()`.
 
 Every step has a name, given as a `Named`: a pipeline's source, each step, and
 its `to`. Names label the program's nodes in
@@ -154,11 +163,6 @@ application first starts.
 stores or steps with the same name, or one topic read twice. `liftTo`
 raises them in `F` as an `InvalidTopology`, and refused settings as an
 `InvalidStreamsSettings`.
-
-A `Serde` holds the serializer and deserializer of one type, since a streams
-application both reads and writes its topics. `Serde.utf8`, `Serde.long` and
-`Serde.bytes` write the same bytes as Java's `Serdes.String()`, `Serdes.Long()`
-and `Serdes.ByteArray()`.
 
 ### Steps that see the whole record
 

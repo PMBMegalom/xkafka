@@ -189,7 +189,8 @@ cents, keyed by user, this adds up what each user spends per visit:
 ```
 
 A session closes once a record arrives timestamped later than its end plus the
-inactivity gap plus the grace, and later records no longer join it. By
+inactivity gap plus the grace, and later records no longer join it.
+`SessionWindows.withNoGrace` gives no grace. By
 default, sessions are kept for the gap plus the grace after they end, which is
 also the shortest `withRetention` accepts. With `emitOnWindowClose`, only each
 session's final value goes downstream, and no `None` values are sent.

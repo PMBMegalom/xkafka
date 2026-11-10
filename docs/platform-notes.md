@@ -31,9 +31,8 @@ sudo apt-get update
 sudo apt-get install librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cflt~ubu24  # Install exactly this release
 ```
 
-Use a librdkafka built with TLS, SASL SCRAM and
-OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
-and read and write records in any compression.
+Use a librdkafka built with TLS, SASL SCRAM and every compression codec, so it
+can reach authenticated brokers and read and write records in any compression.
 
 librdkafka links these against system libraries, so a Scala Native application
 needs OpenSSL, zlib, and zstd available:
@@ -44,7 +43,7 @@ on macOS their locations have to be named when linking.
 ### Linking an application
 
 Compiling an application needs the headers of librdkafka and OpenSSL, and xkafka
-asks the linker for `-lrdkafka` and `-lcrypto`. With both installed where the
+asks the linker for `-lrdkafka`, `-lssl` and `-lcrypto`. With both installed where the
 compiler and linker look by default, no further settings are needed. For an
 installation elsewhere:
 
@@ -96,6 +95,11 @@ wherever the system looks for libraries. To keep it somewhere else, set
 the application opens its first store. Nothing more is needed to compile or
 link.
 
+### Schema registry
+
+Reaching a schema registry through http4s's Ember client also needs the s2n-tls
+library. See [Schema registry](schema-registry.md#dependencies).
+
 ## Scala.js
 
 xkafka uses librdkafka here, the same release as on Scala Native. It runs on
@@ -122,17 +126,21 @@ acquiring a client fails with a `BackendFailure` naming both versions.
 
 ## Transformations
 
-Serializers, deserializers, producer, transactional producer, and consumer
-settings, offset committers, committable offsets, batches, and records,
-partition record streams, consumers, and administration clients have
-cats-tagless `FunctorK` instances. `KafkaProducer` has `mapK`, which needs a
-`Functor` for the target effect, and so no `FunctorK` instance. `KafkaClient.imapK` transforms a complete
-client between effects in both directions while preserving `Resource`
-cancellation semantics.
+These have cats-tagless `FunctorK` instances, and a `mapK` that changes their
+effect: serializers, deserializers and serdes; producer, transactional producer
+and consumer settings; offset committers, committable offsets, batches and
+records; partition record streams; consumers; administration clients; and the
+schema registry client.
 
-A streams `Pipeline` or `Topology` changes effect with `imapK`, which also needs
-both directions: a [processor](streams/processors.md) runs its handler in one
-effect and its stores in the other. They have cats-tagless `InvariantK`
-instances, as do `Transaction` and `KafkaTransactionalProducer`, and a streams
-`Serde` has a `FunctorK` instance. `KafkaStreams` changes effect with `imapK`, as its
-queries go both ways, and has an `InvariantK` instance.
+`KafkaProducer` has `mapK` too, which needs a `Functor` for the target effect,
+and so no `FunctorK` instance.
+
+What runs effects in both directions changes effect with `imapK`, given a
+transformation each way, and has a cats-tagless `InvariantK` instance:
+`Transaction`, `KafkaTransactionalProducer`, a streams `Pipeline` or
+`Topology`, where a [processor](streams/processors.md) runs its handler in one
+effect and its stores in the other, and `KafkaStreams`, whose queries go both
+ways.
+
+`KafkaClient.imapK` transforms a complete client between effects in both
+directions while preserving `Resource` cancellation semantics.

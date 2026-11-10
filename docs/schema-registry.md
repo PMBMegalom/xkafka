@@ -2,9 +2,9 @@
 
 xkafka can write records with schemas kept in a Confluent Schema Registry, and
 read them back, on the JVM, Scala.js and Scala Native. It supports Avro, JSON
-Schema and Protobuf. Records are written in Confluent's wire format, so Java applications
-using Confluent's serializers and deserializers read what xkafka writes, and
-xkafka reads what they write.
+Schema and Protobuf. Records are written in Confluent's wire format, so Java
+applications using Confluent's serializers and deserializers read what xkafka
+writes, and xkafka reads what they write.
 
 ## Dependencies
 
@@ -51,7 +51,8 @@ val registry: Resource[IO, SchemaRegistry[IO]] =
   yield registry
 ```
 
-To authenticate, add the credentials to every request the client sends:
+To authenticate, wrap the client so it adds the credentials to every request,
+and pass the wrapped client to `Http4sTransport`:
 
 ```scala mdoc:compile-only
 // Send basic authentication with every request to the registry
@@ -66,14 +67,18 @@ def authenticated(client: Client[IO], user: String, password: String): Client[IO
 
 `RegistrySettings.from` takes:
 
-- one or more registry URLs. A request that cannot reach one is sent to the next.
+- one or more registry URLs, each `http` or `https`. A request that cannot reach
+  one is sent to the next.
 - `latestCachedFor`: how long a subject's latest version is cached. By default it
   is cached until the program ends, as Confluent's serializers cache it. Use
   `withLatestCachedFor(duration)` to see a new latest version within `duration`,
   and `withoutLatestExpiry` to go back to the default.
 
-Everything else the registry answers never changes, so it is cached for good:
-each schema is fetched once, however many records use it.
+A URL that is not `http` or `https`, or a negative duration, is refused;
+`liftTo` raises the refusal as an `InvalidRegistrySetting`.
+
+Schemas, and the ids they are registered under, never change, so they are cached
+for good: each schema is fetched once, however many records use it.
 
 ### Another HTTP client
 
@@ -89,9 +94,28 @@ body; a `RegistryResponse` has the status code and the body. Fail the effect
 only when the registry cannot be reached: an error status is a response like any
 other. Pass your function to `SchemaRegistry.of` in place of `Http4sTransport`.
 
-## Writing and reading Avro
+## Writing and reading records
 
-Derive a codec for your type, and make a serde from it:
+Each format has a codec, which you derive for your type, and an object that
+makes serdes in three ways:
+
+- `of` writes and reads your own type, with the schema its codec derives.
+- `generic` writes and reads values of a schema your program only learns as it
+  runs.
+- `asWritten` reads any record with the schema it was written with, for tools
+  that show or copy records.
+
+| | Avro | JSON Schema | Protobuf |
+| --- | --- | --- | --- |
+| Module | `xkafka-avro` | `xkafka-json-schema` | `xkafka-protobuf` |
+| Package | `xkafka.avro` | `xkafka.jsonschema` | `xkafka.protobuf` |
+| Codec | `AvroCodec` | `JsonSchemaCodec` | `ProtobufCodec` |
+| Serdes | `AvroSerde` | `JsonSchemaSerde` | `ProtobufSerde` |
+| A record's fields are found by | name, resolved against your schema | name | number |
+| Values of a schema known at run time | `AvroValue` | circe's `Json` | `ProtobufValue` |
+
+Here an Avro serde is given to a producer; `JsonSchemaSerde.of` and
+`ProtobufSerde.of` are used the same way:
 
 ```scala mdoc:compile-only
 // Write orders as Avro values, registering their schema under "orders-value" on the first write
@@ -114,22 +138,28 @@ def orders(registry: SchemaRegistry[IO], client: ClientSettings): Resource[IO, K
   yield producer
 ```
 
-`AvroSerde.of` gives a `Serde`: a producer takes its `serializer`, a consumer
-its `deserializer`, and a streams program the serde itself. Use `Part.Key` for
-a serde of keys.
+The serde is a `Serde`: a producer takes its `serializer`, a consumer its
+`deserializer`, and a streams program the serde itself. Use `Part.Key` for a
+serde of keys. `of` and `generic` also take a `SubjectNaming`, which names the
+subject a schema is kept under (see [Subjects](#subjects)), and a `Writing`,
+which chooses the schema values are written with (see
+[Which schema is written](#which-schema-is-written)).
 
-Each record names the schema it was written with. Reading fetches that schema
-and converts the record to your codec's schema, as Avro's schema resolution
-does, so records written with an older or newer version of your type are read:
+Each record carries the id of the schema it was written with. Reading fetches
+that schema, so records written with an older or newer version of your type
+are read. What changes a reader accepts depends on the format; each format's
+section says.
 
-- a field the record lacks takes its default;
-- a field the codec lacks is skipped;
-- numbers are widened, as an `int` read as a `long`.
+A record without a value, such as a tombstone, fails to read with
+`Deserializer.NullValueException`. Read with `serde.option`, or
+`serde.deserializer.option`, to get `None` for it; writing `None` through
+`serde.option` writes a record without a value.
 
-A record that cannot be resolved this way fails with
-`RegistryException.Unserializable`.
+## Avro
 
-## Derived Avro schemas
+The example above derives Avro codecs with `derives AvroCodec`.
+
+### Derived Avro schemas
 
 `derives AvroCodec` makes a schema from the type:
 
@@ -184,8 +214,8 @@ given AvroCodec[BigDecimal] = AvroCodec.decimal(precision = 10, scale = 2)
 final case class Price(sku: String, amount: BigDecimal) derives AvroCodec
 ```
 
-A number with more digits, or more digits after the point, is refused rather
-than rounded.
+A number with more digits, or more digits after the point, fails to write; it is
+not rounded.
 
 For a type of your own, map it to one that has a codec:
 
@@ -200,7 +230,19 @@ given AvroCodec[CustomerId] = AvroCodec[String].imap(CustomerId(_))(_.value)
 
 `emap` does the same where reading can refuse a value.
 
-## Avro values known only at run time
+### Avro records of other versions
+
+Reading converts each record from the schema it was written with to your
+codec's schema, as Avro's schema resolution does:
+
+- a field the record lacks takes its default;
+- a field the codec lacks is skipped;
+- numbers are widened, as an `int` read as a `long`.
+
+A record that cannot be resolved this way fails with
+`RegistryException.Unserializable`.
+
+### Avro values known only at run time
 
 Where a program does not know the schema until it runs, such as a tool that
 copies or shows any topic's records, it works with `AvroValue`s, which describe
@@ -249,7 +291,7 @@ value: a `date` is the `AvroValue.Int` of its days since 1970-01-01.
 
 ## JSON Schema
 
-Derive a codec for your type, and make a serde from it, as for Avro:
+Derive a codec for your type, and make a serde from it:
 
 ```scala mdoc:compile-only
 // Write orders as JSON, registering their JSON Schema under "orders-value" on the first write
@@ -269,6 +311,8 @@ def orders(registry: SchemaRegistry[IO]): IO[Serde[IO, Order]] = JsonSchemaSerde
 
 A record is the schema's id followed by the JSON as UTF-8 text, as Confluent's
 `KafkaJsonSchemaSerializer` writes it.
+
+### Derived JSON schemas
 
 `derives JsonSchemaCodec` makes a JSON Schema of draft 7 from the type:
 
@@ -299,16 +343,6 @@ A record is the schema's id followed by the JSON as UTF-8 text, as Confluent's
   let you remove a field.
 - A case of a sealed trait must not have a field named `type`: writing it fails.
 
-Reading takes a record's JSON as it is, whatever version of the schema it was
-written with:
-
-- a field the record lacks takes its default, or `None` where it is optional;
-- a field is also read under any name `@SchemaAlias` gives it;
-- properties your type does not have are ignored.
-
-Values are not checked against the schema when they are written or read, as
-Confluent's serializers do not check them by default.
-
 For a schema written by hand, give its JSON with circe's codecs for its values,
 which must write what the schema describes:
 
@@ -324,9 +358,46 @@ given JsonSchemaCodec[Celsius] =
   JsonSchemaCodec.from(Json.obj("type" -> Json.fromString("number")), Encoder[Double].contramap(_.degrees), Decoder[Double].map(Celsius(_)))
 ```
 
-For values known only at run time, `JsonSchemaSerde.generic` writes circe
-`Json` values of a schema you hold, and `JsonSchemaSerde.asWritten` reads each
-record's JSON with the schema it was written with.
+For a type of your own, map it to one that has a codec with `imap` or `emap`,
+as for Avro.
+
+### JSON records of other versions
+
+Reading takes a record's JSON as it is, whatever version of the schema it was
+written with:
+
+- a field the record lacks takes its default, or `None` where it is optional;
+- a field is also read under any name `@SchemaAlias` gives it;
+- properties your type does not have are ignored.
+
+Values are not checked against the schema when they are written or read, as
+Confluent's serializers do not check them by default.
+
+### JSON values known only at run time
+
+`JsonSchemaSerde.generic` writes circe `Json` values of a schema you hold, as
+they are, and reads each record's JSON as it is:
+
+```scala mdoc:compile-only
+// Write a line of an order as JSON, with a schema read from its text as the program runs
+import cats.effect.IO
+import io.circe.{Json, parser}
+
+import xkafka.Serde
+import xkafka.jsonschema.JsonSchemaSerde
+import xkafka.schemaregistry.{Part, SchemaRegistry}
+
+val text = """{"type":"object","title":"com.example.Line","properties":{"sku":{"type":"string"},"quantity":{"type":"integer"}}}"""
+
+def lines(registry: SchemaRegistry[IO]): IO[Serde[IO, Json]] =
+  IO.fromEither(parser.parse(text)).flatMap(schema => JsonSchemaSerde.generic[IO](registry, schema, Part.Value))
+
+val line = Json.obj("sku" -> Json.fromString("apple"), "quantity" -> Json.fromInt(3))
+```
+
+The schema's `title`, where it has one, is its name for naming subjects by
+record. `JsonSchemaSerde.asWritten` reads each record as a `JsonSchemaWritten`:
+its JSON, with the schema it was written with.
 
 ## Protobuf
 
@@ -379,11 +450,12 @@ message Line {
 }
 ```
 
-Records are written as Confluent's `KafkaProtobufSerializer` writes them, so
-Java applications read them with Confluent's deserializer, and xkafka reads
-what they write. A Protobuf record is a message, so the type you write must be a
-case class or a sealed trait; for any other type, `ProtobufSerde.of` fails with
+Records are written as Confluent's `KafkaProtobufSerializer` writes them. A
+Protobuf record is a message, so the type you write must be a case class or a
+sealed trait; for any other type, `ProtobufSerde.of` fails with
 `RegistryException.NoSchema`.
+
+### Field numbers
 
 Records carry each field's number, not its name, so the numbers are what must
 stay the same as your type changes:
@@ -393,6 +465,8 @@ stay the same as your type changes:
   19999) fails to compile;
 - renaming a field, or moving it, changes nothing a reader sees;
 - once a field is removed, do not give its number to another field.
+
+### Derived Protobuf schemas
 
 `derives ProtobufCodec` declares, in proto3:
 
@@ -443,6 +517,8 @@ final case class StockChange(@ProtobufField(1) sku: String, @ProtobufField(2) ch
 For a type of your own, map it to one that has a codec with `imap` or `emap`,
 as for Avro.
 
+### Protobuf records of other versions
+
 Reading takes a record's fields by number, whatever version of the schema it
 was written with:
 
@@ -454,7 +530,7 @@ was written with:
 Under the registry's default compatibility rules, adding a field is a
 compatible change, and changing a field's type is not.
 
-## Protobuf values known only at run time
+### Protobuf values known only at run time
 
 Where a program does not know the schema until it runs, such as a tool that
 copies or shows any topic's records, it works with `ProtobufValue`s, which
@@ -538,10 +614,10 @@ fields of one `oneof`, an unsigned number out of range, or lacks a proto2
 and options, except a field's `packed` and `default`, and refuses files that
 declare groups or extensions, or are written in an edition of Protobuf.
 
-## Annotations
+## Names and documentation
 
-These change what a derived schema calls things, for every schema language.
-They are in `xkafka.schemaregistry`:
+These annotations, in `xkafka.schemaregistry`, change what a derived schema
+calls things, for every format:
 
 | Annotation | On | Effect |
 | --- | --- | --- |
@@ -583,9 +659,13 @@ name it:
 | `RecordName` | `com.example.Order`, the record's full name, the JSON schema's `title` or the Protobuf message's full name | `RecordNameStrategy` |
 | `TopicRecordName` | `orders-com.example.Order` | `TopicRecordNameStrategy` |
 
+`RecordName` and `TopicRecordName` need a named record: writing a type that has
+none, such as a `String` in Avro, or a JSON schema without a `title`, fails with
+`RegistryException.Unserializable`.
+
 ## Which schema is written
 
-`AvroSerde.of`, `JsonSchemaSerde.of` and `ProtobufSerde.of` take a `Writing`:
+`of` and `generic` take a `Writing`:
 
 - `Register` (default): writes with your codec's schema, registering it under
   the subject on the first write if it is not there yet, as Confluent's
@@ -594,13 +674,15 @@ name it:
   `RegistryException.Refused`, with status 409 and error code 40901.
 - `AlreadyRegistered`: writes with your codec's schema, which must already be
   registered. Use it when schemas are registered ahead of time, for example by a
-  deployment pipeline, and applications must not register them.
+  deployment pipeline, and applications must not register them. Writing fails
+  with `RegistryException.Unserializable` where the schema is not registered.
 - `Latest`: writes with the subject's latest version, as Confluent's
   `use.latest.version` does. Use it when another team owns the schema. With
   Avro, fields the latest version lacks are left out, and those it adds take
   their defaults; JSON is written as your codec writes it. A Protobuf message
   is written as your codec writes it, as the message of the latest version's
-  file with your type's name; a file without one is refused.
+  file with your type's name; a file without one is refused. Writing fails with
+  `RegistryException.Unserializable` where the subject has no versions.
 - `Pinned(id)`: writes with the schema registered as `id`.
 
 ## Registry operations
@@ -610,8 +692,9 @@ name it:
 whether a schema could be registered as a subject's next version, with the
 registry's reasons where it could not.
 
-A subject, version or schema the registry does not have is `None`, not an
-error.
+`lookup`, `latest` and `version` answer `None` where the registry does not have
+the subject, the version, or the schema under that subject. `schema(id)` of an
+id the registry does not have fails with `RegistryException.Refused`.
 
 ## Errors
 
@@ -623,13 +706,18 @@ Failures are `RegistryException`s:
 | `Refused` | the registry refused a request; `code` is its error code, such as 40901 for an incompatible schema |
 | `Unreadable` | the registry's answer could not be read, as one from a proxy in front of it |
 | `Unserializable` | a value could not be written, or a record read, with its schema |
-| `NoSchema` | your type has no schema in the serde's schema language, as a list of lists has none in Protobuf |
+| `NoSchema` | your type has no schema in the serde's format, as a list of lists has none in Protobuf |
+
+Settings the registry client refuses raise `InvalidRegistrySetting`, and a
+record without a value raises `Deserializer.NullValueException` (see
+[Writing and reading records](#writing-and-reading-records)).
 
 ## Not yet supported
 
-- Avro and JSON Schema records whose schema names schemas registered under other
-  subjects (schema references) are refused when reading. Protobuf records with
-  such schemas are read: derived serdes read by field number and do not need the
+- Avro and JSON Schema schemas that name schemas registered under other subjects
+  (schema references): records written with them are refused when reading, and
+  `Latest` or `Pinned` cannot write with them. Protobuf records with such
+  schemas are read: derived serdes read by field number and do not need the
   other schemas, and `ProtobufSerde.asWritten` fetches them.
 - Generic Protobuf serdes of files that import files other than the
   well-known types.

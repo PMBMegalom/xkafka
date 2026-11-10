@@ -12,23 +12,24 @@ Native while using the established Kafka client for each runtime.
 
 The API uses `Resource` for producer and consumer lifecycles, `Stream` for
 consumer records, effectful serializers and deserializers, and explicit offset
-commits. Scala.js targets Node.js rather than browsers.
+commits. On Scala.js it runs on Node.js, not in browsers.
 
 ## Usage
 
-Construct the client the same way on every platform:
+Add `xkafka-client` to your build, where `latestVersion` is the
+[latest release](https://github.com/PMBMegalom/xkafka/releases/latest). The
+`%%%` operator picks the artifact for the platform you build for:
 
 ```scala
-// The same line gives you the client for whichever platform you build for
-KafkaClient[IO]
+// Add xkafka to your build
+libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % latestVersion
 ```
 
-Add `xkafka-client` for your platform, and `KafkaClient[IO]` gives you that
-platform's client. Settings are the same on every platform. On Scala.js a
-prebuilt librdkafka comes from npm, and on Scala Native your application links
-an installed librdkafka; see the
-[platform notes](https://pmbmegalom.github.io/xkafka/platform-notes.html) for
-what each platform needs. For example:
+`KafkaClient[IO]` then gives you the client for that platform, and settings
+are the same on every platform. On Scala.js a prebuilt librdkafka comes from
+npm, and on Scala Native your application links an installed librdkafka; see
+[Getting started](https://pmbmegalom.github.io/xkafka/getting-started.html)
+for what each platform needs. For example:
 
 ```scala
 // Write one record to the topic "events", and wait until it is delivered
@@ -62,6 +63,8 @@ Kafka 4.2 or newer:
 
 ```scala
 // Count the records of each key, and write every new count to a topic
+import xkafka.streams.*
+
 val text = Serde.utf8[IO]
 val words =
   KStream(Named("read"), input, text, text)
@@ -101,8 +104,8 @@ The full documentation lives at
 [pmbmegalom.github.io/xkafka](https://pmbmegalom.github.io/xkafka/), covering
 settings and validation, producing and consuming, offsets and commits,
 transactions, streams, topic administration, transport security, the error
-model, headers, serialization, the schema registry with Avro, JSON Schema and Protobuf, and the subtle
-differences between the three runtimes.
+model, headers, serialization, the schema registry with Avro, JSON Schema and
+Protobuf, and what differs between the three platforms.
 
 ## Versioning
 
@@ -119,8 +122,9 @@ To build xkafka or run its tests, see
 
 ## Modules
 
-- `xkafka-kernel` contains the data types, the producer, consumer, and
-  administration interfaces, and the streams DSL, and connects to nothing itself.
+- `xkafka-kernel` contains the data types, serializers, deserializers and
+  serdes, the producer, consumer, and administration interfaces, and the
+  streams DSL, and connects to nothing itself.
 - `xkafka-client` contains `KafkaClient`, which connects to Kafka on the JVM,
   Scala.js, and Scala Native.
 - `xkafka-schema-registry` reaches a Confluent Schema Registry, and
@@ -128,6 +132,8 @@ To build xkafka or run its tests, see
 - `xkafka-avro`, `xkafka-json-schema` and `xkafka-protobuf` write and read Avro,
   JSON Schema and Protobuf with the registry's schemas, with codecs derived from
   Scala types.
+- `xkafka-streams-http4s` lets the members of a streams application query each
+  other's stores over http4s.
 - `xkafka-streams-java`, on the JVM, lets streams programs use code written for
   Java Kafka Streams.
 

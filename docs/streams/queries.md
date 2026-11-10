@@ -10,12 +10,13 @@ member that does and asks it, through a connection your application provides.
 Every member of the application needs:
 
 1. **An endpoint**, the host and port other members reach it at, given with
-   `withQueries`. A member without one cannot be asked, so the keys it holds
-   cannot be answered by any other member.
-2. **A `Forward`**, which sends the bytes of a query to another member's endpoint
-   and gives back the bytes it answers.
+   `StreamsSettings`' `withQueries`. A member without one cannot be asked, so
+   other members cannot answer queries for the keys it holds.
+2. **A `Forward`**, given to `KafkaClient.streams`, which sends the bytes of a
+   query to another member's endpoint and gives back the bytes it answers.
+   Without one, a query that needs another member fails with `Unreachable`.
 3. **An internal route** on that endpoint, which passes the bytes it receives to
-   `answer` and sends back what `answer` returns.
+   `streams.answer` and sends back what it returns.
 
 With [http4s](https://http4s.org), the `xkafka-streams-http4s` module gives the
 last two, on every platform:
@@ -27,7 +28,9 @@ libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-streams-http4s" % "@VE
 `Http4sQueries.forward(client)` posts each query to the member that holds the
 key, through your http4s client, and `Http4sQueries.routes(streams)` is the
 internal route that answers them. Both use the path `/xkafka/query` unless you
-give another:
+give another. This example serves the route and reaches other members with
+Ember, from `http4s-ember-server` and `http4s-ember-client`, which you add
+yourself; any http4s client and server work:
 
 ```scala mdoc:compile-only
 // Run a member that answers other members' queries over HTTP, and asks them for the keys they hold
@@ -49,14 +52,16 @@ def member(settings: StreamsSettings, topology: Topology[IO]): IO[Unit] =
         server.surround(streams.run)                       // Serve the route for as long as the member runs
 ```
 
-To reach members over TLS, give `forward` the scheme `https` and a client set up
-for it, and serve the route over TLS. A member that answers with an error status
-fails the query with `Unreachable`.
+To reach members over TLS, pass `scheme = Uri.Scheme.https` to `forward`, with a
+client set up for it, and serve the route over TLS. The client also decides on
+authentication and timeouts. A member that answers with an error status fails
+the query with `Unreachable`.
 
-Members can talk any other way: a `Forward` is a function from a member's
-endpoint and a query's bytes to the bytes it answers, and the internal route
-only needs to pass the bytes it receives to `streams.answer` and send back what
-it returns.
+Members can talk any other way. A `Forward` is a function
+`(Endpoint, Chunk[Byte]) => F[Chunk[Byte]]` from a member's endpoint and a
+query's bytes to the bytes it answers, and fails the query with `Unreachable`
+when it raises an error. The internal route only needs to pass the bytes it
+receives to `streams.answer` and send back what it returns.
 
 Keep the internal route away from the outside world: it answers any query, for
 any store.
@@ -175,7 +180,9 @@ An application can mix xkafka and Java Kafka Streams members. A Java member
 answers xkafka's queries through `JavaQueries`, from the
 [`xkafka-streams-java` module](README.md#java-partitioners-jvm-only). Give it the
 instance, the application's id, and each store that can be queried with its Java
-serdes, then call its `answer` from the internal route. The member's
+serdes, then serve its `answer` as the member's internal route: at the path
+xkafka members post to, `/xkafka/query` with `Http4sQueries.forward`, taking the
+posted bytes and answering with the bytes it returns. The member's
 `application.server` setting is the endpoint xkafka members reach it at.
 
 ```java
@@ -196,7 +203,7 @@ final class Answering {
             .window("views-per-minute", Serdes.String(), Serdes.Long());  // A windowed count
   }
 
-  // Call this from the internal route: the bytes posted to it in, the answer's bytes out
+  // Serve this as the internal route: the bytes posted to it in, the answer's bytes out
   byte[] answer(byte[] query) {
     return queries.answer(query);
   }

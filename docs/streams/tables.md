@@ -28,7 +28,7 @@ by Kafka's default, give the table its partitioner (see
 [Choosing partitions](README.md#choosing-partitions)).
 
 A table read from a topic can delete keys, so its `toStream` gives `Option`
-values: `Some` for an update and `None` for a delete, which `Serde.option`
+values: `Some` for an update and `None` for a delete, which a serde's `.option`
 writes as a tombstone. A table that only ever updates
 its keys, such as a `count`, gives its values as they are. The table's `Change`
 type member says which, and `KTable.Of` names it in an annotation:

@@ -23,9 +23,11 @@ val program =
 
 ## What it does
 
-- `createTopics` creates each topic with the partitions, replication factor, and configuration given.
-- `deleteTopics` deletes each topic.
-- `createPartitions` requests the topic's new total partition count, which Kafka allows only as an increase.
+- `createTopics` creates each topic with the partitions, replication factor, and
+  configuration given, and fails where one already exists.
+- `deleteTopics` deletes each topic, and fails where one does not exist.
+- `createPartitions` grows a topic to a new total partition count, and fails
+  where the topic already has that many or more.
 - `describeCluster` reports the cluster's id, its brokers, and its controller.
 - `describeTopics` reports each topic's id, its partitions, and where their replicas are. See [Cluster and topics](#cluster-and-topics).
 - `deleteRecords` deletes each partition's records below an offset. See [Deleting records](#deleting-records).

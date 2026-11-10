@@ -3,8 +3,8 @@
 `ClientSettings` describes the connection. `ProducerSettings` and
 `ConsumerSettings` each build on it and add what their client needs.
 `TransactionalProducerSettings` wraps `ProducerSettings`, and is covered in
-[Transactions](transactions.md). `StreamsSettings` also builds on `ClientSettings`,
-and is [described below](#streams-settings).
+[Transactions](transactions.md). `StreamsSettings`, in `xkafka.streams`, also
+builds on `ClientSettings`, and is [described below](#streams-settings).
 
 ```scala mdoc:compile-only
 // Validate the connection, then build producer settings on it
@@ -22,9 +22,10 @@ val settings =
 
 ## Validation
 
-Every `from` constructor returns `ValidatedNel[SettingsError, *]`. It
+Every settings `from` constructor returns `ValidatedNel[SettingsError, *]`. It
 accumulates, so one call reports every problem at once, and only valid settings
-can be constructed.
+can be constructed. `StreamsSettings` works the same way with
+`StreamsSettingsError`, and its `liftTo` raises `InvalidStreamsSettings`.
 
 `liftTo` carries the failure into the effect:
 
@@ -49,17 +50,19 @@ accumulation survives the lift.
 
 Bootstrap servers must be `host:port`, including bracketed IPv6 literals.
 Property names must not be blank. Every duration must be positive and at most
-`Int.MaxValue` milliseconds (about 24.9 days). Some have a lower limit:
-`linger` may be zero and at most `ProducerSettings.LingerLimit` (15 minutes),
-and the group membership intervals are limited by
-`ConsumerSettings.SessionTimeoutLimit` (1 hour),
-`ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
-`ConsumerSettings.MaxPollIntervalLimit` (24 hours).
+`Int.MaxValue` milliseconds (about 24.9 days), with these exceptions:
+
+- `linger` may be zero, and at most `ProducerSettings.LingerLimit` (15 minutes).
+- `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
+- The group membership intervals are at most
+  `ConsumerSettings.SessionTimeoutLimit` (1 hour),
+  `ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
+  `ConsumerSettings.MaxPollIntervalLimit` (24 hours).
 
 ## Properties
 
-Each settings type accepts an immutable `properties` map for Kafka client
-properties that have no typed setting:
+Client, producer, consumer and transactional producer settings each accept a
+`properties` map for Kafka client properties that have no typed setting:
 
 ```scala mdoc:compile-only
 // Pass Kafka properties that have no typed setting
@@ -88,19 +91,30 @@ that both accept with the same meaning.
 
 `ManagedProperties` is the set of property names xkafka sets from the typed
 settings, such as `bootstrap.servers`, `group.id`, `acks`, `linger.ms`, and the
-TLS and SASL names. Supplying one of them through the map is a `SettingsError`;
-use the typed setting instead.
+TLS and SASL names. Supplying one of them through the map fails as
+`SettingsError.ManagedProperty`; use the typed setting instead.
 
 ## Changing settings
 
-Each type has `with*` methods for deriving one value from another. Those that
-can invalidate the result, such as `withProperty`, return
-`ValidatedNel[SettingsError, *]` and revalidate in full. This includes every
-one that sets a duration: `withMetadataRefreshInterval`, `withCloseTimeout`,
-`withTransactionTimeout`, `withCommitTimeout`, `withPollTimeout`,
-`withRequestTimeout`, `withLinger`, `withEnqueueTimeout`, `withSessionTimeout`,
-`withHeartbeatInterval`, `withMaxPollInterval`, `withFetchWait`,
-`withRebalanceSafeCommits`, and `withStartingOffsets`.
+Each type has `with*` and `without*` methods for deriving one value from
+another. Those that can make the settings invalid return
+`ValidatedNel[SettingsError, *]` and validate the result in full: every one
+that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
+`withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
+`withRebalanceSafeCommits`, and `withStartingOffsets`. The others, such as
+`withCompression` or `withIsolationLevel`, return the settings directly.
+
+```scala mdoc:compile-only
+// Change two settings, each of which validates the result again
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def tuned[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
+  settings.withFetchWait(100.millis).andThen(_.withProperty("fetch.min.bytes", "65536")).liftTo[IO]
+```
 
 ## Consumer settings
 
@@ -129,14 +143,14 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 what Kafka's own clients use.
 
 `fetchWait` is the longest the broker holds a fetch while fewer than
-`fetch.min.bytes` of records are waiting, a property you can set, which is 1 by
-default. With that default the broker answers as soon as any record arrives, and
-the wait only sets how often a consumer with nothing to read asks again. Raise
-`fetch.min.bytes` to have the broker gather records into fewer, larger answers,
-and `fetchWait` then bounds how long a record can wait to be gathered. Setting
-`fetchWait` covers every platform: the Java client spells
-it `fetch.max.wait.ms` and librdkafka `fetch.wait.max.ms`, and either property is
-refused, so the two cannot disagree.
+`fetch.min.bytes` of records are waiting. `fetch.min.bytes` is an ordinary
+property, 1 byte by default. With that default the broker answers as soon as any
+record arrives, and `fetchWait` only sets how often a consumer with nothing to
+read asks again. Raise `fetch.min.bytes` to have the broker gather records into
+fewer, larger answers, and `fetchWait` then bounds how long a record can wait to
+be gathered. The Java client calls this setting `fetch.max.wait.ms` and
+librdkafka `fetch.wait.max.ms`. Both are [managed properties](#managed-properties),
+so set it through `withFetchWait`.
 
 See [Offsets](offsets.md) for commit recovery, the commit timeout, assignment
 fencing, rebalance-safe commits, and starting offsets, [Transactions](transactions.md) for the isolation level, and

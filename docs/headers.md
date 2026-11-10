@@ -44,8 +44,9 @@ val cleaned = headers.remove("trace")        // No "trace" headers
 | Replace all headers with a name by one, at the end | `set(name, value)` |
 | Remove all headers with a name | `remove(name)` |
 
-`get` and `as` fail with `InvalidHeaderLength` when a number has the wrong width, not
-by cutting it short, and with `MissingHeaderValue` when the header has no value.
+`get` and `as` return a `ValidationError` when the value cannot be read:
+`InvalidHeaderLength` when a number has the wrong width, and
+`MissingHeaderValue` when the header has no value.
 
 ## How values are written
 

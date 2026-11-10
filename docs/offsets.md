@@ -5,7 +5,124 @@ the offset that commits it. Nothing is committed until your code asks, so you
 decide when.
 
 A successful `record.offset.commit` stores `record.offset.nextOffset`, the
-offset after the one just handled.
+offset after the one just handled, so a consumer that resumes from it starts
+with the next record:
+
+```scala
+// Handle each record, then commit it
+consumer.records.evalMap(record => handle(record) *> record.offset.commit)
+```
+
+Each commit is a request to the broker, so committing every record on its own is slow.
+[Batches](#batches) and [committing on a schedule](#committing-on-a-schedule)
+commit less often.
+
+## Batches
+
+Offsets can be accumulated and committed together while the consumer resource
+is active:
+
+```scala
+// Commit several offsets together, keeping the greatest for each partition
+CommittableOffsetBatch.fromFoldable(offsets).commit
+```
+
+A batch keeps only the greatest next offset for each topic-partition, and
+commits once for each consumer its offsets came from.
+
+## Committing on a schedule
+
+`commitBatchWithin` is an FS2 pipe which commits whenever it collects `n`
+offsets or `d` elapses, whichever happens first:
+
+```scala
+// Handle each record, and commit every 100 offsets or every 5 seconds, whichever comes first
+consumer.records
+  .evalTap(handle)
+  .map(_.offset)                               // Keep only each record's offset
+  .through(commitBatchWithin(100, 5.seconds))  // Collect and commit them in batches
+```
+
+Only non-empty batches are committed.
+
+## Retrying a failed commit
+
+Some commit failures clear on their own, such as a coordinator that is loading
+or a group that is rebalancing. Others never will, and retrying them only delays
+the failure.
+
+`ConsumerSettings.commitRecovery` retries the first kind. `ErrorCode.retriable`
+decides which failures qualify, and it answers the same on every platform:
+
+```scala mdoc:compile-only
+// Retry a failed commit up to five times, waiting longer between attempts
+import scala.concurrent.duration.*
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+import xkafka.*
+
+val utf8 = Deserializer.utf8[IO]
+
+val settings =
+  for
+    client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    group    <- ConsumerGroup.from("workers").liftTo[IO]
+    // Delays start at 50ms, and stop growing at 2 seconds
+    policy   <- CommitRecovery.exponential(maxAttempts = 5, initialDelay = 50.millis, maxDelay = 2.seconds).liftTo[IO]
+    settings <- ConsumerSettings.from(client, group, utf8, utf8).liftTo[IO]
+  yield settings.withCommitRecovery(policy)  // Use the policy for this consumer's commits
+```
+
+`maxAttempts` counts the retries after the first failure. The default policy
+retries up to ten times, waiting 10ms before the first retry, doubling the wait
+each time, and stopping the doubling at 10s. Each delay is then spread by a
+fifth, so that consumers which hit one condition together do not all retry at
+the same moment.
+The spread is applied after the cap, so a delay can exceed `maxDelay` by that
+fraction.
+
+`CommitRecovery.none` disables retrying. A failure that is not retriable fails
+the commit at once, as reported. One that is still retriable after every retry
+fails it with `KafkaException.CommitFailed`, which carries the number of
+attempts, the offsets that were not committed, and the failure from the last
+attempt.
+
+@:callout(info)
+The recovery policy applies wherever a commit happens: a single
+`CommittableOffset.commit`, a batch, `commitBatchWithin`, and `consumeChunk`.
+@:@
+
+## How long a commit waits
+
+`ConsumerSettings.commitTimeout` bounds a commit and defaults to fifteen
+seconds. A commit that does not finish in time fails as
+`ErrorCode.RequestTimedOut`. That code is retriable, so the recovery policy
+tries again:
+
+```scala mdoc:compile-only
+// Let a commit wait at most five seconds before it fails as timed out
+import scala.concurrent.duration.*
+
+import cats.effect.IO
+
+import xkafka.*
+
+def withCommitTimeout[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
+  settings.withCommitTimeout(5.seconds).liftTo[IO]
+```
+
+Like every method that sets a duration, it validates the settings again and returns
+`ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]`. See
+[Settings](settings.md).
+
+@:callout(warning)
+A commit that timed out may still be applied by the broker afterwards, because
+the request has already been sent. Committing the same offset twice has no
+further effect, so a later attempt that succeeds leaves the group in the same
+place.
+@:@
 
 ## Leader epoch and metadata
 
@@ -24,19 +141,6 @@ bytes by default, and the commit fails with `ErrorCode.OffsetMetadataTooLarge`.
 A batch keeps the metadata of the offset it keeps, and a
 [transaction](transactions.md) stores both the epoch and the metadata of the
 offsets it records.
-
-## Batches
-
-Offsets can be accumulated and committed together while the consumer resource
-is active:
-
-```scala
-// Commit several offsets together, keeping the greatest for each partition
-CommittableOffsetBatch.fromFoldable(offsets).commit
-```
-
-A batch keeps only the greatest next offset for each topic-partition, and
-commits once for each consumer its offsets came from.
 
 ## Offsets and rebalances
 
@@ -64,10 +168,12 @@ How many offsets a rebalance affects depends on the partition assignment strateg
   `org.apache.kafka.clients.consumer.CooperativeStickyAssignor` on the JVM, and
   `cooperative-sticky` on Scala.js and Native.
 
-`committer.commit(offsets)` takes offsets that did not come from a record, so it
-can only check that the consumer owns each partition at the time of the commit.
-It commits them with no leader epoch and no metadata;
-`committer.commitWithMetadata` takes an `OffsetAndMetadata` for each partition.
+To commit offsets that did not come from a record, use the consumer's committer,
+`record.offset.committer`. Its `commit` takes a `Map[TopicPartition, Offset]` and
+commits each with no leader epoch and no metadata; `commitWithMetadata` takes an
+`OffsetAndMetadata` for each partition. Since these offsets were not read under
+any particular assignment, fencing can only check that the consumer owns each
+partition at the time of the commit.
 
 To turn fencing off:
 
@@ -135,8 +241,8 @@ settings.withStartingOffsets(10.seconds): partitions =>  // The function must an
 ```
 
 The consumer calls the function with the partitions each rebalance assigns,
-before it reads any of their records, and once at the start with partitions
-named directly. Each partition it answers for starts at the offset given, and
+before it reads any of their records. A consumer reading `Selection.Partitions`
+calls it once, when it is created. Each partition it answers for starts at the offset given, and
 no earlier record of it is handed out. A `StartingOffset` can also carry the
 leader epoch of the last record you handled, `record.offset.leaderEpoch`, if
 you stored it.
@@ -149,99 +255,8 @@ you stored it.
 - The function must answer within its limit, which must be less than
   `maxPollInterval`. If it fails or passes the limit, the record stream fails,
   with the function's own failure or with
-  `KafkaException.StartingOffsetsTimedOut`. For partitions named directly,
+  `KafkaException.StartingOffsetsTimedOut`. With `Selection.Partitions`,
   creating the consumer fails instead.
-
-## Committing on a schedule
-
-`commitBatchWithin` is an FS2 pipe which commits whenever it collects `n`
-offsets or `d` elapses, whichever happens first:
-
-```scala
-// Handle each record, and commit every 100 offsets or every 5 seconds, whichever comes first
-consumer.records
-  .evalTap(handle)
-  .map(_.offset)                               // Keep only each record's offset
-  .through(commitBatchWithin(100, 5.seconds))  // Collect and commit them in batches
-```
-
-Only non-empty batches are committed.
-
-## Retrying a failed commit
-
-Some commit failures clear on their own, such as a coordinator that is loading
-or a group that is rebalancing. Others never will, and retrying them only delays
-the failure.
-
-`ConsumerSettings.commitRecovery` retries the first kind. `ErrorCode.retriable`
-decides which failures qualify, and it answers the same on every platform:
-
-```scala mdoc:compile-only
-// Retry a failed commit, making up to five attempts and waiting longer between them
-import scala.concurrent.duration.*
-
-import cats.data.NonEmptyList
-import cats.effect.IO
-
-import xkafka.*
-
-val utf8 = Deserializer.utf8[IO]
-
-val settings =
-  for
-    client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
-    group    <- ConsumerGroup.from("workers").liftTo[IO]
-    // Delays start at 50ms, and stop growing at 2 seconds
-    policy   <- CommitRecovery.exponential(maxAttempts = 5, initialDelay = 50.millis, maxDelay = 2.seconds).liftTo[IO]
-    settings <- ConsumerSettings.from(client, group, utf8, utf8).liftTo[IO]
-  yield settings.withCommitRecovery(policy)  // Use the policy for this consumer's commits
-```
-
-The default policy makes ten attempts, starting at 10ms, doubling each time, and
-stopping the doubling at 10s. Each delay is then spread by a fifth, so that
-consumers which hit one condition together do not all retry at the same moment.
-The spread is applied after the cap, so a delay can exceed `maxDelay` by that
-fraction.
-
-`CommitRecovery.none` disables retrying. When every attempt has been used, the
-commit fails with `KafkaException.CommitFailed`, which carries the number of
-attempts, the offsets that were not committed, and the failure from the last
-attempt.
-
-@:callout(info)
-The recovery policy applies wherever a commit happens: a single
-`CommittableOffset.commit`, a batch, `commitBatchWithin`, and `consumeChunk`.
-@:@
-
-## How long a commit waits
-
-`ConsumerSettings.commitTimeout` bounds a commit and defaults to fifteen
-seconds. A commit that does not finish in time fails as
-`ErrorCode.RequestTimedOut`. That code is retriable, so the recovery policy
-tries again:
-
-```scala mdoc:compile-only
-// Let a commit wait at most five seconds before it fails as timed out
-import scala.concurrent.duration.*
-
-import cats.effect.IO
-
-import xkafka.*
-
-def withCommitTimeout[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
-  settings.withCommitTimeout(5.seconds).liftTo[IO]
-```
-
-Like every method that sets a duration, it validates the settings again and returns
-`ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]`. See
-[Settings](settings.md).
-
-@:callout(warning)
-A commit that timed out may still be applied by the broker afterwards, because
-the request has already been sent. Committing the same offset twice has no
-further effect, so a later attempt that succeeds leaves the group in the same
-place.
-@:@
 
 ## Transformations
 

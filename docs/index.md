@@ -12,8 +12,13 @@ Native while using the established Kafka client for each runtime.
 
 The API uses `Resource` for producer and consumer lifecycles, `Stream` for
 consumer records, effectful serializers and deserializers, and explicit offset
-commits. Scala.js targets Node.js rather than browsers. xkafka also runs
-[Kafka Streams programs](streams/README.md), alongside Java Kafka Streams instances.
+commits. On Scala.js it runs on Node.js, not in browsers. xkafka also runs
+[Kafka Streams programs](streams/README.md), alongside Java Kafka Streams
+instances, and writes and reads Avro, JSON Schema and Protobuf with schemas kept in
+a [schema registry](schema-registry.md).
+
+To add xkafka to your build and see what each platform needs, start with
+[Getting started](getting-started.md).
 
 ```scala mdoc:compile-only
 // Write one record to the topic "events", and wait until it is delivered

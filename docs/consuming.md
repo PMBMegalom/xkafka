@@ -25,6 +25,9 @@ val program =
   yield records
 ```
 
+The example reads records without committing them. Nothing is committed until
+your code asks; [Offsets](offsets.md) shows how and when to commit.
+
 ## What a record carries
 
 Besides its topic-partition, offset, key, value and [headers](headers.md), a `ConsumerRecord`
@@ -44,8 +47,16 @@ has:
 `Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a
 `TopicPattern`, which matches complete topic names. The JVM matches it as a Java
 regular expression, and Scala.js and Native through librdkafka, so a pattern
-meant for every platform should keep to simple syntax, such as `events-.*`. Both join a consumer group, so the partitions a consumer holds
-follow the group's rebalances.
+meant for every platform should keep to simple syntax, such as `events-.*`.
+Both join a consumer group, so the partitions a consumer holds follow the
+group's rebalances.
+
+@:callout(warning)
+A consumer that subscribes to a topic before that topic exists sees it once the
+consumer refreshes its metadata. `metadataRefreshInterval` sets how long that
+takes and defaults to five minutes. Lower it if a consumer must discover a topic
+promptly.
+@:@
 
 `Selection.Partitions` takes a non-empty set of topic-partitions and reads
 exactly those. It joins no group, so the assignment never changes. Two consumers
@@ -65,18 +76,91 @@ among the offsets in that batch. Give consumers their own group unless they are
 meant to share a position.
 @:@
 
-@:callout(info)
-After a seek, the next record the stream hands out of that partition comes from
-the offset sought, and no record fetched before the seek is handed out. A seek
-of a partition the consumer has not been assigned fails with
-`ErrorCode.UnknownTopicOrPartition`. A seek is also refused until the partition
-it names is being fetched, which happens after the assignment arrives. Retry
-briefly if you seek immediately after starting a consumer.
-@:@
-
 By default a consumer delivers records from transactions that have not
 committed. Set `isolationLevel` to change that. See
 [Transactions](transactions.md).
+
+## Where a consumer starts
+
+A consumer resumes each partition from its group's committed offset. Where the
+group has none, `autoOffsetReset` decides:
+
+| value | where the consumer starts |
+| --- | --- |
+| `Earliest` | at the first record still in the partition |
+| `Latest` | at the end of the partition, reading only records written from then on |
+| `Fail` | nowhere: the record stream fails as `ErrorCode.OffsetResetRequired` |
+
+A committed offset that is no longer in the partition, because the records it
+pointed at were deleted, is handled by the same setting. `Earliest` starts at the
+first record still there, and `Fail` fails the record stream.
+
+Choose `Fail` where skipping or replaying records would be wrong, such as for a
+replica rebuilt from a snapshot and the log written after it.
+
+## Processing records
+
+`records` is one stream of the records from every partition the consumer is
+assigned, each paired with the offset that commits it. You handle each record
+and commit when you choose, as [Offsets](offsets.md) describes.
+
+`consumeChunk` does both for you. It takes a function over a chunk of records
+and commits that chunk once the function returns:
+
+```scala
+// Handle each chunk of records, then commit it
+consumer.consumeChunk: records =>
+  records.traverse_(handle).as(CommitNow)  // CommitNow is what commits the chunk
+```
+
+Partitions are processed concurrently, so a slow chunk holds back only the
+partition it came from. Returning `CommitNow` is what triggers the commit.
+
+`consumeChunk` runs until it is cancelled, until something fails, or until
+`stopConsuming` has been called and everything already fetched has been
+processed.
+
+## Partition streams
+
+`partitionedRecords` exposes a record stream for each assigned topic-partition
+and ends that stream after the partition is revoked.
+
+```scala
+// Give each assigned partition its own stream of records, and handle them
+consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>  // Pause a partition once 256 of its records are waiting
+  partition.records.evalMap(handle)
+}.parJoinUnbounded  // Consume every partition's stream at once
+```
+
+Every emitted stream must be consumed concurrently. `maxQueuedRecords` is the
+point at which the consumer pauses a partition. Records already in flight can
+temporarily take its buffer past that threshold.
+
+## Stopping
+
+`stopConsuming` stops fetching. The record streams then end once the records
+already fetched have been handed over. Nothing read from the broker is dropped,
+and offsets remain committable.
+
+Run it alongside the stream:
+
+```scala
+// Consume until a shutdown is requested, then finish what was already fetched
+// Handle and commit each record
+val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain
+val stop    = shutdownRequested.get *> consumer.stopConsuming  // Stop fetching when a shutdown is requested
+
+(consume, stop).parTupled  // Run both side by side
+```
+
+`stopConsuming` returns as soon as fetching has been told to stop, without
+waiting for the streams to drain. Calling it more than once has no further
+effect, and a stream started after it is empty.
+
+Interrupting the stream instead, with `interruptWhen` for example, stops it
+mid-record and discards whatever had been fetched. Releasing the consumer
+resource, or cancelling whatever reads it, does the same. In those cases whoever
+resumes the group reads those offsets again.
 
 ## Group membership
 
@@ -115,8 +199,14 @@ def staticMember[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSe
   settings.withGroupInstanceId("orders-1").andThen(_.withSessionTimeout(2.minutes)).andThen(_.withMaxPollInterval(5.minutes)).liftTo[IO]
 ```
 
-Each `with` method validates the settings again as a whole, so raising the session timeout
-above the maximum poll interval fails unless the poll interval is raised first.
+Each of these methods validates the settings again as a whole, so raising the
+session timeout above the maximum poll interval fails unless the poll interval
+is raised first.
+
+@:callout(warning)
+A consumer joins its group as soon as it is made, so a consumer nobody reads
+still takes a share of the partitions. Release consumers you are not reading.
+@:@
 
 ### Static members
 
@@ -130,24 +220,6 @@ partitions once its session times out.
 Give each static member an identity of its own. A longer session timeout gives a
 restarting member more time to come back, at the cost of leaving its partitions
 unread for that long if it does not.
-
-## Where a consumer starts
-
-A consumer resumes each partition from its group's committed offset. Where the
-group has none, `autoOffsetReset` decides:
-
-| value | where the consumer starts |
-| --- | --- |
-| `Earliest` | at the first record still in the partition |
-| `Latest` | at the end of the partition, reading only records written from then on |
-| `Fail` | nowhere: the record stream fails as `ErrorCode.OffsetResetRequired` |
-
-A committed offset that is no longer in the partition, because the records it
-pointed at were deleted, is handled by the same setting. `Earliest` starts at the
-first record still there, and `Fail` fails the record stream.
-
-Choose `Fail` where skipping or replaying records would be wrong, such as for a
-replica rebuilt from a snapshot and the log written after it.
 
 ## Inspecting the consumer
 
@@ -177,74 +249,12 @@ differs between platforms. Before the consumer has consumed from the partition,
 it can be `None`.
 @:@
 
-## Processing every record
-
-`consumeChunk` takes a function over a chunk of records and commits that chunk
-once the function returns:
-
-```scala
-// Handle each chunk of records, then commit it
-consumer.consumeChunk: records =>
-  records.traverse_(handle).as(CommitNow)  // CommitNow is what commits the chunk
-```
-
-Partitions are processed concurrently, so a slow chunk holds back only the
-partition it came from. Returning `CommitNow` is what triggers the commit.
-
-`consumeChunk` runs until it is cancelled, until something fails, or until
-`stopConsuming` has been called and everything already fetched has been
-processed.
-
-@:callout(warning)
-A consumer joins its group as soon as it is made, so a consumer nobody reads
-still takes a share of the partitions. Release consumers you are not reading.
-@:@
-
-## Stopping
-
-`stopConsuming` stops fetching. The record streams then end once the records
-already fetched have been handed over. Nothing read from the broker is dropped,
-and offsets remain committable.
-
-Run it alongside the stream:
-
-```scala
-// Consume until a shutdown is requested, then finish what was already fetched
-// Handle and commit each record
-val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain
-val stop    = shutdownRequested.get *> consumer.stopConsuming  // Stop fetching when a shutdown is requested
-
-(consume, stop).parTupled  // Run both side by side
-```
-
-`stopConsuming` returns as soon as fetching has been told to stop, without
-waiting for the streams to drain. Calling it more than once has no further
-effect, and a stream started after it is empty.
-
-Interrupting the stream instead, with `interruptWhen` for example, stops it
-mid-record and discards whatever had been fetched. Releasing the consumer
-resource, or cancelling whatever reads it, does the same. In those cases whoever
-resumes the group reads those offsets again.
-
-## Partition streams
-
-`partitionedRecords` exposes a record stream for each assigned topic-partition
-and ends that stream after the partition is revoked.
-
-```scala
-// Give each assigned partition its own stream of records, and handle them
-consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>  // Pause a partition once 256 of its records are waiting
-  partition.records.evalMap(handle)
-}.parJoinUnbounded  // Consume every partition's stream at once
-```
-
-Every emitted stream must be consumed concurrently. `maxQueuedRecords` is the
-point at which the consumer pauses a partition. Records already in flight can
-temporarily take its buffer past that threshold.
-
-@:callout(warning)
-A consumer that subscribes to a topic before that topic exists sees it once the
-consumer refreshes its metadata. `metadataRefreshInterval` sets how long that
-takes and defaults to five minutes. Lower it if a consumer must discover a topic
-promptly.
+@:callout(info)
+After a seek, the next record the stream hands out of that partition comes from
+the offset sought, and no record fetched before the seek is handed out. A seek
+of a partition the consumer has not been assigned fails with
+`ErrorCode.UnknownTopicOrPartition`. On Scala.js and Scala Native, a seek is
+also refused until the partition it names is being fetched, which happens
+shortly after the assignment arrives, so code meant for every platform should
+retry briefly if it seeks immediately after starting a consumer.
 @:@
