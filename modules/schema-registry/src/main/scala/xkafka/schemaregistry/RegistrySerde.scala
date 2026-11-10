@@ -63,8 +63,8 @@ trait SchemaFormat[A]:
   /** The full name of the record the schema describes, which [[SubjectNaming.RecordName]] and [[SubjectNaming.TopicRecordName]] need. */
   def recordName: Option[String]
 
-  /** How values are written with `target`, or why they cannot be. */
-  def writer(target: Schema): Either[String, A => Chunk[Byte]]
+  /** How values are written with `target`, each of which may be refused, or why none can be. */
+  def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]]
 
   /** How what was written with `writer` is read, or why it cannot be. */
   def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]]
@@ -81,8 +81,8 @@ object RegistrySerde:
       naming: SubjectNaming = SubjectNaming.TopicName,
       writing: Writing = Writing.Register
   )(using F: Concurrent[F]): F[Serde[F, A]] =
-    (Ref.of[F, Map[SchemaId, A => Chunk[Byte]]](Map.empty), Ref.of[F, Map[SchemaId, Chunk[Byte] => Either[String, A]]](Map.empty)).mapN:
-      (writers, readers) =>
+    (Ref.of[F, Map[SchemaId, A => Either[String, Chunk[Byte]]]](Map.empty), Ref.of[F, Map[SchemaId, Chunk[Byte] => Either[String, A]]](Map.empty))
+      .mapN: (writers, readers) =>
         def unserializable(topic: Topic, reason: String): Throwable = new RegistryException.Unserializable(topic, reason)
 
         def subject(topic: Topic): F[Subject] =
@@ -108,7 +108,7 @@ object RegistrySerde:
                   case None             => F.raiseError(unserializable(topic, s"subject '${named.value}' has no versions"))
             case Writing.Pinned(id) => registry.schema(id).map(schema => (id, Some(schema)))
 
-        def writerFor(topic: Topic, id: SchemaId, schema: Option[Schema]): F[A => Chunk[Byte]] =
+        def writerFor(topic: Topic, id: SchemaId, schema: Option[Schema]): F[A => Either[String, Chunk[Byte]]] =
           writers.get.map(_.get(id)).flatMap:
             case Some(write) => F.pure(write)
             case None        => F.fromEither(format.writer(schema.getOrElse(format.schema)).leftMap(unserializable(topic, _)))
@@ -122,7 +122,9 @@ object RegistrySerde:
 
         val serializer =
           Serializer.instance[F, A]: (topic, _, value) =>
-            target(topic).flatMap((id, schema) => writerFor(topic, id, schema).map(write => Some(Wire.write(id, write(value)))))
+            target(topic).flatMap: (id, schema) =>
+              writerFor(topic, id, schema)
+                .flatMap(write => F.fromEither(write(value).bimap(unserializable(topic, _), written => Some(Wire.write(id, written)))))
 
         val deserializer =
           Deserializer.instance[F, A]: (topic, _, bytes) =>

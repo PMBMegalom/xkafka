@@ -245,6 +245,43 @@ class ApacheAvroSuite extends ScalaCheckSuite:
     assertEquals(compatibility, SchemaCompatibility.SchemaCompatibilityType.INCOMPATIBLE)
     assertEquals(AvroBinary.decoder(parsed(writer), parsed(reader)).map(_ => ()), Left("record 'A' is not read as 'B'"))
 
+  test("Apache Avro takes each derived schema, defaults checked, and reads a derived value with its own conversions"):
+    List(AvroCodec[Order].schema, AvroCodec[Payment].schema, AvroCodec[Node].schema, AvroCodec[Preferred].schema).foreach: schema =>
+      new ApacheSchema.Parser().setValidateDefaults(true).parse(AvroSchemaJson.render(schema))
+    val order =
+      Order(
+        java.util.UUID.fromString("3f2b8c1e-9a4d-4e6f-8b2a-1c3d5e7f9a0b"),
+        java.time.Instant.parse("2026-11-10T07:00:00.123Z"),
+        java.time.LocalDate.of(2026, 11, 10),
+        List(Line("apple")),
+        Status.Shipped,
+        Cash
+      )
+    val theirs = apache(AvroSchemaJson.render(AvroCodec[Order].schema))
+    val data   = new GenericData()
+    data.addLogicalTypeConversion(new org.apache.avro.data.TimeConversions.TimestampMillisConversion)
+    data.addLogicalTypeConversion(new org.apache.avro.data.TimeConversions.DateConversion)
+    data.addLogicalTypeConversion(new org.apache.avro.Conversions.UUIDConversion)
+    val written = AvroCodec[Order].encode(order).flatMap(AvroBinary.encode(AvroCodec[Order].schema, _)).fold(fail(_), identity)
+    val read    = new GenericDatumReader[GenericRecord](theirs, theirs, data).read(null, DecoderFactory.get.binaryDecoder(written.toArray, null))
+    assertEquals(read.get("id"), order.id)
+    assertEquals(read.get("placed_at"), order.placedAt)
+    assertEquals(read.get("day"), order.day)
+    assertEquals(read.get("status").toString, "Shipped")
+    read.get("payment") match
+      case payment: GenericRecord => assertEquals(payment.getSchema.getFullName, "xkafka.avro.Cash")
+      case other                  => fail(s"expected a record, got $other")
+
+  test("decimals are the bytes Apache Avro's decimal conversion writes"):
+    val schema     = apache("""{"type":"bytes","logicalType":"decimal","precision":12,"scale":3}""")
+    val conversion = new org.apache.avro.Conversions.DecimalConversion
+    List("0", "1.5", "-1.5", "123456789.123", "-0.001", "-128", "127.999").foreach: text =>
+      val value    = BigDecimal(text)
+      val expected = conversion.toBytes(value.bigDecimal.setScale(3), schema, schema.getLogicalType)
+      val bytes    = new Array[Byte](expected.remaining)
+      expected.get(bytes)
+      assertEquals(AvroCodec.decimal(12, 3).encode(value), Right(AvroValue.Bytes(Chunk.array(bytes))), text)
+
   test("NaN is written with the bits Apache Avro writes"):
     val nan = java.lang.Float.intBitsToFloat(0x7fc00001)
     assertEquals(AvroBinary.encode(AvroSchema.Float, AvroValue.Float(nan)), Right(apacheWrite(apache("\"float\""), nan)))

@@ -33,6 +33,7 @@ val fs2Version             = "3.14.0"
 val circeVersion           = "0.14.17"
 val http4sVersion          = "0.23.38"
 val apacheAvroVersion      = "1.12.2"
+val scalaJavaTimeVersion   = "2.7.0"     // 2.8.0 and later are built with Scala 3.9, which xkafka on Scala 3.3 cannot read.
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
 val lz4JavaVersion         = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
@@ -800,6 +801,8 @@ lazy val avro = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   )
   // Apache Avro, which xkafka's encoding and schema resolution are checked against, runs on the JVM alone.
   .jvmSettings(libraryDependencies += "org.apache.avro" % "avro" % apacheAvroVersion % Test)
+  // The JVM has java.time, which Avro's dates and times are read into; JavaScript and Native take it from scala-java-time.
+  .platformsSettings(JSPlatform, NativePlatform)(libraryDependencies += "io.github.cquiroz" %%% "scala-java-time" % scalaJavaTimeVersion)
 
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/client"))

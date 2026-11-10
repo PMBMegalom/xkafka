@@ -88,7 +88,7 @@ object AvroBinary:
     else items.flatTraverse(item).map(written => (varLong(items.size.toLong) +: written) :+ varLong(0))
 
   /** Whether `value` is one `schema` describes, which picks the union branch it is written as: the first that fits. */
-  private def fits(schema: AvroSchema, value: AvroValue, defined: Defined): Boolean =
+  private[avro] def fits(schema: AvroSchema, value: AvroValue, defined: Map[FullName, AvroSchema]): Boolean =
     (schema, value) match
       case (AvroSchema.Named(name), _)                                    => defined.get(name).exists(fits(_, value, defined))
       case (AvroSchema.Logical(logicalType), _)                           => fits(logicalType.underlying, value, defined)

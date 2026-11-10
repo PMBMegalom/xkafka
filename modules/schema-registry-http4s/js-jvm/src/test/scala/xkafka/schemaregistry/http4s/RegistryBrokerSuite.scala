@@ -143,7 +143,7 @@ class RegistryBrokerSuite extends CatsEffectSuite:
       new SchemaFormat[String]:
         override val schema: Schema             = Schema("\"string\"", SchemaType.Avro)
         override val recordName: Option[String] = None
-        override def writer(target: Schema)     = Right(value => Chunk.array(value.getBytes(StandardCharsets.UTF_8)))
+        override def writer(target: Schema)     = Right(value => Right(Chunk.array(value.getBytes(StandardCharsets.UTF_8))))
         override def reader(writer: Schema)     = Right(bytes => Right(new String(bytes.toArray, StandardCharsets.UTF_8)))
     for
       client  <- registry

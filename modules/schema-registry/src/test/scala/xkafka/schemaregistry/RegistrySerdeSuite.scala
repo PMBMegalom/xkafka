@@ -37,13 +37,14 @@ class RegistrySerdeSuite extends CatsEffectSuite:
   private val plain    = Schema("""{"type":"string","name":"Text"}""", SchemaType.Avro)
   private val loud     = Schema("""{"type":"string","name":"Loud"}""", SchemaType.Avro)
 
-  /** Writes text as UTF-8, in capitals with the schema `loud`, and reads back what was written with `loud` marked as such. */
+  /** Writes text as UTF-8, in capitals with the schema `loud`, refusing empty text, and reads back what was written with `loud` marked as such. */
   private final class Text(val recordName: Option[String]) extends SchemaFormat[String]:
     override val schema: Schema = plain
 
-    override def writer(target: Schema): Either[String, String => Chunk[Byte]] =
-      if target == plain then Right(text => Chunk.array(text.getBytes(StandardCharsets.UTF_8)))
-      else if target == loud then Right(text => Chunk.array(text.toUpperCase.getBytes(StandardCharsets.UTF_8)))
+    override def writer(target: Schema): Either[String, String => Either[String, Chunk[Byte]]] =
+      def utf8(text: String) = Either.cond(text.nonEmpty, Chunk.array(text.getBytes(StandardCharsets.UTF_8)), "empty text")
+      if target == plain then Right(utf8)
+      else if target == loud then Right(text => utf8(text.toUpperCase))
       else Left(s"cannot write with ${target.text}")
 
     override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, String]] =
@@ -153,6 +154,15 @@ class RegistrySerdeSuite extends CatsEffectSuite:
       reading <- serde(fake, format)
       back    <- List(quiet, shouted, quiet).traverse(read(reading, _))
     yield assertEquals(back, List("quiet", "loud QUIET", "quiet"))
+
+  test("a value the format refuses fails as unserializable"):
+    for
+      fake    <- FakeRegistry()
+      format  <- text()
+      refused <- serde(fake, format).flatMap(write(_, "")).attempt
+    yield refused match
+      case Left(error: RegistryException.Unserializable) => assertEquals((error.topic, error.reason), (orders, "empty text"))
+      case other                                         => fail(s"expected unserializable, got $other")
 
   test("a schema the format cannot write with is refused"):
     for
