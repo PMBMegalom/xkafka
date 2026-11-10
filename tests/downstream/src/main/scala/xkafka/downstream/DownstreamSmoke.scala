@@ -28,7 +28,7 @@ import cats.data.{NonEmptyList, NonEmptyMap, ValidatedNel, NonEmptySet}
 import cats.effect.IO
 import cats.effect.IOApp
 import cats.syntax.all.*
-import xkafka.streams.{ApplicationId, KStream, Named, Serde, Store, StreamsSettings, Topology}
+import xkafka.streams.{ApplicationId, KStream, Named, Store, StreamsSettings, Topology}
 
 object DownstreamSmoke extends IOApp.Simple:
   private val bootstrapServer = sys.env.getOrElse(

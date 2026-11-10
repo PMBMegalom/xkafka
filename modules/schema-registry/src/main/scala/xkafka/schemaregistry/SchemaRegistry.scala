@@ -40,7 +40,7 @@ trait SchemaRegistry[F[_]]:
   def schema(id: SchemaId): F[Schema]
 
   /** The id of `schema` as a version of `subject`, which registers it as the subject's next version where it is not one yet, and fails as
-    * [[RegistryException.Refused]] with error 409 where the subject's compatibility rule refuses it.
+    * [[RegistryException.Refused]] with status 409 and error 40901 where the subject's compatibility rule refuses it.
     */
   def register(subject: Subject, schema: Schema): F[SchemaId]
 

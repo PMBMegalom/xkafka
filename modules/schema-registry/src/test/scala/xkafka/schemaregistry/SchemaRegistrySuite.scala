@@ -163,7 +163,7 @@ class SchemaRegistrySuite extends CatsEffectSuite:
       refused <- client.register(orders, order).attempt
     yield refused match
       case Left(error: RegistryException.Refused) =>
-        assertEquals((error.status, error.code, error.reason), (409, 409, "Schema being registered is incompatible with an earlier schema"))
+        assertEquals((error.status, error.code, error.reason), (409, 40901, "Schema being registered is incompatible with an earlier schema"))
       case other => fail(s"expected a refusal, got $other")
 
   test("a 404 that is not the registry's answer for something it lacks fails, and is not taken for nothing found"):

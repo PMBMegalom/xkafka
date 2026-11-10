@@ -32,7 +32,7 @@ object RegistryException:
   final class Unreachable(val urls: NonEmptyList[String], cause: Throwable)
       extends RegistryException(s"the schema registry could not be reached at ${urls.toList.mkString(", ")}: ${cause.getMessage}", cause)
 
-  /** The registry refused a request with `status`, giving its own error `code`, such as 40401 for an unknown subject or 409 for an incompatible
+  /** The registry refused a request with `status`, giving its own error `code`, such as 40401 for an unknown subject or 40901 for an incompatible
     * schema, and its `reason`.
     */
   final class Refused(val status: Int, val code: Int, val reason: String)

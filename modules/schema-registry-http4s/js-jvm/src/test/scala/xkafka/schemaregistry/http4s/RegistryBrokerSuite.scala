@@ -123,7 +123,7 @@ class RegistryBrokerSuite extends CatsEffectSuite:
           case Compatibility.Incompatible(reasons) => assert(reasons.nonEmpty, "the registry gives its reasons")
           case other                               => fail(s"expected incompatible, got $other")
         registered match
-          case Left(error: RegistryException.Refused) => assertEquals((error.status, error.code), (409, 409))
+          case Left(error: RegistryException.Refused) => assertEquals((error.status, error.code), (409, 40901))
           case other                                  => fail(s"expected a refusal, got $other")
 
   registryTest("a Protobuf schema keeps its type and the schemas it imports"): (registry, name) =>
@@ -204,5 +204,5 @@ class RegistryBrokerSuite extends CatsEffectSuite:
         assertEquals(read, Item("apple", 1))
         assertEquals(latest.map(_.version), Some(2))
         broken match
-          case Left(error: RegistryException.Refused) => assertEquals(error.code, 409)
+          case Left(error: RegistryException.Refused) => assertEquals(error.code, 40901)
           case other                                  => fail(s"expected the registry to refuse a field added without a default, got $other")

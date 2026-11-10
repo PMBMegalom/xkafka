@@ -53,7 +53,7 @@ final class FakeRegistry(state: Ref[IO, FakeRegistry.State], val requests: Ref[I
       case (Method.Get, List("schemas", "ids", id)) => state.get
           .map(_.byId.get(id.toInt).fold(refused(404, 40403, "Schema not found"))(schema => ok(schema.json)))
       case (Method.Post, List("subjects", subject, "versions")) => stored.fold(IO.pure(refused(422, 42201, "Invalid schema"))): schema =>
-          if incompatible(schema.text) then IO.pure(refused(409, 409, "Schema being registered is incompatible with an earlier schema"))
+          if incompatible(schema.text) then IO.pure(refused(409, 40901, "Schema being registered is incompatible with an earlier schema"))
           else state.modify(_.register(subject, schema)).map(id => ok(Json.obj("id" -> Json.fromInt(id))))
       case (Method.Post, List("subjects", subject)) => stored.fold(IO.pure(refused(422, 42201, "Invalid schema"))): schema =>
           state.get.map: current =>
