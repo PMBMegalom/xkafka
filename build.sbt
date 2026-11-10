@@ -32,7 +32,7 @@ val catsTaglessVersion     = "0.16.5"
 val fs2Version             = "3.14.0"
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
-val lz4JavaVersion         = "1.12.1"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
+val lz4JavaVersion         = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
 val snappyJavaVersion      = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which has security advisories fixed in 1.1.10.9.
 val nodeVersion            = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
 val librdkafkaVersion      = "2.16.0"
@@ -277,8 +277,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     WorkflowStep.Use(
       UseRef.Public("actions", "setup-node", "v7"),
       name = Some("Setup Node.js"),
-      // Until npm trusts this workflow for the RocksDB packages, which it can only once they exist, their first publish uses a token.
-      params = Map("node-version-file" -> ".nvmrc", "registry-url" -> "https://registry.npmjs.org")
+      params = Map("node-version-file" -> ".nvmrc")
     ),
     WorkflowStep.Use(
       UseRef.Public("actions", "download-artifact", "v8"),
@@ -287,8 +286,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     ),
     WorkflowStep.Run(
       List("scripts/publish-npm-rocksdb.sh npm-packages"),
-      name = Some("Publish the versions npm does not have yet"),
-      env = Map("NODE_AUTH_TOKEN" -> "${{ secrets.NPM_TOKEN }}")
+      name = Some("Publish the versions npm does not have yet")
     )
   ),
   cond = Some(publishedArtifactCondition),

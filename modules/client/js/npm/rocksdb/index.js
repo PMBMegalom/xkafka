@@ -32,7 +32,9 @@ try {
 } catch (cause) {
   shim = null;
   library = null;
-  error = `@xkafka/rocksdb has no prebuilt library for ${platform}`;
+  error = platform in libraries
+    ? `@xkafka/rocksdb-${platform} is not installed, as when npm installs without optional dependencies`
+    : `@xkafka/rocksdb has no prebuilt library for ${platform}`;
 }
 
 module.exports = { platform, shim, library, error };
