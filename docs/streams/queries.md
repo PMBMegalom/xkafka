@@ -17,37 +17,46 @@ Every member of the application needs:
 3. **An internal route** on that endpoint, which passes the bytes it receives to
    `answer` and sends back what `answer` returns.
 
-xkafka does not choose how members talk to each other. Here they use HTTP, with
-[http4s](https://http4s.org):
+With [http4s](https://http4s.org), the `xkafka-streams-http4s` module gives the
+last two, on every platform:
+
+```scala
+libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-streams-http4s" % "@VERSION@"
+```
+
+`Http4sQueries.forward(client)` posts each query to the member that holds the
+key, through your http4s client, and `Http4sQueries.routes(streams)` is the
+internal route that answers them. Both use the path `/xkafka/query` unless you
+give another:
 
 ```scala mdoc:compile-only
 // Run a member that answers other members' queries over HTTP, and asks them for the keys they hold
 import cats.effect.IO
 import com.comcast.ip4s.*
-import fs2.Chunk
-import org.http4s.*
-import org.http4s.dsl.io.*
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.ember.server.EmberServerBuilder
 
 import xkafka.*
 import xkafka.streams.*
+import xkafka.streams.http4s.Http4sQueries
 
 def member(settings: StreamsSettings, topology: Topology[IO]): IO[Unit] =
   Endpoint.from("orders-3.internal", 8080).liftTo[IO].flatMap: here =>
     EmberClientBuilder.default[IO].build.use: http =>
-      // Post a query's bytes to the member that holds the key, and give back what it answers
-      val forward: Forward[IO] = (member, query) =>
-        val route = Uri.unsafeFromString(s"http://${member.host}:${member.port}/xkafka-query")
-        http.expect[Array[Byte]](Request[IO](Method.POST, route).withEntity(query.toArray)).map(Chunk.array(_))
-      KafkaClient[IO].streams(settings.withQueries(here), topology, forward).use: streams =>
-        // Answer the queries other members post here
-        val internal = HttpRoutes.of[IO]:
-          case request @ POST -> Root / "xkafka-query" =>
-            request.as[Array[Byte]].flatMap(query => streams.answer(Chunk.array(query))).flatMap(answer => Ok(answer.toArray))
-        val server = EmberServerBuilder.default[IO].withHost(ipv4"0.0.0.0").withPort(port"8080").withHttpApp(internal.orNotFound).build
+      KafkaClient[IO].streams(settings.withQueries(here), topology, Http4sQueries.forward(http)).use: streams =>
+        val internal = Http4sQueries.routes(streams).orNotFound
+        val server   = EmberServerBuilder.default[IO].withHost(ipv4"0.0.0.0").withPort(port"8080").withHttpApp(internal).build
         server.surround(streams.run)                       // Serve the route for as long as the member runs
 ```
+
+To reach members over TLS, give `forward` the scheme `https` and a client set up
+for it, and serve the route over TLS. A member that answers with an error status
+fails the query with `Unreachable`.
+
+Members can talk any other way: a `Forward` is a function from a member's
+endpoint and a query's bytes to the bytes it answers, and the internal route
+only needs to pass the bytes it receives to `streams.answer` and send back what
+it returns.
 
 Keep the internal route away from the outside world: it answers any query, for
 any store.

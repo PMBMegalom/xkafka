@@ -793,6 +793,19 @@ lazy val schemaRegistryHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlat
   // Ember imports Node's own modules.
   .jsSettings(scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule)))
 
+// Members of a streams application ask each other for what their stores hold through an HTTP client and route the application chooses; this module
+// gives them over http4s.
+lazy val streamsHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .crossType(CrossType.Pure)
+  .in(file("modules/streams-http4s"))
+  .dependsOn(kernel)
+  .settings(commonSettings)
+  .settings(
+    name                                 := "xkafka-streams-http4s",
+    description                          := "Queries between the members of an xkafka streams application over http4s",
+    libraryDependencies += "org.http4s" %%% "http4s-client" % http4sVersion
+  )
+
 lazy val avro = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/avro"))
   // The registry's tests keep an in-memory registry, which the Avro serdes' tests use too.
@@ -1153,7 +1166,7 @@ lazy val streamsFixture = project
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
-  .dependsOn(client.jvm, streamsJava, schemaRegistryHttp4s.jvm, avro.jvm, jsonSchema.jvm, protobuf.jvm)
+  .dependsOn(client.jvm, streamsJava, streamsHttp4s.jvm, schemaRegistryHttp4s.jvm, avro.jvm, jsonSchema.jvm, protobuf.jvm)
   .settings(
     // The examples of querying stores show an HTTP connection between members, so the site depends on http4s's server and Ember client; of the
     // published modules, only xkafka-schema-registry-http4s depends on http4s, and on its client alone.
