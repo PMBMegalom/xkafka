@@ -34,8 +34,8 @@ class Http4sQueriesSuite extends CatsEffectSuite:
   /** A member whose every answer is the query it was asked, reversed. */
   private val streams =
     new KafkaStreams[IO]:
-      override def run: IO[Unit]                                                                      = IO.never
-      override def state: Stream[IO, StreamsState]                                                    = Stream.empty
+      override def run: IO[Unit]                                                                     = IO.never
+      override def state: Stream[IO, StreamsState]                                                   = Stream.empty
       override def query[A](query: Query[IO, A], allowStandby: Boolean): IO[Either[QueryProblem, A]] = IO.pure(Left(QueryProblem.Rebalancing))
       override def answer(request: Chunk[Byte]): IO[Chunk[Byte]]                                     = IO.pure(Chunk.from(request.toList.reverse))
 
@@ -46,18 +46,21 @@ class Http4sQueriesSuite extends CatsEffectSuite:
 
   test("a forwarded query is posted to the member's endpoint, and the route there answers it from the member's streams"):
     for
-      seen   <- Ref.of[IO, List[Request[IO]]](Nil)
+      seen <- Ref.of[IO, List[Request[IO]]](Nil)
       forward: Forward[IO] = Http4sQueries.forward(client(Http4sQueries.routes(streams), seen))
       answer <- forward(member, Chunk[Byte](1, 2, 3))
       asked  <- seen.get
     yield
       assertEquals(answer, Chunk[Byte](3, 2, 1))
-      assertEquals(asked.map(request => (request.method, request.uri)), List((Method.POST, Uri.unsafeFromString("http://orders-3.internal:8080/xkafka/query"))))
+      assertEquals(
+        asked.map(request => (request.method, request.uri)),
+        List((Method.POST, Uri.unsafeFromString("http://orders-3.internal:8080/xkafka/query")))
+      )
 
   test("another path and scheme are posted to and answered at"):
     val path = Uri.Path.unsafeFromString("/internal/queries")
     for
-      seen   <- Ref.of[IO, List[Request[IO]]](Nil)
+      seen <- Ref.of[IO, List[Request[IO]]](Nil)
       forward: Forward[IO] = Http4sQueries.forward(client(Http4sQueries.routes(streams, path), seen), path, Uri.Scheme.https)
       answer <- forward(member, Chunk[Byte](4, 5))
       asked  <- seen.get
@@ -67,8 +70,8 @@ class Http4sQueriesSuite extends CatsEffectSuite:
 
   test("an answer that is not a success fails the forwarded query, and the route answers nothing but posts to its path"):
     for
-      seen    <- Ref.of[IO, List[Request[IO]]](Nil)
-      other   = Http4sQueries.routes(streams, Uri.Path.unsafeFromString("/other"))
+      seen <- Ref.of[IO, List[Request[IO]]](Nil)
+      other                = Http4sQueries.routes(streams, Uri.Path.unsafeFromString("/other"))
       forward: Forward[IO] = Http4sQueries.forward(client(other, seen))
       failed  <- forward(member, Chunk[Byte](1)).attempt
       fetched <- Http4sQueries.routes(streams).orNotFound.run(Request[IO](Method.GET, Uri.unsafeFromString("/xkafka/query")))

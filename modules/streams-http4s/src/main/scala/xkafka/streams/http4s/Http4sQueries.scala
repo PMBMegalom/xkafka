@@ -41,7 +41,7 @@ object Http4sQueries:
     Uri(scheme = Some(scheme), authority = Some(Uri.Authority(host = host, port = Some(member.port))), path = path)
 
   /** Posts each query to `path` at the endpoint of the member that holds what it needs, through `client`, which decides on TLS, authentication and
-    * timeouts; use `scheme` `https` to reach members over TLS. An answer that is not a success fails the query with [[xkafka.streams.QueryProblem.Unreachable]].
+    * timeouts; use `scheme` `https` to reach members over TLS. An answer that is not a success fails the query with `QueryProblem.Unreachable`.
     */
   def forward[F[_]: Concurrent](client: Client[F], path: Uri.Path = defaultPath, scheme: Uri.Scheme = Uri.Scheme.http): Forward[F] =
     (member, query) => client.expect[Array[Byte]](Request[F](Method.POST, uri(member, path, scheme)).withEntity(query.toArray)).map(Chunk.array(_))
