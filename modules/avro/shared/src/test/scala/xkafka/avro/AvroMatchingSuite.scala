@@ -23,6 +23,7 @@ package xkafka.avro
 
 import cats.data.NonEmptyList
 import cats.effect.IO
+import fs2.Chunk
 import munit.CatsEffectSuite
 import xkafka.{Headers, Topic}
 import xkafka.schemaregistry.{FakeRegistry, Part, RegistryException, RegistrySettings, Schema, SchemaDoc, SchemaNamespace, SchemaRegistry, SchemaType}
@@ -61,6 +62,42 @@ class AvroMatchingSuite extends CatsEffectSuite:
     yield
       assertEquals(read, Visit("v-1", 3))
       assertEquals(AvroFormat[Visit].schema, Schema(AvroSchemaJson.parse(file).map(AvroSchemaJson.render).toOption.get, SchemaType.Avro))
+
+  test("a codec matches a file that names a type again where it uses it again"):
+    final case class Stop(city: String) derives AvroCodec
+    final case class Trip(from: Stop, to: Stop, via: Option[Stop]) derives AvroCodec
+    val trip =
+      """{"type": "record", "name": "Trip", "namespace": "xkafka.avro", "fields": [
+        | {"name": "from", "type": {"type": "record", "name": "Stop", "fields": [{"name": "city", "type": "string"}]}},
+        | {"name": "to", "type": "Stop"}, {"name": "via", "type": ["null", "xkafka.avro.Stop"]}]}""".stripMargin
+    assertEquals(AvroCodec[Trip].matching(trip).mismatch, None)
+
+  test("a codec matches a file with a fixed"):
+    @AvroFixed(16)
+    final case class Id(bytes: Chunk[Byte]) derives AvroCodec
+    final case class Session(id: Id) derives AvroCodec
+    val session =
+      """{"type": "record", "name": "Session", "namespace": "xkafka.avro",
+        | "fields": [{"name": "id", "type": {"type": "fixed", "name": "Id", "size": 16}}]}""".stripMargin
+    assertEquals(AvroCodec[Session].matching(session).mismatch, None)
+
+  test("a codec matches a file with an enum's default"):
+    @AvroEnumDefault("NEW")
+    enum State derives AvroCodec:
+      case NEW, DONE
+    val state = """{"type": "enum", "name": "State", "namespace": "xkafka.avro", "symbols": ["NEW", "DONE"], "default": "NEW"}"""
+    assertEquals(AvroCodec[State].matching(state).mismatch, None)
+
+  test("a codec matches a file with a union of records"):
+    final case class Cash(cents: Long) derives AvroCodec
+    final case class Card(number: String) derives AvroCodec
+    given AvroCodec[Cash | Card] = AvroCodec.union[(Cash, Card)]
+    final case class Paid(by: Cash | Card) derives AvroCodec
+    val paid =
+      """{"type": "record", "name": "Paid", "namespace": "xkafka.avro", "fields": [{"name": "by", "type": [
+        | {"type": "record", "name": "Cash", "fields": [{"name": "cents", "type": "long"}]},
+        | {"type": "record", "name": "Card", "fields": [{"name": "number", "type": "string"}]}]}]}""".stripMargin
+    assertEquals(AvroCodec[Paid].matching(paid).mismatch, None)
 
   test("a codec whose schema is another fails to make serdes, saying how the two differ"):
     given AvroCodec[Visit] = AvroCodec.derived[Visit].matching(file.replace("\"default\": 1", "\"default\": 2"))

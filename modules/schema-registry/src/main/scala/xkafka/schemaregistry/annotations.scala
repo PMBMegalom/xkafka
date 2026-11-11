@@ -37,3 +37,8 @@ final class SchemaAlias(val alias: String) extends StaticAnnotation
 
 /** Leaves a field's Scala default out of its schema, so a reader requires the field to have been written. */
 final class SchemaNoDefault extends StaticAnnotation
+
+/** Makes the `BigDecimal`s of a field decimal numbers of at most `precision` digits, `scale` of them after the point, in the schema languages that
+  * record those.
+  */
+final class SchemaDecimal(val precision: Int, val scale: Int) extends StaticAnnotation

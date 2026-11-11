@@ -69,6 +69,41 @@ private[xkafka] object Meta:
       case TermRef(_, _) => Nil
       case other         => other.typeSymbol.primaryConstructor.paramSymss.flatten.filterNot(_.isTypeParam)
 
+  /** The Scala names of the fields of `tpe`. */
+  def fieldNamesOf(using Quotes)(tpe: quotes.reflect.TypeRepr): List[String] = parametersOf(tpe).map(_.name)
+
+  /** The precision and scale [[SchemaDecimal]] gives each field of `tpe`, where it marks the field. */
+  def decimalsOf(using Quotes)(tpe: quotes.reflect.TypeRepr): List[Option[(Int, Int)]] =
+    import quotes.reflect.*
+    parametersOf(tpe).map: parameter =>
+      parameter.annotations.collectFirst:
+        case annotation @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == "xkafka.schemaregistry.SchemaDecimal" =>
+          arguments.map:
+            case Literal(IntConstant(value))              => value
+            case NamedArg(_, Literal(IntConstant(value))) => value
+            case _                                        => report.errorAndAbort("@SchemaDecimal takes literal numbers", annotation.pos)
+          match
+            case List(precision, scale) if precision >= 1 && scale >= 0 && scale <= precision => (precision, scale)
+            case List(precision, scale)                                                       => report.errorAndAbort(
+                s"@SchemaDecimal($precision, $scale) on ${parameter.name}: the precision must be at least 1 and the scale from 0 to the precision",
+                annotation.pos
+              )
+            case _ => report.errorAndAbort("@SchemaDecimal takes a precision and a scale", annotation.pos)
+
+  /** `tpe` with each `BigDecimal` in it a [[Decimals.Decimal]] of `decimal`'s precision and scale; `field` names it where it holds none. */
+  def withDecimal(using Quotes)(tpe: quotes.reflect.TypeRepr, decimal: (Int, Int), field: String): quotes.reflect.TypeRepr =
+    import quotes.reflect.*
+    val (precision, scale) = decimal
+    val decimalType        = TypeRepr.of[Decimals.Decimal].appliedTo(List(ConstantType(IntConstant(precision)), ConstantType(IntConstant(scale))))
+    def replace(inside: TypeRepr): TypeRepr =
+      if inside =:= TypeRepr.of[BigDecimal] then decimalType
+      else
+        inside.dealias match
+          case AppliedType(constructor, arguments) => constructor.appliedTo(arguments.map(replace))
+          case other                               => other
+    val replaced = replace(tpe)
+    if replaced =:= tpe then report.errorAndAbort(s"@SchemaDecimal on $field, which holds no BigDecimal") else replaced
+
   private def namedOf[A: Type](using Quotes): Expr[Named] =
     import quotes.reflect.*
     val tpe         = TypeRepr.of[A]
@@ -110,12 +145,14 @@ private[xkafka] object Meta:
         case AppliedType(_, args) => args
         case _                    => Nil
     Expr.ofList(
-      parametersOf(tpe).zipWithIndex.map: (parameter, index) =>
-        tpe.memberType(symbol.fieldMember(parameter.name)).asType match
-          case '[field] => symbol.companionClass.declaredMethod(s"$$lessinit$$greater$$default$$${index + 1}").headOption match
+      parametersOf(tpe).lazyZip(decimalsOf(tpe)).lazyZip(parametersOf(tpe).indices).map: (parameter, decimal, index) =>
+        val declared = tpe.memberType(symbol.fieldMember(parameter.name))
+        // A default of a field marked SchemaDecimal is written as the decimal its field is, not as any BigDecimal.
+        (declared.asType, decimal.fold(declared)(withDecimal(declared, _, parameter.name)).asType) match
+          case ('[field], '[derived]) => symbol.companionClass.declaredMethod(s"$$lessinit$$greater$$default$$${index + 1}").headOption match
               case Some(method) if parameter.flags.is(Flags.HasDefault) =>
                 val call  = Select(Ref(symbol.companionModule), method)
                 val value = (if arguments.isEmpty then call else call.appliedToTypes(arguments)).asExprOf[field]
-                '{ Some(() => scala.compiletime.summonInline[DefaultOf[C, Out, field]].write($value)) }
+                '{ Some(() => scala.compiletime.summonInline[DefaultOf[C, Out, derived]].write($value.asInstanceOf[derived])) }
               case _ => '{ None }
     )

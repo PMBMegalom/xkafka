@@ -100,6 +100,21 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       )
     )
 
+  test("a field marked SchemaDecimal is a number as any BigDecimal is, with its default"):
+    final case class Priced(
+        @SchemaDecimal(10, 2)
+        price: BigDecimal = BigDecimal("1.50")
+    ) derives JsonSchemaCodec
+    assertEquals(
+      JsonSchemaCodec[Priced].schema,
+      json("""{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","title":"xkafka.jsonschema.Priced",
+             |"properties":{"price":{"type":"number","default":1.50}},"required":[],"additionalProperties":false}""".stripMargin)
+    )
+    assertEquals(
+      JsonSchemaCodec[Priced].encode(Priced(BigDecimal("2.25"))).flatMap(JsonSchemaCodec[Priced].decode),
+      Right(Priced(BigDecimal("2.25")))
+    )
+
   test("an optional field is oneOf null and its type, and may be left out"):
     assertEquals(
       JsonSchemaCodec[Maybe].schema,

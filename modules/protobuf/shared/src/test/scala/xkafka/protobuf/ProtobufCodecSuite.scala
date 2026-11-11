@@ -203,6 +203,14 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         |""".stripMargin
     )
 
+  test("a field marked SchemaDecimal is text as any BigDecimal is, with its default"):
+    final case class Priced(
+        @ProtobufField(1) @SchemaDecimal(10, 2)
+        price: BigDecimal = BigDecimal("1.5")
+    ) derives ProtobufCodec
+    assert(schema(ProtobufCodec[Priced]).contains("message Priced {\n  optional string price = 1;\n}"), schema(ProtobufCodec[Priced]))
+    assertEquals(ProtobufCodec[Priced].encode(Priced(BigDecimal("2.25"))).flatMap(ProtobufCodec[Priced].decode), Right(Priced(BigDecimal("2.25"))))
+
   test("fields are written in order of their numbers, one with a default even where it is zero, and one without left out where it is zero"):
     assertEquals(ProtobufCodec[Line].encode(Line("apple", 3)), Right(bytes(0x0a, 5, 'a', 'p', 'p', 'l', 'e', 0x10, 3)))
     assertEquals(ProtobufCodec[Line].encode(Line("", 0)), Right(bytes(0x10, 0)))

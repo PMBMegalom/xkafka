@@ -179,6 +179,7 @@ The example above derives Avro codecs with `derives AvroCodec`.
 | `java.time.LocalTime` | `long` with logical type `time-micros` |
 | `java.time.LocalDateTime` | `long` with logical type `local-timestamp-micros` |
 | a case class | a `record` of its fields |
+| a case class marked `@AvroFixed(size)`, of one `fs2.Chunk[Byte]` or `Array[Byte]` field | a `fixed` of `size` bytes |
 | an enum or sealed trait whose cases are all objects | an `enum` of the cases' names |
 | any other sealed trait or enum | a union of its cases' records, an object's having no fields |
 
@@ -189,6 +190,13 @@ The example above derives Avro codecs with `derives AvroCodec`.
   a union's default from its first branch.
 - Give a type that holds itself, such as a linked list's node, its codec with
   `derives AvroCodec` on that type.
+- A value of a `fixed` with another number of bytes fails to write. Avro gives a
+  `fixed` no documentation, so `@SchemaDoc` on one fails to compile.
+- Mark an enum, or a sealed trait whose cases are all objects, with
+  `@AvroEnumDefault("NAME")` to make the case `NAME` its default: a record
+  written with a symbol your enum does not have reads as that case, so other
+  applications can add symbols. A name that is not one of its cases, or a type
+  whose cases are not all objects, fails to compile.
 
 `AvroCodec.instantMicros`, `AvroCodec.instantNanos`,
 `AvroCodec.localTimeMillis` and `AvroCodec.localDateTimeMillis` write those
@@ -217,8 +225,47 @@ given AvroCodec[BigDecimal] = AvroCodec.decimal(precision = 10, scale = 2)
 final case class Price(sku: String, amount: BigDecimal) derives AvroCodec
 ```
 
+Where fields need different precisions, mark each with `@SchemaDecimal`. It
+applies to every `BigDecimal` in the field, also inside an `Option` or a list,
+and takes the place of a codec given for every `BigDecimal`:
+
+```scala mdoc:compile-only
+// Write prices to the cent and weights to the gram
+import xkafka.avro.AvroCodec
+import xkafka.schemaregistry.SchemaDecimal
+
+final case class Parcel(
+    @SchemaDecimal(precision = 10, scale = 2) price: BigDecimal,
+    @SchemaDecimal(precision = 8, scale = 3) weights: List[BigDecimal]
+) derives AvroCodec
+```
+
 A number with more digits, or more digits after the point, fails to write; it is
 not rounded.
+
+For a field of a union type, such as `Cash | Card`, give the union its codec
+with `AvroCodec.union`, listing its types in the order of the schema's union:
+
+```scala mdoc:compile-only
+// Pay in cash or by card
+import xkafka.avro.AvroCodec
+
+final case class Cash(cents: Long) derives AvroCodec
+final case class Card(number: String) derives AvroCodec
+
+given AvroCodec[Cash | Card] = AvroCodec.union[(Cash, Card)]
+
+final case class Payment(by: Cash | Card, refundedBy: Option[Cash | Card] = None) derives AvroCodec
+```
+
+A value is written as the first of the union's types it is of, and a record is
+read by its name, so two records with the same fields stay apart. An `Option` of
+a union type is the union with `null` first.
+
+On JavaScript, numbers do not carry their Scala type: a `Double` that is a whole
+number is also an `Int`, and one that a `Float` holds exactly is also a `Float`.
+A union of number types, such as `Int | Double`, writes such a value as the
+first of those types it lists, and reads it back as the same number.
 
 For a type of your own, map it to one that has a codec:
 
@@ -319,7 +366,7 @@ Where your .avsc or .avdl files come first,
 [avrohugger](https://github.com/julianpeeters/avrohugger)'s sbt plugin can
 generate case classes from them that `AvroCodec.derived` writes and reads, on
 the JVM, JavaScript and Native. Generate its standard classes, with enums as
-case objects:
+case objects and unions as union types:
 
 ```scala
 // project/plugins.sbt
@@ -329,7 +376,10 @@ addSbtPlugin("com.julianpeeters" % "sbt-avrohugger" % "2.18.0")
 ```scala
 // build.sbt: generate classes from src/main/avro whenever the project compiles
 Compile / sourceGenerators += (Compile / avroScalaGenerate).taskValue
-Compile / avroScalaCustomTypes := avrohugger.format.Standard.defaultTypes.copy(`enum` = avrohugger.types.ScalaCaseObjectEnum)
+Compile / avroScalaCustomTypes := avrohugger.format.Standard.defaultTypes.copy(
+  `enum` = avrohugger.types.ScalaCaseObjectEnum,
+  union = avrohugger.types.OptionScala3UnionType
+)
 ```
 
 In a project built for several platforms, keep the files in the shared
@@ -341,30 +391,32 @@ Compile / avroSourceDirectories := Seq((baseDirectory.value / ".." / "shared" / 
 ```
 
 Give each record you write or read its codec; the records and enums inside it
-get theirs from it:
+get theirs from it. Give each union of several types its codec too, with
+`AvroCodec.union`, in the order of the file's union:
 
 ```scala
-// Visits, a record avrohugger generated from visit.avsc
-import com.example.web.Visit
+// Visits, a record avrohugger generated from visit.avsc, which may have come by ad or by link
+import com.example.web.{Ad, Link, Visit}
 import xkafka.avro.AvroCodec
 
-given AvroCodec[Visit] = AvroCodec.derived
+given AvroCodec[Ad | Link] = AvroCodec.union[(Ad, Link)]
+given AvroCodec[Visit]     = AvroCodec.derived
 ```
 
 The schema derived for a class is the file's, without its `doc`s: avrohugger
 turns them into comments, which a codec cannot see. Records, enums, primitive
-types, `bytes`, unions of `null` and one other type, arrays, maps, defaults,
-and the logical types `uuid`, `date` and `timestamp-millis` are derived as the
-file declares them. These are not:
+types, `bytes`, unions, arrays, maps, defaults, and the logical types `uuid`,
+`date` and `timestamp-millis` are derived as the file declares them. These are
+not:
 
-- unions of records: avrohugger makes them `Either`, shapeless coproducts or
-  union types, and no codec is derived for those, so they fail to compile;
 - `decimal`: avrohugger makes it a `BigDecimal` without its precision and
   scale, so it fails to compile until you give one with `AvroCodec.decimal`,
   which then serves every `BigDecimal`;
 - `fixed`: avrohugger makes it a case class of an `Array[Byte]`, which is
   derived as a record, not as the file's `fixed`. Do not write such classes:
   their schema is not the file's;
+- an enum's `default`: avrohugger's enums do not carry it, so the derived enum
+  has none;
 - a `bytes` default with a character past `\u007f`: avrohugger generates
   different bytes than the file declares, and the derived default is those.
 
@@ -402,7 +454,7 @@ A record is the schema's id followed by the JSON as UTF-8 text, as Confluent's
 | --- | --- | --- |
 | `Boolean`, `String` | `boolean`, `string` | as they are |
 | `Int`, `Long` | `integer` | numbers |
-| `Float`, `Double`, `BigDecimal` | `number` | numbers; infinities and NaN are refused |
+| `Float`, `Double`, `BigDecimal` | `number` | numbers; infinities and NaN are refused; `@SchemaDecimal` changes nothing |
 | `fs2.Chunk[Byte]` | `string` with `contentEncoding` `base64` | base64 text |
 | `Option[A]` | `oneOf` `null` and `A` | `null` where it is `None` |
 | `List`, `Vector`, `Seq`, `Set` | `array` | arrays |
@@ -559,7 +611,7 @@ stay the same as your type changes:
 | `Option[A]` | an `optional` field; a field of a message, which records whether it is set, needs no label |
 | `List`, `Vector`, `Seq`, `Set` | a `repeated` field, packed where it holds numbers |
 | `Map[String, A]` | `map<string, A>` |
-| `java.util.UUID`, `BigDecimal` | `string`, holding the value as text |
+| `java.util.UUID`, `BigDecimal` | `string`, holding the value as text; `@SchemaDecimal` changes nothing |
 | `java.time.Instant` | `google.protobuf.Timestamp` |
 | `java.time.LocalDate`, `LocalTime`, `LocalDateTime` | `string`, holding ISO-8601 text, such as `2026-11-10` |
 | a case class | a `message` of its fields |

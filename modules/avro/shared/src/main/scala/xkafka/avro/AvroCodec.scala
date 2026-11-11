@@ -24,14 +24,15 @@ package xkafka.avro
 import java.time.{Instant, LocalDate, LocalDateTime, LocalTime, ZoneOffset}
 import java.util.UUID
 
-import scala.compiletime.summonInline
+import scala.compiletime.{erasedValue, summonInline}
 import scala.deriving.Mirror
-import scala.reflect.TypeTest
+import scala.quoted.*
+import scala.reflect.{ClassTag, TypeTest}
 import scala.util.Try
 
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.schemaregistry.{DefaultOf, Meta}
+import xkafka.schemaregistry.{Decimals, DefaultOf, Meta}
 
 /** How values of `A` are written as Avro values of a schema, and read back from them.
   *
@@ -59,11 +60,13 @@ trait AvroCodec[A]:
     * `RegistryException.NoSchema` where its schema is another, and say how.
     */
   final def matching(text: String): AvroCodec[A] =
+    // Rendered, each named type is defined where it is first used and named after, as a file may name it, so the two compare as text.
+    val own     = AvroSchemaJson.render(schema)
     val problem =
-      AvroSchemaJson.parse(text) match
-        case Left(error)                           => Some(s"the schema to match cannot be read: $error")
-        case Right(declared) if declared == schema => None
-        case Right(declared) => Some(s"the codec's schema is ${AvroSchemaJson.render(schema)}, not ${AvroSchemaJson.render(declared)}")
+      AvroSchemaJson.parse(text).map(AvroSchemaJson.render) match
+        case Left(error)                        => Some(s"the schema to match cannot be read: $error")
+        case Right(declared) if declared == own => None
+        case Right(declared)                    => Some(s"the codec's schema is $own, not $declared")
     new AvroCodec[A]:
       override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = self.schemaWithin(seen)
       override private[avro] def mismatch: Option[String]                      = problem
@@ -216,24 +219,39 @@ object AvroCodec:
 
   /** A codec for a case class, as a record of its fields, or for a sealed trait or enum: as an Avro enum where every case is an object, and as a
     * union of its cases' records where not. Names come from the Scala names and packages, and [[SchemaName]], [[SchemaNamespace]], [[SchemaDoc]],
-    * [[SchemaAlias]] and [[SchemaNoDefault]] change them; a field's Scala default is its default in the schema.
+    * [[SchemaAlias]] and [[SchemaNoDefault]] change them; a field's Scala default is its default in the schema. A case class marked [[AvroFixed]] is
+    * a `fixed`.
     */
   inline def derived[A](using mirror: Mirror.Of[A]): AvroCodec[A] =
     inline mirror match
       case product: Mirror.ProductOf[A] =>
-        val named = Meta.named[A]
-        RecordCodec[A, product.MirroredElemTypes](
-          FullName(named.namespace, named.name),
-          named,
-          Meta.fields[A],
-          summonInline[Fields[product.MirroredElemTypes]],
-          Meta.defaults[A, AvroCodec, AvroValue],
-          summonInline[Elements[A, product.MirroredElemTypes]].apply,
-          product.fromTuple
-        )
+        val named   = Meta.named[A]
+        val name    = FullName(named.namespace, named.name)
+        val fields  = Fields.of[A, product.MirroredElemTypes]
+        val toTuple = summonInline[Elements[A, product.MirroredElemTypes]].apply
+        FixedSize.of[A] match
+          case Some(size) => FixedCodec[A, product.MirroredElemTypes](name, size, named, fields, toTuple, product.fromTuple)
+          case None       => RecordCodec[A, product.MirroredElemTypes](
+              name,
+              named,
+              Meta.fields[A],
+              fields,
+              Meta.defaults[A, AvroCodec, AvroValue],
+              toTuple,
+              product.fromTuple
+            )
       case sum: Mirror.SumOf[A] =>
         val named = Meta.named[A]
-        SumCodec[A](FullName(named.namespace, named.name), named, summonInline[Cases[A, sum.MirroredElemTypes]].cases)
+        SumCodec[A](FullName(named.namespace, named.name), named, EnumDefault.of[A], summonInline[Cases[A, sum.MirroredElemTypes]].cases)
+
+  /** Values of a union type, such as `Cash | Card`, as an Avro union of the types of `T` in their order: `AvroCodec.union[(Cash, Card)]`. A value is
+    * written as the first of the types it is of, and read as the first whose schema fits it, so a record is read by its name.
+    */
+  inline def union[T <: Tuple]: AvroCodec[Tuple.Union[T]] = UnionCodec(Branch.all[Tuple.Union[T], T])
+
+  /** A decimal number of the precision and scale `SchemaDecimal` gives its field. */
+  given [P <: Int, S <: Int](using precision: ValueOf[P], scale: ValueOf[S]): AvroCodec[Decimals.Decimal[P, S]] =
+    Decimals.lift(decimal(precision.value, scale.value))
 
   /** A field's default as its codec writes it, which derived schemas take. */
   given [A](using resolved: Resolved[A]): DefaultOf[AvroCodec, AvroValue, A] = value => resolved.codec.encode(value)
@@ -286,8 +304,129 @@ private[avro] final class RecordCodec[A, T <: Tuple](
           .bimap(reason => s"record '${name.value}': $reason", fromTuple)
       case other => Left(s"expected a record '${name.value}', found $other")
 
+/** A case class's codec as a `fixed` of `size` bytes, the bytes of its one field. */
+private[avro] final class FixedCodec[A, T <: Tuple](
+    name: FullName,
+    size: Int,
+    named: Meta.Named,
+    field: Fields[T],
+    toTuple: A => T,
+    fromTuple: T => A
+) extends AvroCodec[A]:
+  override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema =
+    AvroSchema.Fixed(name, size, named.aliases.map(FullName.from(_, name.namespace)))
+
+  override def encode(value: A): Either[String, AvroValue] =
+    field.encode(toTuple(value)).flatMap:
+      case List(AvroValue.Bytes(bytes)) if bytes.size == size => Right(AvroValue.Fixed(name, bytes))
+      case List(AvroValue.Bytes(bytes))                       => Left(s"fixed '${name.value}': ${bytes.size} bytes, not $size")
+      case other                                              => Left(s"fixed '${name.value}': expected bytes, found $other")
+
+  override def decode(value: AvroValue): Either[String, A] =
+    value match
+      case AvroValue.Fixed(_, bytes) => field.decode(List(AvroValue.Bytes(bytes))).map(fromTuple)
+      case other                     => Left(s"expected a fixed '${name.value}', found $other")
+
+/** A union type's codec, as an Avro union of its branches. */
+private[avro] final class UnionCodec[U](branches: List[Branch[U]]) extends AvroCodec[U]:
+  override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = AvroSchema.Union(branches.map(_.codec.schemaWithin(seen)))
+
+  override def encode(value: U): Either[String, AvroValue] =
+    branches.collectFirstSome(branch => branch.tag.unapply(value).map(branch.codec.encode)).getOrElse(Left(s"$value is of none of the union's types"))
+
+  override def decode(value: AvroValue): Either[String, U] =
+    branches.find(branch => AvroBinary.fits(branch.codec.schema, value, AvroSchema.definitions(branch.codec.schema)))
+      .toRight(s"$value is of none of the union's types").flatMap(branch => branch.codec.decode(value).map(branch.widen))
+
+/** One type of a union type `U`: its codec, and how a value of `U` is told to be of it. */
+private[avro] trait Branch[U]:
+  type Of
+  def codec: AvroCodec[Of]
+  def tag: ClassTag[Of]
+  def widen: Of => U
+
+private[avro] object Branch:
+  inline def all[U, T <: Tuple]: List[Branch[U]] =
+    inline erasedValue[T] match
+      case _: EmptyTuple     => Nil
+      case _: (head *: tail) => of[U, head](summonInline[Resolved[head]], summonInline[ClassTag[head]], summonInline[head <:< U]) :: all[U, tail]
+
+  private def of[U, H](resolved: Resolved[H], told: ClassTag[H], up: H <:< U): Branch[U] =
+    new Branch[U]:
+      type Of = H
+      override def codec: AvroCodec[H] = resolved.codec
+      override def tag: ClassTag[H]    = told
+      override def widen: H => U       = up
+
+/** The size [[AvroFixed]] gives a case class, which must have one field of bytes and no documentation, since an Avro `fixed` has none. */
+private[avro] object FixedSize:
+  inline def of[A]: Option[Int] = ${ sizeOf[A] }
+
+  private def sizeOf[A: Type](using Quotes): Expr[Option[Int]] =
+    import quotes.reflect.*
+    val tpe    = TypeRepr.of[A]
+    val symbol = tpe.typeSymbol
+    symbol.annotations.collectFirst:
+      case annotation @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == "xkafka.avro.AvroFixed" => (annotation, arguments)
+    match
+      case None                          => '{ None }
+      case Some((annotation, arguments)) =>
+        val size =
+          arguments match
+            case List(Literal(IntConstant(value)))              => value
+            case List(NamedArg(_, Literal(IntConstant(value)))) => value
+            case _                                              => report.errorAndAbort("@AvroFixed takes a literal number", annotation.pos)
+        val fields =
+          symbol.primaryConstructor.paramSymss.flatten.filterNot(_.isTypeParam).map(field => tpe.memberType(symbol.fieldMember(field.name)))
+        val bytes =
+          fields match
+            case List(field) => field =:= TypeRepr.of[Chunk[Byte]] || field =:= TypeRepr.of[Array[Byte]]
+            case _           => false
+        if size < 0 then report.errorAndAbort(s"@AvroFixed($size) on ${symbol.name}: the size must not be negative", annotation.pos)
+        else if !bytes then
+          report.errorAndAbort(s"@AvroFixed on ${symbol.name}, which must have one field, of fs2.Chunk[Byte] or Array[Byte]", annotation.pos)
+        else if symbol.annotations.exists(_.tpe.typeSymbol.fullName == "xkafka.schemaregistry.SchemaDoc") then
+          report.errorAndAbort(s"@SchemaDoc on ${symbol.name}, which @AvroFixed makes a fixed: an Avro fixed has no documentation", annotation.pos)
+        else '{ Some(${ Expr(size) }) }
+
+/** The symbol [[AvroEnumDefault]] gives an enum or sealed trait, which must be one of its cases, all of them objects. */
+private[avro] object EnumDefault:
+  inline def of[A]: Option[String] = ${ defaultOf[A] }
+
+  private def defaultOf[A: Type](using Quotes): Expr[Option[String]] =
+    import quotes.reflect.*
+    val symbol                      = TypeRepr.of[A].typeSymbol
+    def renamed(of: Symbol): String =
+      of.annotations.collectFirst:
+        case Apply(Select(New(tpt), _), List(Literal(StringConstant(name)))) if tpt.tpe.typeSymbol.fullName == "xkafka.schemaregistry.SchemaName" =>
+          name
+      .getOrElse(of.name.stripSuffix("$"))
+    symbol.annotations.collectFirst:
+      case annotation @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == "xkafka.avro.AvroEnumDefault" =>
+        (annotation, arguments)
+    match
+      case None                          => '{ None }
+      case Some((annotation, arguments)) =>
+        val default =
+          arguments match
+            case List(Literal(StringConstant(value)))              => value
+            case List(NamedArg(_, Literal(StringConstant(value)))) => value
+            case _                                                 => report.errorAndAbort("@AvroEnumDefault takes literal text", annotation.pos)
+        val cases = symbol.children
+        if !cases.forall(child => child.isTerm || child.flags.is(Flags.Module)) then
+          report.errorAndAbort(s"@AvroEnumDefault on ${symbol.name}, whose cases are not all objects, so it is not an Avro enum", annotation.pos)
+        else if !cases.map(renamed).contains(default) then
+          report.errorAndAbort(
+            s"@AvroEnumDefault(\"$default\") on ${symbol.name}, which has no case $default: ${cases.map(renamed).mkString(", ")}",
+            annotation.pos
+          )
+        else '{ Some(${ Expr(default) }) }
+
 /** A sealed trait's or enum's codec: an Avro enum of its cases' names where every case is an object, and a union of its cases' records where not. */
-private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, cases: List[Case[A]]) extends AvroCodec[A]:
+private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default: Option[String], cases: List[Case[A]]) extends AvroCodec[A]:
+  // derived is inline, so programs compiled with xkafka 0.7 call this constructor themselves.
+  def this(name: FullName, named: Meta.Named, cases: List[Case[A]]) = this(name, named, None, cases)
+
   private val singletons = cases.traverse(_.singleton)
 
   /** The names each case's values are written under: its record's, or its own cases' where it is a sealed trait of its own. */
@@ -302,7 +441,7 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, cases: 
 
   override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema =
     singletons match
-      case Some(_) => AvroSchema.Enum(name, cases.map(symbol), None, named.doc, named.aliases.map(FullName.from(_, name.namespace)))
+      case Some(_) => AvroSchema.Enum(name, cases.map(symbol), default, named.doc, named.aliases.map(FullName.from(_, name.namespace)))
       case None    => AvroSchema.Union(
           cases.flatMap: known =>
             known.codec.schemaWithin(seen) match
@@ -341,6 +480,24 @@ private[avro] trait Fields[T <: Tuple]:
   def decode(values: List[AvroValue]): Either[String, T]
 
 private[avro] object Fields:
+  /** The codecs of `A`'s fields, whose types are `T`, where the `BigDecimal`s of a field marked `SchemaDecimal` are decimals of its precision. */
+  inline def of[A, T <: Tuple]: Fields[T] = ${ fieldsOf[A, T] }
+
+  private def fieldsOf[A: Type, T <: Tuple: Type](using Quotes): Expr[Fields[T]] =
+    import quotes.reflect.*
+    def elements(tuple: TypeRepr): List[TypeRepr] =
+      tuple.dealias.simplified match
+        case AppliedType(_, List(head, tail)) => head :: elements(tail)
+        case _                                => Nil
+    val names   = Meta.fieldNamesOf(TypeRepr.of[A])
+    val types   = elements(TypeRepr.of[T])
+    val derived =
+      types.lazyZip(Meta.decimalsOf(TypeRepr.of[A]).padTo(types.size, None)).lazyZip(names.padTo(types.size, "")).map: (tpe, decimal, name) =>
+        decimal.fold(tpe)(Meta.withDecimal(tpe, _, name))
+    val tuple = derived.foldRight(TypeRepr.of[EmptyTuple])((head, tail) => TypeRepr.of[*:].appliedTo(List(head, tail)))
+    Implicits.search(TypeRepr.of[Fields].appliedTo(tuple)) match
+      case found: ImplicitSearchSuccess   => '{ ${ found.tree.asExpr }.asInstanceOf[Fields[T]] }
+      case missing: ImplicitSearchFailure => report.errorAndAbort(missing.explanation)
   given Fields[EmptyTuple] with
     override def schemas(seen: Set[FullName]): List[AvroSchema]              = Nil
     override def encode(values: EmptyTuple): Either[String, List[AvroValue]] = Right(Nil)

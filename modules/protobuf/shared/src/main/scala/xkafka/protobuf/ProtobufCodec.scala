@@ -32,7 +32,7 @@ import scala.util.Try
 
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.schemaregistry.{DefaultOf, Meta}
+import xkafka.schemaregistry.{Decimals, DefaultOf, Meta}
 
 /** A message or enum that a .proto file declares, by its names, with its declaration once it is asked for, so that a type can hold itself. */
 private[protobuf] final case class Declared(namespace: Option[String], simple: String, message: Boolean, body: () => Body):
@@ -230,6 +230,9 @@ object ProtobufCodec:
   /** A decimal number as text, as `BigDecimal` writes it. */
   given ProtobufCodec[BigDecimal] =
     ProtobufCodec[String].emap(value => Try(BigDecimal(value)).toEither.leftMap(_ => s"'$value' is not a decimal number"))(_.toString)
+
+  /** A decimal number of a field marked `SchemaDecimal`, written as any `BigDecimal` is: Protobuf records no precision. */
+  given [P <: Int, S <: Int]: ProtobufCodec[Decimals.Decimal[P, S]] = Decimals.lift(ProtobufCodec[BigDecimal])
 
   given ProtobufCodec[UUID]          = text(UUID.fromString)(_.toString)
   given ProtobufCodec[LocalDate]     = text(LocalDate.parse)(_.toString)

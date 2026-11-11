@@ -32,7 +32,7 @@ import scala.util.Try
 import cats.syntax.all.*
 import fs2.Chunk
 import io.circe.Json
-import xkafka.schemaregistry.{DefaultOf, Meta}
+import xkafka.schemaregistry.{Decimals, DefaultOf, Meta}
 
 /** A schema as it is described inside another: its JSON, and the types it names by reference, by name, with how to describe each. */
 private[jsonschema] final case class Described(json: Json, definitions: Map[String, () => Described])
@@ -143,7 +143,10 @@ object JsonSchemaCodec:
       _.asNumber.map(_.toFloat).toRight("expected a number")
     )
   given JsonSchemaCodec[BigDecimal] = primitive(typed("number"))(Json.fromBigDecimal)(_.asNumber.flatMap(_.toBigDecimal))
-  given JsonSchemaCodec[String]     = primitive(typed("string"))(Json.fromString)(_.asString)
+
+  /** A decimal number of a field marked `SchemaDecimal`, written as any `BigDecimal` is. */
+  given [P <: Int, S <: Int]: JsonSchemaCodec[Decimals.Decimal[P, S]] = Decimals.lift(JsonSchemaCodec[BigDecimal])
+  given JsonSchemaCodec[String]                                       = primitive(typed("string"))(Json.fromString)(_.asString)
 
   /** Bytes as base64 text. */
   given JsonSchemaCodec[Chunk[Byte]] =

@@ -26,7 +26,7 @@ import java.util.UUID
 
 import fs2.Chunk
 import munit.FunSuite
-import xkafka.schemaregistry.{Schema, SchemaAlias, SchemaDoc, SchemaName, SchemaNamespace, SchemaNoDefault, SchemaType}
+import xkafka.schemaregistry.{Schema, SchemaAlias, SchemaDecimal, SchemaDoc, SchemaName, SchemaNamespace, SchemaNoDefault, SchemaType}
 
 final case class Line(sku: String, quantity: Int = 1) derives AvroCodec
 
@@ -193,6 +193,151 @@ class AvroCodecSuite extends FunSuite:
     val local = LocalDateTime.of(2026, 11, 10, 7, 0, 0, 1000)
     assertEquals(AvroCodec[LocalDateTime].encode(local).flatMap(AvroCodec[LocalDateTime].decode), Right(local))
     assert(AvroCodec.instantNanos.encode(Instant.MAX).isLeft, "an instant past what nanoseconds since 1970 hold is refused")
+
+  test("fields marked SchemaDecimal are decimals of their own precision and scale, inside options and lists too, and with their defaults"):
+    final case class Priced(
+        @SchemaDecimal(10, 2)
+        price: BigDecimal,
+        @SchemaDecimal(precision = 5, scale = 1)
+        discount: Option[BigDecimal] = Some(BigDecimal("1.5")),
+        @SchemaDecimal(4, 0)
+        counts: List[BigDecimal] = Nil
+    ) derives AvroCodec
+    assertEquals(
+      AvroSchemaJson.render(AvroCodec[Priced].schema),
+      """{"type":"record","name":"Priced","namespace":"xkafka.avro","fields":[""" +
+        """{"name":"price","type":{"type":"bytes","logicalType":"decimal","precision":10,"scale":2}},""" +
+        """{"name":"discount","type":[{"type":"bytes","logicalType":"decimal","precision":5,"scale":1},"null"],"default":"\u000f"},""" +
+        """{"name":"counts","type":{"type":"array","items":{"type":"bytes","logicalType":"decimal","precision":4,"scale":0}},"default":[]}]}"""
+    )
+    val priced = Priced(BigDecimal("12.5"), None, List(BigDecimal(7)))
+    assertEquals(roundTrip(priced), Right(Priced(BigDecimal("12.50"), None, List(BigDecimal(7)))))
+    assertEquals(
+      AvroCodec[Priced].encode(priced.copy(price = BigDecimal("1.005"))),
+      Left("record 'xkafka.avro.Priced': 1.005 has more than 2 digits after the point")
+    )
+
+  test("SchemaDecimal takes the place of a decimal codec given for every BigDecimal, which unmarked fields take"):
+    given AvroCodec[BigDecimal] = AvroCodec.decimal(6, 3)
+    final case class Mixed(
+        @SchemaDecimal(8, 1)
+        marked: BigDecimal,
+        unmarked: BigDecimal
+    ) derives AvroCodec
+    assertEquals(
+      AvroCodec[Mixed].schema,
+      AvroSchema.Record(
+        FullName(Some("xkafka.avro"), "Mixed"),
+        List(AvroField("marked", AvroSchema.Logical(LogicalType.Decimal(8, 1))), AvroField("unmarked", AvroSchema.Logical(LogicalType.Decimal(6, 3))))
+      )
+    )
+
+  test("SchemaDecimal on a field without a BigDecimal, or with a precision and scale Avro does not allow, fails to compile"):
+    assert(
+      compileErrors("final case class Wrong(@SchemaDecimal(4, 1) text: String) derives AvroCodec")
+        .contains("@SchemaDecimal on text, which holds no BigDecimal")
+    )
+    assert(
+      compileErrors("final case class Wrong(@SchemaDecimal(2, 3) price: BigDecimal) derives AvroCodec")
+        .contains("@SchemaDecimal(2, 3) on price: the precision must be at least 1 and the scale from 0 to the precision")
+    )
+    assert(
+      compileErrors("final case class Wrong(@SchemaDecimal(0, 0) price: BigDecimal) derives AvroCodec")
+        .contains("@SchemaDecimal(0, 0) on price: the precision must be at least 1")
+    )
+    assert(
+      compileErrors("final case class Wrong(price: BigDecimal) derives AvroCodec").contains("xkafka.avro.AvroCodec[BigDecimal]"),
+      "an unmarked BigDecimal still needs a codec"
+    )
+
+  test("a case class marked AvroFixed is a fixed of its size, written as its bytes alone, and named where it is used again"):
+    @SchemaAlias("Digest") @AvroFixed(4)
+    final case class Hash(bytes: Chunk[Byte]) derives AvroCodec
+    @AvroFixed(size = 2)
+    final case class Tag(bytes: Array[Byte]) derives AvroCodec
+    final case class File(hash: Hash, previous: Option[Hash], tag: Tag) derives AvroCodec
+    assertEquals(
+      json(AvroCodec[File]),
+      """{"type":"record","name":"File","namespace":"xkafka.avro","fields":[""" +
+        """{"name":"hash","type":{"type":"fixed","name":"Hash","size":4,"aliases":["Digest"]}},""" +
+        """{"name":"previous","type":["null","Hash"]},{"name":"tag","type":{"type":"fixed","name":"Tag","size":2}}]}"""
+    )
+    val file  = File(Hash(Chunk[Byte](1, 2, 3, 4)), None, Tag(Array[Byte](9, 8)))
+    val bytes = AvroFormat[File].writer(AvroFormat[File].schema).flatMap(_(file))
+    assertEquals(bytes, Right(Chunk[Byte](1, 2, 3, 4, 0, 9, 8)))
+    assertEquals(roundTrip(file).map(read => (read.hash, read.previous, read.tag.bytes.toList)), Right((file.hash, None, List[Byte](9, 8))))
+    assertEquals(AvroCodec[Hash].encode(Hash(Chunk[Byte](1, 2, 3))), Left("fixed 'xkafka.avro.Hash': 3 bytes, not 4"))
+
+  test("AvroFixed on a case class without exactly one field of bytes, with a negative size, or documented, fails to compile"):
+    assert(
+      compileErrors("@AvroFixed(4) final case class Wrong(text: String) derives AvroCodec")
+        .contains("@AvroFixed on Wrong, which must have one field, of fs2.Chunk[Byte] or Array[Byte]")
+    )
+    assert(
+      compileErrors("@AvroFixed(4) final case class Wrong(a: Chunk[Byte], b: Chunk[Byte]) derives AvroCodec")
+        .contains("@AvroFixed on Wrong, which must have one field")
+    )
+    assert(
+      compileErrors("@AvroFixed(-1) final case class Wrong(a: Chunk[Byte]) derives AvroCodec")
+        .contains("@AvroFixed(-1) on Wrong: the size must not be negative")
+    )
+    assert(
+      compileErrors("@SchemaDoc(\"a hash\") @AvroFixed(4) final case class Wrong(a: Chunk[Byte]) derives AvroCodec")
+        .contains("@SchemaDoc on Wrong, which @AvroFixed makes a fixed: an Avro fixed has no documentation")
+    )
+
+  test("an enum marked AvroEnumDefault declares its default, which a reader takes for a symbol it does not know"):
+    @AvroEnumDefault("LOW")
+    enum Level derives AvroCodec:
+      case LOW, HIGH
+    assertEquals(json(AvroCodec[Level]), """{"type":"enum","name":"Level","namespace":"xkafka.avro","symbols":["LOW","HIGH"],"default":"LOW"}""")
+    val writer  = Schema(AvroSchemaJson.render(AvroSchema.Enum(FullName(Some("xkafka.avro"), "Level"), List("LOW", "MID", "HIGH"))), SchemaType.Avro)
+    val written =
+      AvroFormat(using AvroCodec.generic(AvroSchemaJson.parse(writer.text).toOption.get)).writer(writer)
+        .flatMap(_(AvroValue.Enum(FullName(Some("xkafka.avro"), "Level"), "MID")))
+    assertEquals(written.flatMap(bytes => AvroFormat[Level].reader(writer).flatMap(_(bytes))), Right(Level.LOW))
+
+  test("a sealed trait of objects marked AvroEnumDefault takes a case's name for the schema, as SchemaName gives it"):
+    @AvroEnumDefault("FAST")
+    sealed trait Speed derives AvroCodec
+    @SchemaName("FAST")
+    case object Quick extends Speed
+    case object Slow  extends Speed
+    assertEquals(json(AvroCodec[Speed]), """{"type":"enum","name":"Speed","namespace":"xkafka.avro","symbols":["FAST","Slow"],"default":"FAST"}""")
+
+  test("AvroEnumDefault naming no case, or on a type whose cases are not all objects, fails to compile"):
+    assert(
+      compileErrors("@AvroEnumDefault(\"MID\") enum Wrong derives AvroCodec { case LOW, HIGH }")
+        .contains("@AvroEnumDefault(\"MID\") on Wrong, which has no case MID: LOW, HIGH")
+    )
+    assert(
+      compileErrors("@AvroEnumDefault(\"A\") enum Wrong derives AvroCodec { case A; case B(x: Int) }")
+        .contains("@AvroEnumDefault on Wrong, whose cases are not all objects, so it is not an Avro enum")
+    )
+
+  test("a union type is a union of its types in the order given, written as the type a value is of and read back by the record's name"):
+    final case class Cash(cents: Long) derives AvroCodec
+    final case class Refund(cents: Long) derives AvroCodec
+    final case class Card(number: String) derives AvroCodec
+    given AvroCodec[Cash | Refund | Card] = AvroCodec.union[(Cash, Refund, Card)]
+    final case class Payment(method: Cash | Refund | Card, previous: Option[Cash | Refund | Card] = None) derives AvroCodec
+    assertEquals(
+      json(AvroCodec[Payment]),
+      """{"type":"record","name":"Payment","namespace":"xkafka.avro","fields":[{"name":"method","type":[""" +
+        """{"type":"record","name":"Cash","fields":[{"name":"cents","type":"long"}]},""" +
+        """{"type":"record","name":"Refund","fields":[{"name":"cents","type":"long"}]},""" +
+        """{"type":"record","name":"Card","fields":[{"name":"number","type":"string"}]}]},""" +
+        """{"name":"previous","type":["null","Cash","Refund","Card"],"default":null}]}"""
+    )
+    List(Payment(Refund(5)), Payment(Cash(5), Some(Refund(2))), Payment(Card("4111"), Some(Card("0")))).foreach: payment =>
+      assertEquals(roundTrip(payment), Right(payment))
+
+  test("a union of primitive types tells them apart by the value's class"):
+    given AvroCodec[Int | Long | String] = AvroCodec.union[(Int, Long, String)]
+    assertEquals(json(AvroCodec[Int | Long | String]), """["int","long","string"]""")
+    List[Int | Long | String](7, 7L, "7").foreach: value =>
+      assertEquals(AvroCodec[Int | Long | String].encode(value).flatMap(AvroCodec[Int | Long | String].decode), Right(value))
+    assertEquals(AvroCodec[Int | Long | String].encode(7L), Right(AvroValue.Long(7L)))
 
   test("bytes, sets, vectors and maps read back as they were written"):
     final case class Kinds(raw: Chunk[Byte], set: Set[Int], vector: Vector[Double], map: Map[String, Option[Boolean]], float: Float) derives AvroCodec
