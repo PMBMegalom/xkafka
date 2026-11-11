@@ -575,6 +575,35 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
   private def knownEvents: Cluster =
     new Cluster("mock", JavaList.of(), JavaList.of(new PartitionInfo("events", 0, null, Array.empty, Array.empty)), JavaSet.of(), JavaSet.of())
 
+  test("a streams application's consumers take its fetch wait as the Java consumer names it, and fetch.min.bytes from the client's properties"):
+    import streams.{ApplicationId, GlobalKTable, KStream, Named, Store, StreamsSettings, Topology}
+    val created  = new java.util.concurrent.ConcurrentLinkedQueue[Map[String, AnyRef]]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "65536")).toOption.get
+    val settings = StreamsSettings.from(client, ApplicationId.from("app").toOption.get, fetchWait = 250.millis).toOption.get
+    val text     = Serde.utf8[IO]
+    // A global table is read before the member joins its group, so its consumer is the first the application creates, before it reaches a broker.
+    val global  = GlobalKTable(Named("catalog"), Topic.from("catalog").toOption.get, text, text, Store("catalog"))
+    val program =
+      KStream(Named("read"), Topic.from("in").toOption.get, text, text).join(Named("join"), global)((key, _) => key)(_ + _)
+        .to(Named("write"), Topic.from("out").toOption.get, text, text)
+    // An administration client that is created and closed, and asked nothing before the consumer.
+    val closingOnly =
+      java.lang.reflect.Proxy.newProxyInstance(
+        classOf[Admin].getClassLoader,
+        Array(classOf[Admin]),
+        (_, method, _) => if method.getName == "close" then null else throw new IllegalStateException(s"${method.getName} reached the Java client")
+      ).asInstanceOf[Admin]
+    def consumer(properties: Map[String, AnyRef]): org.apache.kafka.clients.consumer.Consumer[Array[Byte], Array[Byte]] =
+      created.add(properties)
+      throw new IllegalStateException("created")
+    val backend = mocked(consumer = consumer, admin = _ => closingOnly)
+    backend.streams(settings, Topology.of(program).toOption.get).use(_ => IO.unit).attempt.map: outcome =>
+      assertEquals(outcome.left.map(_.getMessage), Left("created"))
+      assertEquals(
+        created.asScala.toList.map(properties => (properties.get("fetch.max.wait.ms"), properties.get("fetch.min.bytes"))),
+        List((Some("250"), Some("65536")))
+      )
+
   private def mocked(
       producer: Map[String, AnyRef] => org.apache.kafka.clients.producer.Producer[Array[Byte], Array[Byte]] = _ => fail("no producer expected"),
       consumer: Map[String, AnyRef] => org.apache.kafka.clients.consumer.Consumer[Array[Byte], Array[Byte]] = _ => fail("no consumer expected"),

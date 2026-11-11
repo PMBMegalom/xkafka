@@ -186,8 +186,11 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
 | `queryEndpoint` | unset, so other members cannot query this one | where this member answers other members' [queries](streams/queries.md) |
 | `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Keeping stores on disk](streams/running.md#keeping-stores-on-disk)) |
+| `fetchWait` | 500ms | how long the broker may hold a fetch of the application's consumers, from zero up to 5m |
 
-See [Streams](streams/running.md#guarantees) for each of them.
+See [Streams](streams/running.md#guarantees) for each of them. `fetchWait` works
+as a [consumer's](#consumer-settings) does, and `fetch.min.bytes`, set in the
+client settings' properties, reaches the application's consumers too.
 
 ## Client settings
 

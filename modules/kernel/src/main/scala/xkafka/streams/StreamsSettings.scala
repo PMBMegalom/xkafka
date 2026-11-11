@@ -63,6 +63,7 @@ enum StreamsSettingsError derives CanEqual:
   case NonPositiveCloseTimeout(value: FiniteDuration)
   case EmptyStateDirectory
   case InvalidEndpoint(host: String, port: Int)
+  case FetchWaitOutOfRange(value: FiniteDuration)
 
   def message: String =
     this match
@@ -74,6 +75,7 @@ enum StreamsSettingsError derives CanEqual:
       case NonPositiveCloseTimeout(value)        => s"close timeout must be positive, was $value"
       case EmptyStateDirectory                   => "state directory must not be empty"
       case InvalidEndpoint(host, port)           => s"an endpoint needs a host and a port from 1 to 65535, was '$host' and $port"
+      case FetchWaitOutOfRange(value)            => s"fetch wait must be from 0 to ${ConsumerSettings.FetchWaitLimit}, was $value"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -106,6 +108,9 @@ final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError
   * @param queryEndpoint
   *   where this member answers the queries other members forward to it, as Java Streams' `application.server`; with none, other members cannot ask
   *   this one, and it answers only what its own stores hold
+  * @param fetchWait
+  *   the longest the broker holds a fetch of the application's consumers while fewer than `fetch.min.bytes` of records wait, as `ConsumerSettings`'
+  *   `fetchWait` does for a consumer
   */
 sealed abstract case class StreamsSettings private (
     client: ClientSettings,
@@ -116,7 +121,8 @@ sealed abstract case class StreamsSettings private (
     closeTimeout: FiniteDuration,
     topologyDescriptionPush: Boolean,
     stateDirectory: Option[String],
-    queryEndpoint: Option[Endpoint]
+    queryEndpoint: Option[Endpoint],
+    fetchWait: FiniteDuration
 ):
   def withClient(value: ClientSettings): StreamsSettings = copy(client = value)
 
@@ -155,6 +161,12 @@ sealed abstract case class StreamsSettings private (
   /** Answers no queries from other members. */
   def withoutQueries: StreamsSettings = copy(queryEndpoint = None)
 
+  /** The longest the broker holds a fetch of the application's consumers, from zero up to `ConsumerSettings.FetchWaitLimit`, as `ConsumerSettings`'
+    * `withFetchWait`.
+    */
+  def withFetchWait(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    StreamsSettings.fetchWaitOf(value).map(valid => copy(fetchWait = valid))
+
   private def copy(
       client: ClientSettings = client,
       applicationId: ApplicationId = applicationId,
@@ -164,7 +176,8 @@ sealed abstract case class StreamsSettings private (
       closeTimeout: FiniteDuration = closeTimeout,
       topologyDescriptionPush: Boolean = topologyDescriptionPush,
       stateDirectory: Option[String] = stateDirectory,
-      queryEndpoint: Option[Endpoint] = queryEndpoint
+      queryEndpoint: Option[Endpoint] = queryEndpoint,
+      fetchWait: FiniteDuration = fetchWait
   ): StreamsSettings =
     new StreamsSettings(
       client,
@@ -175,7 +188,8 @@ sealed abstract case class StreamsSettings private (
       closeTimeout,
       topologyDescriptionPush,
       stateDirectory,
-      queryEndpoint
+      queryEndpoint,
+      fetchWait
     ) {}
 
 object StreamsSettings:
@@ -190,15 +204,42 @@ object StreamsSettings:
       closeTimeout: FiniteDuration = DefaultCloseTimeout,
       topologyDescriptionPush: Boolean = true,
       stateDirectory: Option[String] = None,
-      queryEndpoint: Option[Endpoint] = None
+      queryEndpoint: Option[Endpoint] = None,
+      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
       commitInterval.traverse(positive(_)(StreamsSettingsError.NonPositiveCommitInterval(_))),
       atLeastOne(concurrency),
       positive(closeTimeout)(StreamsSettingsError.NonPositiveCloseTimeout(_)),
-      stateDirectory.traverse(directory)
-    ).mapN((interval, tasks, timeout, kept) =>
-      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint) {}
+      stateDirectory.traverse(directory),
+      fetchWaitOf(fetchWait)
+    ).mapN((interval, tasks, timeout, kept, wait) =>
+      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait) {}
+    )
+
+  // 0.7.0's signature, before the fetch wait, which code compiled against 0.7.0 calls.
+  private[streams] def from(
+      client: ClientSettings,
+      applicationId: ApplicationId,
+      guarantee: ProcessingGuarantee,
+      commitInterval: Option[FiniteDuration],
+      concurrency: Int,
+      closeTimeout: FiniteDuration,
+      topologyDescriptionPush: Boolean,
+      stateDirectory: Option[String],
+      queryEndpoint: Option[Endpoint]
+  ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    from(
+      client,
+      applicationId,
+      guarantee,
+      commitInterval,
+      concurrency,
+      closeTimeout,
+      topologyDescriptionPush,
+      stateDirectory,
+      queryEndpoint,
+      ConsumerSettings.DefaultFetchWait
     )
 
   private def directory(value: String): ValidatedNel[StreamsSettingsError, String] =
@@ -206,6 +247,10 @@ object StreamsSettings:
 
   private def positive(value: FiniteDuration)(error: FiniteDuration => StreamsSettingsError): ValidatedNel[StreamsSettingsError, FiniteDuration] =
     if value > Duration.Zero then value.validNel else error(value).invalidNel
+
+  private def fetchWaitOf(value: FiniteDuration): ValidatedNel[StreamsSettingsError, FiniteDuration] =
+    if value >= Duration.Zero && value <= ConsumerSettings.FetchWaitLimit then value.validNel
+    else StreamsSettingsError.FetchWaitOutOfRange(value).invalidNel
 
   private def atLeastOne(value: Int): ValidatedNel[StreamsSettingsError, Int] =
     if value > 0 then value.validNel else StreamsSettingsError.NonPositiveConcurrency(value).invalidNel
