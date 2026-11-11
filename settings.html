@@ -413,9 +413,16 @@
               <td>unset, so stores are kept in memory</td>
               <td>where the application keeps its stores on disk (<a href="streams/running.html#keeping-stores-on-disk">Keeping stores on disk</a>)</td>
             </tr>
+            <tr>
+              <td><code>fetchWait</code></td>
+              <td>500ms</td>
+              <td>how long the broker may hold a fetch of the application&#39;s consumers, from zero up to 5m</td>
+            </tr>
           </tbody>
         </table>
-        <p>See <a href="streams/running.html#guarantees">Streams</a> for each of them.</p>
+        <p>See <a href="streams/running.html#guarantees">Streams</a> for each of them. <code>fetchWait</code> works
+        as a <a href="#consumer-settings">consumer&#39;s</a> does, and <code>fetch.min.bytes</code>, set in the
+        client settings&#39; properties, reaches the application&#39;s consumers too.</p>
         
         <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
         <p><code>ClientSettings</code> applies to producers and consumers alike:</p>
