@@ -22,6 +22,8 @@
 package xkafka
 package internal
 
+import scala.concurrent.duration.FiniteDuration
+
 /** Backend property names for the client settings. */
 private[xkafka] object ClientProperties:
   /** librdkafka refreshes on this timer and derives `metadata.max.age.ms` from it, so only the timer is set here. */
@@ -31,9 +33,11 @@ private[xkafka] object ClientProperties:
   /** librdkafka hashes keys with CRC32 by default; Java's murmur2 sends each key to the partition a Java producer would. */
   val producer: Map[String, String] = Map("partitioner" -> "murmur2_random")
 
-  /** librdkafka bounds each call by the timeout it is given, so a consumer needs only its fetch wait, which librdkafka names `fetch.wait.max.ms`. */
-  def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] =
-    Map("fetch.wait.max.ms" -> settings.fetchWait.toMillis.toString)
+  /** librdkafka bounds each call by the timeout it is given, so a consumer needs only its fetch wait. */
+  def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] = fetchWait(settings.fetchWait)
+
+  /** librdkafka names the fetch wait `fetch.wait.max.ms`. */
+  def fetchWait(value: FiniteDuration): Map[String, String] = Map("fetch.wait.max.ms" -> value.toMillis.toString)
 
   def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.librdkafka(settings)
 

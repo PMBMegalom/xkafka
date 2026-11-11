@@ -22,6 +22,8 @@
 package xkafka
 package internal
 
+import scala.concurrent.duration.FiniteDuration
+
 /** Backend property names for the client settings. */
 private[xkafka] object ClientProperties:
   /** The Java client refreshes when its metadata cache reaches this age, so the age is also the refresh period. */
@@ -30,11 +32,12 @@ private[xkafka] object ClientProperties:
   /** The Java producer's own partitioner is the one every backend follows. */
   val producer: Map[String, String] = Map.empty
 
-  /** The Java consumer bounds the calls given no timeout of their own, such as reading a position, by its default API timeout, and names the fetch
-    * wait `fetch.max.wait.ms`.
-    */
+  /** The Java consumer bounds the calls given no timeout of their own, such as reading a position, by its default API timeout. */
   def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] =
-    Map("default.api.timeout.ms" -> settings.requestTimeout.toMillis.toString, "fetch.max.wait.ms" -> settings.fetchWait.toMillis.toString)
+    Map("default.api.timeout.ms" -> settings.requestTimeout.toMillis.toString) ++ fetchWait(settings.fetchWait)
+
+  /** The Java consumer names the fetch wait `fetch.max.wait.ms`. */
+  def fetchWait(value: FiniteDuration): Map[String, String] = Map("fetch.max.wait.ms" -> value.toMillis.toString)
 
   def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.javaClient(settings)
 

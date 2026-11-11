@@ -58,6 +58,20 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(StreamsSettings.from(client, app, stateDirectory = Some("")), Validated.invalidNel(StreamsSettingsError.EmptyStateDirectory))
     assertEquals(StreamsSettingsError.EmptyStateDirectory.message, "state directory must not be empty")
 
+  test("the fetch wait is the consumers' default and takes zero up to librdkafka's maximum, as a consumer's does"):
+    val settings = StreamsSettings.from(client, app).orFail
+    assertEquals(settings.fetchWait, ConsumerSettings.DefaultFetchWait)
+    assertEquals(StreamsSettings.from(client, app, fetchWait = 100.millis).orFail.fetchWait, 100.millis)
+    assertEquals(settings.withFetchWait(Duration.Zero).map(_.fetchWait), Validated.valid(Duration.Zero))
+    assertEquals(settings.withFetchWait(ConsumerSettings.FetchWaitLimit).map(_.fetchWait), Validated.valid(5.minutes))
+    assertEquals(settings.withFetchWait(5.minutes + 1.milli), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange(5.minutes + 1.milli)))
+    assertEquals(settings.withFetchWait((-1).milli), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange((-1).milli)))
+    assertEquals(StreamsSettings.from(client, app, fetchWait = 6.minutes), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange(6.minutes)))
+    // The signature code compiled against 0.7.0 calls.
+    val earlier = StreamsSettings.from(client, app, ProcessingGuarantee.AtLeastOnce, None, 1, 30.seconds, true, None, None).orFail
+    assertEquals(earlier.fetchWait, ConsumerSettings.DefaultFetchWait)
+    assertEquals(StreamsSettingsError.FetchWaitOutOfRange((-1).milli).message, "fetch wait must be from 0 to 5 minutes, was -1 milliseconds")
+
   test("every invalid setting is reported at once"):
     assertEquals(
       StreamsSettings.from(client, app, commitInterval = Some(Duration.Zero), concurrency = 0, closeTimeout = (-1).second),

@@ -113,12 +113,14 @@ private[xkafka] object Engine:
       topologyDescriptionPush: Boolean = true,
       stateDirectory: Option[String] = None,
       queryEndpoint: Option[Endpoint] = None,
+      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait,
       forward: Option[Forward[F]] = None,
       watch: Plane[F] => Plane[F] = identity[Plane[F]]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val connections = Connections(PlatformSockets[F], PlatformCrypto[F], settings, closeTimeout)
     val servers     = settings.bootstrapServers.toList.mkString(",")
-    val properties  = settings.properties ++ ClientProperties.security(settings.security) ++ ClientProperties(settings)
+    val properties  =
+      settings.properties ++ ClientProperties.security(settings.security) ++ ClientProperties(settings) ++ ClientProperties.fetchWait(fetchWait)
     def consumer(isolation: String, reportEnds: Boolean): Resource[F, driver.Client] =
       Resource.make(
         driver.consumer(servers, settings.clientId, application, "earliest", properties.updated("isolation.level", isolation), reportEnds)

@@ -225,6 +225,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       topologyDescriptionPush = settings.topologyDescriptionPush,
       stateDirectory = settings.stateDirectory,
       queryEndpoint = settings.queryEndpoint,
+      fetchWait = settings.fetchWait,
       forward = Some(forward)
     )
 
