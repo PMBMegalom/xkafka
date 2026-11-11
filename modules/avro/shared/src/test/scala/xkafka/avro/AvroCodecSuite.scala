@@ -199,6 +199,21 @@ class AvroCodecSuite extends FunSuite:
     val kinds = Kinds(Chunk[Byte](0, -1, 7), Set(3, 1), Vector(1.5, -2.25), Map("a" -> Some(true), "b" -> None), 0.5f)
     assertEquals(roundTrip(kinds), Right(kinds))
 
+  test("byte arrays are written as bytes, and what was written does not change with the array"):
+    final case class Blob(raw: Array[Byte], default: Array[Byte] = Array[Byte](1, 2)) derives AvroCodec
+    val raw     = Array[Byte](0, -1, 7)
+    val written = AvroCodec[Blob].encode(Blob(raw))
+    raw(0) = 9
+    val schema = AvroSchemaJson.render(AvroCodec[Blob].schema)
+    assert(
+      schema.contains("\"fields\":[{\"name\":\"raw\",\"type\":\"bytes\"},{\"name\":\"default\",\"type\":\"bytes\",\"default\":\"\\u0001\\u0002\"}]"),
+      schema
+    )
+    assertEquals(
+      written.flatMap(AvroCodec[Blob].decode).map(blob => (blob.raw.toList, blob.default.toList)),
+      Right((List[Byte](0, -1, 7), List[Byte](1, 2)))
+    )
+
   test("records written as one type are refused by a codec of another"):
     val bytes = AvroFormat[Line].writer(AvroFormat[Line].schema).flatMap(_(Line("x", 2)))
     val read  = bytes.flatMap(written => AvroFormat[Status].reader(AvroFormat[Line].schema).flatMap(_(written)))

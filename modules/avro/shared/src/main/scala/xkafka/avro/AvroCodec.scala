@@ -52,6 +52,24 @@ trait AvroCodec[A]:
   /** The value `value` is, which was read with this codec's schema. */
   def decode(value: AvroValue): Either[String, A]
 
+  /** How this codec's schema differs from the schema it must match, where [[matching]] made it. */
+  private[avro] def mismatch: Option[String] = None
+
+  /** This codec, which must have the schema `text` declares, such as the file its type was generated from: serdes of it fail with
+    * `RegistryException.NoSchema` where its schema is another, and say how.
+    */
+  final def matching(text: String): AvroCodec[A] =
+    val problem =
+      AvroSchemaJson.parse(text) match
+        case Left(error)                           => Some(s"the schema to match cannot be read: $error")
+        case Right(declared) if declared == schema => None
+        case Right(declared) => Some(s"the codec's schema is ${AvroSchemaJson.render(schema)}, not ${AvroSchemaJson.render(declared)}")
+    new AvroCodec[A]:
+      override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = self.schemaWithin(seen)
+      override private[avro] def mismatch: Option[String]                      = problem
+      override def encode(value: A): Either[String, AvroValue]                 = self.encode(value)
+      override def decode(value: AvroValue): Either[String, A]                 = self.decode(value)
+
   /** A codec for `B`, written as the `A` that `to` makes of it and read as `from` makes of an `A`. */
   final def imap[B](from: A => B)(to: B => A): AvroCodec[B] = emap(value => Right(from(value)))(to)
 
@@ -91,6 +109,9 @@ object AvroCodec:
   given AvroCodec[Double]      = primitive(AvroSchema.Double)(AvroValue.Double(_)) { case AvroValue.Double(value) => value }
   given AvroCodec[String]      = primitive(AvroSchema.String)(AvroValue.String(_)) { case AvroValue.String(value) => value }
   given AvroCodec[Chunk[Byte]] = primitive(AvroSchema.Bytes)(AvroValue.Bytes(_)) { case AvroValue.Bytes(value) => value }
+
+  /** Bytes as an array, copied on the way in and out so that changing the array later changes nothing written or read. */
+  given AvroCodec[Array[Byte]] = AvroCodec[Chunk[Byte]].imap(_.toArray)(value => Chunk.array(value.clone))
 
   /** A value that may be absent, as a union of null and the value's schema, null first, so a field of it may default to null. */
   given [A](using inner: AvroCodec[A]): AvroCodec[Option[A]] with

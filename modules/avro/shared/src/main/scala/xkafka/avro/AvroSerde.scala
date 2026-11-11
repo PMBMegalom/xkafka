@@ -22,9 +22,10 @@
 package xkafka.avro
 
 import cats.effect.Concurrent
+import cats.syntax.all.*
 import fs2.Chunk
 import xkafka.{Deserializer, Serde}
-import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
+import xkafka.schemaregistry.{Part, RegistryException, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
 
 /** A record as it was written: the schema its writer used, and its value in that schema. */
 final case class AvroWritten(schema: AvroSchema, value: AvroValue)
@@ -41,13 +42,13 @@ object AvroFormat:
       override val recordName: Option[String] = own.fullName.map(_.value)
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        avro(target).map: written =>
+        codec.mismatch.toLeft(()) *> avro(target).map: written =>
           // A value is written as its codec gives it; where the schema is another, the fields it lacks are left out and those it adds take their
           // defaults.
           value => codec.encode(value).flatMap(AvroBinary.encode(written, _))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
+        codec.mismatch.toLeft(()) *> avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
 
   private[avro] def avro(schema: Schema): Either[String, AvroSchema] =
     if schema.schemaType != SchemaType.Avro then Left(s"the schema is ${schema.schemaType.name}, not Avro")
@@ -56,12 +57,12 @@ object AvroFormat:
 
 /** Serdes writing and reading Avro with the schemas the registry keeps, in Confluent's wire format, as Confluent's `KafkaAvroSerializer` does. */
 object AvroSerde:
-  def of[F[_]: Concurrent, A: AvroCodec](
-      registry: SchemaRegistry[F],
-      part: Part,
-      naming: SubjectNaming = SubjectNaming.TopicName,
-      writing: Writing = Writing.Register
-  ): F[Serde[F, A]] = RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
+  /** Fails with `RegistryException.NoSchema` where `A`'s codec does not have the schema it was made [[AvroCodec.matching]]. */
+  def of[F[_], A](registry: SchemaRegistry[F], part: Part, naming: SubjectNaming = SubjectNaming.TopicName, writing: Writing = Writing.Register)(using
+      F: Concurrent[F],
+      codec: AvroCodec[A]
+  ): F[Serde[F, A]] =
+    F.fromEither(codec.mismatch.map(new RegistryException.NoSchema(_)).toLeft(())) *> RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
 
   /** Serdes of values of `schema`, a schema known only as the program runs: values are written with it, and records read as it describes them. */
   def generic[F[_]: Concurrent](
