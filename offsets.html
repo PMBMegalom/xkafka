@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -101,14 +102,14 @@
   <p class="header"><a href="#">Offsets</a></p>
 
   <ul class="nav-list">
-    <li class="level1 nav-leaf"><a href="#leader-epoch-and-metadata">Leader epoch and metadata</a></li>
     <li class="level1 nav-leaf"><a href="#batches">Batches</a></li>
-    <li class="level1 nav-leaf"><a href="#offsets-and-rebalances">Offsets and rebalances</a></li>
-    <li class="level1 nav-leaf"><a href="#committing-before-a-partition-moves">Committing before a partition moves</a></li>
-    <li class="level1 nav-leaf"><a href="#starting-from-offsets-you-keep">Starting from offsets you keep</a></li>
     <li class="level1 nav-leaf"><a href="#committing-on-a-schedule">Committing on a schedule</a></li>
     <li class="level1 nav-leaf"><a href="#retrying-a-failed-commit">Retrying a failed commit</a></li>
     <li class="level1 nav-leaf"><a href="#how-long-a-commit-waits">How long a commit waits</a></li>
+    <li class="level1 nav-leaf"><a href="#leader-epoch-and-metadata">Leader epoch and metadata</a></li>
+    <li class="level1 nav-leaf"><a href="#offsets-and-rebalances">Offsets and rebalances</a></li>
+    <li class="level1 nav-leaf"><a href="#committing-before-a-partition-moves">Committing before a partition moves</a></li>
+    <li class="level1 nav-leaf"><a href="#starting-from-offsets-you-keep">Starting from offsets you keep</a></li>
     <li class="level1 nav-leaf"><a href="#transformations">Transformations</a></li>
   </ul>
 
@@ -123,7 +124,98 @@
         the offset that commits it. Nothing is committed until your code asks, so you
         decide when.</p>
         <p>A successful <code>record.offset.commit</code> stores <code>record.offset.nextOffset</code>, the
-        offset after the one just handled.</p>
+        offset after the one just handled, so a consumer that resumes from it starts
+        with the next record:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Handle each record, then commit it
+</span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>)</span></code></pre>
+        <p>Each commit is a request to the broker, so committing every record on its own is slow.
+        <a href="#batches">Batches</a> and <a href="#committing-on-a-schedule">committing on a schedule</a>
+        commit less often.</p>
+        
+        <h2 id="batches" class="section"><a class="anchor-link left" href="#batches"><i class="icofont-laika link">&#xef71;</i></a>Batches</h2>
+        <p>Offsets can be accumulated and committed together while the consumer resource
+        is active:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Commit several offsets together, keeping the greatest for each partition
+</span><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">offsets</span><span>).</span><span class="identifier">commit</span></code></pre>
+        <p>A batch keeps only the greatest next offset for each topic-partition, and
+        commits once for each consumer its offsets came from.</p>
+        
+        <h2 id="committing-on-a-schedule" class="section"><a class="anchor-link left" href="#committing-on-a-schedule"><i class="icofont-laika link">&#xef71;</i></a>Committing on a schedule</h2>
+        <p><code>commitBatchWithin</code> is an FS2 pipe which commits whenever it collects <code>n</code>
+        offsets or <code>d</code> elapses, whichever happens first:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Handle each record, and commit every 100 offsets or every 5 seconds, whichever comes first
+</span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>
+  .</span><span class="identifier">evalTap</span><span>(</span><span class="identifier">handle</span><span>)
+  .</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">offset</span><span>)                               </span><span class="comment">// Keep only each record&#39;s offset
+</span><span>  .</span><span class="identifier">through</span><span>(</span><span class="identifier">commitBatchWithin</span><span>(</span><span class="number-literal">100</span><span>, </span><span class="number-literal">5</span><span>.</span><span class="identifier">seconds</span><span>))  </span><span class="comment">// Collect and commit them in batches</span></code></pre>
+        <p>Only non-empty batches are committed.</p>
+        
+        <h2 id="retrying-a-failed-commit" class="section"><a class="anchor-link left" href="#retrying-a-failed-commit"><i class="icofont-laika link">&#xef71;</i></a>Retrying a failed commit</h2>
+        <p>Some commit failures clear on their own, such as a coordinator that is loading
+        or a group that is rebalancing. Others never will, and retrying them only delays
+        the failure.</p>
+        <p><code>ConsumerSettings.commitRecovery</code> retries the first kind. <code>ErrorCode.retriable</code>
+        decides which failures qualify, and it answers the same on every platform:</p>
+        <pre><code class="nohighlight"><span class="comment">// Retry a failed commit up to five times, waiting longer between attempts
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">utf8</span><span> = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">settings</span><span> =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">group</span><span>    &lt;- </span><span class="type-name">ConsumerGroup</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;workers&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="comment">// Delays start at 50ms, and stop growing at 2 seconds
+</span><span>    </span><span class="identifier">policy</span><span>   &lt;- </span><span class="type-name">CommitRecovery</span><span>.</span><span class="identifier">exponential</span><span>(</span><span class="identifier">maxAttempts</span><span> = </span><span class="number-literal">5</span><span>, </span><span class="identifier">initialDelay</span><span> = </span><span class="number-literal">50</span><span>.</span><span class="identifier">millis</span><span>, </span><span class="identifier">maxDelay</span><span> = </span><span class="number-literal">2</span><span>.</span><span class="identifier">seconds</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">ConsumerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">group</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
+  </span><span class="keyword">yield</span><span> </span><span class="identifier">settings</span><span>.</span><span class="identifier">withCommitRecovery</span><span>(</span><span class="identifier">policy</span><span>)  </span><span class="comment">// Use the policy for this consumer&#39;s commits</span></code></pre>
+        <p><code>maxAttempts</code> counts the retries after the first failure. The default policy
+        retries up to ten times, waiting 10ms before the first retry, doubling the wait
+        each time, and stopping the doubling at 10s. Each delay is then spread by a
+        fifth, so that consumers which hit one condition together do not all retry at
+        the same moment.
+        The spread is applied after the cap, so a delay can exceed <code>maxDelay</code> by that
+        fraction.</p>
+        <p><code>CommitRecovery.none</code> disables retrying. A failure that is not retriable fails
+        the commit at once, as reported. One that is still retriable after every retry
+        fails it with <code>KafkaException.CommitFailed</code>, which carries the number of
+        attempts, the offsets that were not committed, and the failure from the last
+        attempt.</p>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p>The recovery policy applies wherever a commit happens: a single
+          <code>CommittableOffset.commit</code>, a batch, <code>commitBatchWithin</code>, and <code>consumeChunk</code>.</p>
+        </div>
+        
+        <h2 id="how-long-a-commit-waits" class="section"><a class="anchor-link left" href="#how-long-a-commit-waits"><i class="icofont-laika link">&#xef71;</i></a>How long a commit waits</h2>
+        <p><code>ConsumerSettings.commitTimeout</code> bounds a commit and defaults to fifteen
+        seconds. A commit that does not finish in time fails as
+        <code>ErrorCode.RequestTimedOut</code>. That code is retriable, so the recovery policy
+        tries again:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Let a commit wait at most five seconds before it fails as timed out
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">withCommitTimeout</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
+  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withCommitTimeout</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">seconds</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
+        <p>Like every method that sets a duration, it validates the settings again and returns
+        <code>ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]</code>. See
+        <a href="settings.html">Settings</a>.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>A commit that timed out may still be applied by the broker afterwards, because
+          the request has already been sent. Committing the same offset twice has no
+          further effect, so a later attempt that succeeds leaves the group in the same
+          place.</p>
+        </div>
         
         <h2 id="leader-epoch-and-metadata" class="section"><a class="anchor-link left" href="#leader-epoch-and-metadata"><i class="icofont-laika link">&#xef71;</i></a>Leader epoch and metadata</h2>
         <p>An offset commits with the leader epoch of the record it was read with. It can
@@ -137,14 +229,6 @@
         A batch keeps the metadata of the offset it keeps, and a
         <a href="transactions.html">transaction</a> stores both the epoch and the metadata of the
         offsets it records.</p>
-        
-        <h2 id="batches" class="section"><a class="anchor-link left" href="#batches"><i class="icofont-laika link">&#xef71;</i></a>Batches</h2>
-        <p>Offsets can be accumulated and committed together while the consumer resource
-        is active:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Commit several offsets together, keeping the greatest for each partition
-</span><span class="type-name">CommittableOffsetBatch</span><span>.</span><span class="identifier">fromFoldable</span><span>(</span><span class="identifier">offsets</span><span>).</span><span class="identifier">commit</span></code></pre>
-        <p>A batch keeps only the greatest next offset for each topic-partition, and
-        commits once for each consumer its offsets came from.</p>
         
         <h2 id="offsets-and-rebalances" class="section"><a class="anchor-link left" href="#offsets-and-rebalances"><i class="icofont-laika link">&#xef71;</i></a>Offsets and rebalances</h2>
         <p>By default, an offset can only be committed while the consumer that read it still
@@ -168,10 +252,12 @@
           <code>org.apache.kafka.clients.consumer.CooperativeStickyAssignor</code> on the JVM, and
           <code>cooperative-sticky</code> on Scala.js and Native.</li>
         </ul>
-        <p><code>committer.commit(offsets)</code> takes offsets that did not come from a record, so it
-        can only check that the consumer owns each partition at the time of the commit.
-        It commits them with no leader epoch and no metadata;
-        <code>committer.commitWithMetadata</code> takes an <code>OffsetAndMetadata</code> for each partition.</p>
+        <p>To commit offsets that did not come from a record, use the consumer&#39;s committer,
+        <code>record.offset.committer</code>. Its <code>commit</code> takes a <code>Map[TopicPartition, Offset]</code> and
+        commits each with no leader epoch and no metadata; <code>commitWithMetadata</code> takes an
+        <code>OffsetAndMetadata</code> for each partition. Since these offsets were not read under
+        any particular assignment, fencing can only check that the consumer owns each
+        partition at the time of the commit.</p>
         <p>To turn fencing off:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Let offsets commit even after their partition has moved
 </span><span class="identifier">settings</span><span>.</span><span class="identifier">withoutAssignmentFencing</span></code></pre>
@@ -218,8 +304,8 @@
 </span><span class="identifier">settings</span><span>.</span><span class="identifier">withStartingOffsets</span><span>(</span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>): </span><span class="identifier">partitions</span><span> =&gt;  </span><span class="comment">// The function must answer within 10 seconds
 </span><span>  </span><span class="identifier">loadPositions</span><span>(</span><span class="identifier">partitions</span><span>) </span><span class="comment">// F[Map[TopicPartition, StartingOffset]]</span></code></pre>
         <p>The consumer calls the function with the partitions each rebalance assigns,
-        before it reads any of their records, and once at the start with partitions
-        named directly. Each partition it answers for starts at the offset given, and
+        before it reads any of their records. A consumer reading <code>Selection.Partitions</code>
+        calls it once, when it is created. Each partition it answers for starts at the offset given, and
         no earlier record of it is handed out. A <code>StartingOffset</code> can also carry the
         leader epoch of the last record you handled, <code>record.offset.leaderEpoch</code>, if
         you stored it.</p>
@@ -232,83 +318,9 @@
           <li>The function must answer within its limit, which must be less than
           <code>maxPollInterval</code>. If it fails or passes the limit, the record stream fails,
           with the function&#39;s own failure or with
-          <code>KafkaException.StartingOffsetsTimedOut</code>. For partitions named directly,
+          <code>KafkaException.StartingOffsetsTimedOut</code>. With <code>Selection.Partitions</code>,
           creating the consumer fails instead.</li>
         </ul>
-        
-        <h2 id="committing-on-a-schedule" class="section"><a class="anchor-link left" href="#committing-on-a-schedule"><i class="icofont-laika link">&#xef71;</i></a>Committing on a schedule</h2>
-        <p><code>commitBatchWithin</code> is an FS2 pipe which commits whenever it collects <code>n</code>
-        offsets or <code>d</code> elapses, whichever happens first:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Handle each record, and commit every 100 offsets or every 5 seconds, whichever comes first
-</span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>
-  .</span><span class="identifier">evalTap</span><span>(</span><span class="identifier">handle</span><span>)
-  .</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">offset</span><span>)                               </span><span class="comment">// Keep only each record&#39;s offset
-</span><span>  .</span><span class="identifier">through</span><span>(</span><span class="identifier">commitBatchWithin</span><span>(</span><span class="number-literal">100</span><span>, </span><span class="number-literal">5</span><span>.</span><span class="identifier">seconds</span><span>))  </span><span class="comment">// Collect and commit them in batches</span></code></pre>
-        <p>Only non-empty batches are committed.</p>
-        
-        <h2 id="retrying-a-failed-commit" class="section"><a class="anchor-link left" href="#retrying-a-failed-commit"><i class="icofont-laika link">&#xef71;</i></a>Retrying a failed commit</h2>
-        <p>Some commit failures clear on their own, such as a coordinator that is loading
-        or a group that is rebalancing. Others never will, and retrying them only delays
-        the failure.</p>
-        <p><code>ConsumerSettings.commitRecovery</code> retries the first kind. <code>ErrorCode.retriable</code>
-        decides which failures qualify, and it answers the same on every platform:</p>
-        <pre><code class="nohighlight"><span class="comment">// Retry a failed commit, making up to five attempts and waiting longer between them
-</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
-
-</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
-</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
-
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
-
-</span><span class="keyword">val</span><span> </span><span class="identifier">utf8</span><span> = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
-
-</span><span class="keyword">val</span><span> </span><span class="identifier">settings</span><span> =
-  </span><span class="keyword">for</span><span>
-    </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="identifier">group</span><span>    &lt;- </span><span class="type-name">ConsumerGroup</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;workers&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="comment">// Delays start at 50ms, and stop growing at 2 seconds
-</span><span>    </span><span class="identifier">policy</span><span>   &lt;- </span><span class="type-name">CommitRecovery</span><span>.</span><span class="identifier">exponential</span><span>(</span><span class="identifier">maxAttempts</span><span> = </span><span class="number-literal">5</span><span>, </span><span class="identifier">initialDelay</span><span> = </span><span class="number-literal">50</span><span>.</span><span class="identifier">millis</span><span>, </span><span class="identifier">maxDelay</span><span> = </span><span class="number-literal">2</span><span>.</span><span class="identifier">seconds</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">ConsumerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">group</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-  </span><span class="keyword">yield</span><span> </span><span class="identifier">settings</span><span>.</span><span class="identifier">withCommitRecovery</span><span>(</span><span class="identifier">policy</span><span>)  </span><span class="comment">// Use the policy for this consumer&#39;s commits</span></code></pre>
-        <p>The default policy makes ten attempts, starting at 10ms, doubling each time, and
-        stopping the doubling at 10s. Each delay is then spread by a fifth, so that
-        consumers which hit one condition together do not all retry at the same moment.
-        The spread is applied after the cap, so a delay can exceed <code>maxDelay</code> by that
-        fraction.</p>
-        <p><code>CommitRecovery.none</code> disables retrying. When every attempt has been used, the
-        commit fails with <code>KafkaException.CommitFailed</code>, which carries the number of
-        attempts, the offsets that were not committed, and the failure from the last
-        attempt.</p>
-        <div class="callout info">
-          <i class="icofont-laika info">&#xef4e;</i>
-          <p>The recovery policy applies wherever a commit happens: a single
-          <code>CommittableOffset.commit</code>, a batch, <code>commitBatchWithin</code>, and <code>consumeChunk</code>.</p>
-        </div>
-        
-        <h2 id="how-long-a-commit-waits" class="section"><a class="anchor-link left" href="#how-long-a-commit-waits"><i class="icofont-laika link">&#xef71;</i></a>How long a commit waits</h2>
-        <p><code>ConsumerSettings.commitTimeout</code> bounds a commit and defaults to fifteen
-        seconds. A commit that does not finish in time fails as
-        <code>ErrorCode.RequestTimedOut</code>. That code is retriable, so the recovery policy
-        tries again:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Let a commit wait at most five seconds before it fails as timed out
-</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
-
-</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
-
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
-
-</span><span class="keyword">def</span><span> </span><span class="declaration-name">withCommitTimeout</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
-  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withCommitTimeout</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">seconds</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
-        <p>Like every method that sets a duration, it validates the settings again and returns
-        <code>ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]</code>. See
-        <a href="settings.html">Settings</a>.</p>
-        <div class="callout warning">
-          <i class="icofont-laika warning">&#xf026;</i>
-          <p>A commit that timed out may still be applied by the broker afterwards, because
-          the request has already been sent. Committing the same offset twice has no
-          further effect, so a later attempt that succeeds leaves the group in the same
-          place.</p>
-        </div>
         
         <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
         <p><code>CommittableOffset</code>, <code>CommittableOffsetBatch</code>, and <code>CommittableConsumerRecord</code>

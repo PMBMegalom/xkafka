@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -211,7 +212,7 @@
             <tr>
               <td><code>transactionTimeout</code></td>
               <td>60s</td>
-              <td>Kafka&#39;s <code>transaction.timeout.ms</code>, and how long creating the producer waits to start transactions</td>
+              <td>how long the broker lets a transaction stay open before it aborts it (Kafka&#39;s <code>transaction.timeout.ms</code>), and how long creating the producer waits to be ready for transactions</td>
             </tr>
             <tr>
               <td><code>closeTimeout</code></td>

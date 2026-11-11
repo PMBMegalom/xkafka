@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 active nav-leaf"><a href="#">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -105,6 +106,7 @@
     <li class="level1 nav-node"><a href="#scala-native">Scala Native</a></li>
     <li class="level2 nav-leaf"><a href="#linking-an-application">Linking an application</a></li>
     <li class="level2 nav-leaf"><a href="#stores-on-disk">Stores on disk</a></li>
+    <li class="level2 nav-leaf"><a href="#schema-registry">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="#scala-js">Scala.js</a></li>
     <li class="level1 nav-leaf"><a href="#transformations">Transformations</a></li>
   </ul>
@@ -139,9 +141,8 @@ curl -fsSL https://packages.confluent.io/clients/deb/archive.key | sudo gpg --de
 </span><span class="identifier">echo</span><span> </span><span class="string-literal">&quot;deb [signed-by=/etc/apt/keyrings/confluent-clients.gpg] https://packages.confluent.io/clients/deb </span><span class="substitution">$(lsb_release -cs)</span><span class="string-literal"> main&quot;</span><span> | sudo tee /etc/apt/sources.list.d/confluent-clients.list
 sudo apt-get update
 sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span> librdkafka</span><span class="number-literal">1</span><span>=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span>  </span><span class="comment"># Install exactly this release</span></code></pre>
-        <p>Use a librdkafka built with TLS, SASL SCRAM and
-        OAUTHBEARER, and every compression codec, so it can reach authenticated brokers
-        and read and write records in any compression.</p>
+        <p>Use a librdkafka built with TLS, SASL SCRAM and every compression codec, so it
+        can reach authenticated brokers and read and write records in any compression.</p>
         <p>librdkafka links these against system libraries, so a Scala Native application
         needs OpenSSL, zlib, and zstd available:
         <code>libssl-dev</code>, <code>zlib1g-dev</code>, and <code>libzstd-dev</code> on Debian and Ubuntu, or
@@ -150,7 +151,7 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         
         <h3 id="linking-an-application" class="section"><a class="anchor-link left" href="#linking-an-application"><i class="icofont-laika link">&#xef71;</i></a>Linking an application</h3>
         <p>Compiling an application needs the headers of librdkafka and OpenSSL, and xkafka
-        asks the linker for <code>-lrdkafka</code> and <code>-lcrypto</code>. With both installed where the
+        asks the linker for <code>-lrdkafka</code>, <code>-lssl</code> and <code>-lcrypto</code>. With both installed where the
         compiler and linker look by default, no further settings are needed. For an
         installation elsewhere:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Tell the compiler and the linker where librdkafka is installed
@@ -214,6 +215,10 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         the application opens its first store. Nothing more is needed to compile or
         link.</p>
         
+        <h3 id="schema-registry" class="section"><a class="anchor-link left" href="#schema-registry"><i class="icofont-laika link">&#xef71;</i></a>Schema registry</h3>
+        <p>Reaching a schema registry through http4s&#39;s Ember client also needs the s2n-tls
+        library. See <a href="schema-registry.html#dependencies">Schema registry</a>.</p>
+        
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
         <p>xkafka uses librdkafka here, the same release as on Scala Native. It runs on
         Node.js, not in browsers.</p>
@@ -261,19 +266,21 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         acquiring a client fails with a <code>BackendFailure</code> naming both versions.</p>
         
         <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
-        <p>Serializers, deserializers, producer, transactional producer, and consumer
-        settings, offset committers, committable offsets, batches, and records,
-        partition record streams, consumers, and administration clients have
-        cats-tagless <code>FunctorK</code> instances. <code>KafkaProducer</code> has <code>mapK</code>, which needs a
-        <code>Functor</code> for the target effect, and so no <code>FunctorK</code> instance. <code>KafkaClient.imapK</code> transforms a complete
-        client between effects in both directions while preserving <code>Resource</code>
-        cancellation semantics.</p>
-        <p>A streams <code>Pipeline</code> or <code>Topology</code> changes effect with <code>imapK</code>, which also needs
-        both directions: a <a href="streams/processors.html">processor</a> runs its handler in one
-        effect and its stores in the other. They have cats-tagless <code>InvariantK</code>
-        instances, as do <code>Transaction</code> and <code>KafkaTransactionalProducer</code>, and a streams
-        <code>Serde</code> has a <code>FunctorK</code> instance. <code>KafkaStreams</code> changes effect with <code>imapK</code>, as its
-        queries go both ways, and has an <code>InvariantK</code> instance.</p>
+        <p>These have cats-tagless <code>FunctorK</code> instances, and a <code>mapK</code> that changes their
+        effect: serializers, deserializers and serdes; producer, transactional producer
+        and consumer settings; offset committers, committable offsets, batches and
+        records; partition record streams; consumers; administration clients; and the
+        schema registry client.</p>
+        <p><code>KafkaProducer</code> has <code>mapK</code> too, which needs a <code>Functor</code> for the target effect,
+        and so no <code>FunctorK</code> instance.</p>
+        <p>What runs effects in both directions changes effect with <code>imapK</code>, given a
+        transformation each way, and has a cats-tagless <code>InvariantK</code> instance:
+        <code>Transaction</code>, <code>KafkaTransactionalProducer</code>, a streams <code>Pipeline</code> or
+        <code>Topology</code>, where a <a href="streams/processors.html">processor</a> runs its handler in one
+        effect and its stores in the other, and <code>KafkaStreams</code>, whose queries go both
+        ways.</p>
+        <p><code>KafkaClient.imapK</code> transforms a complete client between effects in both
+        directions while preserving <code>Resource</code> cancellation semantics.</p>
 
         
 <hr class="footer-rule"/>

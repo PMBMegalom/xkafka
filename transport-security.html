@@ -88,6 +88,7 @@
     <li class="level1 active nav-leaf"><a href="#">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -116,7 +117,7 @@
 
         <h1 id="transport-security" class="title">Transport security</h1>
         <p>TLS and SASL are part of <code>ClientSettings</code>, so the same code selects them on
-        every platform.</p>
+        every platform. Without them, a client connects in plaintext.</p>
         <pre><code class="nohighlight"><span class="comment">// Connect over TLS, authenticating with a SCRAM username and password
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">syntax</span><span>.</span><span class="identifier">all</span><span>.*
@@ -132,9 +133,10 @@
 </span><span>  </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;broker:9093&quot;</span><span>), </span><span class="identifier">security</span><span> = </span><span class="identifier">security</span><span>)</span></code></pre>
         
         <h2 id="protocols" class="section"><a class="anchor-link left" href="#protocols"><i class="icofont-laika link">&#xef71;</i></a>Protocols</h2>
-        <p><code>SecuritySettings</code> has one case per protocol: <code>Plaintext</code>, <code>Tls</code>,
+        <p><code>SecuritySettings</code> has one case per protocol: <code>Plaintext</code>, the default, <code>Tls</code>,
         <code>SaslPlaintext</code>, and <code>SaslTls</code>. Each case carries what its protocol needs, so a
-        client cannot ask for SASL without supplying credentials.</p>
+        client cannot ask for SASL without supplying credentials. Pass it to
+        <code>ClientSettings.from</code> as <code>security</code>.</p>
         
         <h2 id="certificate-authorities" class="section"><a class="anchor-link left" href="#certificate-authorities"><i class="icofont-laika link">&#xef71;</i></a>Certificate authorities</h2>
         <p>A <code>CertificateAuthority</code> is one of:</p>
@@ -167,10 +169,12 @@
         as <code>ErrorCode.InvalidConfiguration</code>.</p>
         <p><code>TlsSettings</code> verifies the broker hostname by default. Call
         <code>withoutHostnameVerification</code> to turn that off.</p>
+        <p>A blank path or blank PEM text is a <code>SettingsError</code>.</p>
         
         <h2 id="client-certificates" class="section"><a class="anchor-link left" href="#client-certificates"><i class="icofont-laika link">&#xef71;</i></a>Client certificates</h2>
         <p>A broker can require each client to present a certificate of its own. Give
-        <code>TlsSettings</code> a <code>ClientCertificate</code>, which is one of:</p>
+        <code>TlsSettings</code> a <code>ClientCertificate</code>, as <code>clientCertificate</code> or with
+        <code>withClientCertificate</code>. It is one of:</p>
         <table>
           <thead>
             <tr>
@@ -201,16 +205,18 @@
         <p>The private key must be PKCS#8, which PEM marks as <code>PRIVATE KEY</code>, or as
         <code>ENCRYPTED PRIVATE KEY</code> when it needs <code>keyPassword</code>. Other forms are not
         supported, and an inline key in another form, such as <code>RSA PRIVATE KEY</code>, is a
-        <code>SettingsError</code>. <code>openssl pkcs8 -topk8</code> converts one. The certificate&#39;s key and
-        password are kept out of <code>toString</code>.</p>
+        <code>SettingsError</code>, as is an empty <code>keyPassword</code>. <code>openssl pkcs8 -topk8</code> converts
+        one. The certificate&#39;s key and password are kept out of <code>toString</code>.</p>
         <p>Java 17 can&#39;t read a key encrypted with PBES2, the scheme <code>openssl pkcs8</code>
         uses by default, so on the JVM with Java 17 acquiring the client fails with a
-        <code>BackendFailure</code> whose code is <code>ErrorCode.InvalidConfiguration</code>. Encrypt the key with <code>openssl pkcs8 -topk8 -v1
-PBE-SHA1-3DES</code> instead, which every platform reads. Java 21 reads both.</p>
+        <code>BackendFailure</code> whose code is <code>ErrorCode.InvalidConfiguration</code>. Encrypt the
+        key with <code>openssl pkcs8 -topk8 -v1 PBE-SHA1-3DES</code> instead, which every platform
+        reads. Java 21 reads both.</p>
         
         <h2 id="credentials" class="section"><a class="anchor-link left" href="#credentials"><i class="icofont-laika link">&#xef71;</i></a>Credentials</h2>
         <p><code>SaslSettings</code> accepts <code>SaslMechanism.Plain</code>, <code>ScramSha256</code>, and <code>ScramSha512</code>,
-        and keeps its password out of <code>toString</code>.</p>
+        and keeps its password out of <code>toString</code>. A blank username or an empty password
+        is a <code>SettingsError</code>.</p>
         
         <h2 id="failures" class="section"><a class="anchor-link left" href="#failures"><i class="icofont-laika link">&#xef71;</i></a>Failures</h2>
         <p>Each of these fails as <code>KafkaException.BackendFailure</code>, and its <code>code</code> says

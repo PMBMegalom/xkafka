@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -103,13 +104,13 @@
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#what-a-record-carries">What a record carries</a></li>
     <li class="level1 nav-leaf"><a href="#what-a-consumer-reads">What a consumer reads</a></li>
+    <li class="level1 nav-leaf"><a href="#where-a-consumer-starts">Where a consumer starts</a></li>
+    <li class="level1 nav-leaf"><a href="#processing-records">Processing records</a></li>
+    <li class="level1 nav-leaf"><a href="#partition-streams">Partition streams</a></li>
+    <li class="level1 nav-leaf"><a href="#stopping">Stopping</a></li>
     <li class="level1 nav-node"><a href="#group-membership">Group membership</a></li>
     <li class="level2 nav-leaf"><a href="#static-members">Static members</a></li>
-    <li class="level1 nav-leaf"><a href="#where-a-consumer-starts">Where a consumer starts</a></li>
     <li class="level1 nav-leaf"><a href="#inspecting-the-consumer">Inspecting the consumer</a></li>
-    <li class="level1 nav-leaf"><a href="#processing-every-record">Processing every record</a></li>
-    <li class="level1 nav-leaf"><a href="#stopping">Stopping</a></li>
-    <li class="level1 nav-leaf"><a href="#partition-streams">Partition streams</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -140,6 +141,8 @@
       </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">consumer</span><span>(</span><span class="identifier">settings</span><span>, </span><span class="type-name">Selection</span><span>.</span><span class="type-name">Topics</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))  </span><span class="comment">// Read the partitions of this topic that the group assigns to this consumer
 </span><span>        .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">take</span><span>(</span><span class="number-literal">10</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>)                                     </span><span class="comment">// Stop after ten records, then release the consumer
 </span><span>  </span><span class="keyword">yield</span><span> </span><span class="identifier">records</span></code></pre>
+        <p>The example reads records without committing them. Nothing is committed until
+        your code asks; <a href="offsets.html">Offsets</a> shows how and when to commit.</p>
         
         <h2 id="what-a-record-carries" class="section"><a class="anchor-link left" href="#what-a-record-carries"><i class="icofont-laika link">&#xef71;</i></a>What a record carries</h2>
         <p>Besides its topic-partition, offset, key, value and <a href="headers.html">headers</a>, a <code>ConsumerRecord</code>
@@ -176,8 +179,16 @@
         <p><code>Selection.Topics</code> takes a non-empty set of topics. <code>Selection.Pattern</code> takes a
         <code>TopicPattern</code>, which matches complete topic names. The JVM matches it as a Java
         regular expression, and Scala.js and Native through librdkafka, so a pattern
-        meant for every platform should keep to simple syntax, such as <code>events-.*</code>. Both join a consumer group, so the partitions a consumer holds
-        follow the group&#39;s rebalances.</p>
+        meant for every platform should keep to simple syntax, such as <code>events-.*</code>.
+        Both join a consumer group, so the partitions a consumer holds follow the
+        group&#39;s rebalances.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>A consumer that subscribes to a topic before that topic exists sees it once the
+          consumer refreshes its metadata. <code>metadataRefreshInterval</code> sets how long that
+          takes and defaults to five minutes. Lower it if a consumer must discover a topic
+          promptly.</p>
+        </div>
         <p><code>Selection.Partitions</code> takes a non-empty set of topic-partitions and reads
         exactly those. It joins no group, so the assignment never changes. Two consumers
         naming the same partition each read all of it, even when they share a consumer
@@ -194,18 +205,85 @@
           among the offsets in that batch. Give consumers their own group unless they are
           meant to share a position.</p>
         </div>
-        <div class="callout info">
-          <i class="icofont-laika info">&#xef4e;</i>
-          <p>After a seek, the next record the stream hands out of that partition comes from
-          the offset sought, and no record fetched before the seek is handed out. A seek
-          of a partition the consumer has not been assigned fails with
-          <code>ErrorCode.UnknownTopicOrPartition</code>. A seek is also refused until the partition
-          it names is being fetched, which happens after the assignment arrives. Retry
-          briefly if you seek immediately after starting a consumer.</p>
-        </div>
         <p>By default a consumer delivers records from transactions that have not
         committed. Set <code>isolationLevel</code> to change that. See
         <a href="transactions.html">Transactions</a>.</p>
+        
+        <h2 id="where-a-consumer-starts" class="section"><a class="anchor-link left" href="#where-a-consumer-starts"><i class="icofont-laika link">&#xef71;</i></a>Where a consumer starts</h2>
+        <p>A consumer resumes each partition from its group&#39;s committed offset. Where the
+        group has none, <code>autoOffsetReset</code> decides:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>value</th>
+              <th>where the consumer starts</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Earliest</code></td>
+              <td>at the first record still in the partition</td>
+            </tr>
+            <tr>
+              <td><code>Latest</code></td>
+              <td>at the end of the partition, reading only records written from then on</td>
+            </tr>
+            <tr>
+              <td><code>Fail</code></td>
+              <td>nowhere: the record stream fails as <code>ErrorCode.OffsetResetRequired</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>A committed offset that is no longer in the partition, because the records it
+        pointed at were deleted, is handled by the same setting. <code>Earliest</code> starts at the
+        first record still there, and <code>Fail</code> fails the record stream.</p>
+        <p>Choose <code>Fail</code> where skipping or replaying records would be wrong, such as for a
+        replica rebuilt from a snapshot and the log written after it.</p>
+        
+        <h2 id="processing-records" class="section"><a class="anchor-link left" href="#processing-records"><i class="icofont-laika link">&#xef71;</i></a>Processing records</h2>
+        <p><code>records</code> is one stream of the records from every partition the consumer is
+        assigned, each paired with the offset that commits it. You handle each record
+        and commit when you choose, as <a href="offsets.html">Offsets</a> describes.</p>
+        <p><code>consumeChunk</code> does both for you. It takes a function over a chunk of records
+        and commits that chunk once the function returns:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Handle each chunk of records, then commit it
+</span><span class="identifier">consumer</span><span>.</span><span class="identifier">consumeChunk</span><span>: </span><span class="identifier">records</span><span> =&gt;
+  </span><span class="identifier">records</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">handle</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">CommitNow</span><span>)  </span><span class="comment">// CommitNow is what commits the chunk</span></code></pre>
+        <p>Partitions are processed concurrently, so a slow chunk holds back only the
+        partition it came from. Returning <code>CommitNow</code> is what triggers the commit.</p>
+        <p><code>consumeChunk</code> runs until it is cancelled, until something fails, or until
+        <code>stopConsuming</code> has been called and everything already fetched has been
+        processed.</p>
+        
+        <h2 id="partition-streams" class="section"><a class="anchor-link left" href="#partition-streams"><i class="icofont-laika link">&#xef71;</i></a>Partition streams</h2>
+        <p><code>partitionedRecords</code> exposes a record stream for each assigned topic-partition
+        and ends that stream after the partition is revoked.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Give each assigned partition its own stream of records, and handle them
+</span><span class="identifier">consumer</span><span>.</span><span class="identifier">partitionedRecords</span><span>(</span><span class="identifier">maxQueuedRecords</span><span> = </span><span class="number-literal">256</span><span>).</span><span class="identifier">map</span><span> { </span><span class="identifier">partition</span><span> =&gt;  </span><span class="comment">// Pause a partition once 256 of its records are waiting
+</span><span>  </span><span class="identifier">partition</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">handle</span><span>)
+}.</span><span class="identifier">parJoinUnbounded</span><span>  </span><span class="comment">// Consume every partition&#39;s stream at once</span></code></pre>
+        <p>Every emitted stream must be consumed concurrently. <code>maxQueuedRecords</code> is the
+        point at which the consumer pauses a partition. Records already in flight can
+        temporarily take its buffer past that threshold.</p>
+        
+        <h2 id="stopping" class="section"><a class="anchor-link left" href="#stopping"><i class="icofont-laika link">&#xef71;</i></a>Stopping</h2>
+        <p><code>stopConsuming</code> stops fetching. The record streams then end once the records
+        already fetched have been handed over. Nothing read from the broker is dropped,
+        and offsets remain committable.</p>
+        <p>Run it alongside the stream:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Consume until a shutdown is requested, then finish what was already fetched
+// Handle and commit each record
+</span><span class="keyword">val</span><span> </span><span class="identifier">consume</span><span> = </span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">stop</span><span>    = </span><span class="identifier">shutdownRequested</span><span>.</span><span class="identifier">get</span><span> *&gt; </span><span class="identifier">consumer</span><span>.</span><span class="identifier">stopConsuming</span><span>  </span><span class="comment">// Stop fetching when a shutdown is requested
+</span><span>
+(</span><span class="identifier">consume</span><span>, </span><span class="identifier">stop</span><span>).</span><span class="identifier">parTupled</span><span>  </span><span class="comment">// Run both side by side</span></code></pre>
+        <p><code>stopConsuming</code> returns as soon as fetching has been told to stop, without
+        waiting for the streams to drain. Calling it more than once has no further
+        effect, and a stream started after it is empty.</p>
+        <p>Interrupting the stream instead, with <code>interruptWhen</code> for example, stops it
+        mid-record and discards whatever had been fetched. Releasing the consumer
+        resource, or cancelling whatever reads it, does the same. In those cases whoever
+        resumes the group reads those offsets again.</p>
         
         <h2 id="group-membership" class="section"><a class="anchor-link left" href="#group-membership"><i class="icofont-laika link">&#xef71;</i></a>Group membership</h2>
         <p>A consumer that joins a group stays in it while it keeps in touch with the
@@ -239,8 +317,14 @@
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">staticMember</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
   </span><span class="comment">// Each of these calls validates the settings again
 </span><span>  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withGroupInstanceId</span><span>(</span><span class="string-literal">&quot;orders-1&quot;</span><span>).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withSessionTimeout</span><span>(</span><span class="number-literal">2</span><span>.</span><span class="identifier">minutes</span><span>)).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withMaxPollInterval</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
-        <p>Each <code>with</code> method validates the settings again as a whole, so raising the session timeout
-        above the maximum poll interval fails unless the poll interval is raised first.</p>
+        <p>Each of these methods validates the settings again as a whole, so raising the
+        session timeout above the maximum poll interval fails unless the poll interval
+        is raised first.</p>
+        <div class="callout warning">
+          <i class="icofont-laika warning">&#xf026;</i>
+          <p>A consumer joins its group as soon as it is made, so a consumer nobody reads
+          still takes a share of the partitions. Release consumers you are not reading.</p>
+        </div>
         
         <h3 id="static-members" class="section"><a class="anchor-link left" href="#static-members"><i class="icofont-laika link">&#xef71;</i></a>Static members</h3>
         <p>A dynamic member leaves its group when it is released, and the others take its
@@ -252,37 +336,6 @@
         <p>Give each static member an identity of its own. A longer session timeout gives a
         restarting member more time to come back, at the cost of leaving its partitions
         unread for that long if it does not.</p>
-        
-        <h2 id="where-a-consumer-starts" class="section"><a class="anchor-link left" href="#where-a-consumer-starts"><i class="icofont-laika link">&#xef71;</i></a>Where a consumer starts</h2>
-        <p>A consumer resumes each partition from its group&#39;s committed offset. Where the
-        group has none, <code>autoOffsetReset</code> decides:</p>
-        <table>
-          <thead>
-            <tr>
-              <th>value</th>
-              <th>where the consumer starts</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>Earliest</code></td>
-              <td>at the first record still in the partition</td>
-            </tr>
-            <tr>
-              <td><code>Latest</code></td>
-              <td>at the end of the partition, reading only records written from then on</td>
-            </tr>
-            <tr>
-              <td><code>Fail</code></td>
-              <td>nowhere: the record stream fails as <code>ErrorCode.OffsetResetRequired</code></td>
-            </tr>
-          </tbody>
-        </table>
-        <p>A committed offset that is no longer in the partition, because the records it
-        pointed at were deleted, is handled by the same setting. <code>Earliest</code> starts at the
-        first record still there, and <code>Fail</code> fails the record stream.</p>
-        <p>Choose <code>Fail</code> where skipping or replaying records would be wrong, such as for a
-        replica rebuilt from a snapshot and the log written after it.</p>
         
         <h2 id="inspecting-the-consumer" class="section"><a class="anchor-link left" href="#inspecting-the-consumer"><i class="icofont-laika link">&#xef71;</i></a>Inspecting the consumer</h2>
         <p>Within the consumer resource:</p>
@@ -311,59 +364,15 @@
           differs between platforms. Before the consumer has consumed from the partition,
           it can be <code>None</code>.</p>
         </div>
-        
-        <h2 id="processing-every-record" class="section"><a class="anchor-link left" href="#processing-every-record"><i class="icofont-laika link">&#xef71;</i></a>Processing every record</h2>
-        <p><code>consumeChunk</code> takes a function over a chunk of records and commits that chunk
-        once the function returns:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Handle each chunk of records, then commit it
-</span><span class="identifier">consumer</span><span>.</span><span class="identifier">consumeChunk</span><span>: </span><span class="identifier">records</span><span> =&gt;
-  </span><span class="identifier">records</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">handle</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">CommitNow</span><span>)  </span><span class="comment">// CommitNow is what commits the chunk</span></code></pre>
-        <p>Partitions are processed concurrently, so a slow chunk holds back only the
-        partition it came from. Returning <code>CommitNow</code> is what triggers the commit.</p>
-        <p><code>consumeChunk</code> runs until it is cancelled, until something fails, or until
-        <code>stopConsuming</code> has been called and everything already fetched has been
-        processed.</p>
-        <div class="callout warning">
-          <i class="icofont-laika warning">&#xf026;</i>
-          <p>A consumer joins its group as soon as it is made, so a consumer nobody reads
-          still takes a share of the partitions. Release consumers you are not reading.</p>
-        </div>
-        
-        <h2 id="stopping" class="section"><a class="anchor-link left" href="#stopping"><i class="icofont-laika link">&#xef71;</i></a>Stopping</h2>
-        <p><code>stopConsuming</code> stops fetching. The record streams then end once the records
-        already fetched have been handed over. Nothing read from the broker is dropped,
-        and offsets remain committable.</p>
-        <p>Run it alongside the stream:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Consume until a shutdown is requested, then finish what was already fetched
-// Handle and commit each record
-</span><span class="keyword">val</span><span> </span><span class="identifier">consume</span><span> = </span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
-</span><span class="keyword">val</span><span> </span><span class="identifier">stop</span><span>    = </span><span class="identifier">shutdownRequested</span><span>.</span><span class="identifier">get</span><span> *&gt; </span><span class="identifier">consumer</span><span>.</span><span class="identifier">stopConsuming</span><span>  </span><span class="comment">// Stop fetching when a shutdown is requested
-</span><span>
-(</span><span class="identifier">consume</span><span>, </span><span class="identifier">stop</span><span>).</span><span class="identifier">parTupled</span><span>  </span><span class="comment">// Run both side by side</span></code></pre>
-        <p><code>stopConsuming</code> returns as soon as fetching has been told to stop, without
-        waiting for the streams to drain. Calling it more than once has no further
-        effect, and a stream started after it is empty.</p>
-        <p>Interrupting the stream instead, with <code>interruptWhen</code> for example, stops it
-        mid-record and discards whatever had been fetched. Releasing the consumer
-        resource, or cancelling whatever reads it, does the same. In those cases whoever
-        resumes the group reads those offsets again.</p>
-        
-        <h2 id="partition-streams" class="section"><a class="anchor-link left" href="#partition-streams"><i class="icofont-laika link">&#xef71;</i></a>Partition streams</h2>
-        <p><code>partitionedRecords</code> exposes a record stream for each assigned topic-partition
-        and ends that stream after the partition is revoked.</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Give each assigned partition its own stream of records, and handle them
-</span><span class="identifier">consumer</span><span>.</span><span class="identifier">partitionedRecords</span><span>(</span><span class="identifier">maxQueuedRecords</span><span> = </span><span class="number-literal">256</span><span>).</span><span class="identifier">map</span><span> { </span><span class="identifier">partition</span><span> =&gt;  </span><span class="comment">// Pause a partition once 256 of its records are waiting
-</span><span>  </span><span class="identifier">partition</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">handle</span><span>)
-}.</span><span class="identifier">parJoinUnbounded</span><span>  </span><span class="comment">// Consume every partition&#39;s stream at once</span></code></pre>
-        <p>Every emitted stream must be consumed concurrently. <code>maxQueuedRecords</code> is the
-        point at which the consumer pauses a partition. Records already in flight can
-        temporarily take its buffer past that threshold.</p>
-        <div class="callout warning">
-          <i class="icofont-laika warning">&#xf026;</i>
-          <p>A consumer that subscribes to a topic before that topic exists sees it once the
-          consumer refreshes its metadata. <code>metadataRefreshInterval</code> sets how long that
-          takes and defaults to five minutes. Lower it if a consumer must discover a topic
-          promptly.</p>
+        <div class="callout info">
+          <i class="icofont-laika info">&#xef4e;</i>
+          <p>After a seek, the next record the stream hands out of that partition comes from
+          the offset sought, and no record fetched before the seek is handed out. A seek
+          of a partition the consumer has not been assigned fails with
+          <code>ErrorCode.UnknownTopicOrPartition</code>. On Scala.js and Scala Native, a seek is
+          also refused until the partition it names is being fetched, which happens
+          shortly after the assignment arrives, so code meant for every platform should
+          retry briefly if it seeks immediately after starting a consumer.</p>
         </div>
 
         

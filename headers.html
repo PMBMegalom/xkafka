@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -176,8 +177,9 @@
             </tr>
           </tbody>
         </table>
-        <p><code>get</code> and <code>as</code> fail with <code>InvalidHeaderLength</code> when a number has the wrong width, not
-        by cutting it short, and with <code>MissingHeaderValue</code> when the header has no value.</p>
+        <p><code>get</code> and <code>as</code> return a <code>ValidationError</code> when the value cannot be read:
+        <code>InvalidHeaderLength</code> when a number has the wrong width, and
+        <code>MissingHeaderValue</code> when the header has no value.</p>
         
         <h2 id="how-values-are-written" class="section"><a class="anchor-link left" href="#how-values-are-written"><i class="icofont-laika link">&#xef71;</i></a>How values are written</h2>
         <table>

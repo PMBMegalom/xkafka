@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -152,7 +153,8 @@
         <p>Acquiring the resource joins the application and starts processing. <code>run</code> waits
         while the application runs, and fails with the error that stops it. Releasing
         the resource commits the member&#39;s work, hands it back to the application, and
-        leaves, waiting at most <code>closeTimeout</code>.</p>
+        leaves, waiting at most the settings&#39; <code>closeTimeout</code>, 30 seconds by default.
+        <a href="running.html">Running a program</a> covers guarantees, concurrency and stores.</p>
         
         <h2 id="programs" class="section"><a class="anchor-link left" href="#programs"><i class="icofont-laika link">&#xef71;</i></a>Programs</h2>
         <p>A program is a <code>Topology</code> of pipelines. A pipeline starts by reading a topic, as a
@@ -185,6 +187,13 @@
         listed twice is read once. Partitions with the same number are processed together,
         so to keep a key&#39;s records together for grouping or joining, give the topics the
         same number of partitions.</p>
+        <p>Each topic and store is read and written with a <code>Serde</code>, which pairs a
+        <a href="../serialization.html">serializer and a deserializer</a> of one type, since a streams
+        application both reads and writes. <code>Serde(serializer, deserializer)</code> makes one.
+        <code>.option</code> turns a serde into one of <code>Option</code>s, which reads and writes a null as
+        <code>None</code>, so a <code>None</code> value is written as a tombstone. <code>Serde.utf8</code>, <code>Serde.long</code>
+        and <code>Serde.bytes</code> write the same bytes as Java&#39;s <code>Serdes.String()</code>,
+        <code>Serdes.Long()</code> and <code>Serdes.ByteArray()</code>.</p>
         <p>Every step has a name, given as a <code>Named</code>: a pipeline&#39;s source, each step, and
         its <code>to</code>. Names label the program&#39;s nodes in
         <a href="#describing-a-program">its description</a>, as <code>Named</code>, <code>Consumed</code> and <code>Produced</code>
@@ -249,10 +258,6 @@
         stores or steps with the same name, or one topic read twice. <code>liftTo</code>
         raises them in <code>F</code> as an <code>InvalidTopology</code>, and refused settings as an
         <code>InvalidStreamsSettings</code>.</p>
-        <p>A <code>Serde</code> holds the serializer and deserializer of one type, since a streams
-        application both reads and writes its topics. <code>Serde.utf8</code>, <code>Serde.long</code> and
-        <code>Serde.bytes</code> write the same bytes as Java&#39;s <code>Serdes.String()</code>, <code>Serdes.Long()</code>
-        and <code>Serdes.ByteArray()</code>.</p>
         
         <h3 id="steps-that-see-the-whole-record" class="section"><a class="anchor-link left" href="#steps-that-see-the-whole-record"><i class="icofont-laika link">&#xef71;</i></a>Steps that see the whole record</h3>
         <p><code>filter</code>, <code>mapValues</code> and the steps like them see a record&#39;s key and value. To read

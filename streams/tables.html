@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -136,7 +137,7 @@
         by Kafka&#39;s default, give the table its partitioner (see
         <a href="index.html#choosing-partitions">Choosing partitions</a>).</p>
         <p>A table read from a topic can delete keys, so its <code>toStream</code> gives <code>Option</code>
-        values: <code>Some</code> for an update and <code>None</code> for a delete, which <code>Serde.option</code>
+        values: <code>Some</code> for an update and <code>None</code> for a delete, which a serde&#39;s <code>.option</code>
         writes as a tombstone. A table that only ever updates
         its keys, such as a <code>count</code>, gives its values as they are. The table&#39;s <code>Change</code>
         type member says which, and <code>KTable.Of</code> names it in an annotation:

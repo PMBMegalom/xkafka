@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -120,7 +121,10 @@
       <main class="content">
 
         <h1 id="producing" class="title">Producing</h1>
-        <p>A producer is a <code>Resource</code>. Records are produced in non-empty batches.</p>
+        <p>A producer is a <code>Resource</code>: acquiring it creates the producer, and releasing
+        it delivers what is still pending and closes it (see
+        <a href="#releasing-a-producer">Releasing a producer</a>). Records are produced in
+        non-empty batches.</p>
         <pre><code class="nohighlight"><span class="comment">// Write one record to the topic &quot;events&quot;, and wait until it is delivered
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -166,10 +170,10 @@
         <h2 id="results" class="section"><a class="anchor-link left" href="#results"><i class="icofont-laika link">&#xef71;</i></a>Results</h2>
         <p>Each <code>Produced</code> holds a record and the metadata reported for it, in
         the order the records were given:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Send a batch, and read the offset each record was written at
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Send a batch, and read the offset each record was written at, where Kafka reported one
 </span><span class="identifier">producer</span><span>.</span><span class="identifier">produceAndAwait</span><span>(</span><span class="identifier">batch</span><span>).</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">produced</span><span> =&gt; </span><span class="identifier">produced</span><span>.</span><span class="identifier">metadata</span><span>.</span><span class="identifier">offset</span><span>))</span></code></pre>
-        <p><code>RecordMetadata</code> carries the topic-partition, and the offset and timestamp where
-        Kafka reports them.</p>
+        <p><code>RecordMetadata</code> carries the topic-partition, and the offset and timestamp,
+        each an <code>Option</code> that is set where Kafka reports it.</p>
         <p>If any record is not delivered, the inner effect fails with the failure of the
         first such record. If the client refuses a record as it is enqueued, the outer
         effect fails instead.</p>
@@ -186,6 +190,8 @@
         enqueue timeout, a minute unless set with <code>withEnqueueTimeout</code>, fails with
         <code>ErrorCode.RequestTimedOut</code>, and so does every record after it in the batch.
         Cancelling the outer effect stops the wait.</p>
+        <p>Failures are <code>KafkaException</code> values; see <a href="errors.html">Errors</a> for how to tell
+        them apart.</p>
         
         <h2 id="when-some-records-fail" class="section"><a class="anchor-link left" href="#when-some-records-fail"><i class="icofont-laika link">&#xef71;</i></a>When some records fail</h2>
         <p><code>produceAttemptEach</code> answers for every record, so you can tell which records
@@ -209,13 +215,15 @@
         <h2 id="records" class="section"><a class="anchor-link left" href="#records"><i class="icofont-laika link">&#xef71;</i></a>Records</h2>
         <p>A <code>ProducerRecord</code> names its topic, key, and value, and optionally a partition,
         a timestamp, and <a href="headers.html">headers</a>. A key or value of <code>None</code>, through the <code>.option</code>
-        codecs, represents a Kafka null. Tombstones are produced this way.</p>
+        codecs, represents a Kafka null. Tombstones are produced this way; see
+        <a href="serialization.html#nulls-and-tombstones">Nulls and tombstones</a>.</p>
         
         <h2 id="partitions" class="section"><a class="anchor-link left" href="#partitions"><i class="icofont-laika link">&#xef71;</i></a>Partitions</h2>
         <p>A record with a key and no partition goes to the partition given by the murmur2
         hash of its serialized key, modulo the topic&#39;s partition count. Every platform
         uses this hash, the same one the Java producer uses, so a key always lands on
-        the same partition whichever platform produced it.</p>
+        the same partition whichever platform produced it. A record with neither a key
+        nor a partition goes to a partition the platform&#39;s client chooses.</p>
         <p><code>partitionsFor</code> returns the partitions a topic currently has. Use it to pick a
         partition to produce to. Asking about a topic the cluster does not have creates
         it if the broker creates topics on request, which Kafka brokers do by default.</p>

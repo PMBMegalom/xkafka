@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -125,41 +126,49 @@
         <p>Every member of the application needs:</p>
         <ol class="arabic">
           <li><strong>An endpoint</strong>, the host and port other members reach it at, given with
-          <code>withQueries</code>. A member without one cannot be asked, so the keys it holds
-          cannot be answered by any other member.</li>
-          <li><strong>A <code>Forward</code></strong>, which sends the bytes of a query to another member&#39;s endpoint
-          and gives back the bytes it answers.</li>
+          <code>StreamsSettings</code>&#39; <code>withQueries</code>. A member without one cannot be asked, so
+          other members cannot answer queries for the keys it holds.</li>
+          <li><strong>A <code>Forward</code></strong>, given to <code>KafkaClient.streams</code>, which sends the bytes of a
+          query to another member&#39;s endpoint and gives back the bytes it answers.
+          Without one, a query that needs another member fails with <code>Unreachable</code>.</li>
           <li><strong>An internal route</strong> on that endpoint, which passes the bytes it receives to
-          <code>answer</code> and sends back what <code>answer</code> returns.</li>
+          <code>streams.answer</code> and sends back what it returns.</li>
         </ol>
-        <p>xkafka does not choose how members talk to each other. Here they use HTTP, with
-        <a href="https://http4s.org">http4s</a>:</p>
+        <p>With <a href="https://http4s.org">http4s</a>, the <code>xkafka-streams-http4s</code> module gives the
+        last two, on every platform:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-streams-http4s&quot;</span><span> % </span><span class="string-literal">&quot;0.6.0&quot;</span></code></pre>
+        <p><code>Http4sQueries.forward(client)</code> posts each query to the member that holds the
+        key, through your http4s client, and <code>Http4sQueries.routes(streams)</code> is the
+        internal route that answers them. Both use the path <code>/xkafka/query</code> unless you
+        give another. This example serves the route and reaches other members with
+        Ember, from <code>http4s-ember-server</code> and <code>http4s-ember-client</code>, which you add
+        yourself; any http4s client and server work:</p>
         <pre><code class="nohighlight"><span class="comment">// Run a member that answers other members&#39; queries over HTTP, and asks them for the keys they hold
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">comcast</span><span>.</span><span class="identifier">ip4s</span><span>.*
-</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="type-name">Chunk</span><span>
-</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.*
-</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">dsl</span><span>.</span><span class="identifier">io</span><span>.*
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">ember</span><span>.</span><span class="identifier">client</span><span>.</span><span class="type-name">EmberClientBuilder</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">ember</span><span>.</span><span class="identifier">server</span><span>.</span><span class="type-name">EmberServerBuilder</span><span>
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="type-name">Http4sQueries</span><span>
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">member</span><span>(</span><span class="identifier">settings</span><span>: </span><span class="type-name">StreamsSettings</span><span>, </span><span class="identifier">topology</span><span>: </span><span class="type-name">Topology</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
   </span><span class="type-name">Endpoint</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;orders-3.internal&quot;</span><span>, </span><span class="number-literal">8080</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">here</span><span> =&gt;
     </span><span class="type-name">EmberClientBuilder</span><span>.</span><span class="identifier">default</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">build</span><span>.</span><span class="identifier">use</span><span>: </span><span class="identifier">http</span><span> =&gt;
-      </span><span class="comment">// Post a query&#39;s bytes to the member that holds the key, and give back what it answers
-</span><span>      </span><span class="keyword">val</span><span> </span><span class="identifier">forward</span><span>: </span><span class="type-name">Forward</span><span>[</span><span class="type-name">IO</span><span>] = (</span><span class="identifier">member</span><span>, </span><span class="identifier">query</span><span>) =&gt;
-        </span><span class="keyword">val</span><span> </span><span class="identifier">route</span><span> = </span><span class="type-name">Uri</span><span>.</span><span class="identifier">unsafeFromString</span><span>(</span><span class="string-literal">s&quot;http://</span><span class="substitution">${member.host}</span><span class="string-literal">:</span><span class="substitution">${member.port}</span><span class="string-literal">/xkafka-query&quot;</span><span>)
-        </span><span class="identifier">http</span><span>.</span><span class="identifier">expect</span><span>[</span><span class="type-name">Array</span><span>[</span><span class="type-name">Byte</span><span>]](</span><span class="type-name">Request</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="type-name">Method</span><span>.</span><span class="type-name">POST</span><span>, </span><span class="identifier">route</span><span>).</span><span class="identifier">withEntity</span><span>(</span><span class="identifier">query</span><span>.</span><span class="identifier">toArray</span><span>)).</span><span class="identifier">map</span><span>(</span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="identifier">_</span><span>))
-      </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">streams</span><span>(</span><span class="identifier">settings</span><span>.</span><span class="identifier">withQueries</span><span>(</span><span class="identifier">here</span><span>), </span><span class="identifier">topology</span><span>, </span><span class="identifier">forward</span><span>).</span><span class="identifier">use</span><span>: </span><span class="identifier">streams</span><span> =&gt;
-        </span><span class="comment">// Answer the queries other members post here
-</span><span>        </span><span class="keyword">val</span><span> </span><span class="identifier">internal</span><span> = </span><span class="type-name">HttpRoutes</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>]:
-          </span><span class="keyword">case</span><span> </span><span class="identifier">request</span><span> @ </span><span class="type-name">POST</span><span> -&gt; </span><span class="type-name">Root</span><span> / </span><span class="string-literal">&quot;xkafka-query&quot;</span><span> =&gt;
-            </span><span class="identifier">request</span><span>.</span><span class="identifier">as</span><span>[</span><span class="type-name">Array</span><span>[</span><span class="type-name">Byte</span><span>]].</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">query</span><span> =&gt; </span><span class="identifier">streams</span><span>.</span><span class="identifier">answer</span><span>(</span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="identifier">query</span><span>))).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">answer</span><span> =&gt; </span><span class="type-name">Ok</span><span>(</span><span class="identifier">answer</span><span>.</span><span class="identifier">toArray</span><span>))
-        </span><span class="keyword">val</span><span> </span><span class="identifier">server</span><span> = </span><span class="type-name">EmberServerBuilder</span><span>.</span><span class="identifier">default</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">withHost</span><span>(</span><span class="identifier">ipv4</span><span class="string-literal">&quot;0.0.0.0&quot;</span><span>).</span><span class="identifier">withPort</span><span>(</span><span class="string-literal">port&quot;8080&quot;</span><span>).</span><span class="identifier">withHttpApp</span><span>(</span><span class="identifier">internal</span><span>.</span><span class="identifier">orNotFound</span><span>).</span><span class="identifier">build</span><span>
+      </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">streams</span><span>(</span><span class="identifier">settings</span><span>.</span><span class="identifier">withQueries</span><span>(</span><span class="identifier">here</span><span>), </span><span class="identifier">topology</span><span>, </span><span class="type-name">Http4sQueries</span><span>.</span><span class="identifier">forward</span><span>(</span><span class="identifier">http</span><span>)).</span><span class="identifier">use</span><span>: </span><span class="identifier">streams</span><span> =&gt;
+        </span><span class="keyword">val</span><span> </span><span class="identifier">internal</span><span> = </span><span class="type-name">Http4sQueries</span><span>.</span><span class="identifier">routes</span><span>(</span><span class="identifier">streams</span><span>).</span><span class="identifier">orNotFound</span><span>
+        </span><span class="keyword">val</span><span> </span><span class="identifier">server</span><span>   = </span><span class="type-name">EmberServerBuilder</span><span>.</span><span class="identifier">default</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">withHost</span><span>(</span><span class="identifier">ipv4</span><span class="string-literal">&quot;0.0.0.0&quot;</span><span>).</span><span class="identifier">withPort</span><span>(</span><span class="string-literal">port&quot;8080&quot;</span><span>).</span><span class="identifier">withHttpApp</span><span>(</span><span class="identifier">internal</span><span>).</span><span class="identifier">build</span><span>
         </span><span class="identifier">server</span><span>.</span><span class="identifier">surround</span><span>(</span><span class="identifier">streams</span><span>.</span><span class="identifier">run</span><span>)                       </span><span class="comment">// Serve the route for as long as the member runs</span></code></pre>
+        <p>To reach members over TLS, pass <code>scheme = Uri.Scheme.https</code> to <code>forward</code>, with a
+        client set up for it, and serve the route over TLS. The client also decides on
+        authentication and timeouts. A member that answers with an error status fails
+        the query with <code>Unreachable</code>.</p>
+        <p>Members can talk any other way. A <code>Forward</code> is a function
+        <code>(Endpoint, Chunk[Byte]) =&gt; F[Chunk[Byte]]</code> from a member&#39;s endpoint and a
+        query&#39;s bytes to the bytes it answers, and fails the query with <code>Unreachable</code>
+        when it raises an error. The internal route only needs to pass the bytes it
+        receives to <code>streams.answer</code> and send back what it returns.</p>
         <p>Keep the internal route away from the outside world: it answers any query, for
         any store.</p>
         
@@ -174,6 +183,7 @@
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">dsl</span><span>.</span><span class="identifier">io</span><span>.*
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">`Retry-After`</span><span>
 
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">balances</span><span> = </span><span class="type-name">QueryableStore</span><span>.</span><span class="identifier">keyValue</span><span>(</span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;balances&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])
@@ -321,7 +331,9 @@
         answers xkafka&#39;s queries through <code>JavaQueries</code>, from the
         <a href="index.html#java-partitioners-jvm-only"><code>xkafka-streams-java</code> module</a>. Give it the
         instance, the application&#39;s id, and each store that can be queried with its Java
-        serdes, then call its <code>answer</code> from the internal route. The member&#39;s
+        serdes, then serve its <code>answer</code> as the member&#39;s internal route: at the path
+        xkafka members post to, <code>/xkafka/query</code> with <code>Http4sQueries.forward</code>, taking the
+        posted bytes and answering with the bytes it returns. The member&#39;s
         <code>application.server</code> setting is the endpoint xkafka members reach it at.</p>
         <pre><code class="nohighlight"><span class="comment">// Let a Java member answer xkafka members&#39; queries of its page view counts
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">clients</span><span>.</span><span class="identifier">admin</span><span>.</span><span class="type-name">Admin</span><span>;
@@ -340,7 +352,7 @@
 </span><span>            .</span><span class="identifier">window</span><span>(</span><span class="string-literal">&quot;views-per-minute&quot;</span><span>, </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>(), </span><span class="type-name">Serdes</span><span>.</span><span class="type-name">Long</span><span>());  </span><span class="comment">// A windowed count
 </span><span>  }
 
-  </span><span class="comment">// Call this from the internal route: the bytes posted to it in, the answer&#39;s bytes out
+  </span><span class="comment">// Serve this as the internal route: the bytes posted to it in, the answer&#39;s bytes out
 </span><span>  </span><span class="type-name">byte</span><span>[] </span><span class="identifier">answer</span><span>(</span><span class="type-name">byte</span><span>[] </span><span class="identifier">query</span><span>) {
     </span><span class="keyword">return</span><span> </span><span class="identifier">queries</span><span>.</span><span class="identifier">answer</span><span>(</span><span class="identifier">query</span><span>);
   }

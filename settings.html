@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -121,8 +122,8 @@
         <p><code>ClientSettings</code> describes the connection. <code>ProducerSettings</code> and
         <code>ConsumerSettings</code> each build on it and add what their client needs.
         <code>TransactionalProducerSettings</code> wraps <code>ProducerSettings</code>, and is covered in
-        <a href="transactions.html">Transactions</a>. <code>StreamsSettings</code> also builds on <code>ClientSettings</code>,
-        and is <a href="#streams-settings">described below</a>.</p>
+        <a href="transactions.html">Transactions</a>. <code>StreamsSettings</code>, in <code>xkafka.streams</code>, also
+        builds on <code>ClientSettings</code>, and is <a href="#streams-settings">described below</a>.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Validate the connection, then build producer settings on it
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -136,9 +137,10 @@
 </span><span>    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>)</span></code></pre>
         
         <h2 id="validation" class="section"><a class="anchor-link left" href="#validation"><i class="icofont-laika link">&#xef71;</i></a>Validation</h2>
-        <p>Every <code>from</code> constructor returns <code>ValidatedNel[SettingsError, *]</code>. It
+        <p>Every settings <code>from</code> constructor returns <code>ValidatedNel[SettingsError, *]</code>. It
         accumulates, so one call reports every problem at once, and only valid settings
-        can be constructed.</p>
+        can be constructed. <code>StreamsSettings</code> works the same way with
+        <code>StreamsSettingsError</code>, and its <code>liftTo</code> raises <code>InvalidStreamsSettings</code>.</p>
         <p><code>liftTo</code> carries the failure into the effect:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Turn invalid values or settings into a failure of the effect
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
@@ -157,16 +159,19 @@
         accumulation survives the lift.</p>
         <p>Bootstrap servers must be <code>host:port</code>, including bracketed IPv6 literals.
         Property names must not be blank. Every duration must be positive and at most
-        <code>Int.MaxValue</code> milliseconds (about 24.9 days). Some have a lower limit:
-        <code>linger</code> may be zero and at most <code>ProducerSettings.LingerLimit</code> (15 minutes),
-        and the group membership intervals are limited by
-        <code>ConsumerSettings.SessionTimeoutLimit</code> (1 hour),
-        <code>ConsumerSettings.HeartbeatIntervalLimit</code> (1 hour), and
-        <code>ConsumerSettings.MaxPollIntervalLimit</code> (24 hours).</p>
+        <code>Int.MaxValue</code> milliseconds (about 24.9 days), with these exceptions:</p>
+        <ul>
+          <li><code>linger</code> may be zero, and at most <code>ProducerSettings.LingerLimit</code> (15 minutes).</li>
+          <li><code>fetchWait</code> may be zero, and at most <code>ConsumerSettings.FetchWaitLimit</code> (5 minutes).</li>
+          <li>The group membership intervals are at most
+          <code>ConsumerSettings.SessionTimeoutLimit</code> (1 hour),
+          <code>ConsumerSettings.HeartbeatIntervalLimit</code> (1 hour), and
+          <code>ConsumerSettings.MaxPollIntervalLimit</code> (24 hours).</li>
+        </ul>
         
         <h2 id="properties" class="section"><a class="anchor-link left" href="#properties"><i class="icofont-laika link">&#xef71;</i></a>Properties</h2>
-        <p>Each settings type accepts an immutable <code>properties</code> map for Kafka client
-        properties that have no typed setting:</p>
+        <p>Client, producer, consumer and transactional producer settings each accept a
+        <code>properties</code> map for Kafka client properties that have no typed setting:</p>
         <pre><code class="nohighlight"><span class="comment">// Pass Kafka properties that have no typed setting
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -190,18 +195,26 @@
         <h2 id="managed-properties" class="section"><a class="anchor-link left" href="#managed-properties"><i class="icofont-laika link">&#xef71;</i></a>Managed properties</h2>
         <p><code>ManagedProperties</code> is the set of property names xkafka sets from the typed
         settings, such as <code>bootstrap.servers</code>, <code>group.id</code>, <code>acks</code>, <code>linger.ms</code>, and the
-        TLS and SASL names. Supplying one of them through the map is a <code>SettingsError</code>;
-        use the typed setting instead.</p>
+        TLS and SASL names. Supplying one of them through the map fails as
+        <code>SettingsError.ManagedProperty</code>; use the typed setting instead.</p>
         
         <h2 id="changing-settings" class="section"><a class="anchor-link left" href="#changing-settings"><i class="icofont-laika link">&#xef71;</i></a>Changing settings</h2>
-        <p>Each type has <code>with*</code> methods for deriving one value from another. Those that
-        can invalidate the result, such as <code>withProperty</code>, return
-        <code>ValidatedNel[SettingsError, *]</code> and revalidate in full. This includes every
-        one that sets a duration: <code>withMetadataRefreshInterval</code>, <code>withCloseTimeout</code>,
-        <code>withTransactionTimeout</code>, <code>withCommitTimeout</code>, <code>withPollTimeout</code>,
-        <code>withRequestTimeout</code>, <code>withLinger</code>, <code>withEnqueueTimeout</code>, <code>withSessionTimeout</code>,
-        <code>withHeartbeatInterval</code>, <code>withMaxPollInterval</code>, <code>withRebalanceSafeCommits</code>, and
-        <code>withStartingOffsets</code>.</p>
+        <p>Each type has <code>with*</code> and <code>without*</code> methods for deriving one value from
+        another. Those that can make the settings invalid return
+        <code>ValidatedNel[SettingsError, *]</code> and validate the result in full: every one
+        that sets a duration or properties, and <code>withBootstrapServers</code>, <code>withAcks</code>,
+        <code>withIdempotence</code>, <code>withBatchSize</code>, <code>withGroupInstanceId</code>,
+        <code>withRebalanceSafeCommits</code>, and <code>withStartingOffsets</code>. The others, such as
+        <code>withCompression</code> or <code>withIsolationLevel</code>, return the settings directly.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Change two settings, each of which validates the result again
+</span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">tuned</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
+  </span><span class="identifier">settings</span><span>.</span><span class="identifier">withFetchWait</span><span>(</span><span class="number-literal">100</span><span>.</span><span class="identifier">millis</span><span>).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withProperty</span><span>(</span><span class="string-literal">&quot;fetch.min.bytes&quot;</span><span>, </span><span class="string-literal">&quot;65536&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
         
         <h2 id="consumer-settings" class="section"><a class="anchor-link left" href="#consumer-settings"><i class="icofont-laika link">&#xef71;</i></a>Consumer settings</h2>
         <p>Beyond the group and the deserializers, <code>ConsumerSettings</code> carries:</p>
@@ -270,6 +283,11 @@
               <td>how long the consumer can go without fetching before it leaves its group</td>
             </tr>
             <tr>
+              <td><code>fetchWait</code></td>
+              <td>500ms</td>
+              <td>how long the broker may hold a fetch waiting for records, from zero up to 5m</td>
+            </tr>
+            <tr>
               <td><code>rebalanceSafeCommits</code></td>
               <td>none</td>
               <td>how long a partition being taken away waits for the records handed out from it to be committed</td>
@@ -285,6 +303,15 @@
         <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, <code>seek</code>, <code>seekToBeginning</code>, and
         <code>seekToEnd</code>. Its default matches
         what Kafka&#39;s own clients use.</p>
+        <p><code>fetchWait</code> is the longest the broker holds a fetch while fewer than
+        <code>fetch.min.bytes</code> of records are waiting. <code>fetch.min.bytes</code> is an ordinary
+        property, 1 byte by default. With that default the broker answers as soon as any
+        record arrives, and <code>fetchWait</code> only sets how often a consumer with nothing to
+        read asks again. Raise <code>fetch.min.bytes</code> to have the broker gather records into
+        fewer, larger answers, and <code>fetchWait</code> then bounds how long a record can wait to
+        be gathered. The Java client calls this setting <code>fetch.max.wait.ms</code> and
+        librdkafka <code>fetch.wait.max.ms</code>. Both are <a href="#managed-properties">managed properties</a>,
+        so set it through <code>withFetchWait</code>.</p>
         <p>See <a href="offsets.html">Offsets</a> for commit recovery, the commit timeout, assignment
         fencing, rebalance-safe commits, and starting offsets, <a href="transactions.html">Transactions</a> for the isolation level, and
         <a href="consuming.html#group-membership">Group membership</a> for <code>groupInstanceId</code> and the

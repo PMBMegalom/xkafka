@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 active nav-leaf"><a href="#">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -102,8 +103,11 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#provided-codecs">Provided codecs</a></li>
+    <li class="level1 nav-leaf"><a href="#writing-your-own">Writing your own</a></li>
     <li class="level1 nav-leaf"><a href="#nulls-and-tombstones">Nulls and tombstones</a></li>
+    <li class="level1 nav-leaf"><a href="#windowed-keys">Windowed keys</a></li>
     <li class="level1 nav-leaf"><a href="#codecs-written-for-java-jvm-only">Codecs written for Java (JVM only)</a></li>
+    <li class="level1 nav-leaf"><a href="#schema-registry">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="#headers">Headers</a></li>
     <li class="level1 nav-leaf"><a href="#instances">Instances</a></li>
   </ul>
@@ -115,15 +119,60 @@
       <main class="content">
 
         <h1 id="serialization" class="title">Serialization</h1>
-        <p><code>Serializer[F, A]</code> and <code>Deserializer[F, A]</code> are effectful, and receive the topic
-        and headers alongside the value, so a codec can depend on either.</p>
+        <p>A <code>Serializer[F, A]</code> writes values of <code>A</code> as a record&#39;s key or value, and a
+        <code>Deserializer[F, A]</code> reads them back. Both are effectful, and receive the
+        record&#39;s topic and headers alongside the value, so a codec can depend on
+        either. A <code>Serde[F, A]</code> holds one of each, for code that both writes and reads
+        a type, such as a <a href="streams/">streams</a> program. All three are in the
+        <code>xkafka</code> package.</p>
         
         <h2 id="provided-codecs" class="section"><a class="anchor-link left" href="#provided-codecs"><i class="icofont-laika link">&#xef71;</i></a>Provided codecs</h2>
-        <p><code>Serializer.bytes</code>, <code>Deserializer.bytes</code>, <code>Serializer.utf8</code>, and
-        <code>Deserializer.utf8</code> cover the common cases.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Codec</th>
+              <th>Writes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>Serializer.bytes</code>, <code>Deserializer.bytes</code>, <code>Serde.bytes</code></td>
+              <td>the bytes as they are</td>
+            </tr>
+            <tr>
+              <td><code>Serializer.utf8</code>, <code>Deserializer.utf8</code>, <code>Serde.utf8</code></td>
+              <td>text as UTF-8, as Java&#39;s <code>Serdes.String()</code> does</td>
+            </tr>
+            <tr>
+              <td><code>Serde.long</code></td>
+              <td>a <code>Long</code> as eight big-endian bytes, as Java&#39;s <code>Serdes.Long()</code> does</td>
+            </tr>
+          </tbody>
+        </table>
+        <p><code>Serde.long</code> fails to read a value that is not eight bytes long.</p>
+        
+        <h2 id="writing-your-own" class="section"><a class="anchor-link left" href="#writing-your-own"><i class="icofont-laika link">&#xef71;</i></a>Writing your own</h2>
+        <p>Build a codec from one that exists with <code>contramap</code> and <code>map</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Write a temperature as its text, and read it back
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Celsius</span><span>(</span><span class="identifier">degrees</span><span>: </span><span class="type-name">Double</span><span>)
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">write</span><span> = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">contramap</span><span>[</span><span class="type-name">Celsius</span><span>](</span><span class="identifier">_</span><span>.</span><span class="identifier">degrees</span><span>.</span><span class="identifier">toString</span><span>)
+</span><span class="keyword">val</span><span> </span><span class="identifier">read</span><span>  = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">map</span><span>(</span><span class="identifier">text</span><span> =&gt; </span><span class="type-name">Celsius</span><span>(</span><span class="identifier">text</span><span>.</span><span class="identifier">toDouble</span><span>))
+</span><span class="keyword">val</span><span> </span><span class="identifier">serde</span><span> = </span><span class="type-name">Serde</span><span>(</span><span class="identifier">write</span><span>, </span><span class="identifier">read</span><span>)</span></code></pre>
+        <p>To work with the bytes, the topic or the headers directly, use
+        <code>Serializer.instance</code> and <code>Deserializer.instance</code>, which take a function of the
+        topic, the headers, and the value or its bytes. A serializer answers
+        <code>Option[Chunk[Byte]]</code>, where <code>None</code> writes a record without a value. A
+        deserializer is given <code>None</code> for a record without a value.</p>
         
         <h2 id="nulls-and-tombstones" class="section"><a class="anchor-link left" href="#nulls-and-tombstones"><i class="icofont-laika link">&#xef71;</i></a>Nulls and tombstones</h2>
-        <p>The <code>.option</code> combinator represents Kafka null keys and values explicitly as
+        <p>A record without a value is a tombstone. The provided deserializers fail on one
+        with <code>Deserializer.NullValueException</code>. The <code>.option</code> combinator, on a serializer, a
+        deserializer or a serde, represents a Kafka null key or value explicitly as
         <code>None</code>:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Codecs that read and write a Kafka null as None
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -132,10 +181,14 @@
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">key</span><span>   = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>
 </span><span class="keyword">val</span><span> </span><span class="identifier">value</span><span> = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span></code></pre>
-        <p>A tombstone is a record whose value is <code>None</code>.</p>
+        
+        <h2 id="windowed-keys" class="section"><a class="anchor-link left" href="#windowed-keys"><i class="icofont-laika link">&#xef71;</i></a>Windowed keys</h2>
+        <p>Streams programs that write windowed results to a topic use
+        <code>Windowed.timeSerde</code> and <code>Windowed.sessionSerde</code>, in <code>xkafka.streams</code>. See
+        <a href="streams/windows.html#writing-windowed-keys">Writing windowed keys</a>.</p>
         
         <h2 id="codecs-written-for-java-jvm-only" class="section"><a class="anchor-link left" href="#codecs-written-for-java-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Codecs written for Java (JVM only)</h2>
-        <p>On the JVM, a serializer, deserializer or streams serde written for Kafka&#39;s Java
+        <p>On the JVM, a serializer, deserializer or serde written for Kafka&#39;s Java
         client can be turned into xkafka&#39;s, and used wherever xkafka takes one:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Make xkafka codecs from Java&#39;s: one for a producer, one for a consumer, and one for a streams program
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -146,18 +199,22 @@
 </span><span>
 </span><span class="keyword">val</span><span> </span><span class="identifier">write</span><span> = </span><span class="type-name">Serializer</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="keyword">new</span><span> </span><span class="type-name">StringSerializer</span><span>)               </span><span class="comment">// Writes values as Java&#39;s StringSerializer does
 </span><span class="keyword">val</span><span> </span><span class="identifier">read</span><span>  = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="keyword">new</span><span> </span><span class="type-name">StringDeserializer</span><span>).</span><span class="identifier">option</span><span>    </span><span class="comment">// Reads them back, with None for a record without a value
-</span><span class="keyword">val</span><span> </span><span class="identifier">serde</span><span> = </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">Serde</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>())          </span><span class="comment">// Both at once, as a streams program takes them</span></code></pre>
+</span><span class="keyword">val</span><span> </span><span class="identifier">serde</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>())                         </span><span class="comment">// Both at once, as a streams program takes them</span></code></pre>
         <ul>
           <li>The Java codec is given each record&#39;s topic and headers, as it is in Java.</li>
           <li>Configure it before you pass it in, and close it once nothing uses it: xkafka calls
           neither <code>configure</code> nor <code>close</code>.</li>
           <li>Headers a Java serializer adds are not written: it is given a copy of the record&#39;s
           headers. Configure a serializer that can write headers of its own not to.</li>
-          <li>A record without a value fails a plain deserializer, as it does for xkafka&#39;s own;
+          <li>A record without a value fails the deserializer, as it does xkafka&#39;s own;
           read with <code>.option</code> to get <code>None</code> for it. If the Java deserializer returns <code>null</code>
           for a value, the record fails with <code>JavaNullValueException</code>.</li>
           <li>Whatever the Java codec throws fails the effect it runs in.</li>
         </ul>
+        
+        <h2 id="schema-registry" class="section"><a class="anchor-link left" href="#schema-registry"><i class="icofont-laika link">&#xef71;</i></a>Schema registry</h2>
+        <p>Avro, JSON Schema and Protobuf values with schemas kept in a Confluent Schema Registry
+        have serdes of their own. See <a href="schema-registry.html">Schema registry</a>.</p>
         
         <h2 id="headers" class="section"><a class="anchor-link left" href="#headers"><i class="icofont-laika link">&#xef71;</i></a>Headers</h2>
         <p>A record&#39;s headers have codecs of their own. See <a href="headers.html">Headers</a>.</p>
@@ -166,8 +223,8 @@
         <p>With <code>F</code> fixed, <code>Serializer[F, A]</code> has a Cats <code>Contravariant</code> instance and
         <code>Deserializer[F, A]</code> has a Cats <code>Functor</code> instance, so codecs compose with
         <code>contramap</code> and <code>map</code>.</p>
-        <p>Both also have cats-tagless <code>FunctorK</code> instances for transforming their effect
-        with a natural transformation.</p>
+        <p><code>Serializer</code>, <code>Deserializer</code> and <code>Serde</code> also have cats-tagless <code>FunctorK</code>
+        instances for transforming their effect with a natural transformation.</p>
 
         
 <hr class="footer-rule"/>

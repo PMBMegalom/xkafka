@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 active nav-leaf"><a href="#">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -102,6 +103,8 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#streams">Streams</a></li>
+    <li class="level1 nav-leaf"><a href="#schema-registry">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="#deserializing">Deserializing</a></li>
     <li class="level1 nav-leaf"><a href="#backend-failures">Backend failures</a></li>
     <li class="level1 nav-leaf"><a href="#portable-codes">Portable codes</a></li>
   </ul>
@@ -114,7 +117,8 @@
 
         <h1 id="errors" class="title">Errors</h1>
         <p>Failures Kafka reports, and values or settings xkafka rejects, are
-        <code>KafkaException</code> values, except for the <a href="#streams">streams</a> ones below. A failure raised by your own
+        <code>KafkaException</code> values, except for those under <a href="#streams">Streams</a>,
+        <a href="#schema-registry">Schema registry</a> and <a href="#deserializing">Deserializing</a> below. A failure raised by your own
         serializer, handler or other effect stays as it is, and an invalid argument, such
         as a <code>maxQueuedRecords</code> that is not positive, raises <code>IllegalArgumentException</code>.</p>
         <table>
@@ -151,7 +155,7 @@
             </tr>
             <tr>
               <td><code>Unsupported</code></td>
-              <td>a transaction was asked to record offsets that came from a consumer of another client</td>
+              <td>a transaction was asked to record offsets that came from a consumer of another backend</td>
             </tr>
             <tr>
               <td><code>UncommittedRevocation</code></td>
@@ -171,18 +175,34 @@
           <li><code>InvalidStreamsSettings</code> carries every <code>StreamsSettingsError</code> in <code>errors</code>.</li>
         </ul>
         
+        <h2 id="schema-registry" class="section"><a class="anchor-link left" href="#schema-registry"><i class="icofont-laika link">&#xef71;</i></a>Schema registry</h2>
+        <p>The registry client and its serdes fail with a <code>RegistryException</code>, and refused
+        registry settings raise <code>InvalidRegistrySetting</code>. See
+        <a href="schema-registry.html#errors">Schema registry</a>.</p>
+        
+        <h2 id="deserializing" class="section"><a class="anchor-link left" href="#deserializing"><i class="icofont-laika link">&#xef71;</i></a>Deserializing</h2>
+        <p>A record without a value fails the provided deserializers with
+        <code>Deserializer.NullValueException</code>, unless they read with <code>.option</code>. See
+        <a href="serialization.html#nulls-and-tombstones">Nulls and tombstones</a>.</p>
+        
         <h2 id="backend-failures" class="section"><a class="anchor-link left" href="#backend-failures"><i class="icofont-laika link">&#xef71;</i></a>Backend failures</h2>
-        <p><code>BackendFailure</code> keeps the original failure as its cause, where there is one,
-        and carries an <code>ErrorCode</code> with three flags: <code>retriable</code>, <code>fatal</code>, and
-        <code>transactionAbortRequired</code>. <code>retriable</code> is what the code&#39;s <code>retriable</code> says, so
-        it is the same on every platform, and <code>None</code> only where there is no code.
-        <code>fatal</code> and <code>transactionAbortRequired</code> are <code>None</code> where the platform&#39;s client
-        does not report them. <code>fatal</code> is always <code>true</code> for <code>ErrorCode.Fenced</code>.</p>
+        <p><code>BackendFailure</code> keeps the original failure as its cause, where there is one.
+        Its <code>code</code> is the failure&#39;s <code>ErrorCode</code>, where the client gave one, and three
+        flags say more:</p>
+        <ul>
+          <li><code>retriable</code> is what the code&#39;s <code>retriable</code> says, so it is the same on every
+          platform, and <code>None</code> only where there is no code.</li>
+          <li><code>fatal</code> and <code>transactionAbortRequired</code> are what the platform&#39;s client
+          reports: that the client cannot recover, and that the current transaction must
+          be aborted. Each is <code>None</code> where the client does not report it. A
+          transactional producer fenced by a newer one fails with <code>fatal</code> set to <code>true</code>
+          on every platform.</li>
+        </ul>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Retry only a failure that can clear on its own
-</span><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">give</span><span> </span><span class="identifier">up</span></code></pre>
-        <p><code>ErrorCode.retriable</code> is true for an unavailable or loading coordinator, a
-        leader that has moved, a rebalance in progress, a network failure, and a timed
-        out request.</p>
+</span><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">giveUp</span></code></pre>
+        <p><code>ErrorCode.retriable</code> is true for a network failure, a timed out request, an
+        unavailable broker, a partition whose leader is unavailable or has moved, an
+        unavailable, loading or moved coordinator, and a rebalance in progress.</p>
         
         <h2 id="portable-codes" class="section"><a class="anchor-link left" href="#portable-codes"><i class="icofont-laika link">&#xef71;</i></a>Portable codes</h2>
         <p>The named <code>ErrorCode</code> cases are Kafka protocol errors, which every broker

@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 active nav-leaf"><a href="#">Contributing</a></li>
   </ul>
@@ -104,7 +105,8 @@
     <li class="level1 nav-leaf"><a href="#running-the-tests">Running the tests</a></li>
     <li class="level1 nav-leaf"><a href="#broker-backed-tests">Broker-backed tests</a></li>
     <li class="level1 nav-leaf"><a href="#librdkafka-for-the-native-build">librdkafka for the Native build</a></li>
-    <li class="level1 nav-leaf"><a href="#the-c-shim">The C shim</a></li>
+    <li class="level1 nav-leaf"><a href="#rocksdb-for-the-scala-js-and-native-builds">RocksDB for the Scala.js and Native builds</a></li>
+    <li class="level1 nav-leaf"><a href="#the-c-shims">The C shims</a></li>
     <li class="level1 nav-leaf"><a href="#published-artifacts">Published artifacts</a></li>
     <li class="level1 nav-leaf"><a href="#formatting">Formatting</a></li>
   </ul>
@@ -119,16 +121,28 @@
         
         <h2 id="running-the-tests" class="section"><a class="anchor-link left" href="#running-the-tests"><i class="icofont-laika link">&#xef71;</i></a>Running the tests</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt test</span></code></pre>
-        <p>That runs the ordinary JVM, Scala.js, and Scala Native suites. Tests which need
-        a broker are skipped unless <code>XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS</code> names one,
-        which the script below sets.</p>
+        <p>That runs the ordinary JVM, Scala.js, and Scala Native suites. Use Node.js 24
+        for Scala.js, as <code>.nvmrc</code> records. Tests which need a broker or a schema
+        registry are skipped unless the environment names one, which the scripts below
+        do.</p>
+        <p>The Avro, JSON Schema and Protobuf suites on the JVM also check what xkafka
+        writes and reads against Apache Avro and Confluent&#39;s own serializers, which
+        come from Confluent&#39;s Maven repository.</p>
         
         <h2 id="broker-backed-tests" class="section"><a class="anchor-link left" href="#broker-backed-tests"><i class="icofont-laika link">&#xef71;</i></a>Broker-backed tests</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh</span></code></pre>
-        <p>The script starts one pinned Kafka broker with plaintext, TLS, and SASL_SSL
-        listeners, runs the same suites against all three backends, then removes the
-        broker and its volume. Name a backend, <code>jvm</code>, <code>js</code> or <code>native</code>, to run only that
-        one, as CI does with each on a runner of its own:</p>
+        <p>The script starts, in Docker:</p>
+        <ul>
+          <li>one pinned Kafka broker, with plaintext, TLS, mutual TLS and SASL_SSL
+          listeners;</li>
+          <li>a cluster of three brokers, for what needs replicas on more than one broker,
+          such as leader elections;</li>
+          <li>a Confluent Schema Registry that keeps its schemas on the single broker.</li>
+        </ul>
+        <p>It runs the same suites against all three backends, then removes the brokers,
+        the registry and their volumes. When a run fails, each container&#39;s log is kept
+        in <code>target/broker-logs</code>. Name a backend, <code>jvm</code>, <code>js</code> or <code>native</code>, to run only
+        that one, as CI does with each on a runner of its own:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/integration-test.sh native</span></code></pre>
         <p>The suites it runs include:</p>
         <ul>
@@ -136,10 +150,19 @@
           <li><code>KafkaConformanceSuite</code> asserts behaviour every backend is expected to share,
           identically on each one.</li>
           <li><code>KafkaSecuritySuite</code> covers TLS and SASL.</li>
+          <li><code>KafkaClusterSuite</code> covers what needs the three-broker cluster.</li>
+          <li><code>RegistryBrokerSuite</code> writes and reads Avro, JSON Schema and Protobuf through
+          the real registry. It runs on the JVM and Scala.js only: it reaches the
+          registry through Ember, which on Scala Native needs s2n-tls, a library Ubuntu
+          does not package.</li>
         </ul>
         <p>A case listed as divergent in the conformance suite is marked as expected to
         fail on the named backends. Fixing the backend makes the marked case fail, so a
         marker cannot outlive the divergence it records.</p>
+        <p>To run other commands against the same brokers and registry, such as a single
+        suite, use <code>scripts/with-kafka.sh</code>, which starts them, exports their addresses,
+        runs the command and cleans up:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/with-kafka.sh sbt </span><span class="string-literal">&quot;schemaRegistryHttp4sJVM/Test/testOnly xkafka.schemaregistry.http4s.RegistryBrokerSuite&quot;</span></code></pre>
         <p>The streams engine&#39;s tests run separately, against a broker of each Kafka
         release it supports and beside a Java Kafka Streams application, as CI does in
         a job of their own:</p>
@@ -153,7 +176,12 @@
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>XKAFKA_LIBRDKAFKA_PREFIX=/path/to/librdkafka-prefix sbt test</span></code></pre>
         <p>The prefix must contain <code>include/librdkafka/rdkafka.h</code> and <code>lib/librdkafka.a</code>.</p>
         
-        <h2 id="the-c-shim" class="section"><a class="anchor-link left" href="#the-c-shim"><i class="icofont-laika link">&#xef71;</i></a>The C shim</h2>
+        <h2 id="rocksdb-for-the-scala-js-and-native-builds" class="section"><a class="anchor-link left" href="#rocksdb-for-the-scala-js-and-native-builds"><i class="icofont-laika link">&#xef71;</i></a>RocksDB for the Scala.js and Native builds</h2>
+        <p>The build downloads the pinned <code>rocksdbjni</code> jar once, verifies its checksum, and
+        extracts the RocksDB library for this platform, which the Scala.js and Native
+        tests of stores kept on disk use.</p>
+        
+        <h2 id="the-c-shims" class="section"><a class="anchor-link left" href="#the-c-shims"><i class="icofont-laika link">&#xef71;</i></a>The C shims</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/native-leak-check.sh</span></code></pre>
         <p>Runs the Native smoke binary against a broker under <code>leaks</code> on macOS or
         LeakSanitizer on Linux, so the shim&#39;s allocations are exercised through a real
@@ -162,11 +190,15 @@
         <p>Runs every asynchronous call of the Scala.js library against a broker under the
         same leak checkers, through a small C program linked against the library the
         npm package ships.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt clientJS/rocksdbShimTest</span></code></pre>
+        <p>Builds the RocksDB shim and tests it in C under the same leak checkers, with the
+        RocksDB library found each way a Native application finds it.</p>
         
         <h2 id="published-artifacts" class="section"><a class="anchor-link left" href="#published-artifacts"><i class="icofont-laika link">&#xef71;</i></a>Published artifacts</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span>scripts/downstream-test.sh</span></code></pre>
-        <p>Builds a separate application against the published artifacts and runs it
-        against a broker, including both ways a Native application reaches librdkafka.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>XKAFKA_VERSION=</span><span class="number-literal">0.7.0</span><span> scripts/downstream-test.sh</span></code></pre>
+        <p>Builds a separate application against the published <code>xkafka-client</code> artifacts
+        of the version <code>XKAFKA_VERSION</code> names, and runs it against a broker the script
+        starts, including both ways a Native application reaches librdkafka.</p>
         
         <h2 id="formatting" class="section"><a class="anchor-link left" href="#formatting"><i class="icofont-laika link">&#xef71;</i></a>Formatting</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt scalafmtAll scalafmtSbt</span></code></pre>

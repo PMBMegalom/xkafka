@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -134,7 +135,7 @@
 </span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-minute&quot;</span><span>))          </span><span class="comment">// Count per user and window
 </span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
     </span><span class="comment">// Write each key together with its window
-</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
         <p>This counts each user&#39;s page views per minute, writing a new count each time
         one changes.</p>
         <p><code>TimeWindows.tumbling</code> makes windows that follow one another without gaps or
@@ -172,7 +173,7 @@
 </span><span>    .</span><span class="identifier">emitOnWindowClose</span><span>          </span><span class="comment">// Send each result once its window closes
 </span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;final-views-per-minute&quot;</span><span>))
     .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
-    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
         <p>A closed window&#39;s result is sent when the next record arrives, at most once a
         second, as in Java Kafka Streams. So results do not go out at the exact moment
         a window closes, and while no records arrive, they wait.</p>
@@ -216,7 +217,7 @@
     .</span><span class="identifier">windowedBy</span><span>(</span><span class="type-name">SlidingWindows</span><span>(</span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>))  </span><span class="comment">// Records at most five minutes apart share a window
 </span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-failures&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;failures-within-five-minutes&quot;</span><span>))
     .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;failure-counts&quot;</span><span>))
-    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-failure-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-failure-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">5</span><span>.</span><span class="identifier">minutes</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
         <p>Each record ends a window, and a window also starts just after a record when
         later records follow it within the time difference. For example, with a
         five-second difference, records of one key at 10:00:00 and 10:00:01 give three
@@ -254,7 +255,7 @@
 </span><span>    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-visit&quot;</span><span>))
     .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
     </span><span class="comment">// A replaced session is written as a tombstone
-</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">sessionWindowed</span><span>(</span><span class="identifier">user</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>)</span></code></pre>
+</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">sessionSerde</span><span>(</span><span class="identifier">user</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>)</span></code></pre>
         <p>A new record within the gap of two separate sessions merges them into one, so a
         session already sent downstream can be replaced. A table of
         sessions is therefore a table that can delete keys (see <a href="tables.html">Tables</a>): its
@@ -272,7 +273,8 @@
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add up spending per visit. The last function combines two visits when they merge
 </span><span>.</span><span class="identifier">aggregate</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;add-spending&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;spending-per-visit&quot;</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])(</span><span class="number-literal">0L</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">cents</span><span>, </span><span class="identifier">total</span><span>) =&gt; </span><span class="identifier">total</span><span> + </span><span class="identifier">cents</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">first</span><span>, </span><span class="identifier">second</span><span>) =&gt; </span><span class="identifier">first</span><span> + </span><span class="identifier">second</span><span>)</span></code></pre>
         <p>A session closes once a record arrives timestamped later than its end plus the
-        inactivity gap plus the grace, and later records no longer join it. By
+        inactivity gap plus the grace, and later records no longer join it.
+        <code>SessionWindows.withNoGrace</code> gives no grace. By
         default, sessions are kept for the gap plus the grace after they end, which is
         also the shortest <code>withRetention</code> accepts. With <code>emitOnWindowClose</code>, only each
         session&#39;s final value goes downstream, and no <code>None</code> values are sent.</p>
@@ -296,7 +298,7 @@
   </span><span class="identifier">clicked</span><span>
     .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;click-rate&quot;</span><span>), </span><span class="identifier">viewed</span><span>)((</span><span class="identifier">c</span><span>, </span><span class="identifier">v</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">${c.toDouble / v}</span><span class="string-literal">&quot;</span><span>)  </span><span class="comment">// Each page and minute meets the same page and minute
 </span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;rates&quot;</span><span>))
-    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-rates&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">page</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="identifier">page</span><span>.</span><span class="identifier">option</span><span>)</span></code></pre>
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-rates&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">page</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="identifier">page</span><span>.</span><span class="identifier">option</span><span>)</span></code></pre>
         <p>A window meets only the same window of the other table: the same key and the same
         start, and for sessions the same end too. A window the other table has already
         dropped, once its retention has passed, finds nothing. <code>join</code>, <code>leftJoin</code> and
@@ -307,12 +309,12 @@
         Windowed tables cannot join on a foreign key.</p>
         
         <h2 id="writing-windowed-keys" class="section"><a class="anchor-link left" href="#writing-windowed-keys"><i class="icofont-laika link">&#xef71;</i></a>Writing windowed keys</h2>
-        <p>To write windowed keys to a topic, use <code>Serde.timeWindowed(key, size)</code>, with the
+        <p>To write windowed keys to a topic, use <code>Windowed.timeSerde(key, size)</code>, with the
         window size for time windows and the time difference for sliding windows. It
         writes the same bytes as Java&#39;s <code>WindowedSerdes.timeWindowedSerdeFrom</code>, so Java
         applications can read them. Only the window&#39;s start is written, which is why
         reading it back needs the size.</p>
-        <p>For sessions, use <code>Serde.sessionWindowed(key)</code>, which writes both the start and
+        <p>For sessions, use <code>Windowed.sessionSerde(key)</code>, which writes both the start and
         the end, as Java&#39;s <code>WindowedSerdes.sessionWindowedSerdeFrom</code> does.</p>
         <p>Like Java Kafka Streams, xkafka sends windowed results to the partition of their
         key alone, not of the key and window together. All of a key&#39;s windows are then

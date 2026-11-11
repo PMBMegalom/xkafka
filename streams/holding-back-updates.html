@@ -88,6 +88,7 @@
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -113,7 +114,8 @@
         <h1 id="holding-back-updates" class="title">Holding back updates</h1>
         <p><code>suppress</code> holds back a table&#39;s updates and sends on only some of them, as Java
         Kafka Streams&#39; <code>suppress</code> does. Each suppression has a name, and keeps what it
-        holds in a store called <code>&lt;name&gt;-store</code>, so a member that takes over the work
+        holds in a store called <code>&lt;name&gt;-store</code>, with the changelog
+        <code>&lt;application id&gt;-&lt;name&gt;-store-changelog</code>, so a member that takes over the work
         goes on with what the last one held.</p>
         <p>To send only each window&#39;s final result, use <code>Suppressed.untilWindowCloses</code>:</p>
         <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s views per minute, and write only each window&#39;s final count
@@ -133,7 +135,7 @@
     .</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-minute&quot;</span><span>))
     .</span><span class="identifier">suppress</span><span>(</span><span class="type-name">Suppressed</span><span>.</span><span class="identifier">untilWindowCloses</span><span>(</span><span class="string-literal">&quot;final-views&quot;</span><span>))  </span><span class="comment">// Hold each window&#39;s updates until it closes
 </span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
-    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Serde</span><span>.</span><span class="identifier">timeWindowed</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
+    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
         <p>A window&#39;s result goes on once a record arrives timestamped at or after the
         window&#39;s end plus its grace. For sessions, the inactivity gap is added too,
         and a session merged into another is not sent at all. <code>untilWindowCloses</code> is
@@ -153,10 +155,11 @@
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Hold at most 10000 keys. Past that, the earliest updates are sent early
 </span><span class="type-name">Suppressed</span><span>.</span><span class="identifier">untilTimeLimit</span><span>(</span><span class="string-literal">&quot;calm-views&quot;</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="type-name">BufferLimit</span><span>.</span><span class="identifier">records</span><span>(</span><span class="number-literal">10000</span><span>))</span></code></pre>
         <p><code>BufferLimit.records(n)</code> holds at most <code>n</code> keys, and <code>BufferLimit.bytes(n)</code> at
-        most <code>n</code> bytes, counted as Java Kafka Streams counts them. When the buffer holds
-        more, the earliest updates go on early. To stop the application with an error
-        instead, add <code>shutDownWhenFull</code>. <code>untilWindowCloses</code> only accepts limits that
-        never send early: none, or one with <code>shutDownWhenFull</code>.</p>
+        most <code>n</code> bytes, counted as Java Kafka Streams counts them. Add <code>withMaxBytes</code> or
+        <code>withMaxRecords</code> to limit both. When the buffer holds more, the earliest updates
+        go on early. To stop the application with an error instead, add
+        <code>shutDownWhenFull</code>. <code>untilWindowCloses</code> only accepts limits that never send
+        early: none, or one with <code>shutDownWhenFull</code>. Any other does not compile.</p>
 
         
 <hr class="footer-rule"/>
