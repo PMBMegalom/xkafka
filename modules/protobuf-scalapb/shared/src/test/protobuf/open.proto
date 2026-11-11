@@ -1,0 +1,9 @@
+// A message open to extensions, which xkafka does not read.
+syntax = "proto2";
+
+package example.open;
+
+message Open {
+  optional int32 id = 1;
+  extensions 100 to 199;
+}

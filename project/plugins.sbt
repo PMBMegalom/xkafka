@@ -6,3 +6,7 @@ addSbtPlugin("ch.epfl.scala"    % "sbt-scalajs-bundler" % "0.21.1")
 addSbtPlugin("org.typelevel"    % "sbt-typelevel"       % "0.8.7")
 addSbtPlugin("org.typelevel"    % "sbt-typelevel-site"  % "0.8.7")
 addSbtPlugin("com.eed3si9n"     % "sbt-buildinfo"       % "0.13.2")
+addSbtPlugin("com.thesamet"     % "sbt-protoc"          % "1.0.8")
+
+// ScalaPB generates the Scala messages the ScalaPB bridge's tests read and write.
+libraryDependencies += "com.thesamet.scalapb" %% "compilerplugin" % "0.11.21"

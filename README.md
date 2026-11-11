@@ -132,6 +132,8 @@ To build xkafka or run its tests, see
 - `xkafka-avro`, `xkafka-json-schema` and `xkafka-protobuf` write and read Avro,
   JSON Schema and Protobuf with the registry's schemas, with codecs derived from
   Scala types.
+- `xkafka-protobuf-scalapb` writes and reads the Protobuf messages
+  [ScalaPB](https://scalapb.github.io) generates, with the registry's schemas.
 - `xkafka-streams-http4s` lets the members of a streams application query each
   other's stores over http4s.
 - `xkafka-streams-java`, on the JVM, lets streams programs use code written for

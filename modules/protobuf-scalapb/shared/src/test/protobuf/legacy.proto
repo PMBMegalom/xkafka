@@ -1,0 +1,24 @@
+// An older team's messages, in proto2, with defaults and a field that must be set.
+syntax = "proto2";
+
+package example.legacy;
+
+import "scalapb/scalapb.proto";
+
+option (scalapb.options) = {
+  flat_package: false
+};
+
+enum Kind {
+  KIND_PLAIN = 0;
+  KIND_FANCY = 1;
+}
+
+message Item {
+  required string sku = 1;
+  optional string label = 2 [default = "say \"hi\""];
+  optional bytes tag = 3 [default = "\001x"];
+  optional Kind kind = 4 [default = KIND_FANCY];
+  optional int32 count = 5 [default = 7];
+  repeated int32 sizes = 6 [packed = true];
+}

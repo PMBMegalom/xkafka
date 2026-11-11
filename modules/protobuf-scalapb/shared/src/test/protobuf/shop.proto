@@ -1,0 +1,35 @@
+// A shop's orders, as a team that writes its .proto files first keeps them.
+syntax = "proto3";
+
+package example.shop;
+
+import "google/protobuf/timestamp.proto";
+
+enum Status {
+  STATUS_UNKNOWN = 0;
+  STATUS_PAID = 1;
+}
+
+message Cash {
+  int64 cents = 1;
+}
+
+message Order {
+  message Line {
+    string sku = 1;
+    int32 quantity = 2;
+  }
+
+  string id = 1;
+  repeated Line lines = 2;
+  optional string note = 3;
+  repeated int32 codes = 4;
+  map<string, int64> counts = 5;
+  Status status = 6;
+  google.protobuf.Timestamp placed = 7;
+  oneof payment {
+    string card = 8;
+    Cash cash = 9;
+  }
+  Line first = 10;
+}
