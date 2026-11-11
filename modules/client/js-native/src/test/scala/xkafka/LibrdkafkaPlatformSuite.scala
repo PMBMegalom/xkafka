@@ -52,6 +52,16 @@ final class LibrdkafkaPlatformSuite extends CatsEffectSuite:
     KafkaClient[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(IO.pure).flatMap: escaped =>
       interceptIO[IllegalStateException](escaped.assignment)
 
+  test("the fetch wait reaches librdkafka as fetch.wait.max.ms, which takes the longest the settings accept"):
+    val deserializer = Deserializer.utf8[IO]
+    val client       = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("native-test")).toOption.get
+    val group        = ConsumerGroup.from("native-fetch-wait").toOption.get
+    val settings     = ConsumerSettings.from(client, group, deserializer, deserializer, fetchWait = ConsumerSettings.FetchWaitLimit).toOption.get
+    val topic        = Topic.from("events").toOption.get
+
+    assertEquals(internal.ClientProperties.consumer(settings), Map("fetch.wait.max.ms" -> "300000"))
+    KafkaClient[IO].consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use(_ => IO.unit)
+
   test("a producer refuses work once its resource has closed"):
     val serializer = Serializer.const[IO, String](Some(Chunk.array(Array.emptyByteArray)))
     val client     = ClientSettings.from(NonEmptyList.one("localhost:9092"), Some("native-test")).toOption.get

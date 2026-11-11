@@ -31,8 +31,9 @@ import fs2.Chunk
 import fs2.concurrent.SignallingRef
 import munit.CatsEffectSuite
 import protocol.StreamsGroup
+import xkafka.Serde
 import xkafka.streams.{
-  Endpoint, Forward, KStream, Named, QueryableStore, QueryProblem, Serde, SessionWindows, Store, StreamsPhase, TimeWindows, Topology, Window
+  Endpoint, Forward, KStream, Named, QueryableStore, QueryProblem, SessionWindows, Store, StreamsPhase, TimeWindows, Topology, Window, Windowed
 }
 
 /** Window and session queries answered by two members in one process, each asking the other through its `answer`, over a topic of four partitions.
@@ -46,11 +47,11 @@ final class WindowQueriesSuite extends CatsEffectSuite:
   private val windowed =
     KStream(Named("read"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 1.hour))
       .count(Named("count-windows"), Store("windows")).toStream(Named("windows-changes"))
-      .to(Named("write-windows"), Topic.from("out").orFail, Serde.timeWindowed(text, 10.seconds), numbers)
+      .to(Named("write-windows"), Topic.from("out").orFail, Windowed.timeSerde(text, 10.seconds), numbers)
   private val sessioned =
     KStream(Named("read-s"), Topic.from("in-s").orFail, text, text).groupByKey(text, text).windowedBy(SessionWindows.withNoGrace(5.seconds))
       .count(Named("count-sessions"), Store("sessions")).toStream(Named("sessions-changes"))
-      .to(Named("write-sessions"), Topic.from("out-s").orFail, Serde.sessionWindowed(text), numbers.option)
+      .to(Named("write-sessions"), Topic.from("out-s").orFail, Windowed.sessionSerde(text), numbers.option)
   private val topology = Topology.of(windowed, sessioned).orFail
 
   private val here  = Endpoint.from("here", 1).orFail

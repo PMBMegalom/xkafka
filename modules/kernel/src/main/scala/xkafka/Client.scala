@@ -57,6 +57,8 @@ val ManagedProperties: Set[String] =
     "session.timeout.ms",
     "heartbeat.interval.ms",
     "max.poll.interval.ms",
+    "fetch.max.wait.ms",
+    "fetch.wait.max.ms",
     "batch.size",
     "queue.buffering.max.ms",
     "default.api.timeout.ms",
@@ -151,6 +153,7 @@ object SettingsError:
     case SessionTimeout           extends DurationField("sessionTimeout")
     case HeartbeatInterval        extends DurationField("heartbeatInterval")
     case MaxPollInterval          extends DurationField("maxPollInterval")
+    case FetchWait                extends DurationField("fetchWait")
     case RebalanceSafeCommitLimit extends DurationField("rebalanceSafeCommits.limit")
     case StartingOffsetsLimit     extends DurationField("startingOffsets.limit")
 
@@ -626,7 +629,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     heartbeatInterval: Option[FiniteDuration],
     maxPollInterval: FiniteDuration,
     rebalanceSafeCommits: Option[RebalanceSafeCommits],
-    startingOffsets: Option[StartingOffsets[F]]
+    startingOffsets: Option[StartingOffsets[F]],
+    fetchWait: FiniteDuration
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -647,7 +651,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       heartbeatInterval,
       maxPollInterval,
       rebalanceSafeCommits,
-      startingOffsets.map(_.mapK(fk))
+      startingOffsets.map(_.mapK(fk)),
+      fetchWait
     ) {}
 
   def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
@@ -719,6 +724,12 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     * most `ConsumerSettings.MaxPollIntervalLimit`.
     */
   def withMaxPollInterval(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollInterval = value)
+
+  /** The longest the broker holds a fetch while fewer than `fetch.min.bytes` of records wait, before it answers with what it has, from zero up to
+    * `ConsumerSettings.FetchWaitLimit`. The default, `ConsumerSettings.DefaultFetchWait`, is both backends'. The Java client calls it
+    * `fetch.max.wait.ms` and librdkafka `fetch.wait.max.ms`; set it here for both, since either property is refused.
+    */
+  def withFetchWait(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(fetchWait = value)
 
   /** Holds back the revocation of a partition until every record `records` handed out from it is committed, for at most `limit`, which must be less
     * than the maximum poll interval.
@@ -792,7 +803,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       heartbeatInterval,
       maxPollInterval,
       rebalanceSafeCommits,
-      startingOffsets
+      startingOffsets,
+      fetchWait
     ) {}
 
   private def revalidated(
@@ -805,7 +817,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       heartbeatInterval: Option[FiniteDuration] = heartbeatInterval,
       maxPollInterval: FiniteDuration = maxPollInterval,
       rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits,
-      startingOffsets: Option[StartingOffsets[F]] = startingOffsets
+      startingOffsets: Option[StartingOffsets[F]] = startingOffsets,
+      fetchWait: FiniteDuration = fetchWait
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     ConsumerSettings.from(
       client,
@@ -825,14 +838,15 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       heartbeatInterval,
       maxPollInterval,
       rebalanceSafeCommits,
-      startingOffsets
+      startingOffsets,
+      fetchWait
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
       )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval,$rebalanceSafeCommits,${startingOffsets
-        .map(value => s"StartingOffsets(${value.limit})")})"
+        .map(value => s"StartingOffsets(${value.limit})")},$fetchWait)"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -862,6 +876,12 @@ object ConsumerSettings:
   /** The longest maximum poll interval the settings accept. */
   val MaxPollIntervalLimit: FiniteDuration = 24.hours
 
+  /** What both backends use. */
+  val DefaultFetchWait: FiniteDuration = 500.millis
+
+  /** The longest fetch wait the settings accept, librdkafka's maximum. */
+  val FetchWaitLimit: FiniteDuration = 5.minutes
+
   def from[F[_], K, V](
       client: ClientSettings,
       groupId: ConsumerGroup,
@@ -880,7 +900,8 @@ object ConsumerSettings:
       heartbeatInterval: Option[FiniteDuration] = None,
       maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval,
       rebalanceSafeCommits: Option[RebalanceSafeCommits] = None,
-      startingOffsets: Option[StartingOffsets[F]] = None
+      startingOffsets: Option[StartingOffsets[F]] = None,
+      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
     val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
@@ -907,6 +928,7 @@ object ConsumerSettings:
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
         durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout) ++
+        boundedDurationErrors(SettingsError.DurationField.FetchWait, fetchWait, FetchWaitLimit) ++
         Option.when(groupInstanceId.exists(_.trim.isEmpty))(SettingsError.BlankGroupInstanceId) ++ intervals ++ combinations
     validateSettings(errors).map(_ =>
       new ConsumerSettings(
@@ -927,7 +949,8 @@ object ConsumerSettings:
         heartbeatInterval,
         maxPollInterval,
         rebalanceSafeCommits,
-        startingOffsets
+        startingOffsets,
+        fetchWait
       ) {}
     )
 

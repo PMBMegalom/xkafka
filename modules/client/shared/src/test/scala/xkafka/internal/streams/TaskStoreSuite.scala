@@ -111,7 +111,7 @@ final class TaskStoreSuite extends CatsEffectSuite:
   test("sessions of a key merge across a commit as within one, the store's and the unstored together"):
     val sessions =
       KStream(Named("read-s"), in, text, text).groupByKey(text, text).windowedBy(SessionWindows.withNoGrace(10.seconds))
-        .count(Named("count-s"), Store("sessions")).toStream(Named("to-stream-s")).to(Named("write-s"), out, Serde.sessionWindowed(text), long.option)
+        .count(Named("count-s"), Store("sessions")).toStream(Named("to-stream-s")).to(Named("write-s"), out, Windowed.sessionSerde(text), long.option)
     val records             = List(("k", 1000L), ("j", 1500L), ("k", 5000L), ("k", 40000L), ("k", 45000L))
     def run(store: Boolean) =
       over(sessions).flatMap: task =>

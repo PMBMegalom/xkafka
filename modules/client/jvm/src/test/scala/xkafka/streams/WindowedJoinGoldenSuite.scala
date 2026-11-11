@@ -138,7 +138,7 @@ final class WindowedJoinGoldenSuite extends CatsEffectSuite:
       sliding => grouped.windowedBy(sliding).count(JavaNamed.as(count), kept)
     )
 
-  private val windowedKey                                              = Serde.timeWindowed(text, size)
+  private val windowedKey                                              = Windowed.timeSerde(text, size)
   private def javaOut(table: JavaKTable[JavaWindowed[String], String]) =
     table.toStream(JavaNamed.as("changes"))
       .to("out", Produced.`with`(WindowedSerdes.timeWindowedSerdeFrom(classOf[String], size.toMillis), Serdes.String).withName("write"))
@@ -261,7 +261,7 @@ final class WindowedJoinGoldenSuite extends CatsEffectSuite:
     same(
       sessioned(clicks, "read-clicks", "count-clicks", "clicks")
         .leftJoin(Named("rate"), sessioned(views, "read-views", "count-views", "views"))((c, v) => s"$c/${v.getOrElse(-1L)}")
-        .toStream(Named("changes")).to(Named("write"), out, Serde.sessionWindowed(text), text.option),
+        .toStream(Named("changes")).to(Named("write"), out, Windowed.sessionSerde(text), text.option),
       builder =>
         val l = javaSessioned(builder, "clicks", "read-clicks", "count-clicks", "clicks")
         val r = javaSessioned(builder, "views", "read-views", "count-views", "views")
@@ -312,7 +312,7 @@ final class WindowedJoinGoldenSuite extends CatsEffectSuite:
     same(
       sessioned(clicks, "read-clicks", "count-clicks", "clicks")
         .leftJoin(Named("rate"), sessioned(views, "read-views", "count-views", "views"))((c, v) => s"$c/${v.getOrElse(-1L)}")
-        .toStream(Named("changes")).to(Named("write"), out, Serde.sessionWindowed(text), text.option),
+        .toStream(Named("changes")).to(Named("write"), out, Windowed.sessionSerde(text), text.option),
       builder =>
         val l = javaSessioned(builder, "clicks", "read-clicks", "count-clicks", "clicks")
         val r = javaSessioned(builder, "views", "read-views", "count-views", "views")

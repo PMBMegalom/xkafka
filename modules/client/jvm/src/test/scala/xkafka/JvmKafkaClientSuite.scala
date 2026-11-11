@@ -221,6 +221,8 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           assertEquals(properties.get("auto.offset.reset"), Some("earliest"))
           // The request timeout bounds the calls that take no timeout of their own, which the Java consumer reads as default.api.timeout.ms.
           assertEquals(properties.get("default.api.timeout.ms"), Some(ConsumerSettings.DefaultRequestTimeout.toMillis.toString))
+          // The Java consumer names the fetch wait fetch.max.wait.ms.
+          assertEquals(properties.get("fetch.max.wait.ms"), Some("250"))
           mock
       )
 
@@ -233,7 +235,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1")).toOption.get
     val settings =
       ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "2"))
-        .toOption.get
+        .andThen(_.withFetchWait(250.millis)).toOption.get
 
     backend.consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
       for

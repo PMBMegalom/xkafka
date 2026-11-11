@@ -1,7 +1,7 @@
 # Transport security
 
 TLS and SASL are part of `ClientSettings`, so the same code selects them on
-every platform.
+every platform. Without them, a client connects in plaintext.
 
 ```scala mdoc:compile-only
 // Connect over TLS, authenticating with a SCRAM username and password
@@ -21,9 +21,10 @@ val client = (tls, sasl).mapN(SecuritySettings.SaslTls.apply).andThen: security 
 
 ## Protocols
 
-`SecuritySettings` has one case per protocol: `Plaintext`, `Tls`,
+`SecuritySettings` has one case per protocol: `Plaintext`, the default, `Tls`,
 `SaslPlaintext`, and `SaslTls`. Each case carries what its protocol needs, so a
-client cannot ask for SASL without supplying credentials.
+client cannot ask for SASL without supplying credentials. Pass it to
+`ClientSettings.from` as `security`.
 
 ## Certificate authorities
 
@@ -44,10 +45,13 @@ as `ErrorCode.InvalidConfiguration`.
 `TlsSettings` verifies the broker hostname by default. Call
 `withoutHostnameVerification` to turn that off.
 
+A blank path or blank PEM text is a `SettingsError`.
+
 ## Client certificates
 
 A broker can require each client to present a certificate of its own. Give
-`TlsSettings` a `ClientCertificate`, which is one of:
+`TlsSettings` a `ClientCertificate`, as `clientCertificate` or with
+`withClientCertificate`. It is one of:
 
 | case | meaning |
 | --- | --- |
@@ -69,18 +73,20 @@ val tls =
 The private key must be PKCS#8, which PEM marks as `PRIVATE KEY`, or as
 `ENCRYPTED PRIVATE KEY` when it needs `keyPassword`. Other forms are not
 supported, and an inline key in another form, such as `RSA PRIVATE KEY`, is a
-`SettingsError`. `openssl pkcs8 -topk8` converts one. The certificate's key and
-password are kept out of `toString`.
+`SettingsError`, as is an empty `keyPassword`. `openssl pkcs8 -topk8` converts
+one. The certificate's key and password are kept out of `toString`.
 
 Java 17 can't read a key encrypted with PBES2, the scheme `openssl pkcs8`
 uses by default, so on the JVM with Java 17 acquiring the client fails with a
-`BackendFailure` whose code is `ErrorCode.InvalidConfiguration`. Encrypt the key with `openssl pkcs8 -topk8 -v1
-PBE-SHA1-3DES` instead, which every platform reads. Java 21 reads both.
+`BackendFailure` whose code is `ErrorCode.InvalidConfiguration`. Encrypt the
+key with `openssl pkcs8 -topk8 -v1 PBE-SHA1-3DES` instead, which every platform
+reads. Java 21 reads both.
 
 ## Credentials
 
 `SaslSettings` accepts `SaslMechanism.Plain`, `ScramSha256`, and `ScramSha512`,
-and keeps its password out of `toString`.
+and keeps its password out of `toString`. A blank username or an empty password
+is a `SettingsError`.
 
 ## Failures
 

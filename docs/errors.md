@@ -1,7 +1,8 @@
 # Errors
 
 Failures Kafka reports, and values or settings xkafka rejects, are
-`KafkaException` values, except for the [streams](#streams) ones below. A failure raised by your own
+`KafkaException` values, except for those under [Streams](#streams),
+[Schema registry](#schema-registry) and [Deserializing](#deserializing) below. A failure raised by your own
 serializer, handler or other effect stays as it is, and an invalid argument, such
 as a `maxQueuedRecords` that is not positive, raises `IllegalArgumentException`.
 
@@ -13,7 +14,7 @@ as a `maxQueuedRecords` that is not positive, raises `IllegalArgumentException`.
 | `InvalidSettings` | settings could not be constructed |
 | `StartingOffsetsTimedOut` | a consumer's [starting offsets](offsets.md#starting-from-offsets-you-keep) were not supplied within their limit |
 | `CommitFailed` | a commit kept failing as retriable after every retry its [recovery policy](offsets.md#retrying-a-failed-commit) allowed |
-| `Unsupported` | a transaction was asked to record offsets that came from a consumer of another client |
+| `Unsupported` | a transaction was asked to record offsets that came from a consumer of another backend |
 | `UncommittedRevocation` | a consumer whose [rebalance-safe commits](offsets.md#committing-before-a-partition-moves) fail at their limit gave up partitions with records still uncommitted |
 
 `InvalidValue` carries the `ValidationError` that rejected the value, and
@@ -28,23 +29,40 @@ when `liftTo` carries the refusal into the effect:
 - `InvalidTopology` carries every `TopologyError` in `errors`.
 - `InvalidStreamsSettings` carries every `StreamsSettingsError` in `errors`.
 
+## Schema registry
+
+The registry client and its serdes fail with a `RegistryException`, and refused
+registry settings raise `InvalidRegistrySetting`. See
+[Schema registry](schema-registry.md#errors).
+
+## Deserializing
+
+A record without a value fails the provided deserializers with
+`Deserializer.NullValueException`, unless they read with `.option`. See
+[Nulls and tombstones](serialization.md#nulls-and-tombstones).
+
 ## Backend failures
 
-`BackendFailure` keeps the original failure as its cause, where there is one,
-and carries an `ErrorCode` with three flags: `retriable`, `fatal`, and
-`transactionAbortRequired`. `retriable` is what the code's `retriable` says, so
-it is the same on every platform, and `None` only where there is no code.
-`fatal` and `transactionAbortRequired` are `None` where the platform's client
-does not report them. `fatal` is always `true` for `ErrorCode.Fenced`.
+`BackendFailure` keeps the original failure as its cause, where there is one.
+Its `code` is the failure's `ErrorCode`, where the client gave one, and three
+flags say more:
+
+- `retriable` is what the code's `retriable` says, so it is the same on every
+  platform, and `None` only where there is no code.
+- `fatal` and `transactionAbortRequired` are what the platform's client
+  reports: that the client cannot recover, and that the current transaction must
+  be aborted. Each is `None` where the client does not report it. A
+  transactional producer fenced by a newer one fails with `fatal` set to `true`
+  on every platform.
 
 ```scala
 // Retry only a failure that can clear on its own
-if failure.retriable.contains(true) then retry else give up
+if failure.retriable.contains(true) then retry else giveUp
 ```
 
-`ErrorCode.retriable` is true for an unavailable or loading coordinator, a
-leader that has moved, a rebalance in progress, a network failure, and a timed
-out request.
+`ErrorCode.retriable` is true for a network failure, a timed out request, an
+unavailable broker, a partition whose leader is unavailable or has moved, an
+unavailable, loading or moved coordinator, and a rebalance in progress.
 
 ## Portable codes
 

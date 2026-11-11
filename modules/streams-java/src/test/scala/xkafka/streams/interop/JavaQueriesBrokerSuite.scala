@@ -166,9 +166,9 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
           val out                = Topic.from(s"$application-output").orFail
           Topology.of(
             read("tumbling").windowedBy(TimeWindows.tumbling(5.seconds, grace = 1.hour)).count(Named("count-windows"), Store("tumbling"))
-              .toStream(Named("windows")).to(Named("write-windows"), out, Serde.timeWindowed(text, 5.seconds), Serde.long[IO]),
+              .toStream(Named("windows")).to(Named("write-windows"), out, Windowed.timeSerde(text, 5.seconds), Serde.long[IO]),
             read("sessions").windowedBy(SessionWindows(10.minutes, grace = 1.hour)).count(Named("count-sessions"), Store("sessions"))
-              .toStream(Named("sessions")).to(Named("write-sessions"), out, Serde.sessionWindowed(text), Serde.long[IO].option)
+              .toStream(Named("sessions")).to(Named("write-sessions"), out, Windowed.sessionSerde(text), Serde.long[IO].option)
           ).orFail
         ,
         _.window("tumbling", JavaSerdes.String, JavaSerdes.Long).session("sessions", JavaSerdes.String, JavaSerdes.Long),

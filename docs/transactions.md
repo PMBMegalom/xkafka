@@ -102,7 +102,7 @@ properties, along with these values:
 | setting | default | meaning |
 | --- | --- | --- |
 | `transactionalId` | required | Kafka's `transactional.id` |
-| `transactionTimeout` | 60s | Kafka's `transaction.timeout.ms`, and how long creating the producer waits to start transactions |
+| `transactionTimeout` | 60s | how long the broker lets a transaction stay open before it aborts it (Kafka's `transaction.timeout.ms`), and how long creating the producer waits to be ready for transactions |
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
 | `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |

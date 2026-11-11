@@ -30,7 +30,7 @@ import fs2.{Chunk, Stream}
 import internal.streams.{Task, TaskInput, TaskState}
 import munit.CatsEffectSuite
 import streams.{
-  ApplicationId, Endpoint, Forward, KafkaStreams, KeyValueStore, KStream, Named, Pipeline, Processor, Query, QueryProblem, Serde, Store, StreamsPhase,
+  ApplicationId, Endpoint, Forward, KafkaStreams, KeyValueStore, KStream, Named, Pipeline, Processor, Query, QueryProblem, Store, StreamsPhase,
   StreamsSettings, StreamsState, Topology
 }
 

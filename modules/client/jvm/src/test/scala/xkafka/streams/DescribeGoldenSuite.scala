@@ -290,7 +290,7 @@ final class DescribeGoldenSuite extends FunSuite:
       )
 
   test("windows of each kind, each in its own pipeline, one emitting on close and one suppressed"):
-    val windowed = Serde.timeWindowed(text, 1.minute)
+    val windowed = Windowed.timeSerde(text, 1.minute)
     assertEquals(
       ours(
         KStream(Named("read-1"), topic("in-1"), text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(1.minute, grace = 10.seconds))
@@ -298,10 +298,10 @@ final class DescribeGoldenSuite extends FunSuite:
           .to(Named("write-1"), topic("out-1"), windowed, count),
         KStream(Named("read-2"), topic("in-2"), text, text).groupByKey(text, text).windowedBy(SlidingWindows(5.minutes, grace = 30.seconds))
           .count(Named("count-sliding"), Store("sliding")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-2"))
-          .to(Named("write-2"), topic("out-2"), Serde.timeWindowed(text, 5.minutes), count),
+          .to(Named("write-2"), topic("out-2"), Windowed.timeSerde(text, 5.minutes), count),
         KStream(Named("read-3"), topic("in-3"), text, text).groupByKey(text, text).windowedBy(SessionWindows(5.minutes, grace = 1.minute))
           .count(Named("count-session"), Store("sessions")).toStream(Named("to-stream-3"))
-          .to(Named("write-3"), topic("out-3"), Serde.sessionWindowed(text), count.option)
+          .to(Named("write-3"), topic("out-3"), Windowed.sessionSerde(text), count.option)
       ),
       javas: builder =>
         def produced = Produced.`with`[JavaWindowed[String], java.lang.Long](null, l)

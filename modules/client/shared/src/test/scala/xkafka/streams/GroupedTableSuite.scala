@@ -37,7 +37,7 @@ final class GroupedTableSuite extends CatsEffectSuite:
 
   private def topic(name: String) = Topic.from(name).orFail
 
-  private val changes = Serde.tableChange(text)
+  private val changes = TableChange.serde(text)
 
   private def bytes(values: Int*) = Chunk.from(values.map(_.toByte))
 

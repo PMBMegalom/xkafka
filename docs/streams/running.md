@@ -9,13 +9,13 @@ With `ProcessingGuarantee.AtLeastOnce`, the default, a member commits its
 progress every 30 seconds. If its work moves to another member, the records read
 since the last commit are processed and written again.
 
-With `ProcessingGuarantee.ExactlyOnce`, a member writes its output and commits
+With `ProcessingGuarantee.ExactlyOnce`, set with `withGuarantee`, a member writes its output and commits
 its progress together in one transaction, every 100ms. Each record then counts
 exactly once in the application's stores and output topics, even when work
 moves between members. Input is read with `IsolationLevel.ReadCommitted`.
 
 These are the same intervals Java Kafka Streams uses. Change them with
-`commitInterval`.
+`withCommitInterval`.
 
 @:callout(warning)
 Under either guarantee, an effectful step can run more than once for the same
@@ -34,8 +34,7 @@ start and stop.
 ## Concurrency
 
 By default a member processes one task at a time, like a single Java Kafka
-Streams thread. Set `concurrency` higher to process up to that many tasks at
-once. Records within each task stay in order. This helps when an effectful step
+Streams thread. `withConcurrency(n)` processes up to `n` tasks at once. Records within each task stay in order. This helps when an effectful step
 waits on something outside Kafka.
 
 ## State

@@ -1,6 +1,9 @@
 # Producing
 
-A producer is a `Resource`. Records are produced in non-empty batches.
+A producer is a `Resource`: acquiring it creates the producer, and releasing
+it delivers what is still pending and closes it (see
+[Releasing a producer](#releasing-a-producer)). Records are produced in
+non-empty batches.
 
 ```scala mdoc:compile-only
 // Write one record to the topic "events", and wait until it is delivered
@@ -63,12 +66,12 @@ Each `Produced` holds a record and the metadata reported for it, in
 the order the records were given:
 
 ```scala
-// Send a batch, and read the offset each record was written at
+// Send a batch, and read the offset each record was written at, where Kafka reported one
 producer.produceAndAwait(batch).map(_.map(produced => produced.metadata.offset))
 ```
 
-`RecordMetadata` carries the topic-partition, and the offset and timestamp where
-Kafka reports them.
+`RecordMetadata` carries the topic-partition, and the offset and timestamp,
+each an `Option` that is set where Kafka reports it.
 
 If any record is not delivered, the inner effect fails with the failure of the
 first such record. If the client refuses a record as it is enqueued, the outer
@@ -87,6 +90,9 @@ enqueues the rest of the records. A record that finds no room within the
 enqueue timeout, a minute unless set with `withEnqueueTimeout`, fails with
 `ErrorCode.RequestTimedOut`, and so does every record after it in the batch.
 Cancelling the outer effect stops the wait.
+
+Failures are `KafkaException` values; see [Errors](errors.md) for how to tell
+them apart.
 
 ## When some records fail
 
@@ -115,14 +121,16 @@ producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
 
 A `ProducerRecord` names its topic, key, and value, and optionally a partition,
 a timestamp, and [headers](headers.md). A key or value of `None`, through the `.option`
-codecs, represents a Kafka null. Tombstones are produced this way.
+codecs, represents a Kafka null. Tombstones are produced this way; see
+[Nulls and tombstones](serialization.md#nulls-and-tombstones).
 
 ## Partitions
 
 A record with a key and no partition goes to the partition given by the murmur2
 hash of its serialized key, modulo the topic's partition count. Every platform
 uses this hash, the same one the Java producer uses, so a key always lands on
-the same partition whichever platform produced it.
+the same partition whichever platform produced it. A record with neither a key
+nor a partition goes to a partition the platform's client chooses.
 
 `partitionsFor` returns the partitions a topic currently has. Use it to pick a
 partition to produce to. Asking about a topic the cluster does not have creates

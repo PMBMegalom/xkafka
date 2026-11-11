@@ -298,7 +298,7 @@ final class CogroupGoldenSuite extends CatsEffectSuite:
       List("out", "app-g-repartition")
     )
 
-  private val windowedSerde = Serde.timeWindowed(text, 10.seconds)
+  private val windowedSerde = Windowed.timeSerde(text, 10.seconds)
   private val javaWindowed  = WindowedSerdes.timeWindowedSerdeFrom(classOf[String], 10000L)
   private def kept          = Materialized.as[String, String, WindowStore[Bytes, Array[Byte]]]("kept").withKeySerde(s).withValueSerde(s)
   private def session       = Materialized.as[String, String, SessionStore[Bytes, Array[Byte]]]("kept").withKeySerde(s).withValueSerde(s)
@@ -369,7 +369,7 @@ final class CogroupGoldenSuite extends CatsEffectSuite:
     same(
       two.windowedBy(SessionWindows(5.seconds, grace = 2.seconds)).withRetention(2.minutes)
         .aggregate(Named("co"), Store("kept"), text)("start")(joining).toStream(Named("changes"))
-        .to(Named("write"), topic("out"), Serde.sessionWindowed(text), text.option),
+        .to(Named("write"), topic("out"), Windowed.sessionSerde(text), text.option),
       builder =>
         javaTwo(builder).windowedBy(JavaSessionWindows.ofInactivityGapAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)))
           .aggregate(javaStart, javaJoining, JavaNamed.as("co"), session.withRetention(java.time.Duration.ofMinutes(2)))
@@ -427,7 +427,7 @@ final class CogroupGoldenSuite extends CatsEffectSuite:
     same(
       two.windowedBy(SessionWindows(5.seconds, grace = 2.seconds)).withRetention(2.minutes)
         .aggregate(Named("co"), Store("kept"), text)("start")(joining).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("changes"))
-        .to(Named("write"), topic("out"), Serde.sessionWindowed(text), text.option),
+        .to(Named("write"), topic("out"), Windowed.sessionSerde(text), text.option),
       builder =>
         javaTwo(builder).windowedBy(JavaSessionWindows.ofInactivityGapAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)))
           .aggregate(javaStart, javaJoining, JavaNamed.as("co"), session.withRetention(java.time.Duration.ofMinutes(2)))
@@ -508,7 +508,7 @@ final class CogroupGoldenSuite extends CatsEffectSuite:
     assertEquals(
       declared(
         two.windowedBy(SessionWindows(5.seconds, grace = 2.seconds)).aggregate(Named("co"), Store("kept"), text)("start")(joining)
-          .toStream(Named("changes")).to(Named("write"), topic("out"), Serde.sessionWindowed(text), text.option)
+          .toStream(Named("changes")).to(Named("write"), topic("out"), Windowed.sessionSerde(text), text.option)
       ),
       javas: builder =>
         javaTwo(builder).windowedBy(JavaSessionWindows.ofInactivityGapAndGrace(java.time.Duration.ofSeconds(5), java.time.Duration.ofSeconds(2)))

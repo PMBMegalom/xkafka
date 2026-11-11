@@ -30,7 +30,8 @@ import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
-import xkafka.streams.{JoinWindows, KStream, KTable, Named, Pipeline, Serde, Store, TimeWindows, Topology}
+import xkafka.Serde
+import xkafka.streams.{JoinWindows, KStream, KTable, Named, Pipeline, Store, TimeWindows, Topology, Windowed}
 
 /** What a task writes to its changelogs and keeps between records, on every platform. */
 final class TaskSuite extends CatsEffectSuite:
@@ -75,7 +76,7 @@ final class TaskSuite extends CatsEffectSuite:
     val windowed =
       KStream(Named("read-2"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .count(Named("count-2"), Store("windows")).toStream(Named("to-stream-2"))
-        .to(Named("write-2"), out, Serde.timeWindowed(text, 10.seconds), count)
+        .to(Named("write-2"), out, Windowed.timeSerde(text, 10.seconds), count)
     val old    = WindowStore.key(Chunk.array("k".getBytes), 0L)
     val latest = WindowStore.key(Chunk.array("other".getBytes), 30000L)
     // The store as restoring leaves it: its clock is at 30000, so the window starting at 0 has expired and gone, as the engine and Java's store drop it.
@@ -93,7 +94,7 @@ final class TaskSuite extends CatsEffectSuite:
     val emitting =
       KStream(Named("read-3"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .withRetention(1.minute).emitOnWindowClose.count(Named("count-3"), Store("windows")).toStream(Named("to-stream-3"))
-        .to(Named("write-3"), out, Serde.timeWindowed(text, 10.seconds), count)
+        .to(Named("write-3"), out, Windowed.timeSerde(text, 10.seconds), count)
     val counted = task(emitting, 0)
     val inputs  = List(1000L, 12000L, 25000L, 31000L, 36000L)
     inputs.zipWithIndex.foldLeftM((TaskState.empty, Vector.empty[Long], Vector.empty[Option[Long]])):
@@ -114,7 +115,7 @@ final class TaskSuite extends CatsEffectSuite:
       val counted  =
         task(
           kept.emitOnWindowClose.count(Named("count-4"), Store("windows")).toStream(Named("to-stream-4"))
-            .to(Named("write-4"), out, Serde.timeWindowed(text, 1.minute), count),
+            .to(Named("write-4"), out, Windowed.timeSerde(text, 1.minute), count),
           0
         )
       for
@@ -130,7 +131,7 @@ final class TaskSuite extends CatsEffectSuite:
     val windowed =
       KStream(Named("read-5"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
         .count(Named("count-5"), Store("windows")).toStream(Named("to-stream-5"))
-        .to(Named("write-5"), out, Serde.timeWindowed(text, 10.seconds), count)
+        .to(Named("write-5"), out, Windowed.timeSerde(text, 10.seconds), count)
     val mapped = Task("app", Topology.of(windowed).orFail.imapK(FunctionK.id[IO])(FunctionK.id[IO]).subtopologies.head, 0)
     List(task(windowed, 0), mapped).traverse(_.process(TaskState.empty, TaskInput(bytes("k"), bytes("v"), 2000L, Headers.empty), 0L))
       .map(found => assertEquals(found.map(_._2.filter(_.topic == out).map(_.partitionBy)), List(Vector(bytes("k")), Vector(bytes("k")))))

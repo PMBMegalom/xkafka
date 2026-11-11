@@ -2,7 +2,8 @@
 
 `suppress` holds back a table's updates and sends on only some of them, as Java
 Kafka Streams' `suppress` does. Each suppression has a name, and keeps what it
-holds in a store called `<name>-store`, so a member that takes over the work
+holds in a store called `<name>-store`, with the changelog
+`<application id>-<name>-store-changelog`, so a member that takes over the work
 goes on with what the last one held.
 
 To send only each window's final result, use `Suppressed.untilWindowCloses`:
@@ -25,7 +26,7 @@ def finalViews(input: Topic, output: Topic): Pipeline[IO] =
     .count(Named("count-views"), Store("views-per-minute"))
     .suppress(Suppressed.untilWindowCloses("final-views"))  // Hold each window's updates until it closes
     .toStream(Named("view-counts"))
-    .to(Named("write-view-counts"), output, Serde.timeWindowed(user, 1.minute), Serde.long[IO])
+    .to(Named("write-view-counts"), output, Windowed.timeSerde(user, 1.minute), Serde.long[IO])
 ```
 
 A window's result goes on once a record arrives timestamped at or after the
@@ -57,7 +58,8 @@ Suppressed.untilTimeLimit("calm-views", 1.minute, BufferLimit.records(10000))
 ```
 
 `BufferLimit.records(n)` holds at most `n` keys, and `BufferLimit.bytes(n)` at
-most `n` bytes, counted as Java Kafka Streams counts them. When the buffer holds
-more, the earliest updates go on early. To stop the application with an error
-instead, add `shutDownWhenFull`. `untilWindowCloses` only accepts limits that
-never send early: none, or one with `shutDownWhenFull`.
+most `n` bytes, counted as Java Kafka Streams counts them. Add `withMaxBytes` or
+`withMaxRecords` to limit both. When the buffer holds more, the earliest updates
+go on early. To stop the application with an error instead, add
+`shutDownWhenFull`. `untilWindowCloses` only accepts limits that never send
+early: none, or one with `shutDownWhenFull`. Any other does not compile.

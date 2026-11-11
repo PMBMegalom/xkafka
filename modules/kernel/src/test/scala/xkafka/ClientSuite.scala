@@ -798,6 +798,25 @@ final class ClientSuite extends FunSuite:
       Some(Set("group.instance.id", "max.poll.interval.ms"))
     )
 
+  test("the fetch wait is both backends' default, takes zero up to librdkafka's maximum, and is set only through its setting"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+    val field        = SettingsError.DurationField
+
+    assertEquals(settings.fetchWait, 500.millis)
+    assertEquals(settings.withFetchWait(Duration.Zero).map(_.fetchWait).toEither, Right(Duration.Zero))
+    assertEquals(settings.withFetchWait(ConsumerSettings.FetchWaitLimit).map(_.fetchWait).toEither, Right(5.minutes))
+    assertEquals(
+      settings.withFetchWait(ConsumerSettings.FetchWaitLimit + 1.milli).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(field.FetchWait, 5.minutes + 1.milli, ConsumerSettings.FetchWaitLimit)))
+    )
+    assertEquals(settings.withFetchWait((-1).milli).toEither, Left(NonEmptyList.one(SettingsError.NegativeDuration(field.FetchWait, (-1).milli))))
+    List("fetch.max.wait.ms", "fetch.wait.max.ms").foreach: name =>
+      assertEquals(
+        settings.withProperty(name, "100").toEither,
+        Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Consumer)))
+      )
+
   test("group membership settings are refused where either backend would refuse them"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get

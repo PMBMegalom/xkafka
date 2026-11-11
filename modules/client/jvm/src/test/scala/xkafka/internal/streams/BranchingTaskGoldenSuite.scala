@@ -43,7 +43,8 @@ import org.apache.kafka.streams.kstream.{
 }
 import org.apache.kafka.streams.state.KeyValueStore
 import org.apache.kafka.streams.test.TestRecord
-import xkafka.streams.{Flow, JoinWindows, KStream, KTable, Named, Pipeline, Repartition, Serde, Store, Topology}
+import xkafka.Serde
+import xkafka.streams.{Flow, JoinWindows, KStream, KTable, Named, Pipeline, Repartition, Store, Topology}
 
 /** What tasks write for a program that branches, against what Java Streams' `TopologyTestDriver` writes for the same program and records, with Java's
   * record cache off so that it, too, passes on every change. Each sub-topology's task reads what the others write to repartition topics, in the order

@@ -77,7 +77,7 @@ final class RestoreSuite extends CatsEffectSuite:
       Names.fresh:
         val table    = topic("global")
         val keys     = (0 until 2000).toList.map(n => s"key-$n")
-        val text     = xkafka.streams.Serde.utf8[IO]
+        val text     = xkafka.Serde.utf8[IO]
         val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
         val consumer =
           Resource.make(
@@ -182,9 +182,9 @@ final class RestoreSuite extends CatsEffectSuite:
     test("a global table keeps the bytes of what its topic held before it was acquired as they are, without reading them through its serdes"):
       Names.fresh:
         val table    = topic("raw")
-        val text     = xkafka.streams.Serde.utf8[IO]
+        val text     = xkafka.Serde.utf8[IO]
         val refusing =
-          xkafka.streams.Serde(text.serializer, Deserializer.instance[IO, String]((_, _, _) => IO.raiseError(new IllegalArgumentException("unread"))))
+          xkafka.Serde(text.serializer, Deserializer.instance[IO, String]((_, _, _) => IO.raiseError(new IllegalArgumentException("unread"))))
         val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, refusing, xkafka.streams.Store("gs"))
         val consumer =
           Resource.make(
@@ -199,7 +199,7 @@ final class RestoreSuite extends CatsEffectSuite:
     test("a global table acquired again over the store it kept reads on from where it was, without reading its topic again"):
       Names.fresh:
         val table    = topic("again")
-        val utf8     = xkafka.streams.Serde.utf8[IO]
+        val utf8     = xkafka.Serde.utf8[IO]
         val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, utf8, utf8, xkafka.streams.Store("gs"))
         val consumer =
           Resource.make(
@@ -223,7 +223,7 @@ final class RestoreSuite extends CatsEffectSuite:
 
     test("a global table acquired as soon as its topic is created waits for the topic's leaders"):
       Names.fresh:
-        val text     = xkafka.streams.Serde.utf8[IO]
+        val text     = xkafka.Serde.utf8[IO]
         val consumer =
           Resource.make(
             driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
@@ -238,7 +238,7 @@ final class RestoreSuite extends CatsEffectSuite:
     test("a global table under read_committed does not wait for a transaction still open, and does not hold what it wrote"):
       Names.fresh:
         val table    = topic("open")
-        val text     = xkafka.streams.Serde.utf8[IO]
+        val text     = xkafka.Serde.utf8[IO]
         val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, text, text, xkafka.streams.Store("gs"))
         val consumer =
           Resource.make(
