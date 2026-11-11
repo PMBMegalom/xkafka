@@ -801,8 +801,10 @@ lazy val streamsHttp4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .dependsOn(kernel)
   .settings(commonSettings)
   .settings(
-    name                                 := "xkafka-streams-http4s",
-    description                          := "Queries between the members of an xkafka streams application over http4s",
+    name        := "xkafka-streams-http4s",
+    description := "Queries between the members of an xkafka streams application over http4s",
+    // 0.7.0 was released without this module, so MiMa has no earlier version of it to compare.
+    tlVersionIntroduced                  := Map("3" -> "0.7.1"),
     libraryDependencies += "org.http4s" %%% "http4s-client" % http4sVersion
   )
 
@@ -1185,5 +1187,6 @@ lazy val root =
     avro,
     jsonSchema,
     protobuf,
+    streamsHttp4s,
     streamsJava
   ).settings(name := "xkafka")
