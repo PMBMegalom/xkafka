@@ -1,0 +1,142 @@
+/*
+ * Copyright (c) 2026 xkafka contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+package xkafka.codegen
+
+/** Scala names for Avro's, which are letters, digits and underscores, and Scala text for strings. */
+private[codegen] object Names:
+  private val keywords =
+    Set(
+      "abstract",
+      "case",
+      "catch",
+      "class",
+      "def",
+      "do",
+      "else",
+      "enum",
+      "export",
+      "extends",
+      "false",
+      "final",
+      "finally",
+      "for",
+      "given",
+      "if",
+      "implicit",
+      "import",
+      "lazy",
+      "match",
+      "new",
+      "null",
+      "object",
+      "override",
+      "package",
+      "private",
+      "protected",
+      "return",
+      "sealed",
+      "super",
+      "then",
+      "throw",
+      "trait",
+      "true",
+      "try",
+      "type",
+      "val",
+      "var",
+      "while",
+      "with",
+      "yield"
+    )
+
+  // A case class's own members, which a field of that name would clash with.
+  private val members =
+    Set(
+      "copy",
+      "equals",
+      "hashCode",
+      "toString",
+      "productArity",
+      "productElement",
+      "productElementName",
+      "productElementNames",
+      "productIterator",
+      "productPrefix",
+      "canEqual",
+      "getClass",
+      "notify",
+      "notifyAll",
+      "wait",
+      "clone",
+      "finalize"
+    )
+
+  // An enum's own members, which a case of that name would clash with.
+  private val enumMembers = members ++ Set("values", "valueOf", "fromOrdinal", "ordinal")
+
+  private val qualifiedBuiltins =
+    Map(
+      "Boolean"    -> "scala.Boolean",
+      "Byte"       -> "scala.Byte",
+      "Int"        -> "scala.Int",
+      "Long"       -> "scala.Long",
+      "Float"      -> "scala.Float",
+      "Double"     -> "scala.Double",
+      "String"     -> "scala.Predef.String",
+      "List"       -> "scala.collection.immutable.List",
+      "Map"        -> "scala.collection.immutable.Map",
+      "Option"     -> "scala.Option",
+      "Some"       -> "scala.Some",
+      "None"       -> "scala.None",
+      "Array"      -> "scala.Array",
+      "BigDecimal" -> "scala.math.BigDecimal",
+      "BigInt"     -> "scala.math.BigInt"
+    )
+
+  /** A name of Scala's own, qualified where a type in the package being written has it too. */
+  def builtin(name: String, neighbours: Set[String]): String = if neighbours.contains(name) then qualifiedBuiltins(name) else name
+
+  /** A package's or type's name. */
+  def term(name: String): String = if keywords.contains(name) then s"`$name`" else name
+
+  def typeName(name: String): String = term(name)
+
+  /** A field's Scala name, and the Avro name it is renamed from where that name is one of a case class's own. */
+  def field(name: String): (String, Option[String]) = if members.contains(name) then (s"${name}_", Some(name)) else (term(name), None)
+
+  /** An enum case's Scala name, and the symbol it is renamed from where that symbol is one of an enum's own members. */
+  def symbol(name: String): (String, Option[String]) = if enumMembers.contains(name) then (s"${name}_", Some(name)) else (term(name), None)
+
+  /** What goes between a parameter's name and its type: a name ending in an underscore would take a colon right after it as part of itself. */
+  def colon(name: String): String = if name.endsWith("_") then " : " else ": "
+
+  /** `text` as a Scala string literal. */
+  def quote(text: String): String =
+    text.flatMap:
+      case '"'                                                   => "\\\""
+      case '\\'                                                  => "\\\\"
+      case '\n'                                                  => "\\n"
+      case '\r'                                                  => "\\r"
+      case '\t'                                                  => "\\t"
+      case character if character < ' ' || character == '\u007f' => f"\\u${character.toInt}%04x"
+      case character                                             => character.toString
+    .mkString("\"", "", "\"")

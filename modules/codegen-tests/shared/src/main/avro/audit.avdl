@@ -1,0 +1,13 @@
+@namespace("example.audit")
+protocol Audit {
+  /** How important an entry is */
+  enum Level { LOW, HIGH } = LOW;
+
+  record Entry {
+    string who;
+    Level level = "LOW";
+    union { null, long } at = null;
+    array<string> notes = [];
+    string @aliases(["by"]) author = "nobody";
+  }
+}

@@ -1,0 +1,100 @@
+/*
+ * Copyright (c) 2026 xkafka contributors
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+ * FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+ * COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+ * IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ */
+
+package xkafka.codegen
+
+import java.time.{Instant, LocalDate, LocalDateTime, LocalTime}
+import java.util.UUID
+
+import example.audit.{Entry, Level}
+import example.chain.Link
+import example.shop.*
+import fs2.Chunk
+import munit.FunSuite
+import xkafka.avro.{AvroCodec, AvroFormat, AvroSchemaJson}
+
+/** Values of the classes xkafka-codegen generated from the schemas in src/main/avro, written and read with the schemas they were generated from. */
+class GeneratedAvroSuite extends FunSuite:
+  private def roundTrip[A](value: A)(using AvroCodec[A]): Either[String, A] =
+    val format = AvroFormat[A]
+    for
+      write <- format.writer(format.schema)
+      bytes <- write(value)
+      read  <- format.reader(format.schema)
+      back  <- read(bytes)
+    yield back
+
+  private def registers[A](avroSchema: String)(using AvroCodec[A]): Unit =
+    assertEquals(AvroFormat[A].writer(AvroFormat[A].schema).map(_ => ()), Right(()), "the codec has the schema it was generated from")
+    assertEquals(Right(AvroFormat[A].schema.text), AvroSchemaJson.parse(avroSchema).map(AvroSchemaJson.render))
+
+  private val order =
+    Order(
+      id = "o-1",
+      lines = List(Line("apple", 3)),
+      hash = Hash(Chunk[Byte](1, 2, 3, 4)),
+      payment = Card("4111"),
+      refund = Some(Cash(5)),
+      code = "x",
+      discount = Some(BigDecimal("1.5")),
+      `type` = "kind",
+      copy_ = 9
+    )
+
+  test("every generated type's codec has the schema it was generated from"):
+    registers[Order](Order.avroSchema)
+    registers[Status](Status.avroSchema)
+    registers[Line](Line.avroSchema)
+    registers[Hash](Hash.avroSchema)
+    registers[Cash](Cash.avroSchema)
+    registers[Card](Card.avroSchema)
+    registers[Link](Link.avroSchema)
+    registers[example.`type`.List](example.`type`.List.avroSchema)
+    registers[Entry](Entry.avroSchema)
+    registers[Level](Level.avroSchema)
+
+  test("a record's fields take the file's defaults"):
+    val defaults = Order(id = "o", lines = Nil, hash = Hash(Chunk[Byte](0, 0, 0, 0)), payment = Cash(1))
+    assertEquals((defaults.quantity, defaults.total, defaults.ratio, defaults.weight, defaults.paid), (1, -5L, 0.5f, 1.25, false))
+    assertEquals(defaults.greeting, "say \"hi\"\né")
+    assertEquals(defaults.blob, Chunk[Byte](0, -1))
+    assertEquals((defaults.note, defaults.label, defaults.tags, defaults.counts), (None, Some("none"), List("a", "b"), Map("x" -> 1L)))
+    assertEquals((defaults.status, defaults.line, defaults.previous, defaults.refund, defaults.code), (Status.NEW, Line("none", 0), None, None, 7))
+    assertEquals(defaults.either, Some(3))
+    assertEquals((defaults.price, defaults.discount), (BigDecimal("12.34"), None))
+    assertEquals(defaults.ref, UUID.fromString("123e4567-e89b-12d3-a456-426614174000"))
+    assertEquals((defaults.day, defaults.opens), (LocalDate.ofEpochDay(20000), LocalTime.of(9, 0)))
+    assertEquals(defaults.placed, Instant.ofEpochSecond(1700000000L, 1000L))
+    assertEquals(defaults.local, LocalDateTime.of(2023, 11, 14, 22, 13, 20))
+    assertEquals((defaults.`type`, defaults.copy_), ("keyword", 2))
+
+  test("records of the generated classes read back as they were written"):
+    assertEquals(roundTrip(order), Right(order))
+    assertEquals(roundTrip(Link(1, Some(Link(2, None)))), Right(Link(1, Some(Link(2, None)))))
+    assertEquals(roundTrip(example.`type`.List(List("a"), Some("b"))), Right(example.`type`.List(List("a"), Some("b"))))
+    assertEquals(roundTrip(Entry("me", Level.HIGH, Some(5L))), Right(Entry("me", Level.HIGH, Some(5L))))
+    Status.values.foreach(status => assertEquals(roundTrip(status), Right(status)))
+
+  test("names Scala keeps for itself are renamed in Scala and keep their Avro names in the schema"):
+    assert(Order.avroSchema.contains("\"name\":\"copy\""), Order.avroSchema)
+    assert(Status.avroSchema.contains("\"symbols\":[\"NEW\",\"PAID\",\"type\",\"values\"]"), Status.avroSchema)
+    assertEquals(Status.values.toList, List(Status.NEW, Status.PAID, Status.`type`, Status.values_))
+    assertEquals(AvroCodec[Status].encode(Status.values_).map(_.toString), Right("Enum(FullName(Some(example.shop),Status),values)"))

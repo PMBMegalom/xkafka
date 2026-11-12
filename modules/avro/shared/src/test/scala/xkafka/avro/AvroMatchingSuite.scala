@@ -35,6 +35,15 @@ final case class Visit(
     pages: Int = 1
 ) derives AvroCodec
 
+final case class Link(value: Int, next: Option[Link])
+
+object Link:
+  val avroSchema: String =
+    """{"type": "record", "name": "Link", "namespace": "xkafka.avro",
+      | "fields": [{"name": "value", "type": "int"}, {"name": "next", "type": ["null", "Link"]}]}""".stripMargin
+
+  given AvroCodec[Link] = AvroCodec.derived[Link].matching(avroSchema)
+
 /** Codecs that must have the schema of the file their type was generated from. */
 class AvroMatchingSuite extends CatsEffectSuite:
   private val base     = "http://registry:8081"
@@ -98,6 +107,14 @@ class AvroMatchingSuite extends CatsEffectSuite:
         | {"type": "record", "name": "Cash", "fields": [{"name": "cents", "type": "long"}]},
         | {"type": "record", "name": "Card", "fields": [{"name": "number", "type": "string"}]}]}]}""".stripMargin
     assertEquals(AvroCodec[Paid].matching(paid).mismatch, None)
+
+  test("a type that holds itself matches its file, with its codec given in its companion as generated code gives it"):
+    for
+      client  <- registry
+      serde   <- AvroSerde.of[IO, Link](client, Part.Value)
+      written <- serde.serializer.serialize(topic, Headers.empty, Link(1, Some(Link(2, None))))
+      read    <- serde.deserializer.deserialize(topic, Headers.empty, written)
+    yield assertEquals(read, Link(1, Some(Link(2, None))))
 
   test("a codec whose schema is another fails to make serdes, saying how the two differ"):
     given AvroCodec[Visit] = AvroCodec.derived[Visit].matching(file.replace("\"default\": 1", "\"default\": 2"))

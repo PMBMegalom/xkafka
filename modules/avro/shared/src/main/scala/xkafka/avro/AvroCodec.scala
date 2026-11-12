@@ -60,9 +60,10 @@ trait AvroCodec[A]:
     * `RegistryException.NoSchema` where its schema is another, and say how.
     */
   final def matching(text: String): AvroCodec[A] =
-    // Rendered, each named type is defined where it is first used and named after, as a file may name it, so the two compare as text.
-    val own     = AvroSchemaJson.render(schema)
-    val problem =
+    // Rendered, each named type is defined where it is first used and named after, as a file may name it, so the two compare as text. They are
+    // compared once a serde asks, since a type that holds itself has no schema yet while its codec is being made.
+    lazy val problem =
+      val own = AvroSchemaJson.render(schema)
       AvroSchemaJson.parse(text).map(AvroSchemaJson.render) match
         case Left(error)                        => Some(s"the schema to match cannot be read: $error")
         case Right(declared) if declared == own => None

@@ -1,0 +1,3 @@
+{"type": "record", "name": "List", "namespace": "example.type",
+ "fields": [{"name": "items", "type": {"type": "array", "items": "string"}, "default": []},
+            {"name": "String", "type": ["null", "string"], "default": null}]}
