@@ -161,6 +161,23 @@ static int xkafka_take_security_error(rd_kafka_t *client,
         return found;
 }
 
+/* Whether a failure is the client giving up on reaching the brokers, which a
+ * recorded security failure explains. Any other failure is its own, however
+ * long ago a handshake or login failed. */
+static int xkafka_unreached(rd_kafka_resp_err_t err) {
+        switch (err) {
+        case RD_KAFKA_RESP_ERR__MSG_TIMED_OUT:
+        case RD_KAFKA_RESP_ERR__TIMED_OUT:
+        case RD_KAFKA_RESP_ERR__TRANSPORT:
+        case RD_KAFKA_RESP_ERR__ALL_BROKERS_DOWN:
+        case RD_KAFKA_RESP_ERR__AUTHENTICATION:
+        case RD_KAFKA_RESP_ERR__SSL:
+                return 1;
+        default:
+                return 0;
+        }
+}
+
 static int xkafka_conf_set(rd_kafka_conf_t *conf,
                            const char *name,
                            const char *value,
@@ -450,11 +467,11 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
 
         /* A delivery report that never reached a broker reports the retries
          * ending, so a recorded security failure is the cause. */
-        if (!batch->security_read) {
+        if (xkafka_unreached(err) && !batch->security_read) {
                 batch->security_read = 1;
                 xkafka_take_security_error(producer, batch->security_message, sizeof(batch->security_message), &batch->security_error);
         }
-        if (batch->security_error != 0)
+        if (xkafka_unreached(err) && batch->security_error != 0)
                 xkafka_set_error_at(error, error_size, error_code, batch->security_message, batch->security_error);
         else
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);
@@ -786,7 +803,7 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                 return NULL;
         }
         if (message->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                if (!xkafka_take_security_error(consumer, error, error_size, error_code))
+                if (!xkafka_unreached(message->err) || !xkafka_take_security_error(consumer, error, error_size, error_code))
                         xkafka_set_error_at(error, error_size, error_code,
                                             rd_kafka_message_errstr(message), message->err);
                 rd_kafka_message_destroy(message);
@@ -1036,8 +1053,8 @@ void *xkafka_consumer_committed(rd_kafka_t *consumer,
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size, error_code,
-                                         rd_kafka_err2str(entry->err));
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(entry->err), entry->err);
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return NULL;
                 }
@@ -1090,8 +1107,8 @@ int xkafka_consumer_position(rd_kafka_t *consumer,
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size, error_code,
-                                         rd_kafka_err2str(entry->err));
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(entry->err), entry->err);
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return -1;
                 }
@@ -1144,8 +1161,8 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size, error_code,
-                                         rd_kafka_err2str(entry->err));
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(entry->err), entry->err);
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return -1;
                 }

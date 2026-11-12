@@ -41,5 +41,11 @@ private[xkafka] object MockCluster:
   /** Kafka's `OffsetFetch` API, which reads a group's committed offsets. */
   val OffsetFetch = 9
 
+  /** Kafka's `ListOffsets` API, which finds offsets by time. */
+  val ListOffsets = 2
+
+  /** Kafka's `TOPIC_AUTHORIZATION_FAILED` error. */
+  val TopicAuthorizationFailed = 29
+
   /** Kafka's `NOT_COORDINATOR` error. */
   val NotCoordinator = 16
