@@ -908,22 +908,22 @@ lazy val protobufScalapb = crossProject(JVMPlatform, JSPlatform, NativePlatform)
 lazy val xkafkaSmithy4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/smithy4s"))
   .enablePlugins(Smithy4sCodegenPlugin)
-  .dependsOn(jsonSchema % "compile->compile;test->test")
+  .dependsOn(jsonSchema % "compile->compile;test->test", protobuf % "compile->compile;test->test")
   .settings(commonSettings)
   .settings(Smithy4sCodegenPlugin.defaultSettings(Test))
   .settings(
     name                := "xkafka-smithy4s",
     description         := "Types smithy4s generates, written and read by smithy4s with the schemas a schema registry keeps",
     tlVersionIntroduced := Map("3" -> "0.8.0"),
-    libraryDependencies += "com.disneystreaming.smithy4s" %%% "smithy4s-json" % smithy4sVersion.value,
-    Test / smithy4sInputDirs                               := Seq((ThisBuild / baseDirectory).value / "modules/smithy4s/shared/src/test/smithy"),
+    libraryDependencies ++= Seq("json", "protobuf").map(module => "com.disneystreaming.smithy4s" %%% s"smithy4s-$module" % smithy4sVersion.value),
+    Test / smithy4sInputDirs := Seq((ThisBuild / baseDirectory).value / "modules/smithy4s/shared/src/test/smithy"),
     // The code smithy4s generates is not held to xkafka's warnings.
     Test / scalacOptions += "-Wconf:src=src_managed/.*:s"
   )
-  // Confluent's JSON Schema serializer, which validates values against schemas, runs on the JVM alone.
+  // Confluent's JSON Schema and Protobuf serializers, which check values and files against schemas, run on the JVM alone.
   .jvmSettings(
     resolvers += "Confluent" at "https://packages.confluent.io/maven/",
-    libraryDependencies += "io.confluent" % "kafka-json-schema-serializer" % confluentVersion % Test
+    libraryDependencies ++= Seq("json-schema", "protobuf").map(format => "io.confluent" % s"kafka-$format-serializer" % confluentVersion % Test)
   )
 
 // vulcan, and the Apache Avro it writes with, run on the JVM alone.
