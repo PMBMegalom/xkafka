@@ -153,39 +153,40 @@ private[protobuf] final class Dynamic(pool: Pool):
               case other                            => Left(s"expected a value of $full, found $other")
       case (expected, other) => Left(s"expected a value of ${expected.toString.toLowerCase}, found $other")
 
-  def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] =
-    described(full).flatMap: (message, _) =>
-      ProtobufWire.fields(bytes).flatMap: read =>
-        val byNumber = read.groupMap(_._1)(_._2)
-        val numbers  = message.fields.map(_.number).toSet
-        val unknown  = read.collect { case (number, raw) if !numbers.contains(number) => UnknownField(number, ProtobufWire.field(number, raw)) }
-        message.fields.flatTraverse: field =>
-          readField(full, field, byNumber.getOrElse(field.number, Vector.empty))
-            .bimap(reason => s"field ${field.name} of $full: $reason", _.map(field.name -> _).toList)
-        .map(fields => ProtobufValue.Message(full, fields.toVector, unknown))
+  def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] = decode(full, bytes, 0)
+
+  /** A message inside as many others as `depth` says, refused at `ProtobufWire.MaxDepth`, so that no record runs the stack out. */
+  private def decode(full: String, bytes: Chunk[Byte], depth: Int): Either[String, ProtobufValue.Message] =
+    if depth >= ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    else
+      described(full).flatMap: (message, _) =>
+        ProtobufWire.fields(bytes).flatMap: read =>
+          val byNumber = read.groupMap(_._1)(_._2)
+          val numbers  = message.fields.map(_.number).toSet
+          val unknown  = read.collect { case (number, raw) if !numbers.contains(number) => UnknownField(number, ProtobufWire.field(number, raw)) }
+          message.fields.flatTraverse: field =>
+            readField(full, field, byNumber.getOrElse(field.number, Vector.empty), depth + 1)
+              .bimap(reason => s"field ${field.name} of $full: $reason", _.map(field.name -> _).toList)
+          .map(fields => ProtobufValue.Message(full, fields.toVector, unknown))
 
   /** A field's value from what was written under its number; none where it is absent and records presence. */
-  private def readField(scope: String, field: Field, found: Vector[Raw]): Either[String, Option[ProtobufValue]] =
+  private def readField(scope: String, field: Field, found: Vector[Raw], depth: Int): Either[String, Option[ProtobufValue]] =
     field.fieldType match
       case FieldType.Map(key, item) => found.traverse:
           case Raw.Bytes(entry) => ProtobufWire.fields(entry).flatMap: fields =>
               def at(number: Int): Option[Raw] = fields.collect { case (`number`, raw) => raw }.lastOption
-              (at(1).fold(zeroOf(scope, key))(take(scope, key, _)), at(2).fold(zeroOf(scope, item))(take(scope, item, _))).tupled
+              (at(1).fold(zeroOf(scope, key))(take(scope, key, _, depth)), at(2).fold(zeroOf(scope, item))(take(scope, item, _, depth))).tupled
           case _ => Left("expected a map's entry")
-        .map(entries =>
-          Some(
-            ProtobufValue
-              .Map(entries.foldLeft(Vector.empty[(ProtobufValue, ProtobufValue)])((kept, entry) => kept.filterNot(_._1 == entry._1) :+ entry))
-          )
-        )
+        // Of two entries with one key, the later is read, in its place.
+        .map(entries => Some(ProtobufValue.Map(entries.reverse.distinctBy(_._1).reverse)))
       case fieldType if field.label == Label.Repeated =>
         found.flatTraverse:
           case Raw.Bytes(packed) if packable(scope, fieldType) =>
-            ProtobufWire.packed(packed, wireOf(fieldType)).flatMap(_.traverse(take(scope, fieldType, _)))
-          case raw => take(scope, fieldType, raw).map(Vector(_))
+            ProtobufWire.packed(packed, wireOf(fieldType)).flatMap(_.traverse(take(scope, fieldType, _, depth)))
+          case raw => take(scope, fieldType, raw, depth).map(Vector(_))
         .map(values => Some(ProtobufValue.List(values)))
       case fieldType => found.lastOption match
-          case Some(raw) => take(scope, fieldType, raw).map(Some(_))
+          case Some(raw) => take(scope, fieldType, raw, depth).map(Some(_))
           // A message has presence of its own, even in a field without a label.
           case None if field.label == Label.Implicit && !message(scope, fieldType) => zeroOf(scope, fieldType).map(Some(_))
           case None                                                                => Right(None)
@@ -214,17 +215,18 @@ private[protobuf] final class Dynamic(pool: Pool):
       case FieldType.String      => Right(ProtobufValue.String(""))
       case FieldType.Bytes       => Right(ProtobufValue.Bytes(Chunk.empty))
       case FieldType.Named(name) => pool.resolve(scope, name).flatMap:
-          case Left(_)     => take(scope, fieldType, Raw.Varint(0))
+          case Left(_)     => take(scope, fieldType, Raw.Varint(0), 0)
           case Right(full) => Left(s"a message $full has presence, so it has no zero")
       case scalar => take(
           scope,
           scalar,
           if wireOf(scalar) == ProtobufWire.Fixed64Type then Raw.Fixed64(0)
           else if wireOf(scalar) == ProtobufWire.Fixed32Type then Raw.Fixed32(0)
-          else Raw.Varint(0)
+          else Raw.Varint(0),
+          0
         )
 
-  private def take(scope: String, fieldType: FieldType, raw: Raw): Either[String, ProtobufValue] =
+  private def take(scope: String, fieldType: FieldType, raw: Raw, depth: Int): Either[String, ProtobufValue] =
     (fieldType, raw) match
       case (FieldType.Double, Raw.Fixed64(bits))    => Right(ProtobufValue.Double(java.lang.Double.longBitsToDouble(bits)))
       case (FieldType.Float, Raw.Fixed32(bits))     => Right(ProtobufValue.Float(java.lang.Float.intBitsToFloat(bits)))
@@ -243,7 +245,7 @@ private[protobuf] final class Dynamic(pool: Pool):
       case (FieldType.Bytes, Raw.Bytes(bytes))      => Right(ProtobufValue.Bytes(bytes))
       case (FieldType.Named(name), _)               => pool.resolve(scope, name).flatMap:
           case Right(full) => raw match
-              case Raw.Bytes(bytes) => decode(full, bytes)
+              case Raw.Bytes(bytes) => decode(full, bytes, depth)
               case _                => Left(s"expected a message $full, found another wire type")
           case Left((_, enumerated)) => raw match
               case Raw.Varint(value) => Right(

@@ -95,6 +95,20 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
     val bytes = Chunk.array("""{"n":9007199254740993}""".getBytes("UTF-8"))
     assertEquals(JsonSchemaFormat.read(bytes).flatMap(JsonSchemaCodec[Big].decode), Right(Big(9007199254740993L)))
 
+  test("records nested deeper than the limit are refused, not read until the stack runs out"):
+    val nested = Chunk.array(("[" * 1000 + "]" * 1000).getBytes("UTF-8"))
+    assertEquals(JsonSchemaFormat.read(nested), Left(s"the record is nested more than ${JsonSchemaFormat.MaxDepth} deep"))
+    val format  = JsonSchemaFormat[Node]
+    val deepest = (1 until JsonSchemaFormat.MaxDepth).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    val read    =
+      for
+        write <- format.writer(format.schema)
+        read  <- format.reader(format.schema)
+        bytes <- write(deepest)
+        value <- read(bytes)
+      yield value
+    assertEquals(read, Right(deepest))
+
   test("a case class is a closed object of its fields, those without a default required"):
     assertEquals(
       JsonSchemaCodec[Line].schema,

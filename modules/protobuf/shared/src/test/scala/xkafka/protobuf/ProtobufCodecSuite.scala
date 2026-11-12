@@ -339,6 +339,15 @@ class ProtobufCodecSuite extends CatsEffectSuite:
     assertEquals(ProtobufCodec[Zigzag.Delta].encode(Zigzag.Delta(-1)), Right(bytes(0x08, 1)))
     assertEquals(ProtobufCodec[Zigzag.Delta].decode(bytes(0x08, 3)), Right(Zigzag.Delta(-2)))
 
+  test("messages nested deeper than the limit are refused, not read until the stack runs out"):
+    val nested = (1 to ProtobufWire.MaxDepth).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(2, Raw.Bytes(inner)))
+    assert(
+      ProtobufCodec[Node].decode(nested).left.exists(_.endsWith(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")),
+      ProtobufCodec[Node].decode(nested).left.map(_.takeRight(80))
+    )
+    val deepest = (1 until ProtobufWire.MaxDepth).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    assertEquals(ProtobufCodec[Node].encode(deepest).flatMap(ProtobufCodec[Node].decode), Right(deepest))
+
   test("a type that holds itself is a message whose field names it"):
     assert(schema(ProtobufCodec[Node]).contains("message Node {\n  int32 value = 1;\n  Node next = 2;\n}"))
     val node = Node(1, Some(Node(2, Some(Node(3)))))

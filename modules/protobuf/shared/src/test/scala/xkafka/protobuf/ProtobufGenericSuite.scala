@@ -24,6 +24,8 @@ package xkafka.protobuf
 import java.time.{Instant, LocalDate}
 import java.util.UUID
 
+import scala.concurrent.duration.*
+
 import cats.data.NonEmptyList
 import cats.effect.IO
 import fs2.Chunk
@@ -248,10 +250,33 @@ class ProtobufGenericSuite extends CatsEffectSuite:
     assertEquals(codecs.decode("com.example.shop.Order", written), Right(value))
     assert(written.toList.containsSlice(List[Byte](0x30, 1, 0x30, 2)), "counts are not packed, as the file says")
 
-  test("of two map entries with one key, the later is read"):
-    val entry = (value: Int) => Chunk[Byte](0x22, 5, 0x0a, 1, 'k', 0x10, value.toByte)
-    val read  = dynamic(shopFile).decode("com.example.shop.Order", entry(1) ++ entry(2)).fold(fail(_), identity)
-    assertEquals(read.field("tags"), Some(ProtobufValue.Map(Vector(ProtobufValue.String("k") -> ProtobufValue.Int64(2)))))
+  test("many map entries are read in time proportional to their number"):
+    val entry =
+      (key: Int) =>
+        ProtobufWire
+          .field(4, Raw.Bytes(ProtobufWire.field(1, Raw.Bytes(Chunk.array(key.toString.getBytes("UTF-8")))) ++ ProtobufWire.field(2, Raw.Varint(1))))
+    val entries = Chunk.concat((0 until 100000).map(entry)).compact
+    IO(dynamic(shopFile).decode("com.example.shop.Order", entries)).timeout(20.seconds).map: read =>
+      assertEquals(read.map(_.field("tags").collect { case ProtobufValue.Map(all) => all.size }), Right(Some(100000)))
+
+  test("of map entries with one key, the later is read, in the order of the later ones"):
+    val entry = (key: Char, value: Int) => Chunk[Byte](0x22, 5, 0x0a, 1, key.toByte, 0x10, value.toByte)
+    val read  = dynamic(shopFile).decode("com.example.shop.Order", entry('a', 1) ++ entry('b', 2) ++ entry('a', 3)).fold(fail(_), identity)
+    assertEquals(
+      read.field("tags"),
+      Some(ProtobufValue.Map(Vector(ProtobufValue.String("b") -> ProtobufValue.Int64(2), ProtobufValue.String("a") -> ProtobufValue.Int64(3))))
+    )
+
+  test("messages nested deeper than the limit are refused, not read until the stack runs out"):
+    val list   = dynamic(parsed("syntax = \"proto3\"; package p; message N { N next = 1; }"))
+    val nested = (1 to ProtobufWire.MaxDepth).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
+    assert(list.decode("p.N", nested).left.exists(_.endsWith(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")))
+    val within = (1 until ProtobufWire.MaxDepth).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
+    assert(list.decode("p.N", within).isRight)
+
+  test("a number in a file that is not one is refused, saying where"):
+    assert(ProtobufSchemaText.parse("message A { int32 a = 0x; }").isLeft)
+    assert(ProtobufSchemaText.parse("message A { int32 a = 0xZZ; }").isLeft)
 
   test("a value that does not fit its message is refused, saying why"):
     val codecs                                                                 = dynamic(shopFile)

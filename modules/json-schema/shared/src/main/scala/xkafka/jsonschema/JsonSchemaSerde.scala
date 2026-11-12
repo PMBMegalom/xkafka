@@ -37,6 +37,9 @@ final case class JsonSchemaWritten(schema: Json, value: Json)
   * field it lacks takes its default, and properties the codec does not know are ignored.
   */
 object JsonSchemaFormat:
+  /** How deep a record's arrays and objects may be nested before it is refused instead of read. */
+  private[jsonschema] val MaxDepth = 100
+
   def apply[A](using codec: JsonSchemaCodec[A]): SchemaFormat[A] =
     new SchemaFormat[A]:
       override val schema: Schema             = Schema(codec.schema.noSpaces, SchemaType.Json)
@@ -55,6 +58,21 @@ object JsonSchemaFormat:
 
   private[jsonschema] def read(bytes: Chunk[Byte]): Either[String, Json] =
     jawn.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).leftMap(error => s"the record is not JSON: ${error.message}")
+      .filterOrElse(shallow, s"the record is nested more than $MaxDepth deep")
+
+  /** Whether no array or object in `json` is inside `MaxDepth` others, found without recursion, so that no record runs the stack out. */
+  private def shallow(json: Json): Boolean =
+    @scala.annotation.tailrec
+    def within(pending: List[(Json, Int)]): Boolean =
+      pending match
+        case Nil                        => true
+        case (value, enclosing) :: rest =>
+          val inner = value.asArray.map(_.toList).orElse(value.asObject.map(_.values.toList))
+          inner match
+            case None                             => within(rest)
+            case Some(_) if enclosing >= MaxDepth => false
+            case Some(values)                     => within(values.map(_ -> (enclosing + 1)) ++ rest)
+    within(List(json -> 0))
 
 /** Serdes writing and reading JSON with the schemas the registry keeps, in Confluent's wire format, as Confluent's `KafkaJsonSchemaSerializer` does:
   * the schema's id, then the JSON as UTF-8 text.

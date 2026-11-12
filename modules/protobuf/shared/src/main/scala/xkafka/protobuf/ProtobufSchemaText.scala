@@ -182,7 +182,7 @@ object ProtobufSchemaText:
         peek(start) match
           case Some(Token.Number(digits)) =>
             val value =
-              if digits.startsWith("0x") || digits.startsWith("0X") then BigInt(digits.drop(2), 16).some
+              if digits.startsWith("0x") || digits.startsWith("0X") then scala.util.Try(BigInt(digits.drop(2), 16)).toOption
               else if digits.length > 1 && digits.startsWith("0") then scala.util.Try(BigInt(digits.drop(1), 8)).toOption
               else scala.util.Try(BigInt(digits)).toOption
             value.map(number => if negative then -number else number).filter(_.isValidInt) match

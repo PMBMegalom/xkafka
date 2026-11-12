@@ -35,6 +35,9 @@ private[protobuf] enum Raw:
 
 /** Protobuf's encoding: each field as its number and wire type, then its value as a varint, little-endian fixed bytes or length-prefixed bytes. */
 private[protobuf] object ProtobufWire:
+  /** How deep messages may hold messages before a record is refused instead of read, as protobuf-java's default limit. */
+  val MaxDepth: Int = 100
+
   val VarintType: Int  = 0
   val Fixed64Type: Int = 1
   val BytesType: Int   = 2

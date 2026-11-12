@@ -1060,6 +1060,10 @@ Failures are `RegistryException`s:
 | `Unserializable` | a value could not be written, or a record read, with its schema |
 | `NoSchema` | your type has no schema in the serde's format, as a list of lists has none in Protobuf |
 
+A record nested more than 100 deep, such as a list of 101 nodes that each hold
+the next, is also `Unserializable`, in every format. So is an Avro record whose
+arrays or maps claim more items than its bytes can hold.
+
 Settings the registry client refuses raise `InvalidRegistrySetting`, and a
 record without a value raises `Deserializer.NullValueException` (see
 [Writing and reading records](#writing-and-reading-records)).
