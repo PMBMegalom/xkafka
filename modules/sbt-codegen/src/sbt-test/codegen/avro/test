@@ -1,0 +1,18 @@
+# The classes are generated from src/main/avro, and a program writes and reads them with their codecs.
+> run
+> elsewhere/run
+
+# A changed schema is generated again.
+$ copy-file changes/visit.avsc src/main/avro/visit.avsc
+$ copy-file changes/Main.scala src/main/scala/Main.scala
+$ delete src/main/avro/audit.avdl
+> run
+
+# A schema the generator refuses fails the build.
+$ copy-file changes/broken.avsc src/main/avro/broken.avsc
+-> compile
+$ delete src/main/avro/broken.avsc
+
+# With no schemas left, nothing is generated, so the program no longer compiles.
+$ delete src/main/avro/visit.avsc
+-> compile

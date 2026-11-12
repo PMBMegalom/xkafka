@@ -23,18 +23,30 @@ package xkafka.codegen
 
 import java.nio.file.{Files, Path}
 
-import cats.effect.{ExitCode, IO, IOApp}
+import scala.jdk.CollectionConverters.*
+
+import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
 
-/** Writes the Scala sources of Avro schemas: the first argument is the directory they go in, the others the .avsc and .avdl files. */
+/** Writes the Scala sources of Avro schemas: the first argument is the directory they go in, the others .avsc and .avdl files, or directories whose
+  * .avsc and .avdl files, at any depth, are read.
+  */
 object Main extends IOApp:
   override def run(arguments: List[String]): IO[ExitCode] =
     arguments match
-      case output :: files if files.nonEmpty =>
-        AvroGenerator.generate(files.map(Path.of(_))) match
+      case output :: inputs if inputs.nonEmpty =>
+        inputs.flatTraverse(input => schemas(Path.of(input))).flatMap(files => IO.blocking(AvroGenerator.generate(files))).flatMap:
           case Left(problems) => problems.traverse_(problem => IO.consoleForIO.errorln(problem)).as(ExitCode.Error)
           case Right(sources) => sources.traverse_(source => write(Path.of(output).resolve(source.path), source.text)).as(ExitCode.Success)
-      case _ => IO.consoleForIO.errorln("usage: xkafka-codegen <output directory> <.avsc or .avdl files>").as(ExitCode.Error)
+      case _ => IO.consoleForIO.errorln("usage: xkafka-codegen <output directory> <.avsc and .avdl files, or directories of them>").as(ExitCode.Error)
+
+  /** `input`, a file, or the .avsc and .avdl files in `input`, a directory, in the order of their paths. */
+  private def schemas(input: Path): IO[List[Path]] =
+    IO.blocking(Files.isDirectory(input)).ifM(
+      Resource.fromAutoCloseable(IO.blocking(Files.walk(input))).use: paths =>
+        IO.blocking(paths.iterator.asScala.filter(path => path.toString.endsWith(".avsc") || path.toString.endsWith(".avdl")).toList.sorted),
+      IO.pure(List(input))
+    )
 
   private def write(path: Path, text: String): IO[Unit] =
     IO.blocking(Files.createDirectories(path.getParent)) *> IO.blocking(Files.writeString(path, text)).void

@@ -86,6 +86,17 @@ class GeneratedAvroSuite extends FunSuite:
     assertEquals(defaults.local, LocalDateTime.of(2023, 11, 14, 22, 13, 20))
     assertEquals((defaults.`type`, defaults.copy_), ("keyword", 2))
 
+  test("times and timestamps of every precision are generated with the codec of their precision, and their defaults"):
+    import example.times.{Defaults, Nanos}
+    registers[Defaults](Defaults.avroSchema)
+    registers[Nanos](Nanos.avroSchema)
+    assertEquals(Defaults().time, LocalTime.ofNanoOfDay(1000001000L))
+    assertEquals(Defaults().at, Instant.ofEpochMilli(1700000000001L))
+    assertEquals(Defaults().local, LocalDateTime.of(2023, 11, 14, 22, 13, 20, 1000))
+    assertEquals(Nanos().at, Instant.ofEpochSecond(1700000000L, 1L))
+    assertEquals(roundTrip(Nanos(Instant.ofEpochSecond(5, 7))), Right(Nanos(Instant.ofEpochSecond(5, 7))))
+    assertEquals(roundTrip(Defaults()), Right(Defaults()))
+
   test("records of the generated classes read back as they were written"):
     assertEquals(roundTrip(order), Right(order))
     assertEquals(roundTrip(Link(1, Some(Link(2, None)))), Right(Link(1, Some(Link(2, None)))))

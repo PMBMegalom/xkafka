@@ -136,11 +136,11 @@ jobs:
 
       - name: Make target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-        run: mkdir -p modules/protobuf/native/target modules/schema-registry-http4s/js/target modules/protobuf-scalapb/native/target modules/avro/js/target modules/client/native/target modules/protobuf/js/target modules/streams-http4s/.native/target modules/codegen/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/json-schema/js/target modules/kernel/.js/target modules/streams-java/target modules/protobuf-scalapb/jvm/target modules/protobuf-scalapb/js/target modules/schema-registry-http4s/native/target modules/streams-http4s/.jvm/target modules/streams-http4s/.js/target modules/kernel/.native/target modules/avro/jvm/target modules/schema-registry-http4s/jvm/target modules/json-schema/jvm/target modules/json-schema/native/target modules/protobuf/jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target modules/avro/native/target project/target
+        run: mkdir -p modules/protobuf/native/target modules/schema-registry-http4s/js/target modules/protobuf-scalapb/native/target modules/avro/js/target modules/client/native/target modules/protobuf/js/target modules/sbt-codegen/target modules/streams-http4s/.native/target modules/codegen/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/json-schema/js/target modules/kernel/.js/target modules/streams-java/target modules/protobuf-scalapb/jvm/target modules/protobuf-scalapb/js/target modules/schema-registry-http4s/native/target modules/streams-http4s/.jvm/target modules/streams-http4s/.js/target modules/kernel/.native/target modules/avro/jvm/target modules/schema-registry-http4s/jvm/target modules/json-schema/jvm/target modules/json-schema/native/target modules/protobuf/jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target modules/avro/native/target project/target
 
       - name: Compress target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-        run: tar cf targets.tar modules/protobuf/native/target modules/schema-registry-http4s/js/target modules/protobuf-scalapb/native/target modules/avro/js/target modules/client/native/target modules/protobuf/js/target modules/streams-http4s/.native/target modules/codegen/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/json-schema/js/target modules/kernel/.js/target modules/streams-java/target modules/protobuf-scalapb/jvm/target modules/protobuf-scalapb/js/target modules/schema-registry-http4s/native/target modules/streams-http4s/.jvm/target modules/streams-http4s/.js/target modules/kernel/.native/target modules/avro/jvm/target modules/schema-registry-http4s/jvm/target modules/json-schema/jvm/target modules/json-schema/native/target modules/protobuf/jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target modules/avro/native/target project/target
+        run: tar cf targets.tar modules/protobuf/native/target modules/schema-registry-http4s/js/target modules/protobuf-scalapb/native/target modules/avro/js/target modules/client/native/target modules/protobuf/js/target modules/sbt-codegen/target modules/streams-http4s/.native/target modules/codegen/target modules/client/js/target modules/schema-registry/.jvm/target modules/client/jvm/target modules/kernel/.jvm/target modules/json-schema/js/target modules/kernel/.js/target modules/streams-java/target modules/protobuf-scalapb/jvm/target modules/protobuf-scalapb/js/target modules/schema-registry-http4s/native/target modules/streams-http4s/.jvm/target modules/streams-http4s/.js/target modules/kernel/.native/target modules/avro/jvm/target modules/schema-registry-http4s/jvm/target modules/json-schema/jvm/target modules/json-schema/native/target modules/protobuf/jvm/target modules/schema-registry/.native/target modules/schema-registry/.js/target modules/avro/native/target project/target
 
       - name: Upload target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
@@ -152,7 +152,7 @@ jobs:
 
   publish:
     name: Publish Artifacts
-    needs: [build, integration, streams-integration, native-leaks, js-leaks, npm-publish, npm-publish-rocksdb]
+    needs: [build, integration, streams-integration, native-leaks, js-leaks, sbt-plugin, npm-publish, npm-publish-rocksdb]
     if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
     strategy:
       matrix:
@@ -760,6 +760,39 @@ jobs:
 
       - name: Check the Native downstream application for leaks
         run: scripts/native-leak-check.sh
+
+  sbt-plugin:
+    name: sbt plugin
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+        java: [temurin@17]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout current branch (full)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Setup Java (temurin@17)
+        id: setup-java-temurin-17
+        if: matrix.java == 'temurin@17'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: sbt
+
+      - name: sbt update
+        if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
+        run: sbt +update
+
+      - name: Generate Avro classes in a build on sbt 1 and on sbt 2
+        run: sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'
 
   js-leaks:
     name: Scala.js leak check

@@ -376,6 +376,21 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "sbt-plugin",
+  name = "sbt plugin",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    WorkflowStep.Run(
+      List("sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'"),
+      name = Some("Generate Avro classes in a build on sbt 1 and on sbt 2")
+    )
+  ),
+  oses = List("ubuntu-24.04"),
+  scalas = Nil,
+  javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(30)
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   id = "js-leaks",
   name = "Scala.js leak check",
   steps = githubWorkflowJobSetup.value.toList ++ List(
@@ -443,7 +458,7 @@ def uploadsArtifact(ref: UseRef): Boolean = ref match {
 
 // sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
-val publishWaitsFor = List("integration", "streams-integration", "native-leaks", "js-leaks", "npm-publish", "npm-publish-rocksdb")
+val publishWaitsFor = List("integration", "streams-integration", "native-leaks", "js-leaks", "sbt-plugin", "npm-publish", "npm-publish-rocksdb")
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
     if (job.id == "publish")
@@ -1175,7 +1190,49 @@ lazy val codegen = project
     name                := "xkafka-codegen",
     description         := "Scala sources generated from Avro schemas, for xkafka",
     tlVersionIntroduced := Map("3" -> "0.8.0"),
-    libraryDependencies ++= Seq("org.apache.avro" % "avro" % apacheAvroVersion, "org.apache.avro" % "avro-idl" % apacheAvroVersion)
+    libraryDependencies ++= Seq(
+      "org.apache.avro" % "avro"     % apacheAvroVersion,
+      "org.apache.avro" % "avro-idl" % apacheAvroVersion,
+      // Apache Avro logs through SLF4J, which otherwise says it has nowhere to log; the generator says what it has to say itself.
+      "org.slf4j" % "slf4j-nop" % slf4jVersion
+    ),
+    // So that a launcher such as Coursier's runs the generator from its jar.
+    Compile / packageBin / packageOptions += Package.MainClass("xkafka.codegen.Main")
+  )
+
+// The sbt plugin that runs xkafka-codegen where a build compiles, for sbt 1, whose plugins are in Scala 2.12, and sbt 2, whose plugins are in Scala 3.
+lazy val sbtCodegen = project
+  .in(file("modules/sbt-codegen"))
+  .enablePlugins(SbtPlugin)
+  .settings(
+    name                          := "sbt-xkafka-codegen",
+    description                   := "Scala classes generated from Avro schemas by xkafka-codegen, where sbt compiles",
+    headerLicense                 := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
+    scalaVersion                  := "2.12.21",
+    crossScalaVersions            := Seq("2.12.21", "3.8.4"),
+    pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.0.12"),
+    tlVersionIntroduced           := Map("2.12" -> "0.8.0", "3" -> "0.8.0"),
+    // The scripted builds run on the newest sbt of each major version, with this build's xkafka-codegen and xkafka-avro published locally.
+    scriptedSbt := (if (scalaBinaryVersion.value == "2.12") "1.13.1" else "2.0.12"),
+    scriptedLaunchOpts ++= Seq("-Xmx2g", s"-Dplugin.version=${version.value}"),
+    scriptedBufferLog    := false,
+    scriptedDependencies := scriptedDependencies
+      .dependsOn(kernel.jvm / publishLocal, schemaRegistry.jvm / publishLocal, avro.jvm / publishLocal, codegen / publishLocal)
+      .value,
+    // The plugin runs the xkafka-codegen of its own version.
+    Compile / sourceGenerators += Def.task {
+      val file = (Compile / sourceManaged).value / "xkafka" / "sbtcodegen" / "PluginVersion.scala"
+      IO.write(
+        file,
+        s"""package xkafka.sbtcodegen
+
+private[sbtcodegen] object PluginVersion {
+  val value = "${version.value}"
+}
+"""
+      )
+      Seq(file)
+    }.taskValue
   )
 
 // Classes xkafka-codegen writes from the test schemas while this project compiles, run on every platform. The generator runs in a JVM of its own,
@@ -1189,10 +1246,10 @@ lazy val codegenTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .settings(
     Compile / sourceGenerators += Def.task {
       val output  = (Compile / sourceManaged).value / "xkafka-codegen"
-      val schemas = ((ThisBuild / baseDirectory).value / "modules/codegen-tests/shared/src/main/avro" ** ("*.avsc" || "*.avdl")).get.sorted
+      val schemas = (ThisBuild / baseDirectory).value / "modules/codegen-tests/shared/src/main/avro"
       IO.delete(output)
       new ForkRun(ForkOptions())
-        .run("xkafka.codegen.Main", (codegen / Compile / fullClasspath).value.files, output.toString +: schemas.map(_.toString), streams.value.log)
+        .run("xkafka.codegen.Main", (codegen / Compile / fullClasspath).value.files, Seq(output.toString, schemas.toString), streams.value.log)
         .get
       (output ** "*.scala").get
     }.taskValue
@@ -1253,6 +1310,7 @@ lazy val root =
     protobufScalapb,
     codegen,
     codegenTests,
+    sbtCodegen,
     streamsHttp4s,
     streamsJava
   ).settings(name := "xkafka")

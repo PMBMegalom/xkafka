@@ -1,0 +1,2 @@
+{"type": "record", "name": "Visit", "namespace": "example.web", "doc": "A visit",
+ "fields": [{"name": "id", "type": "string"}, {"name": "pages", "type": "int", "default": 1}, {"name": "referrer", "type": ["null", "string"], "default": null}]}

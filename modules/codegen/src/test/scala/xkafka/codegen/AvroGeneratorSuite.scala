@@ -92,7 +92,8 @@ class AvroGeneratorSuite extends FunSuite:
         in,
         "a.avsc" -> record(
           """{"name": "a", "type": {"type": "long", "logicalType": "local-timestamp-nanos"}}""" +
-            """, {"name": "b", "type": ["int", {"type": "bytes", "logicalType": "decimal", "precision": 4, "scale": 1}]}"""
+            """, {"name": "b", "type": ["int", {"type": "bytes", "logicalType": "decimal", "precision": 4, "scale": 1}]}""" +
+            """, {"name": "c", "type": {"type": "fixed", "name": "Money", "size": 8, "logicalType": "decimal", "precision": 10, "scale": 2}}"""
         ),
         "b.avsc" -> """{"type": "record", "name": "T", "namespace": "example", "fields": [
                     |  {"name": "a", "type": {"type": "long", "logicalType": "timestamp-millis"}},
@@ -103,8 +104,10 @@ class AvroGeneratorSuite extends FunSuite:
     assertEquals(
       problems,
       List(
+        "example.Money is a decimal held in a fixed type, which xkafka has no codec for",
         "example.R.a is a local-timestamp-nanos, which xkafka has no codec for; " +
-          "example.R.b has a decimal in a union of several types, which xkafka cannot give a precision there",
+          "example.R.b has a decimal in a union of several types, which xkafka cannot give a precision there; " +
+          "example.R.c is a decimal held in a fixed type, which xkafka has no codec for",
         "example.T has fields of java.time.Instant written with different precisions, which one record cannot hold",
         "example.U has unions of Int | String in different orders, which one record cannot hold"
       )

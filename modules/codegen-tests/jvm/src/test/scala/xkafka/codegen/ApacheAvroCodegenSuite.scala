@@ -42,7 +42,7 @@ class ApacheAvroCodegenSuite extends FunSuite:
   private lazy val declared: Map[String, Schema] =
     val parser = SchemaParser()
     // Read so that the types the order's defaults are of come first.
-    List("line.avsc", "status.avsc", "chain.avsc", "clash.avsc", "order.avsc").map(sources.resolve).foreach(parser.parse)
+    List("line.avsc", "status.avsc", "chain.avsc", "clash.avsc", "times.avsc", "order.avsc").map(sources.resolve).foreach(parser.parse)
     val idl = IdlReader().parse(sources.resolve("audit.avdl")).getNamedSchemas.asScala.values
     (parser.getParsedNamedSchemas.asScala ++ idl).map(schema => schema.getFullName -> schema).toMap
 
@@ -58,6 +58,8 @@ class ApacheAvroCodegenSuite extends FunSuite:
     same[example.`type`.List]("example.type.List")
     same[example.audit.Entry]("example.audit.Entry")
     same[example.audit.Level]("example.audit.Level")
+    same[example.times.Defaults]("example.times.Defaults")
+    same[example.times.Nanos]("example.times.Nanos")
 
   test("Apache Avro reads a generated class's record with the file's schema"):
     val order =

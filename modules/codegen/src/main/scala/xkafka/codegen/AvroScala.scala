@@ -28,10 +28,12 @@ import xkafka.avro.{AvroField, AvroSchema, AvroSchemaJson, AvroValue, FullName, 
 private[codegen] final class AvroScala(namespace: String, neighbours: Set[String]):
   def source(schema: AvroSchema): Either[String, String] =
     schema match
-      case record: AvroSchema.Record    => recordSource(record)
-      case enumeration: AvroSchema.Enum => enumSource(enumeration)
-      case fixed: AvroSchema.Fixed      => Right(fixedSource(fixed))
-      case other                        => Left(s"${AvroSchemaJson.render(other)} is not a record, an enum or a fixed type")
+      case record: AvroSchema.Record                                   => recordSource(record)
+      case enumeration: AvroSchema.Enum                                => enumSource(enumeration)
+      case fixed: AvroSchema.Fixed                                     => Right(fixedSource(fixed))
+      case AvroSchema.Logical(LogicalType.FixedDecimal(name, _, _, _)) =>
+        Left(s"${name.value} is a decimal held in a fixed type, which xkafka has no codec for")
+      case other => Left(s"${AvroSchemaJson.render(other)} is not a record, an enum or a fixed type")
 
   /** A Scala type and what its codec needs from the companion it is derived in. */
   private final case class Typed(scala: String, unions: List[List[String]], codecs: Map[String, String], decimals: Set[(Int, Int)])
