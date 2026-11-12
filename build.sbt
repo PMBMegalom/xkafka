@@ -904,6 +904,28 @@ lazy val protobufScalapb = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     libraryDependencies += "io.confluent" % "kafka-protobuf-serializer" % confluentVersion % Test
   )
 
+// Types smithy4s generates from Smithy files, written and read by smithy4s's own codecs; the tests' types are generated from shared Smithy files.
+lazy val xkafkaSmithy4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .in(file("modules/smithy4s"))
+  .enablePlugins(Smithy4sCodegenPlugin)
+  .dependsOn(jsonSchema % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(Smithy4sCodegenPlugin.defaultSettings(Test))
+  .settings(
+    name                := "xkafka-smithy4s",
+    description         := "Types smithy4s generates, written and read by smithy4s with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    libraryDependencies += "com.disneystreaming.smithy4s" %%% "smithy4s-json" % smithy4sVersion.value,
+    Test / smithy4sInputDirs                               := Seq((ThisBuild / baseDirectory).value / "modules/smithy4s/shared/src/test/smithy"),
+    // The code smithy4s generates is not held to xkafka's warnings.
+    Test / scalacOptions += "-Wconf:src=src_managed/.*:s"
+  )
+  // Confluent's JSON Schema serializer, which validates values against schemas, runs on the JVM alone.
+  .jvmSettings(
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies += "io.confluent" % "kafka-json-schema-serializer" % confluentVersion % Test
+  )
+
 // vulcan, and the Apache Avro it writes with, run on the JVM alone.
 lazy val avroVulcan = project
   .in(file("modules/avro-vulcan"))
@@ -1353,6 +1375,7 @@ lazy val root =
     protobufScalapb,
     avroVulcan,
     avro4s,
+    xkafkaSmithy4s,
     codegen,
     codegenTests,
     sbtCodegen,
