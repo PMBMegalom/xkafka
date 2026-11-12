@@ -241,6 +241,16 @@ final class MemberSuite extends FunSuite:
       assertEquals(sent(actions(1)).map(_.memberEpoch), List(-1))
       assertEquals(actions(2), List(Done))
 
+  test("abandoning, even while a leave waits for the tasks to be given back, sends epoch -1 at once without them, and is done"):
+    val tasks          = Set(task("0", 0), task("1", 1))
+    val (_, abandoned) = run(joined(tasks), Abandoned, Answered(answer(-1)))
+    assertEquals(sent(abandoned(0)).map(_.memberEpoch), List(-1))
+    assertEquals(abandoned(1), List(Done))
+    val (_, waiting) = run(joined(tasks), Leave, Abandoned)
+    assertEquals(waiting(0), List(Revoke(2, tasks)))
+    assertEquals(sent(waiting(1)).map(_.memberEpoch), List(-1))
+    assertEquals(Member(identity).next(Abandoned)._2, List(Done))
+
   test("leaving while a heartbeat is in flight sends epoch -1 after its answer, ignoring any new assignment"):
     val member       = joined(Set.empty)
     val (_, actions) = run(member, Due, Leave, Answered(answer(2, Some(Set(task("0", 0))))))

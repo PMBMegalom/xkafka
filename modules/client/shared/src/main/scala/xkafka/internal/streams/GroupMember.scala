@@ -56,6 +56,9 @@ private[xkafka] trait GroupMember[F[_]]:
   /** Gives back the active tasks through `changes`, tells the coordinator the member leaves and waits until it has answered. */
   def leave: F[Unit]
 
+  /** Leaves without waiting for the engine to give back its tasks, which it no longer runs, as once it has stopped on a failure. */
+  def abandon: F[Unit]
+
   /** The member's epoch: 0 until the coordinator has taken it in, and again after it was fenced, until it is taken in again. */
   def epoch: F[Int]
 
@@ -119,6 +122,7 @@ private[xkafka] object GroupMember:
       def revoked(round: Long): F[Unit]    = events.offer(MemberEvent.Revoked(round))
       def assigned(round: Long): F[Unit]   = events.offer(MemberEvent.Assigned(round))
       def leave: F[Unit]                   = events.offer(MemberEvent.Leave) *> ended.get.rethrow
+      def abandon: F[Unit]                 = events.offer(MemberEvent.Abandoned) *> ended.get.rethrow
       def epoch: F[Int]                    = current.get.map(_.epoch)
       def reports: Signal[F, Member]       = current
 
@@ -159,6 +163,9 @@ private[xkafka] object GroupMember:
   private def leaving[F[_]](events: Queue[F, MemberEvent], ended: Deferred[F, Either[Throwable, Unit]], timeout: FiniteDuration)(using
       F: Temporal[F]
   ): F[Unit] = events.offer(MemberEvent.Leave) *> F.timeoutTo(ended.get.void, timeout, F.unit)
+
+  /** The longest a heartbeat waits for the task offsets it carries. */
+  private val OffsetsWait: FiniteDuration = 1.second
 
   private final class Loop[F[_]](
       coordinator: Resource[F, Connection[F]],
@@ -211,7 +218,8 @@ private[xkafka] object GroupMember:
         // A joining heartbeat always reports the member's tasks.
         val due = heartbeat.activeTasks.isDefined || member.taskOffsetInterval.exists(interval => at.forall(now - _ >= interval))
         read.filter(_ => due && heartbeat.memberEpoch >= 0).fold(F.pure(heartbeat)): reading =>
-          reading.attempt.flatMap:
+          // Offsets only help the coordinator place tasks, so a heartbeat does not wait long for them, nor for a read it cannot stop.
+          F.timeoutAndForget(reading, OffsetsWait).attempt.flatMap:
             case Right(read @ TaskOffsets(positions, ends)) =>
               val newPositions = Option.when(joining || !last.exists(_.positions == positions))(positions)
               val newEnds      = Option.when(joining || !last.exists(_.ends == ends))(ends)

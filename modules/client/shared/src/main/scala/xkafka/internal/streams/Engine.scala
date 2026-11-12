@@ -351,8 +351,9 @@ private[xkafka] object Engine:
       running <-
         // The tasks still open once the loop has stopped close with the engine, and with them their processors' instances.
         Resource.make(loop.begin(Running(Map.empty, started, started), kept).start): fiber =>
-          member.leave.timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty).flatMap(_.values.toList.traverse_(_.close)) *>
-            stores.getAndSet(Map.empty).flatMap(_.values.toList.flatMap(_.values).traverse_(_.close))
+          // A loop that stopped on a failure gives back no tasks, so the member leaves without waiting for it to.
+          F.race(member.leave, fiber.join *> member.abandon).timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty)
+            .flatMap(_.values.toList.traverse_(_.close)) *> stores.getAndSet(Map.empty).flatMap(_.values.toList.flatMap(_.values).traverse_(_.close))
       querying =
         Querying(
           application,

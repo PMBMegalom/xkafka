@@ -64,7 +64,9 @@ when it raises an error. The internal route only needs to pass the bytes it
 receives to `streams.answer` and send back what it returns.
 
 Keep the internal route away from the outside world: it answers any query, for
-any store.
+any store. `Http4sQueries.routes` answers bytes that are not a query with
+`400 Bad Request`, and a body over `Http4sQueries.MaxQuery` (2 MiB) with
+`413 Payload Too Large`, without reading the rest of it.
 
 ## Asking
 
@@ -164,6 +166,7 @@ older windows are no longer found.
 | `Unreachable(member, reason)` | the member holding it could not be reached, or failed to answer | check that member and your `Forward` |
 | `NotXkafka(member)` | the member holding it answered in a format xkafka does not read | see [Java members](#java-members) |
 | `UnknownStore(store)` | the program has no store of that name of the kind queried | check the store's name, and that it is a key-value, window or session store as queried |
+| `FedByPattern(store)` | a Java member's program fills the store from a pattern of topics, and xkafka cannot tell which members hold it | read the store from Java members with Java's own queries |
 
 A range fails as a whole if any member it needs cannot answer, so you never get
 part of a store without being told.

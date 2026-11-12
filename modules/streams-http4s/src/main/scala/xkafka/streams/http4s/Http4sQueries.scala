@@ -32,6 +32,9 @@ import xkafka.streams.{Endpoint, Forward, KafkaStreams}
   * what they need, and serves a route that answers the queries posted to it.
   */
 object Http4sQueries:
+  /** The largest query the route reads: a key of a record as large as Kafka takes by default, with room to spare. */
+  val MaxQuery: Int = 2 * 1024 * 1024
+
   /** The path queries are posted to, unless another is given. */
   val defaultPath: Uri.Path = Uri.Path.unsafeFromString("/xkafka/query")
 
@@ -47,9 +50,15 @@ object Http4sQueries:
     (member, query) => client.expect[Array[Byte]](Request[F](Method.POST, uri(member, path, scheme)).withEntity(query.toArray)).map(Chunk.array(_))
 
   /** The route answering the queries other members post to `path`, from `streams`. Serve it at this member's endpoint, and keep it from the outside
-    * world: it answers any query, of any store.
+    * world: it answers any query, of any store. Bytes that are not a query are answered as a bad request, and a body of more than `MaxQuery` bytes as
+    * too large.
     */
   def routes[F[_]: Concurrent](streams: KafkaStreams[F], path: Uri.Path = defaultPath): HttpRoutes[F] =
     HttpRoutes.of[F]:
       case request if request.method == Method.POST && request.pathInfo == path =>
-        request.as[Array[Byte]].flatMap(query => streams.answer(Chunk.array(query))).map(answer => Response[F](Status.Ok).withEntity(answer.toArray))
+        // A body larger than any query is refused once the limit is passed, without reading the rest.
+        request.body.take(MaxQuery.toLong + 1).chunks.compile.toVector.map(Chunk.concat(_)).flatMap: query =>
+          if query.size > MaxQuery then Response[F](Status.PayloadTooLarge).pure[F]
+          else
+            streams.answer(query).map(answer => Response[F](Status.Ok).withEntity(answer.toArray)).recover:
+              case _: IllegalArgumentException => Response[F](Status.BadRequest)

@@ -279,7 +279,10 @@ final class JavaQuerying private (
       case processor: TopologyDescription.Processor => processor.stores.contains(store)
       case _                                        => false
     }).fold(throw new QueryProblemException(QueryProblem.UnknownStore(store))): subtopology =>
-      subtopology.nodes.asScala.collect { case source: TopologyDescription.Source => source.topicSet.asScala }.flatten.toSet
+      // A source reading a pattern of topics has no set of them, and xkafka reads no patterns, so it cannot tell which partitions hold the store.
+      subtopology.nodes.asScala.collect { case source: TopologyDescription.Source =>
+        Option(source.topicSet).fold(throw new QueryProblemException(QueryProblem.FedByPattern(store)))(_.asScala)
+      }.flatten.toSet
 
   private def asked(at: HostInfo, query: Asked): Vector[(Chunk[Byte], Chunk[Byte])] =
     val member = Endpoint.from(at.host, at.port).getOrElse(throw new QueryProblemException(QueryProblem.Rebalancing))

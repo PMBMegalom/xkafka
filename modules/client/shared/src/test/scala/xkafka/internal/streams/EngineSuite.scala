@@ -171,6 +171,21 @@ final class EngineSuite extends CatsEffectSuite:
             Some(Some(ErrorCode.TopicAuthorizationFailed))
           )
 
+  test("an engine stopped by a failure abandons its tasks as it is released, without waiting for them to be given back"):
+    val program =
+      World().flatMap: world =>
+        // A member that, once asked to leave, would wait for the stopped engine to give back its tasks.
+        val member = world.member(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 29))), leave = IO.never)
+        val run    =
+          Engine.running("app", counting, member, world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), TaskStore.memory[IO])
+            .use: running =>
+              world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> running.run.attempt
+        run.flatMap(stopped => (IO.monotonic, world.log.get).tupled.map((at, log) => (stopped, at, log)))
+    TestControl.executeEmbed(program.timeout(1.minute)).map: (stopped, at, log) =>
+      assert(stopped.isLeft, stopped)
+      assert(log.contains(Event.Abandon), log)
+      assert(at < CloseTimeout, s"released at $at")
+
   test("records of partitions the engine does not run are skipped, and nothing is polled while it runs no task"):
     run(): world =>
       for
@@ -1089,6 +1104,7 @@ object EngineSuite:
     case Assigned(round: Long)
     case Revoked(round: Long)
     case Leave
+    case Abandon
     case Transaction(written: Int, offsets: Map[TopicPartition, OffsetAndMetadata])
     case Purged(before: Map[TopicPartition, Offset])
     case Followed(starts: Vector[StartAt])
@@ -1156,6 +1172,7 @@ object EngineSuite:
         def revoked(round: Long): IO[Unit]                                                        = logged(Event.Revoked(round))
         def assigned(round: Long): IO[Unit]                                                       = logged(Event.Assigned(round))
         def leave: IO[Unit]                                                                       = logged(Event.Leave) *> leaving
+        def abandon: IO[Unit]                                                                     = logged(Event.Abandon)
         def epoch: IO[Int]                                                                        = IO.pure(1)
         def reports: Signal[IO, Member]                                                           = reported
         def offsetsFrom(read: IO[TaskOffsets]): IO[Unit]                                          = offsetsRead.set(read)

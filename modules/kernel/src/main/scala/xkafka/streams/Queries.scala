@@ -59,6 +59,9 @@ enum QueryProblem derives CanEqual:
   /** The program has no store of this name of the kind queried: key-value, window or session. */
   case UnknownStore(store: String)
 
+  /** A Java program fills the store from topics a pattern names, which xkafka cannot find the members holding it for. */
+  case FedByPattern(store: String)
+
 /** A question for one store of the application, whose answer is an `A`, as [[QueryableStore]] makes one. */
 final class Query[F[_], A] private[xkafka] (
     private[xkafka] val store: Store,

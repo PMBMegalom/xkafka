@@ -199,6 +199,16 @@ final class GroupMemberSuite extends CatsEffectSuite:
 
   private def offsetsAt(n: Long) = TaskOffsets(List(StreamsGroup.TaskOffset("0", 1, n)), List(StreamsGroup.TaskOffset("0", 1, 5L)))
 
+  test("a heartbeat waits no longer than a second for task offsets slow to read, and goes without them"):
+    // A read that cannot be cancelled, as the engine's reads of partition ends are not.
+    val slow = IO.sleep(1.minute).uncancelable.as(offsetsAt(1))
+    val run  =
+      Coordinator((_, request) => IO.pure(answer(request, active = Some(Set.empty), interval = 300, offsetInterval = 1000))).flatMap: coordinator =>
+        member(coordinator).use(member => member.offsetsFrom(slow) *> IO.sleep(2500.millis)) *> coordinator.sent
+    TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
+      assert(sent.size >= 2, s"only ${sent.size} heartbeats went in 2.5 seconds")
+      assert(sent.forall((_, heartbeat) => heartbeat.taskOffsets.isEmpty), sent)
+
   test("the joining heartbeat carries the task offsets, and later ones only those that changed"):
     carried(IO.pure(offsetsAt(2L))).map: sent =>
       assertEquals(sent.map(_._1), List(0L))

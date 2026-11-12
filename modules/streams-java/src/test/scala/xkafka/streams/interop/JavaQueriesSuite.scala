@@ -85,6 +85,18 @@ final class JavaQueriesSuite extends FunSuite:
         assertEquals(problem(asking.all("other", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.UnknownStore("other"))
     finally streams.close()
 
+  test("a Java member asking of a store fed by a pattern of topics is told the query has a problem, not failed by a null"):
+    val streams = notStarted()
+    val builder = new StreamsBuilder()
+    builder.stream[String, String](java.util.regex.Pattern.compile("in-.*")).groupByKey.count(Materialized.as("counts"))
+    try Using.resource(Admin.create(java.util.Map.of[String, AnyRef](AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1"))): admin =>
+        val asking = JavaQuerying.of(streams, builder.build(), "app", admin, (_, _) => throw new AssertionError("nothing is asked of other members"))
+        assertEquals(
+          intercept[QueryProblemException](asking.all("counts", JavaSerdes.String, JavaSerdes.Long)).problem,
+          QueryProblem.FedByPattern("counts")
+        )
+    finally streams.close()
+
   test("a partition no member holds, as while it moves, has no holder, and a store is whole only when each of its partitions is held once"):
     val (a, b) = (new HostInfo("a", 1), new HostInfo("b", 2))
     // Four partitions, the last moving: Java's metadata lists three, which a count taken from it would call whole.

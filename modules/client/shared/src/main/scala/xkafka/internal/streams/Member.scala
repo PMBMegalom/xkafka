@@ -99,6 +99,9 @@ private[xkafka] enum MemberEvent:
   /** Leave the group. */
   case Leave
 
+  /** Leave the group without waiting for the engine to give back the active tasks, which it no longer runs. */
+  case Abandoned
+
 private[xkafka] enum MemberAction derives CanEqual:
   /** Send this heartbeat now. */
   case Send(request: StreamsGroupHeartbeatRequest)
@@ -166,22 +169,25 @@ private[xkafka] final case class Member(
 
   def next(event: MemberEvent): (Member, List[MemberAction]) =
     (phase, event) match
-      case (Phase.Left | Phase.Failed, _) => (this, Nil)
-      case (Phase.Idle, Start)            => copy(phase = Phase.Joining).heartbeat
-      case (Phase.Idle, Leave)            => (copy(phase = Phase.Left), List(Done))
-      case (Phase.Idle, _)                => (this, Nil)
-      case (_, Start)                     => (this, Nil)
-      case (_, Due)                       => if inFlight then (this, Nil) else heartbeat
-      case (_, Answered(response))        => copy(inFlight = false).answered(response)
-      case (_, RequestFailed(error))      => copy(inFlight = false).failed(error)
-      case (_, Revoked(round))            => step match
+      case (Phase.Left | Phase.Failed, _)  => (this, Nil)
+      case (Phase.Idle, Start)             => copy(phase = Phase.Joining).heartbeat
+      case (Phase.Idle, Leave | Abandoned) => (copy(phase = Phase.Left), List(Done))
+      case (Phase.Idle, _)                 => (this, Nil)
+      case (_, Start)                      => (this, Nil)
+      case (_, Due)                        => if inFlight then (this, Nil) else heartbeat
+      case (_, Answered(response))         => copy(inFlight = false).answered(response)
+      case (_, RequestFailed(error))       => copy(inFlight = false).failed(error)
+      case (_, Revoked(round))             => step match
           case Some(Step.Revoking(`round`, tasks)) => copy(owned = owned.copy(active = owned.active -- tasks), step = None).settle(None)
           case _                                   => (this, Nil)
       case (_, Assigned(round)) => step match
           case Some(Step.Assigning(`round`, assignment)) => copy(owned = assignment, step = None).settle(None)
           case _                                         => (this, Nil)
-      case (Phase.Leaving(_), Leave) => (this, Nil)
-      case (_, Leave)                => copy(phase = Phase.Leaving(false), target = None).settle(None)
+      case (Phase.Leaving(_), Leave)        => (this, Nil)
+      case (_, Leave)                       => copy(phase = Phase.Leaving(false), target = None).settle(None)
+      case (Phase.Leaving(true), Abandoned) => (this, Nil)
+      // A revocation under way is no longer answered, so the member stops waiting for it and has no active tasks left to give back.
+      case (_, Abandoned) => copy(phase = Phase.Leaving(false), target = None, step = None, owned = owned.copy(active = Set.empty)).settle(None)
 
   /** Sends a heartbeat now, unless one is in flight: its answer settles the member again, which sends what is still wanted. */
   private def heartbeat: (Member, List[MemberAction]) =
