@@ -417,6 +417,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
               case AutoOffsetReset.Latest   => Some(StartAt(partition, EndOffset, -1))
               case AutoOffsetReset.Fail     => None
 
+  /** Refuses times before 1970, which Kafka cannot hold: the Java client refuses them, and librdkafka would take -1 and -2 for the latest and
+    * earliest offsets.
+    */
+  private def before1970(times: List[Timestamp]): F[Unit] =
+    times.find(_.epochMillis < 0L).traverse_(time => F.raiseError(new IllegalArgumentException(s"Kafka holds no time before 1970, was $time")))
+
   /** Asks again after a failure the broker may get over, waiting 100 ms and twice as long each time up to a second, as the Java consumer does. */
   private def untilAnswered[A](request: F[A], attempt: Int): F[A] =
     request.handleErrorWith:
@@ -604,10 +610,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       else client(driver.awaitDeliveries(batch, DeliveryPollTimeoutMillis)).flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
-      (
-        settings.keySerializer.serialize(record.topic, record.headers, record.key),
-        settings.valueSerializer.serialize(record.topic, record.headers, record.value)
-      ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
+      before1970(record.timestamp.toList) *>
+        (
+          settings.keySerializer.serialize(record.topic, record.headers, record.key),
+          settings.valueSerializer.serialize(record.topic, record.headers, record.value)
+        ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
 
     private def outcomes(batch: driver.Batch, records: NonEmptyList[ProducerRecord[K, V]]): F[Vector[Either[KafkaException, RecordMetadata]]] =
       driver.deliveries(client.handle, batch).flatMap: reported =>
@@ -807,8 +814,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       if timestampsToSearch.isEmpty then F.pure(Map.empty)
       else
         val entries = timestampsToSearch.toVector
-        client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis)).flatMap: values =>
-          F.delay(entries.zip(values).map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
+        before1970(timestampsToSearch.values.toList) *> client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis)).flatMap:
+          values =>
+            F.delay(entries.zip(values).map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
 
     override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] = client(readPartitionsFor(client.handle, requestTimeoutMillis, topic))
 

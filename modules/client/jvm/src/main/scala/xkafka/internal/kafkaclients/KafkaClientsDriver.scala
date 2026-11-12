@@ -99,9 +99,9 @@ private[kafkaclients] final class DeliveryBatch(capacity: Int):
   val delivered           = new CompletableFuture[Unit]
   private val sealedBatch = new java.util.concurrent.atomic.AtomicBoolean(false)
 
+  /** Keeps the first outcome reported for a record: the Java client can report one twice, as where a transaction fails while it is being sent. */
   def report(index: Int, outcome: Either[Throwable, JavaRecordMetadata]): Unit =
-    reports.set(index, outcome)
-    if outstanding.decrementAndGet() == 0 && sealedBatch.get then delivered.complete(()): Unit
+    if reports.compareAndSet(index, null, outcome) && outstanding.decrementAndGet() == 0 && sealedBatch.get then delivered.complete(()): Unit
 
   /** No further record joins the batch, so it is delivered once the ones it has are. */
   def seal(): Unit =
@@ -191,8 +191,9 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             case timedOut: JavaTimeoutException =>
               answered(timedOut)
               (true, partitions)
+            // The record no longer counts as outstanding, unless the client already reported it, which counted it.
             case error: Throwable =>
-              batch.outstanding.decrementAndGet()
+              if batch.reports.compareAndSet(index, null, Left(error)) then batch.outstanding.decrementAndGet(): Unit
               throw error
         def from(rest: List[EncodedRecord], partitions: Map[String, Int], taken: Int): Enqueued =
           rest match

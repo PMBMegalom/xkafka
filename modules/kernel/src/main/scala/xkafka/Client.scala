@@ -38,10 +38,12 @@ import fs2.{Chunk, Pipe, Stream}
 val ManagedProperties: Set[String] =
   Set(
     "bootstrap.servers",
+    "metadata.broker.list",
     "client.id",
     "group.id",
     "auto.offset.reset",
     "enable.auto.commit",
+    "auto.commit.enable",
     "enable.auto.offset.store",
     "acks",
     "request.required.acks",

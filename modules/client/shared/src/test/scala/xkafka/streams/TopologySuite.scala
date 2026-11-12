@@ -116,6 +116,14 @@ final class TopologySuite extends CatsEffectSuite:
       Right(List[Short](3, 3))
     )
 
+  test("an empty repartition name is refused, as Java refuses it, though no step carries it"):
+    def repartitioned(in: String) =
+      KStream(Named(s"$in-read"), topic(in), text, text).repartition(Repartition(""), text, text)
+        .to(Named(s"$in-write"), topic(s"$in-out"), text, text)
+    val refused = Topology.of(repartitioned("a"), repartitioned("b")).left.map(_.toList.toSet)
+    assert(refused.left.exists(_.contains(TopologyError.InvalidName("", "it is empty"))), refused)
+    assert(refused.left.exists(_.contains(TopologyError.DuplicateRepartition(""))), refused)
+
   test("a program is refused with every reason at once: names reused, a topic read twice, and names no topic can carry or Java refuses"):
     val refused = Topology.of(counting("in", "same", "counts"), counting("in", "same", "counts"), counting("other", "bad name", ""))
     assertEquals(

@@ -93,7 +93,8 @@ that both accept with the same meaning.
 
 `ManagedProperties` is the set of property names xkafka sets from the typed
 settings, such as `bootstrap.servers`, `group.id`, `acks`, `linger.ms`, and the
-TLS and SASL names. Supplying one of them through the map fails as
+TLS and SASL names, with the other names librdkafka reads them under, such as
+`metadata.broker.list`. Supplying one of them through the map fails as
 `SettingsError.ManagedProperty`; use the typed setting instead.
 
 ## Changing settings

@@ -190,6 +190,17 @@ final class DriverClientSuite extends CatsEffectSuite:
   private def values(first: String, rest: String*): NonEmptyList[ProducerRecord[String, String]] =
     NonEmptyList(first, rest.toList).map(ProducerRecord(events, "k", _))
 
+  test("a time before 1970, which Kafka cannot hold, is refused before it reaches the client, whether searched for or written"):
+    val before1970 = Timestamp.fromEpochMillis(-1L)
+    FakeDriver().flatMap: fake =>
+      val client = new DriverClient[IO](fake)
+      val search = client.consumer(consumerSettings, topics).use(_.offsetsForTimes(Map(eventsZero -> before1970)).attempt)
+      val write  = client.producer(producerSettings).use(_.produceAndAwait(values("a").map(_.copy(timestamp = Some(before1970)))).attempt)
+      (search, write).tupled.timeout(10.seconds)
+    .map: (searched, written) =>
+      assert(searched.left.exists(_.isInstanceOf[IllegalArgumentException]), searched)
+      assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>

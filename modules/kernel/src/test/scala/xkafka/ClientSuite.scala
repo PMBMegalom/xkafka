@@ -231,6 +231,14 @@ final class ClientSuite extends FunSuite:
       ))
     )
 
+  test("the names librdkafka also reads a managed property under are rejected too"):
+    val client   = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("metadata.broker.list" -> "other:9092"))
+    val consumer =
+      ConsumerSettings.from(clientSettings, group, Deserializer.utf8[IO], Deserializer.utf8[IO], properties = Map("auto.commit.enable" -> "true"))
+
+    assertEquals(client.toEither, Left(NonEmptyList.one(SettingsError.ManagedProperty("metadata.broker.list", SettingsError.PropertyScope.Client))))
+    assertEquals(consumer.toEither, Left(NonEmptyList.one(SettingsError.ManagedProperty("auto.commit.enable", SettingsError.PropertyScope.Consumer))))
+
   test("managed property rejection is scoped to the settings that declared it"):
     val serializer = Serializer.const[IO, String](None)
     val producer   = ProducerSettings.from(clientSettings, serializer, serializer, Map("enable.auto.commit" -> "true"))

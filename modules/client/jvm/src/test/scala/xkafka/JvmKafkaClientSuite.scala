@@ -119,6 +119,24 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(attempted.toList.map(_.outcome.leftMap(timedOut).void), List(Right(()), Left(true), Left(true)))
       assertEquals(mock.history.size, 1, "only the record before the full buffer should be sent")
 
+  test("a record the Java client reports twice, as it can when a transaction fails while the record is sent, is answered once"):
+    val mock =
+      new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+        override def send(record: JavaProducerRecord[Array[Byte], Array[Byte]], callback: Callback): Future[JavaRecordMetadata] =
+          if new String(record.value(), StandardCharsets.UTF_8) != "twice" then super.send(record, callback)
+          else
+            val aborted = new org.apache.kafka.common.KafkaException("aborted")
+            callback.onCompletion(null, aborted)
+            callback.onCompletion(null, aborted)
+            CompletableFuture.failedFuture(aborted)
+    val utf8     = Serializer.utf8[IO]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings = ProducerSettings.from(client, utf8, utf8).toOption.get
+    val records  = NonEmptyList.of("a", "twice").map(value => ProducerRecord(Topic.from("events").toOption.get, "key", value))
+
+    mocked(producer = _ => mock).producer(settings).use(_.produceAttemptEachAndAwait(records)).timeout(10.seconds).map: attempted =>
+      assertEquals(attempted.toList.map(_.outcome.isRight), List(true, false))
+
   test("a produce waiting on the Java client can be cancelled"):
     val client   = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
     val settings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get.withCloseTimeout(100.millis).toOption.get

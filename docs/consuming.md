@@ -232,6 +232,8 @@ Within the consumer resource:
   committed offset.
 - `beginningOffsets` and `endOffsets` query the available offset range.
 - `offsetsForTimes` finds the earliest available offsets at or after timestamps.
+  A time before 1970 raises `IllegalArgumentException`, as does writing a record
+  with one, since Kafka holds none.
 - `partitionsFor` returns a topic's partitions. For a topic the cluster does
   not have, it fails with `ErrorCode.UnknownTopicOrPartition` and creates
   nothing.

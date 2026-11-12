@@ -2407,9 +2407,9 @@ object Topology:
   val MaxNameLength = 249
 
   def of[F[_]](first: Pipeline[F], rest: Pipeline[F]*): Either[NonEmptyList[TopologyError], Topology[F]] =
-    val wired        = Wiring(first :: rest.toList)
-    val stores       = wired.subtopologies.flatMap(_.stores).map(_.value) ++ wired.globals.map(_._2.store.value)
-    val repartitions = wired.subtopologies.flatMap(_.origins).collect { case Source.Repartitioned(named) if named.value.nonEmpty => named.value }
+    val wired                     = Wiring(first :: rest.toList)
+    val stores                    = wired.subtopologies.flatMap(_.stores).map(_.value) ++ wired.globals.map(_._2.store.value)
+    val repartitions              = wired.subtopologies.flatMap(_.origins).collect { case Source.Repartitioned(named) => named.value }
     def twice[A](values: List[A]) = values.groupBy(identity).collect { case (value, all) if all.size > 1 => value }.toList
     val problems                  =
       wired.problems ++ (stores ++ repartitions ++ wired.steps).flatMap(invalid) ++ twice(wired.steps).sorted.map(TopologyError.DuplicateName(_)) ++
