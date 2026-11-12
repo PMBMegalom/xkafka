@@ -63,6 +63,7 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
   private val waiting  = new AtomicReference[Option[Waiting]](None)
   private val raised   = mutable.ArrayDeque.empty[Rebalancing]
   private val stopping = new AtomicReference[Option[Close]](None)
+  private val calling  = new AtomicReference[Option[Call]](None)
 
   private val closing  = new AtomicBoolean(false)
   private val finished = new AtomicBoolean(false)
@@ -116,8 +117,8 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
       finally rebalancing.applied.set(true)
     )(reply)
 
-  /** Closes the consumer, once the poll it may be inside has returned, and stops the thread. */
-  def close(reply: Either[Throwable, Unit] => Unit): Unit = send(Close(reply), reply)
+  /** Closes the consumer, once the poll it may be inside has returned, and stops the thread; one the thread already closed is closed. */
+  def close(reply: Either[Throwable, Unit] => Unit): Unit = send(Close(reply), _ => reply(Right(())))
 
   private def send(command: Command, reply: Either[Throwable, Nothing] => Unit): Unit =
     mailbox.put(command)
@@ -125,12 +126,37 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
     if finished.get && mailbox.remove(command) then reply(Left(closed))
 
   private def loop(): Unit =
-    while !finished.get do
-      mailbox.take() match
-        case Call(task, _)       => task(consumer)
-        case Poll(timeout, sent) => polling(timeout, sent)
-        case close: Close        => stopping.set(Some(close))
-      stopping.getAndSet(None).foreach(finish)
+    try
+      while !finished.get do
+        mailbox.take() match
+          case call: Call          => made(call)
+          case Poll(timeout, sent) => polling(timeout, sent)
+          case close: Close        => stopping.set(Some(close))
+        stopping.getAndSet(None).foreach(finish)
+    catch case fatal: Throwable => stopped(fatal)
+
+  /** Makes a queued call, keeping it where an error that ends the thread can still answer it. */
+  private def made(call: Call): Unit =
+    calling.set(Some(call))
+    call.task(consumer)
+    calling.set(None)
+
+  /** Ends the thread on an error no call recovers from, which the calls `Try` makes do not catch: every call waiting on the thread fails with it, so
+    * none waits forever, and the consumer is closed as far as it can be. The error then goes on to the thread's handler, as it would have.
+    */
+  private def stopped(fatal: Throwable): Unit =
+    val failure = new KafkaException.BackendFailure(s"the consumer's thread stopped: $fatal", cause = fatal)
+    closing.set(true)
+    calling.getAndSet(None).foreach(_.fail(failure))
+    waiting.getAndSet(None).foreach(_.reply(Left(failure)))
+    Try(consumer.close()): Unit
+    finished.set(true)
+    stopping.getAndSet(None).foreach(_.reply(Right(())))
+    Iterator.continually(mailbox.poll()).takeWhile(_ != null).foreach:
+      case Call(_, fail)    => fail(failure)
+      case Poll(_, sent)    => sent(Left(failure))
+      case Close(remaining) => remaining(Right(()))
+    throw fatal
 
   private def polling(timeout: Duration, reply: Either[Throwable, Polled] => Unit): Unit =
     if buffered.nonEmpty || ends.nonEmpty || failed.get.nonEmpty then deliver(reply)
@@ -180,7 +206,7 @@ private[kafkaclients] final class ConsumerThread(consumer: JavaConsumer[Array[By
       while !rebalancing.applied.get && !closing.get do
         val wait = waiting.get.fold(Long.MaxValue)(_.deadline - System.nanoTime).max(0L)
         Option(mailbox.poll(wait, TimeUnit.NANOSECONDS)).foreach:
-          case Call(task, _)       => task(consumer)
+          case call: Call          => made(call)
           case Poll(timeout, sent) => waiting.getAndSet(Some(Waiting(sent, System.nanoTime + timeout.toNanos))).foreach(_.reply(Right(Polled.empty)))
           case close: Close        =>
             closing.set(true)

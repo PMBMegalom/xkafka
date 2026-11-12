@@ -92,6 +92,26 @@ final class ConsumerThreadSuite extends FunSuite:
     assertEquals(events.asScala.toList, List("poll returned", "call"))
     answer(thread.close)
 
+  bounded("an error no program recovers from, thrown by a poll, fails that poll and every later call, and the consumer still closes"):
+    val consumer =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        override def poll(timeout: Duration): ConsumerRecords[Array[Byte], Array[Byte]] = throw new StackOverflowError("in the test")
+    consumer.updatePartitions(topic, JavaList.of(new PartitionInfo(topic, 0, null, Array.empty, Array.empty)))
+    val thread = subscribed(consumer)
+    val polled = await(thread.poll(Duration.ofSeconds(5)))
+    assert(polled.left.exists(_.getCause.isInstanceOf[StackOverflowError]), s"the poll should fail with the error as its cause, got $polled")
+    assert(await(thread.call(_.assignment)).isLeft, "a call after the thread stopped should be refused")
+    assertEquals(await(thread.close), Right(()))
+    assert(consumer.closed, "the consumer was not closed")
+
+  bounded("an error no program recovers from, thrown by a call, fails that call, and the consumer still closes"):
+    val consumer = subscribable()
+    val thread   = subscribed(consumer)
+    val called   = await(thread.call[Unit](_ => throw new StackOverflowError("in the test")))
+    assert(called.left.exists(_.getCause.isInstanceOf[StackOverflowError]), s"the call should fail with the error as its cause, got $called")
+    assertEquals(await(thread.close), Right(()))
+    assert(consumer.closed, "the consumer was not closed")
+
   private def bounded(name: String)(body: => Unit): Unit = test(name)(Future(body)(using ExecutionContext.global))
 
   private def subscribable(): MockConsumer[Array[Byte], Array[Byte]] =

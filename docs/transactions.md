@@ -28,6 +28,16 @@ val program =
 `transactionally` commits the transaction if its body succeeds, and aborts it if
 the body fails or is cancelled.
 
+If the commit itself fails, `transactionally` fails with that error:
+
+- A commit that timed out may still complete, so it is tried once more, and the
+  transaction is not aborted.
+- After a fatal failure, such as another producer with the same
+  `transactionalId` fencing this one, the producer can do nothing more. Release
+  it and create a new one.
+- Any other failure aborts the transaction, and the producer is ready for the
+  next one.
+
 A transactional producer only writes inside transactions. Create one with
 `transactionalProducer`, from `TransactionalProducerSettings`.
 

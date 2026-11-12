@@ -32,8 +32,11 @@ import cats.effect.{Resource, Sync}
 import scodec.bits.ByteVector
 import group.{Socket, Sockets}
 
+// Opening, reading and writing wait for the broker, so each is marked `@blocking`, so that the garbage collector does not wait for the thread making
+// it to reach a safepoint before it collects. Each is given only memory of a `Zone`, which the collector does not move.
 @link("rdkafka") @link("ssl") @link("crypto") @extern
 private[librdkafka] object SocketBindings:
+  @blocking
   def xkafka_socket_open(
       host: CString,
       port: CInt,
@@ -52,8 +55,10 @@ private[librdkafka] object SocketBindings:
       errorCode: Ptr[CInt]
   ): CVoidPtr = extern
 
+  @blocking
   def xkafka_socket_write(socket: CVoidPtr, data: CVoidPtr, size: CSize, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
 
+  @blocking
   def xkafka_socket_read(socket: CVoidPtr, out: CVoidPtr, size: CSize, error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CInt = extern
 
   def xkafka_socket_close(socket: CVoidPtr): Unit = extern

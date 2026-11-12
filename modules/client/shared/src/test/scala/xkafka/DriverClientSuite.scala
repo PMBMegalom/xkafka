@@ -490,6 +490,46 @@ final class DriverClientSuite extends CatsEffectSuite:
         s"a listed topic without partitions should be refused, got $listed"
       )
 
+  private def failure(retriable: Boolean, fatal: Boolean, abortRequired: Boolean) =
+    new KafkaException.BackendFailure("commit failed", None, Some(retriable), Some(fatal), Some(abortRequired))
+
+  /** Two transactions in a row on one producer, the first failing to commit as `failures` say, with the calls each made. */
+  private def twoTransactions(failures: Throwable*): IO[(Either[Throwable, Unit], Either[Throwable, Unit], Vector[String])] =
+    FakeDriver(commitFailures = failures.toList).flatMap: fake =>
+      new DriverClient[IO](fake).transactionalProducer(transactionalSettings).use: producer =>
+        (producer.transactionally(_ => IO.unit).attempt, producer.transactionally(_ => IO.unit).attempt).tupled
+      .flatMap((first, second) => fake.calls.map(calls => (first, second, calls.filter(_.endsWith("Transaction")))))
+
+  test("a commit that fails as the transaction must be aborted is aborted, so the producer begins the next transaction"):
+    val abortable = failure(retriable = false, fatal = false, abortRequired = true)
+    twoTransactions(abortable).map: (first, second, calls) =>
+      assertEquals(first, Left(abortable))
+      assertEquals(second, Right(()))
+      assertEquals(calls, Vector("beginTransaction", "commitTransaction", "abortTransaction", "beginTransaction", "commitTransaction"))
+
+  test("a commit that fails for any other reason it names no remedy for is aborted too"):
+    val refused = failure(retriable = false, fatal = false, abortRequired = false)
+    twoTransactions(refused).map: (first, second, calls) =>
+      assertEquals((first, second), (Left(refused), Right(())))
+      assertEquals(calls.count(_ == "abortTransaction"), 1)
+
+  test("a commit that timed out, which may still be completing, is tried once more and never aborted"):
+    val timedOut = failure(retriable = true, fatal = false, abortRequired = false)
+    twoTransactions(timedOut).map: (first, _, calls) =>
+      assertEquals(first, Right(()))
+      assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
+    *> twoTransactions(timedOut, timedOut).map: (first, _, calls) =>
+      assertEquals(first, Left(timedOut))
+      assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
+      assert(!calls.contains("abortTransaction"), calls)
+
+  test("a commit that fails fatally is neither tried again nor aborted, since the producer can do nothing more"):
+    val fenced = failure(retriable = false, fatal = true, abortRequired = false)
+    twoTransactions(fenced).map: (first, _, calls) =>
+      assertEquals(first, Left(fenced))
+      assertEquals(calls.take(2), Vector("beginTransaction", "commitTransaction"))
+      assert(!calls.contains("abortTransaction"), calls)
+
   test("a producer asked about a topic the broker is still creating waits for it"):
     FakeDriver().flatMap: fake =>
       new DriverClient[IO](fake).producer(producerSettings).use(_.partitionsFor(Topic.from("creating").toOption.get)).timeout(10.seconds)
@@ -553,7 +593,8 @@ final class DriverClientSuite extends CatsEffectSuite:
       servings: Ref[IO, Int],
       servingTakes: FiniteDuration,
       holdCommits: Boolean,
-      holdOffsets: Boolean
+      holdOffsets: Boolean,
+      commitFailures: Ref[IO, List[Throwable]]
   ) extends KafkaDriver[IO]:
     type Client        = String
     type Batch         = Int
@@ -676,11 +717,12 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
 
-    override def beginTransaction(producer: Client): IO[Unit] = IO.unit
+    override def beginTransaction(producer: Client): IO[Unit] = record("beginTransaction")
 
-    override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
+    override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] =
+      record("commitTransaction") *> commitFailures.modify(failures => (failures.drop(1), failures.headOption)).flatMap(_.traverse_(IO.raiseError))
 
-    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
+    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = record("abortTransaction")
 
     override def sendOffsets(
         producer: Client,
@@ -826,7 +868,12 @@ final class DriverClientSuite extends CatsEffectSuite:
       unused("deleteGroups")
 
   private object FakeDriver:
-    def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false, servingTakes: FiniteDuration = 5.millis): IO[FakeDriver] =
+    def apply(
+        holdCommits: Boolean = false,
+        holdOffsets: Boolean = false,
+        servingTakes: FiniteDuration = 5.millis,
+        commitFailures: List[Throwable] = Nil
+    ): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
         Ref.of[IO, Set[Int]](Set.empty),
@@ -836,7 +883,22 @@ final class DriverClientSuite extends CatsEffectSuite:
         Ref.of[IO, Option[IO[Unit]]](None),
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
         Ref.of[IO, Option[Deferred[IO, Unit]]](None),
-        Ref.of[IO, Int](0)
-      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings) =>
-        new FakeDriver(batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, servingTakes, holdCommits, holdOffsets)
+        Ref.of[IO, Int](0),
+        Ref.of[IO, List[Throwable]](commitFailures)
+      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, failures) =>
+        new FakeDriver(
+          batches,
+          flushed,
+          log,
+          queued,
+          rebalances,
+          inPoll,
+          holds,
+          pauseTake,
+          servings,
+          servingTakes,
+          holdCommits,
+          holdOffsets,
+          failures
+        )
       )
