@@ -29,10 +29,7 @@ import scala.jdk.CollectionConverters.*
 import cats.effect.IO
 import cats.syntax.all.*
 import fs2.Chunk
-import io.confluent.kafka.schemaregistry.avro.AvroSchema as ConfluentAvroSchema
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient
-import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException
-import io.confluent.kafka.serializers.{KafkaAvroDeserializer, KafkaAvroSerializer}
 import munit.CatsEffectSuite
 import org.apache.avro.generic.GenericRecord
 import xkafka.{Headers, Topic}
@@ -55,41 +52,6 @@ class ConfluentAvroSuite extends CatsEffectSuite:
       1
     )
 
-  /** xkafka's registry operations on Confluent's registry in memory. */
-  private def bridged(mock: MockSchemaRegistryClient): SchemaRegistry[IO] =
-    def missing[A](run: => A): IO[Option[A]] = IO.blocking(Option(run)).recover { case error: RestClientException if error.getStatus == 404 => None }
-    def registered(subject: Subject, id: Int, version: Int, text: String) = Registered(SchemaId(id), subject, version, Schema(text, SchemaType.Avro))
-    new SchemaRegistry[IO]:
-      override def schema(id: SchemaId): IO[Schema] = IO.blocking(Schema(mock.getSchemaById(id.value).canonicalString, SchemaType.Avro))
-      override def register(subject: Subject, schema: Schema): IO[SchemaId] =
-        IO.blocking(SchemaId(mock.register(subject.value, new ConfluentAvroSchema(schema.text))))
-      override def lookup(subject: Subject, schema: Schema): IO[Option[Registered]] =
-        missing(mock.getId(subject.value, new ConfluentAvroSchema(schema.text))).flatMap(
-          _.traverse: id =>
-            IO.blocking(registered(subject, id, mock.getVersion(subject.value, new ConfluentAvroSchema(schema.text)), schema.text))
-        )
-      override def latest(subject: Subject): IO[Option[Registered]] =
-        missing(mock.getLatestSchemaMetadata(subject.value)).map(_.map(meta => registered(subject, meta.getId, meta.getVersion, meta.getSchema)))
-      override def version(subject: Subject, version: Int): IO[Option[Registered]] =
-        missing(mock.getSchemaMetadata(subject.value, version)).map(_.map(meta => registered(subject, meta.getId, meta.getVersion, meta.getSchema)))
-      override def compatibility(subject: Subject, schema: Schema): IO[Compatibility] =
-        IO.blocking(mock.testCompatibility(subject.value, new ConfluentAvroSchema(schema.text)))
-          .map(ok => if ok then Compatibility.Compatible else Compatibility.Incompatible(Nil))
-
-  private def confluentSerializer(mock: MockSchemaRegistryClient, isKey: Boolean = false, strategy: Option[String] = None): KafkaAvroSerializer =
-    val serializer = new KafkaAvroSerializer(mock)
-    val naming     =
-      strategy.map(name =>
-        (if isKey then "key.subject.name.strategy" else "value.subject.name.strategy") -> s"io.confluent.kafka.serializers.subject.$name"
-      )
-    serializer.configure((Map("schema.registry.url" -> "mock://xkafka", "auto.register.schemas" -> "true") ++ naming).asJava, isKey)
-    serializer
-
-  private def confluentDeserializer(mock: MockSchemaRegistryClient): KafkaAvroDeserializer =
-    val deserializer = new KafkaAvroDeserializer(mock)
-    deserializer.configure(Map("schema.registry.url" -> "mock://xkafka").asJava, false)
-    deserializer
-
   /** The order as the generic record Confluent's serializer writes. */
   private def generic(value: Order): Any =
     val schema = new org.apache.avro.Schema.Parser().parse(AvroSchemaJson.render(AvroCodec[Order].schema))
@@ -98,9 +60,9 @@ class ConfluentAvroSuite extends CatsEffectSuite:
   test("xkafka writes an order in the bytes Confluent's serializer writes, with the same schema id"):
     val mock = new MockSchemaRegistryClient()
     for
-      serde  <- AvroSerde.of[IO, Order](bridged(mock), Part.Value)
+      serde  <- AvroSerde.of[IO, Order](ConfluentRegistry.bridged(mock), Part.Value)
       ours   <- serde.serializer.serialize(topic, Headers.empty, order).map(_.get)
-      theirs <- IO.blocking(Chunk.array(confluentSerializer(mock).serialize("orders", generic(order))))
+      theirs <- IO.blocking(Chunk.array(ConfluentRegistry.serializer(mock).serialize("orders", generic(order))))
     yield
       assertEquals(ours, theirs)
       assertEquals(mock.getAllSubjects.asScala.toList, List("orders-value"))
@@ -108,11 +70,12 @@ class ConfluentAvroSuite extends CatsEffectSuite:
   test("Confluent's deserializer reads what xkafka writes, and xkafka reads what Confluent's serializer writes"):
     val mock = new MockSchemaRegistryClient()
     for
-      serde  <- AvroSerde.of[IO, Order](bridged(mock), Part.Value)
+      serde  <- AvroSerde.of[IO, Order](ConfluentRegistry.bridged(mock), Part.Value)
       ours   <- serde.serializer.serialize(topic, Headers.empty, order).map(_.get)
-      read   <- IO.blocking(confluentDeserializer(mock).deserialize("orders", ours.toArray))
-      theirs <- IO.blocking(Chunk.array(confluentSerializer(mock).serialize("orders", generic(order.copy(note = None, payment = Cash)))))
-      back   <- AvroSerde.of[IO, Order](bridged(mock), Part.Value).flatMap(_.deserializer.deserialize(topic, Headers.empty, Some(theirs)))
+      read   <- IO.blocking(ConfluentRegistry.deserializer(mock).deserialize("orders", ours.toArray))
+      theirs <- IO.blocking(Chunk.array(ConfluentRegistry.serializer(mock).serialize("orders", generic(order.copy(note = None, payment = Cash)))))
+      back   <-
+        AvroSerde.of[IO, Order](ConfluentRegistry.bridged(mock), Part.Value).flatMap(_.deserializer.deserialize(topic, Headers.empty, Some(theirs)))
     yield
       read match
         case record: GenericRecord => assertEquals(
@@ -133,10 +96,10 @@ class ConfluentAvroSuite extends CatsEffectSuite:
       (naming, strategy, part) =>
         val (ours, theirs) = (new MockSchemaRegistryClient(), new MockSchemaRegistryClient())
         for
-          serde <- AvroSerde.of[IO, Line](bridged(ours), part, naming)
+          serde <- AvroSerde.of[IO, Line](ConfluentRegistry.bridged(ours), part, naming)
           _     <- serde.serializer.serialize(topic, Headers.empty, Line("apple"))
           _     <-
-            IO.blocking(confluentSerializer(theirs, part == Part.Key, Some(strategy)).serialize(
+            IO.blocking(ConfluentRegistry.serializer(theirs, part == Part.Key, Some(strategy)).serialize(
               "orders",
               ApacheValues.toApache(
                 AvroCodec[Line].encode(Line("apple")).fold(fail(_), identity),
@@ -151,8 +114,9 @@ class ConfluentAvroSuite extends CatsEffectSuite:
     val datum = new org.apache.avro.generic.GenericData.Record(older)
     datum.put("sku", "apple")
     for
-      theirs <- IO.blocking(Chunk.array(confluentSerializer(mock).serialize("orders", datum)))
-      back   <- AvroSerde.of[IO, Line](bridged(mock), Part.Value).flatMap(_.deserializer.deserialize(topic, Headers.empty, Some(theirs)))
+      theirs <- IO.blocking(Chunk.array(ConfluentRegistry.serializer(mock).serialize("orders", datum)))
+      back   <-
+        AvroSerde.of[IO, Line](ConfluentRegistry.bridged(mock), Part.Value).flatMap(_.deserializer.deserialize(topic, Headers.empty, Some(theirs)))
     yield assertEquals(back, Line("apple", 1))
 
   test("records Confluent's serializer writes are read as written, and Confluent's deserializer reads generic values xkafka writes"):
@@ -163,10 +127,12 @@ class ConfluentAvroSuite extends CatsEffectSuite:
     datum.put("quantity", 4)
     val value = AvroValue.Record(FullName(Some("xkafka.avro"), "Line"), Vector("sku" -> AvroValue.String("pear"), "quantity" -> AvroValue.Int(2)))
     for
-      theirs  <- IO.blocking(Chunk.array(confluentSerializer(mock).serialize("orders", datum)))
-      written <- AvroSerde.asWritten[IO](bridged(mock)).flatMap(_.deserialize(topic, Headers.empty, Some(theirs)))
-      ours    <- AvroSerde.generic[IO](bridged(mock), AvroCodec[Line].schema, Part.Value).flatMap(_.serializer.serialize(topic, Headers.empty, value))
-      read    <- IO.blocking(confluentDeserializer(mock).deserialize("orders", ours.get.toArray))
+      theirs  <- IO.blocking(Chunk.array(ConfluentRegistry.serializer(mock).serialize("orders", datum)))
+      written <- AvroSerde.asWritten[IO](ConfluentRegistry.bridged(mock)).flatMap(_.deserialize(topic, Headers.empty, Some(theirs)))
+      ours    <-
+        AvroSerde.generic[IO](ConfluentRegistry.bridged(mock), AvroCodec[Line].schema, Part.Value)
+          .flatMap(_.serializer.serialize(topic, Headers.empty, value))
+      read <- IO.blocking(ConfluentRegistry.deserializer(mock).deserialize("orders", ours.get.toArray))
     yield
       assertEquals(written.value, ApacheValues.fromApache(datum, schema))
       assertEquals(new org.apache.avro.Schema.Parser().parse(AvroSchemaJson.render(written.schema)), schema)

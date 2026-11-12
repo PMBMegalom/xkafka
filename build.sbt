@@ -35,6 +35,8 @@ val http4sVersion          = "0.23.38"
 val apacheAvroVersion      = "1.12.2"
 val confluentVersion       = "8.4.1"
 val scalapbVersion         = "0.11.21"
+val vulcanVersion          = "1.14.1"
+val avro4sVersion          = "5.0.15"
 val scalaJavaTimeVersion   = "2.7.0"     // 2.8.0 and later are built with Scala 3.9, which xkafka on Scala 3.3 cannot read.
 val kafkaClientsVersion    = "4.4.0"
 val koffiVersion           = "3.3.3"
@@ -902,6 +904,39 @@ lazy val protobufScalapb = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     libraryDependencies += "io.confluent" % "kafka-protobuf-serializer" % confluentVersion % Test
   )
 
+// vulcan, and the Apache Avro it writes with, run on the JVM alone.
+lazy val avroVulcan = project
+  .in(file("modules/avro-vulcan"))
+  .dependsOn(avro.jvm % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name                := "xkafka-avro-vulcan",
+    description         := "Avro values that vulcan's codecs write and read, with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies ++= Seq(
+      "com.github.fd4s" %% "vulcan"                % vulcanVersion,
+      "org.apache.avro"  % "avro"                  % apacheAvroVersion,
+      "io.confluent"     % "kafka-avro-serializer" % confluentVersion % Test
+    )
+  )
+
+// avro4s, and the Apache Avro it writes with, run on the JVM alone. avro4s asks for Apache Avro 1.11, which the module is built with.
+lazy val avro4s = project
+  .in(file("modules/avro4s"))
+  .dependsOn(avro.jvm % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name                := "xkafka-avro4s",
+    description         := "Avro values that avro4s's encoders and decoders write and read, with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies ++= Seq(
+      "com.sksamuel.avro4s" %% "avro4s-core"           % avro4sVersion,
+      "io.confluent"         % "kafka-avro-serializer" % confluentVersion % Test
+    )
+  )
+
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/client"))
   .enablePlugins(BuildInfoPlugin)
@@ -1296,7 +1331,7 @@ lazy val streamsFixture = project
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
-  .dependsOn(client.jvm, streamsJava, streamsHttp4s.jvm, schemaRegistryHttp4s.jvm, avro.jvm, jsonSchema.jvm, protobuf.jvm)
+  .dependsOn(client.jvm, streamsJava, streamsHttp4s.jvm, schemaRegistryHttp4s.jvm, avro.jvm, avroVulcan, avro4s, jsonSchema.jvm, protobuf.jvm)
   .settings(
     // The examples of querying stores show an HTTP connection between members, so the site depends on http4s's server and Ember client; of the
     // published modules, only xkafka-schema-registry-http4s depends on http4s, and on its client alone.
@@ -1316,6 +1351,8 @@ lazy val root =
     jsonSchema,
     protobuf,
     protobufScalapb,
+    avroVulcan,
+    avro4s,
     codegen,
     codegenTests,
     sbtCodegen,

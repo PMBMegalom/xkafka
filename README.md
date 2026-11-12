@@ -134,6 +134,8 @@ To build xkafka or run its tests, see
   Scala types.
 - `xkafka-protobuf-scalapb` writes and reads the Protobuf messages
   [ScalaPB](https://scalapb.github.io) generates, with the registry's schemas.
+- `xkafka-avro-vulcan` and `xkafka-avro4s` write and read the types vulcan and
+  avro4s have codecs for, with the registry's schemas, on the JVM.
 - `sbt-xkafka-codegen` generates Scala classes from Avro and JSON Schema files
   while sbt compiles; `xkafka-codegen` is the generator it runs.
 - `xkafka-streams-http4s` lets the members of a streams application query each
