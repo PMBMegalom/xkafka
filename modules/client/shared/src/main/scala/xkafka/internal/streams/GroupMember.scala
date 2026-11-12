@@ -28,7 +28,7 @@ import scala.concurrent.duration.*
 
 import cats.{Functor, Monad}
 import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
-import cats.effect.std.{NonEmptyHotswap, Queue, Random, Supervisor, UUIDGen}
+import cats.effect.std.{Mutex, NonEmptyHotswap, Queue, Random, Supervisor, UUIDGen}
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Signal, SignallingRef}
@@ -97,8 +97,9 @@ private[xkafka] object GroupMember:
       F: Async[F]
   ): Resource[F, GroupMember[F]] =
     for
-      // The connection is closed only once every fiber that might use it has stopped.
+      // A connection is closed only once every request on it is answered: each runs while it holds the connection, which a swap waits for.
       held       <- NonEmptyHotswap.empty[F, Connection[F]]
+      making     <- Resource.eval(Mutex[F])
       supervisor <- Supervisor[F](await = false)
       random     <- Resource.eval(Random.scalaUtilRandom[F])
       events     <- Resource.eval(Queue.unbounded[F, MemberEvent])
@@ -110,7 +111,7 @@ private[xkafka] object GroupMember:
       offsetsAt  <- Resource.eval(F.ref(Option.empty[FiniteDuration]))
       sent       <- Resource.eval(F.ref(Option.empty[TaskOffsets]))
       pushing    <- Resource.eval(F.ref(false))
-      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current, offsets, offsetsAt, sent, pushing)
+      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, making, current, offsets, offsetsAt, sent, pushing)
       _ <- Resource.make(supervisor.supervise(loop.run(Member(identity)).void))(_ => leaving(events, ended, closeTimeout))
       _ <- Resource.eval(events.offer(MemberEvent.Start))
     yield new GroupMember[F]:
@@ -168,6 +169,7 @@ private[xkafka] object GroupMember:
       ended: Deferred[F, Either[Throwable, Unit]],
       timer: Ref[F, Long],
       held: NonEmptyHotswap[F, Option[Connection[F]]],
+      making: Mutex[F],
       current: SignallingRef[F, Member],
       offsets: Ref[F, Option[F[TaskOffsets]]],
       offsetsAt: Ref[F, Option[FiniteDuration]],
@@ -182,13 +184,13 @@ private[xkafka] object GroupMember:
         current.set(next) *> actions.traverse_(perform) *> run(next)
 
     /** Sends a request of the engine's over the member's connection, which it gives up, to be made again, if the request fails. */
-    def send[R](request: Request[R]): F[R] = connection.flatMap(_.send(request)).onError(_ => drop)
+    def send[R](request: Request[R]): F[R] = sent(request).onError(_ => drop)
 
     private def perform(action: MemberAction): F[Unit] =
       action match
         case Send(heartbeat) =>
           val answer =
-            withOffsets(heartbeat).flatMap(request => connection.flatMap(_.send(request))).attempt.flatMap:
+            withOffsets(heartbeat).flatMap(sent).attempt.flatMap:
               case Right(response) => events.offer(MemberEvent.Answered(response)) *> described.whenA(response.topologyDescriptionRequired)
               case Left(error: KafkaException) => drop *> events.offer(MemberEvent.RequestFailed(error))
               case Left(other)                 => drop *> events.offer(MemberEvent.RequestFailed(unexpected(other)))
@@ -238,7 +240,7 @@ private[xkafka] object GroupMember:
         drop.whenA(rediscover) *> backoff(attempt, random).flatMap(wait => F.sleep(wait.max(throttled.millis))) *> pushed(request, attempt + 1)
       current.get.flatMap: member =>
         val joined = member.phase == Phase.Joining || member.phase == Phase.Joined
-        connection.flatMap(_.send(request)).attempt.flatMap:
+        sent(request).attempt.flatMap:
           case Right(answer) if answer.errorCode == Member.NotCoordinator || answer.errorCode == Member.NotAvailable =>
             again(rediscover = true, answer.throttleTimeMs)
           case Right(answer) if answer.errorCode == Member.LoadInProgress                       => again(rediscover = false, answer.throttleTimeMs)
@@ -252,6 +254,11 @@ private[xkafka] object GroupMember:
       timer.updateAndGet(_ + 1).flatMap: planned =>
         supervisor.supervise(F.sleep(after) *> timer.get.flatMap(now => events.offer(MemberEvent.Due).whenA(now == planned))).void
 
-    private def connection: F[Connection[F]] = held.get.use(F.pure).flatMap(_.fold(held.swap(coordinator.map(Some(_))) *> connection)(F.pure))
+    /** `request` sent over the connection to the coordinator, made first where there is none, which stays open until it is answered. */
+    private def sent[R](request: Request[R]): F[R] = held.get.use(_.traverse(_.send(request))).flatMap(_.fold(made *> sent(request))(F.pure))
+
+    /** A connection to the coordinator where there is none, made by one fiber at a time, so that two do not each make one and close the other's. */
+    private def made: F[Unit] =
+      making.lock.surround(held.get.use(current => F.pure(current.isEmpty)).flatMap(held.swap(coordinator.map(Some(_))).whenA(_)))
 
     private def drop: F[Unit] = held.swap(Resource.pure(None))

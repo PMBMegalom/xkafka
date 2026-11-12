@@ -134,6 +134,43 @@ final class GroupMemberSuite extends CatsEffectSuite:
         )
       )
 
+  test("a connection a failed request gives up is closed only once the requests still on it are answered"):
+    val failure = new KafkaException.BackendFailure("gone", Some(ErrorCode.RequestTimedOut), Some(true))
+    val offsets = List(OffsetCommitRequest.Topic("input", List(OffsetCommitRequest.Partition(0, 5L, -1, None))))
+    val run     =
+      Coordinator(
+        (n, request) => if n == 1 then IO.raiseError(failure) else IO.pure(answer(request, active = Some(Set.empty), interval = 1000)),
+        [R] =>
+          (_: Int, request: Request[R]) =>
+            request match
+              case _: OffsetCommitRequest => IO.sleep(3.seconds).as(List(OffsetCommitRequest.Answer("input", 0, 0)))
+              case other                  => Coordinator.unexpected(other)
+      ).flatMap: coordinator =>
+        // The second heartbeat fails a second in, while the commit waits two more seconds for its answer.
+        member(coordinator).use(member => IO.sleep(100.millis) *> member.commit(offsets).attempt).product(coordinator.opened)
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (committed, opened) =>
+      assertEquals(committed, Right(List(OffsetCommitRequest.Answer("input", 0, 0))))
+      assertEquals(opened, 2)
+
+  test("requests made together while there is no connection share the one connection made for them"):
+    val offsets = List(OffsetCommitRequest.Topic("input", List(OffsetCommitRequest.Partition(0, 5L, -1, None))))
+    val run     =
+      Coordinator(
+        (_, request) => IO.pure(answer(request, active = Some(Set.empty))),
+        [R] =>
+          (_: Int, request: Request[R]) =>
+            request match
+              case _: OffsetCommitRequest => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
+              case other                  => Coordinator.unexpected(other)
+        ,
+        connecting = 1.second
+      ).flatMap: coordinator =>
+        // The first heartbeat and the commit both wait for the connection the first of them asked for.
+        member(coordinator).use(member => member.commit(offsets)) *> (coordinator.opened, coordinator.sent.map(_.size)).tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (opened, heartbeats) =>
+      assertEquals(opened, 1)
+      assert(heartbeats >= 1)
+
   test("a heartbeat refused the application's topics goes again after a wait, and the refusal is reported until one is accepted"):
     val run =
       Coordinator: (n, request) =>
@@ -437,21 +474,27 @@ object GroupMemberSuite:
       others: [R] => (Int, Request[R]) => IO[R],
       log: Ref[IO, Vector[(Long, StreamsGroupHeartbeatRequest)]],
       made: Ref[IO, Vector[Request[?]]],
-      counts: Ref[IO, (Int, Int)]
+      counts: Ref[IO, (Int, Int)],
+      connecting: FiniteDuration
   ):
     def sent: IO[List[(Long, StreamsGroupHeartbeatRequest)]] = log.get.map(_.toList)
     def requests: IO[List[Request[?]]]                       = made.get.map(_.toList)
     def opened: IO[Int]                                      = counts.get.map(_._1)
     def closed: IO[Int]                                      = counts.get.map(_._2)
 
+    /** Connections that fail an answer that comes after they are closed, as a closed socket can give none. */
     val connect: Resource[IO, Connection[IO]] =
-      Resource.make(counts.update((opened, closed) => (opened + 1, closed)))(_ => counts.update((opened, closed) => (opened, closed + 1))).as:
+      Resource.make(IO.sleep(connecting) *> counts.update((opened, closed) => (opened + 1, closed)) *> IO.ref(false))(closed =>
+        closed.set(true) *> counts.update((opened, closed) => (opened, closed + 1))
+      ).map: closed =>
         new Connection[IO]:
           def send[R](request: Request[R]): IO[R] =
-            request match
-              case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
-                  .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
-              case other => made.modify(before => (before :+ other, before.size)).flatMap(others(_, other))
+            val answered: IO[R] =
+              request match
+                case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
+                    .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
+                case other => made.modify(before => (before :+ other, before.size)).flatMap(others(_, other))
+            answered.flatTap(_ => closed.get.flatMap(IO.raiseWhen(_)(new AssertionError(s"$request was answered on a closed connection"))))
 
   object Coordinator:
     /** A request the coordinator has no answer for, which fails the test. */
@@ -459,7 +502,8 @@ object GroupMemberSuite:
 
     def apply(
         script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
-        others: [R] => (Int, Request[R]) => IO[R] = [R] => (_: Int, request: Request[R]) => unexpected(request)
+        others: [R] => (Int, Request[R]) => IO[R] = [R] => (_: Int, request: Request[R]) => unexpected(request),
+        connecting: FiniteDuration = Duration.Zero
     ): IO[Coordinator] =
       (IO.ref(Vector.empty[(Long, StreamsGroupHeartbeatRequest)]), IO.ref(Vector.empty[Request[?]]), IO.ref((0, 0)))
-        .mapN(new Coordinator(script, others, _, _, _))
+        .mapN(new Coordinator(script, others, _, _, _, connecting))

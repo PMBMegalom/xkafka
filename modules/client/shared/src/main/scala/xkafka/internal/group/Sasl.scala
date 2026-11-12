@@ -37,6 +37,9 @@ private[xkafka] object Sasl:
   /** The fewest iterations the Java client accepts from a broker, for either SCRAM digest. */
   val MinIterations = 4096
 
+  /** The most iterations Kafka's brokers keep credentials with; a broker asking for more would only have the client spend its time. */
+  val MaxIterations = 16384
+
   def authenticate[F[_]: MonadThrow](settings: SaslSettings, crypto: Crypto[F], send: ByteVector => F[ByteVector]): F[Unit] =
     settings.mechanism match
       case SaslMechanism.Plain       => send(plain(settings.username, settings.password)).void
@@ -80,6 +83,7 @@ private[xkafka] object Sasl:
         salt       <- fields.get("s").flatMap(ByteVector.fromBase64(_)).toRight(refused(s"the broker's first SCRAM message has no salt: $message"))
         iterations <- fields.get("i").flatMap(_.toIntOption).toRight(refused(s"the broker's first SCRAM message has no iteration count: $message"))
         _ <- Either.cond(iterations >= MinIterations, (), refused(s"the broker asks for $iterations SCRAM iterations, fewer than $MinIterations"))
+        _ <- Either.cond(iterations <= MaxIterations, (), refused(s"the broker asks for $iterations SCRAM iterations, more than $MaxIterations"))
       yield ServerFirst(nonce, salt, iterations)
 
   private def verify(message: String, expected: ByteVector): Either[Throwable, Unit] =
