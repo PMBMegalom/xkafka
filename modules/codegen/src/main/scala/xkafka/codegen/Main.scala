@@ -25,26 +25,44 @@ import java.nio.file.{Files, Path}
 
 import scala.jdk.CollectionConverters.*
 
+import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
 
-/** Writes the Scala sources of Avro schemas: the first argument is the directory they go in, the others .avsc and .avdl files, or directories whose
-  * .avsc and .avdl files, at any depth, are read.
+/** Writes the Scala sources of Avro and JSON Schema files: the first argument is the directory they go in, the others .avsc, .avdl and .json files,
+  * or directories whose such files, at any depth, are read. They may be preceded by `--json-package`, then the package of the types of JSON Schema
+  * files whose titles name none, and by `--json-big-decimals`, for JSON Schema's numbers to be `BigDecimal`.
   */
 object Main extends IOApp:
+  private val extensions = List(".avsc", ".avdl", ".json")
+
   override def run(arguments: List[String]): IO[ExitCode] =
-    arguments match
-      case output :: inputs if inputs.nonEmpty =>
-        inputs.flatTraverse(input => schemas(Path.of(input))).flatMap(files => IO.blocking(AvroGenerator.generate(files))).flatMap:
+    options(arguments, JsonSchemaOptions()) match
+      case Some((json, output :: inputs)) if inputs.nonEmpty =>
+        inputs.flatTraverse(input => schemas(Path.of(input))).flatMap(files => IO.blocking(generate(files, json))).flatMap:
           case Left(problems) => problems.traverse_(problem => IO.consoleForIO.errorln(problem)).as(ExitCode.Error)
           case Right(sources) => sources.traverse_(source => write(Path.of(output).resolve(source.path), source.text)).as(ExitCode.Success)
-      case _ => IO.consoleForIO.errorln("usage: xkafka-codegen <output directory> <.avsc and .avdl files, or directories of them>").as(ExitCode.Error)
+      case _ => IO.consoleForIO.errorln(
+          "usage: xkafka-codegen [--json-package <package>] [--json-big-decimals] <output directory> <.avsc, .avdl and .json files, or directories of them>"
+        ).as(ExitCode.Error)
 
-  /** `input`, a file, or the .avsc and .avdl files in `input`, a directory, in the order of their paths. */
+  private def options(arguments: List[String], json: JsonSchemaOptions): Option[(JsonSchemaOptions, List[String])] =
+    arguments match
+      case "--json-package" :: name :: rest       => options(rest, json.copy(packageName = Some(name)))
+      case "--json-big-decimals" :: rest          => options(rest, json.copy(bigDecimals = true))
+      case option :: _ if option.startsWith("--") => None
+      case rest                                   => Some((json, rest))
+
+  private def generate(files: List[Path], json: JsonSchemaOptions): Either[NonEmptyList[String], List[GeneratedFile]] =
+    val (schemas, avro) = files.partition(_.toString.endsWith(".json"))
+    val fromAvro        = if avro.isEmpty then Right(Nil) else AvroGenerator.generate(avro)
+    (fromAvro.toValidated, JsonSchemaGenerator.generate(schemas, json).toValidated).mapN(_ ++ _).toEither
+
+  /** `input`, a file, or the schema files in `input`, a directory, in the order of their paths. */
   private def schemas(input: Path): IO[List[Path]] =
     IO.blocking(Files.isDirectory(input)).ifM(
       Resource.fromAutoCloseable(IO.blocking(Files.walk(input))).use: paths =>
-        IO.blocking(paths.iterator.asScala.filter(path => path.toString.endsWith(".avsc") || path.toString.endsWith(".avdl")).toList.sorted),
+        IO.blocking(paths.iterator.asScala.filter(path => extensions.exists(path.toString.endsWith)).toList.sorted),
       IO.pure(List(input))
     )
 

@@ -24,7 +24,9 @@ package xkafka.sbtcodegen
 import sbt._
 import sbt.Keys._
 
-/** Generates Scala classes from the Avro schemas in `src/main/avro` while a project compiles, with xkafka-codegen run in a JVM of its own. */
+/** Generates Scala classes from the Avro schemas in `src/main/avro` and the JSON Schema files in `src/main/json-schema` while a project compiles,
+  * with xkafka-codegen run in a JVM of its own.
+  */
 object XkafkaCodegenPlugin extends AutoPlugin {
   override def trigger: PluginTrigger = allRequirements
 
@@ -33,36 +35,52 @@ object XkafkaCodegenPlugin extends AutoPlugin {
   object autoImport {
     val xkafkaAvroSources = settingKey[Seq[File]]("Directories whose .avsc and .avdl files, at any depth, Scala classes are generated from")
 
+    val xkafkaJsonSchemaSources = settingKey[Seq[File]]("Directories whose .json files, at any depth, Scala classes are generated from")
+
+    val xkafkaJsonSchemaPackage =
+      settingKey[Option[String]]("The package of the classes of JSON Schema files whose titles name none, such as com.example.Order does")
+
+    val xkafkaJsonSchemaBigDecimals = settingKey[Boolean]("Whether JSON Schema's numbers are BigDecimal, rather than Double")
+
     val xkafkaCodegenVersion = settingKey[String]("The version of xkafka-codegen that generates the classes")
 
     // The task keeps track itself of when its classes need generating again, so sbt 2 does not cache it.
     @transient
-    val xkafkaAvroGenerate = taskKey[Seq[File]]("Generates Scala classes from the Avro schemas in xkafkaAvroSources")
+    val xkafkaGenerate = taskKey[Seq[File]]("Generates Scala classes from the schemas in xkafkaAvroSources and xkafkaJsonSchemaSources")
   }
 
   import autoImport._
 
   override def projectSettings: Seq[Setting[?]] =
-    Seq(xkafkaCodegenVersion := PluginVersion.value) ++ inConfig(Compile)(Seq(
-      xkafkaAvroSources  := Seq(sourceDirectory.value / "avro"),
-      xkafkaAvroGenerate := generate.value,
-      sourceGenerators += xkafkaAvroGenerate.taskValue
+    Seq(xkafkaCodegenVersion := PluginVersion.value, xkafkaJsonSchemaPackage := None, xkafkaJsonSchemaBigDecimals := false) ++ inConfig(Compile)(Seq(
+      xkafkaAvroSources       := Seq(sourceDirectory.value / "avro"),
+      xkafkaJsonSchemaSources := Seq(sourceDirectory.value / "json-schema"),
+      xkafkaGenerate          := generate.value,
+      sourceGenerators += xkafkaGenerate.taskValue
     ))
 
   private def generate: Def.Initialize[Task[Seq[File]]] =
     Def.task {
       val log     = streams.value.log
-      val schemas = xkafkaAvroSources.value.flatMap(directory => (directory ** ("*.avsc" || "*.avdl")).get()).sorted
+      val avro    = xkafkaAvroSources.value.flatMap(directory => (directory ** ("*.avsc" || "*.avdl")).get())
+      val json    = xkafkaJsonSchemaSources.value.flatMap(directory => (directory ** "*.json").get())
+      val schemas = (avro ++ json).distinct.sorted
       val output  = sourceManaged.value / "xkafka-codegen"
       val version = xkafkaCodegenVersion.value
       val cache   = streams.value.cacheDirectory / s"xkafka-codegen-$version"
+      val options =
+        xkafkaJsonSchemaPackage.value.toSeq.flatMap(name => Seq("--json-package", name)) ++
+          (if (xkafkaJsonSchemaBigDecimals.value) Seq("--json-big-decimals") else Nil)
       val resolve = dependencyResolution.value
       val java    = javaHome.value
+      // The options are kept in a file of their own, which the classes are generated again where it changes, as where a schema does.
+      val settings = cache / "options"
       if (schemas.isEmpty) {
         IO.delete(output)
         Nil
       } else {
-        // The schemas are generated again when any of them changes, or the generated classes are gone.
+        // The classes are generated again when any schema or option changes, or the generated classes are gone.
+        IO.write(settings, options.mkString("\n"))
         val run =
           FileFunction.cached(cache / "inputs", FilesInfo.hash, FilesInfo.exists) { _ =>
             IO.delete(output)
@@ -71,14 +89,13 @@ object XkafkaCodegenPlugin extends AutoPlugin {
                 case Left(unresolved) => throw unresolved.resolveException
                 case Right(files)     => files
               }
-            val options   = ForkOptions().withJavaHome(java).withOutputStrategy(OutputStrategy.LoggedOutput(log))
-            val arguments = Seq("-cp", Path.makeString(tool), "xkafka.codegen.Main", output.getPath) ++ schemas.map(_.getPath)
-            if (Fork.java(options, arguments) != 0) throw new sbt.internal.util.MessageOnlyException(
-              "xkafka-codegen could not generate classes from the Avro schemas, for the reasons above"
-            )
+            val fork      = ForkOptions().withJavaHome(java).withOutputStrategy(OutputStrategy.LoggedOutput(log))
+            val arguments = Seq("-cp", Path.makeString(tool), "xkafka.codegen.Main") ++ options ++ Seq(output.getPath) ++ schemas.map(_.getPath)
+            if (Fork.java(fork, arguments) != 0)
+              throw new sbt.internal.util.MessageOnlyException("xkafka-codegen could not generate classes from the schemas, for the reasons above")
             (output ** "*.scala").get().toSet
           }
-        run(schemas.toSet).toSeq.sorted
+        run(schemas.toSet + settings).toSeq.sorted
       }
     }
 }

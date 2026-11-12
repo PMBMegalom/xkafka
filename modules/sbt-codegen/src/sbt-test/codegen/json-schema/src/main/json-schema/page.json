@@ -1,0 +1,1 @@
+{ "title": "Page", "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }

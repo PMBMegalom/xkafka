@@ -381,7 +381,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   steps = githubWorkflowJobSetup.value.toList ++ List(
     WorkflowStep.Run(
       List("sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'"),
-      name = Some("Generate Avro classes in a build on sbt 1 and on sbt 2")
+      name = Some("Generate classes from schema files in a build on sbt 1 and on sbt 2")
     )
   ),
   oses = List("ubuntu-24.04"),
@@ -1188,7 +1188,7 @@ lazy val codegen = project
   .settings(commonSettings)
   .settings(
     name                := "xkafka-codegen",
-    description         := "Scala sources generated from Avro schemas, for xkafka",
+    description         := "Scala sources generated from Avro and JSON Schema files, for xkafka",
     tlVersionIntroduced := Map("3" -> "0.8.0"),
     libraryDependencies ++= Seq(
       "org.apache.avro" % "avro"     % apacheAvroVersion,
@@ -1206,18 +1206,24 @@ lazy val sbtCodegen = project
   .enablePlugins(SbtPlugin)
   .settings(
     name                          := "sbt-xkafka-codegen",
-    description                   := "Scala classes generated from Avro schemas by xkafka-codegen, where sbt compiles",
+    description                   := "Scala classes generated from Avro and JSON Schema files by xkafka-codegen, where sbt compiles",
     headerLicense                 := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
     scalaVersion                  := "2.12.21",
     crossScalaVersions            := Seq("2.12.21", "3.8.4"),
     pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.0.12"),
     tlVersionIntroduced           := Map("2.12" -> "0.8.0", "3" -> "0.8.0"),
-    // The scripted builds run on the newest sbt of each major version, with this build's xkafka-codegen and xkafka-avro published locally.
+    // The scripted builds run on the newest sbt of each major version, with this build's xkafka-codegen and format modules published locally.
     scriptedSbt := (if (scalaBinaryVersion.value == "2.12") "1.13.1" else "2.0.12"),
     scriptedLaunchOpts ++= Seq("-Xmx2g", s"-Dplugin.version=${version.value}"),
     scriptedBufferLog    := false,
     scriptedDependencies := scriptedDependencies
-      .dependsOn(kernel.jvm / publishLocal, schemaRegistry.jvm / publishLocal, avro.jvm / publishLocal, codegen / publishLocal)
+      .dependsOn(
+        kernel.jvm / publishLocal,
+        schemaRegistry.jvm / publishLocal,
+        avro.jvm / publishLocal,
+        jsonSchema.jvm / publishLocal,
+        codegen / publishLocal
+      )
       .value,
     // The plugin runs the xkafka-codegen of its own version.
     Compile / sourceGenerators += Def.task {
@@ -1241,16 +1247,18 @@ lazy val codegenTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .crossType(CrossType.Full)
   .in(file("modules/codegen-tests"))
   .enablePlugins(NoPublishPlugin)
-  .dependsOn(avro % "compile->compile;test->test")
+  .dependsOn(avro % "compile->compile;test->test", jsonSchema % "compile->compile;test->test")
   .settings(commonSettings)
   .settings(
     Compile / sourceGenerators += Def.task {
-      val output  = (Compile / sourceManaged).value / "xkafka-codegen"
-      val schemas = (ThisBuild / baseDirectory).value / "modules/codegen-tests/shared/src/main/avro"
+      val output                             = (Compile / sourceManaged).value / "xkafka-codegen"
+      val schemas                            = (ThisBuild / baseDirectory).value / "modules/codegen-tests/shared/src/main"
+      val run                                = new ForkRun(ForkOptions())
+      def generate(arguments: String*): Unit =
+        run.run("xkafka.codegen.Main", (codegen / Compile / fullClasspath).value.files, arguments, streams.value.log).get
       IO.delete(output)
-      new ForkRun(ForkOptions())
-        .run("xkafka.codegen.Main", (codegen / Compile / fullClasspath).value.files, Seq(output.toString, schemas.toString), streams.value.log)
-        .get
+      generate("--json-package", "example.json.untitled", output.toString, (schemas / "avro").toString, (schemas / "json-schema").toString)
+      generate("--json-package", "example.json.decimal", "--json-big-decimals", output.toString, (schemas / "json-schema-decimal").toString)
       (output ** "*.scala").get
     }.taskValue
   )

@@ -109,7 +109,9 @@ private[codegen] object Names:
       "None"       -> "scala.None",
       "Array"      -> "scala.Array",
       "BigDecimal" -> "scala.math.BigDecimal",
-      "BigInt"     -> "scala.math.BigInt"
+      "BigInt"     -> "scala.math.BigInt",
+      "Set"        -> "scala.collection.immutable.Set",
+      "Either"     -> "scala.util.Either"
     )
 
   /** A name of Scala's own, qualified where a type in the package being written has it too. */
@@ -128,6 +130,25 @@ private[codegen] object Names:
 
   /** What goes between a parameter's name and its type: a name ending in an underscore would take a colon right after it as part of itself. */
   def colon(name: String): String = if name.endsWith("_") then " : " else ": "
+
+  private val identifier = """[\p{L}_][\p{L}\p{Nd}_]*""".r
+
+  /** Whether `text` is a Scala identifier made of letters, digits and underscores, which a name may be as it is. */
+  def isIdentifier(text: String): Boolean = text != "_" && identifier.matches(text)
+
+  private def words(text: String): List[String] = text.split("[^\\p{L}\\p{Nd}]+").toList.filter(_.nonEmpty)
+
+  /** A type's name made of the letters and digits of `text`, each word capitalized, as `line-item` makes `LineItem`. */
+  def pascal(text: String): Option[String] =
+    Option(words(text).map(_.capitalize).mkString).filter(_.nonEmpty).map(name => if name.head.isDigit then s"_$name" else name)
+
+  /** A value's name made of the letters and digits of `text`, words after the first capitalized, as `first-name` makes `firstName`. */
+  def camel(text: String): Option[String] =
+    words(text) match
+      case Nil           => None
+      case first :: rest =>
+        val head = if first.forall(!_.isLower) then first.toLowerCase else first.head.toLower +: first.tail
+        Some((head :: rest.map(_.capitalize)).mkString).map(name => if name.head.isDigit then s"_$name" else name)
 
   /** `text` as a Scala string literal. */
   def quote(text: String): String =

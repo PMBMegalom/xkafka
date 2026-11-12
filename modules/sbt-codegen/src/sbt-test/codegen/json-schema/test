@@ -1,0 +1,14 @@
+# The classes are generated from src/main/json-schema, the untitled one in the package set, and a program writes and reads them with their codecs.
+> run
+
+# Numbers are BigDecimal where set so, and Double again where set back, each time generated again.
+$ copy-file changes/Decimal.scala src/main/scala/Main.scala
+> set xkafkaJsonSchemaBigDecimals := true
+> run
+$ copy-file changes/Double.scala src/main/scala/Main.scala
+> set xkafkaJsonSchemaBigDecimals := false
+> run
+
+# A file whose title names no package fails the build where no package is set.
+> set xkafkaJsonSchemaPackage := None
+-> compile

@@ -791,7 +791,7 @@ jobs:
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
         run: sbt +update
 
-      - name: Generate Avro classes in a build on sbt 1 and on sbt 2
+      - name: Generate classes from schema files in a build on sbt 1 and on sbt 2
         run: sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'
 
   js-leaks:

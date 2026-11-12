@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "example.json.Payment",
+  "oneOf": [{ "$ref": "#/definitions/Cash" }, { "$ref": "#/definitions/Card" }],
+  "definitions": {
+    "Cash": {
+      "type": "object",
+      "properties": { "kind": { "const": "cash" }, "amount": { "type": "number" } },
+      "required": ["kind", "amount"]
+    },
+    "Card": {
+      "type": "object",
+      "properties": { "kind": { "enum": ["card"] }, "amount": { "type": "number" }, "last4": { "type": "string" } },
+      "required": ["kind", "amount"]
+    }
+  }
+}
