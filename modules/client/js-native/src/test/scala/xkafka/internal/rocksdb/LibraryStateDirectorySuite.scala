@@ -91,8 +91,9 @@ final class LibraryStateDirectorySuite extends CatsEffectSuite:
       PlatformStateDirectory[IO](root, "app").use: directory =>
         def made(owner: String) = directory.open(owner, "counts", None).flatMap(_.close)
         for
-          _       <- List("0_1", "0_2", StateDirectory.Global).traverse_(made)
+          _       <- List("0_1", "0_2", StateDirectory.Global, "notes").traverse_(made)
           _       <- directory.released("0_1", Map("counts" -> 7L)) *> directory.released("0_2", Map("counts" -> 2L))
+          _       <- directory.released("notes", Map("counts" -> 1L))
           held    <- directory.held
           _       <- directory.cleaned(Set("0_2"), 1.hour)
           recent  <- directory.held
@@ -100,7 +101,7 @@ final class LibraryStateDirectorySuite extends CatsEffectSuite:
           cleaned <- directory.held
           global  <- directory.open(StateDirectory.Global, "counts", None).flatMap(store => store.position.flatTap(_ => store.close))
         yield
-          assertEquals(held, Map("0_1" -> Map("counts" -> 7L), "0_2" -> Map("counts" -> 2L)))
+          assertEquals(held, Map("0_1" -> Map("counts" -> 7L), "0_2" -> Map("counts" -> 2L), "notes" -> Map("counts" -> 1L)))
           assertEquals(recent, held)
-          assertEquals(cleaned, Map("0_2" -> Map("counts" -> 2L)))
+          assertEquals(cleaned, Map("0_2" -> Map("counts" -> 2L), "notes" -> Map("counts" -> 1L)), "a directory no task is named as is not removed")
           assertEquals(global, None)

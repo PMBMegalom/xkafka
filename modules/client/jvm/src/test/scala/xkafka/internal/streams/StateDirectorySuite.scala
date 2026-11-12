@@ -98,10 +98,18 @@ final class StateDirectorySuite extends CatsEffectSuite:
           _    <- made(at, "0_2", 11.minutes)
           _    <- made(at, "0_3", 1.minute)
           _    <- made(at, StateDirectory.Global, 11.minutes)
+          _    <- made(at, "notes", 11.minutes)
           _    <- made(at, "0_4", 11.minutes) *> directory.released("0_4", Map("counts" -> 7L, "sums" -> 2L))
           held <- directory.held
           _    <- directory.cleaned(Set("0_2"), 10.minutes)
-          left <- IO.blocking(List("0_1", "0_2", "0_3", "0_4", StateDirectory.Global).filter(owner => Files.exists(at.resolve("app").resolve(owner))))
+          left <-
+            IO.blocking(
+              List("0_1", "0_2", "0_3", "0_4", StateDirectory.Global, "notes").filter(owner => Files.exists(at.resolve("app").resolve(owner)))
+            )
         yield
-          assertEquals(left, List("0_2", "0_3", "0_4", StateDirectory.Global))
+          assertEquals(
+            left,
+            List("0_2", "0_3", "0_4", StateDirectory.Global, "notes"),
+            "a directory no task is named as is not the application's to remove"
+          )
           assertEquals(held, Map("0_4" -> Map("counts" -> 7L, "sums" -> 2L)))

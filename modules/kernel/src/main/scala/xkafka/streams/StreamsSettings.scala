@@ -34,6 +34,8 @@ opaque type ApplicationId = String
 object ApplicationId:
   def from(value: String): Either[StreamsSettingsError, ApplicationId] =
     if value.isEmpty then Left(StreamsSettingsError.EmptyApplicationId)
+    // The names of a directory and its parent, which a state directory would take for the application's own.
+    else if value == "." || value == ".." then Left(StreamsSettingsError.ReservedApplicationId(value))
     else if value.length > Topology.MaxNameLength then Left(StreamsSettingsError.ApplicationIdTooLong(value.length))
     else if !value.forall(char => char.isLetterOrDigit && char < 128 || char == '.' || char == '_' || char == '-') then
       Left(StreamsSettingsError.InvalidApplicationIdCharacters(value))
@@ -64,6 +66,8 @@ enum StreamsSettingsError derives CanEqual:
   case EmptyStateDirectory
   case InvalidEndpoint(host: String, port: Int)
   case FetchWaitOutOfRange(value: FiniteDuration)
+  case PartialMilliseconds(setting: String, value: FiniteDuration)
+  case ReservedApplicationId(value: String)
 
   def message: String =
     this match
@@ -76,6 +80,8 @@ enum StreamsSettingsError derives CanEqual:
       case EmptyStateDirectory                   => "state directory must not be empty"
       case InvalidEndpoint(host, port)           => s"an endpoint needs a host and a port from 1 to 65535, was '$host' and $port"
       case FetchWaitOutOfRange(value)            => s"fetch wait must be from 0 to ${ConsumerSettings.FetchWaitLimit}, was $value"
+      case PartialMilliseconds(setting, value)   => s"$setting must be whole milliseconds, was $value"
+      case ReservedApplicationId(value)          => s"application id must not be '$value'"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -131,7 +137,8 @@ sealed abstract case class StreamsSettings private (
   def withGuarantee(value: ProcessingGuarantee): StreamsSettings = copy(guarantee = value)
 
   def withCommitInterval(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
-    StreamsSettings.positive(value)(StreamsSettingsError.NonPositiveCommitInterval(_)).map(valid => copy(commitInterval = Some(valid)))
+    StreamsSettings.positive(value, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))
+      .map(valid => copy(commitInterval = Some(valid)))
 
   /** Commits at Java Streams' interval for the guarantee. */
   def withoutCommitInterval: StreamsSettings = copy(commitInterval = None)
@@ -140,7 +147,7 @@ sealed abstract case class StreamsSettings private (
     StreamsSettings.atLeastOne(value).map(valid => copy(concurrency = valid))
 
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
-    StreamsSettings.positive(value)(StreamsSettingsError.NonPositiveCloseTimeout(_)).map(valid => copy(closeTimeout = valid))
+    StreamsSettings.positive(value, "close timeout")(StreamsSettingsError.NonPositiveCloseTimeout(_)).map(valid => copy(closeTimeout = valid))
 
   /** Sends the program's description to the group's coordinator when it asks for one. */
   def withTopologyDescriptionPush: StreamsSettings = copy(topologyDescriptionPush = true)
@@ -208,9 +215,9 @@ object StreamsSettings:
       fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
-      commitInterval.traverse(positive(_)(StreamsSettingsError.NonPositiveCommitInterval(_))),
+      commitInterval.traverse(positive(_, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))),
       atLeastOne(concurrency),
-      positive(closeTimeout)(StreamsSettingsError.NonPositiveCloseTimeout(_)),
+      positive(closeTimeout, "close timeout")(StreamsSettingsError.NonPositiveCloseTimeout(_)),
       stateDirectory.traverse(directory),
       fetchWaitOf(fetchWait)
     ).mapN((interval, tasks, timeout, kept, wait) =>
@@ -245,12 +252,17 @@ object StreamsSettings:
   private def directory(value: String): ValidatedNel[StreamsSettingsError, String] =
     if value.trim.nonEmpty then value.validNel else StreamsSettingsError.EmptyStateDirectory.invalidNel
 
-  private def positive(value: FiniteDuration)(error: FiniteDuration => StreamsSettingsError): ValidatedNel[StreamsSettingsError, FiniteDuration] =
-    if value > Duration.Zero then value.validNel else error(value).invalidNel
+  private def positive(value: FiniteDuration, setting: String)(
+      error: FiniteDuration => StreamsSettingsError
+  ): ValidatedNel[StreamsSettingsError, FiniteDuration] = if value <= Duration.Zero then error(value).invalidNel else whole(value, setting)
 
   private def fetchWaitOf(value: FiniteDuration): ValidatedNel[StreamsSettingsError, FiniteDuration] =
-    if value >= Duration.Zero && value <= ConsumerSettings.FetchWaitLimit then value.validNel
+    if value >= Duration.Zero && value <= ConsumerSettings.FetchWaitLimit then whole(value, "fetch wait")
     else StreamsSettingsError.FetchWaitOutOfRange(value).invalidNel
+
+  /** The clients count durations in milliseconds, so a part of one would be dropped, and a duration under one would become none. */
+  private def whole(value: FiniteDuration, setting: String): ValidatedNel[StreamsSettingsError, FiniteDuration] =
+    if value.toNanos % 1000000L == 0L then value.validNel else StreamsSettingsError.PartialMilliseconds(setting, value).invalidNel
 
   private def atLeastOne(value: Int): ValidatedNel[StreamsSettingsError, Int] =
     if value > 0 then value.validNel else StreamsSettingsError.NonPositiveConcurrency(value).invalidNel

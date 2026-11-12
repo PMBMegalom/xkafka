@@ -33,7 +33,8 @@ commits once for each consumer its offsets came from.
 ## Committing on a schedule
 
 `commitBatchWithin` is an FS2 pipe which commits whenever it collects `n`
-offsets or `d` elapses, whichever happens first:
+offsets or `d` elapses, whichever happens first. Both must be positive; the
+stream fails with `IllegalArgumentException` otherwise:
 
 ```scala
 // Handle each record, and commit every 100 offsets or every 5 seconds, whichever comes first

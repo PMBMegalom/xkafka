@@ -104,6 +104,7 @@ enum SettingsError derives CanEqual:
   case IdempotenceRequiresAllReplicas(acks: Acks)
   case NegativeDuration(field: SettingsError.DurationField, value: FiniteDuration)
   case DurationAboveLimit(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration)
+  case PartialMilliseconds(field: SettingsError.DurationField, value: FiniteDuration)
   case NonPositiveBatchSize(value: Int)
   case BlankGroupInstanceId
   case HeartbeatNotBelowSessionTimeout(heartbeatInterval: FiniteDuration, sessionTimeout: FiniteDuration)
@@ -128,6 +129,7 @@ enum SettingsError derives CanEqual:
       case IdempotenceRequiresAllReplicas(acks)    => s"acks must be AllReplicas while idempotence is on, was $acks"
       case NegativeDuration(field, value)          => s"${field.label} must not be negative, was $value"
       case DurationAboveLimit(field, value, limit) => s"${field.label} must not exceed $limit, was $value"
+      case PartialMilliseconds(field, value)       => s"${field.label} must be whole milliseconds, was $value"
       case NonPositiveBatchSize(value)             => s"batchSize must be positive, was $value"
       case BlankGroupInstanceId                    => "group instance id must not be blank"
       case HeartbeatNotBelowSessionTimeout(heartbeat, session) =>
@@ -175,19 +177,23 @@ private def propertyErrors(properties: Map[String, String], scope: SettingsError
 private def durationErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > SettingsError.MaxDuration then List(SettingsError.DurationExceedsMaximum(field, value))
-  else Nil
+  else partialErrors(field, value)
+
+/** Both backends count durations in milliseconds, so a part of one would be dropped, and a duration under one would become none. */
+private def partialErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
+  if value.toNanos % 1000000L == 0L then Nil else List(SettingsError.PartialMilliseconds(field, value))
 
 /** Checks a positive duration both backends accept up to a limit, which is the lower of their two maximums. */
 private def limitedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
-  else Nil
+  else partialErrors(field, value)
 
 /** Checks a duration both backends accept from zero up to a limit, which is the lower of their two maximums. */
 private def boundedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
   if value < Duration.Zero then List(SettingsError.NegativeDuration(field, value))
   else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
-  else Nil
+  else partialErrors(field, value)
 
 /** Accepts `host:port`, including bracketed IPv6 literals, so an unusable endpoint is caught at construction. */
 private def bootstrapServerError(value: String, index: Int): Option[SettingsError] =
@@ -1488,7 +1494,10 @@ object CommittableOffsetBatch:
 
 /** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
 def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =
-  _.groupWithin(n, d).evalMap(offsets => CommittableOffsetBatch.fromFoldable(offsets).commit)
+  // A batch of none, or no time, would never be committed.
+  if n <= 0 || d <= Duration.Zero then
+    _ => Stream.raiseError[F](new IllegalArgumentException(s"commitBatchWithin needs a positive size and time, was $n and $d"))
+  else _.groupWithin(n, d).evalMap(offsets => CommittableOffsetBatch.fromFoldable(offsets).commit)
 
 final case class CommittableConsumerRecord[F[_], K, V](record: ConsumerRecord[K, V], offset: CommittableOffset[F]):
   def mapK[G[_]](fk: FunctionK[F, G]): CommittableConsumerRecord[G, K, V] = CommittableConsumerRecord(record, offset.mapK(fk))

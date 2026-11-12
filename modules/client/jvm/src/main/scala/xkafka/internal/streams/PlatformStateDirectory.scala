@@ -124,5 +124,5 @@ private[xkafka] object PlatformStateDirectory:
           try listed.iterator.asScala.toList.filter(Files.isDirectory(_)).foreach: directory =>
               val owner = directory.getFileName.toString
               val idle  = now.toMillis - Files.getLastModifiedTime(directory).toMillis
-              if owner != StateDirectory.Global && !held(owner) && idle >= delay.toMillis then removed(directory)
+              if StateDirectory.isTask(owner) && !held(owner) && idle >= delay.toMillis then removed(directory)
           finally listed.close()

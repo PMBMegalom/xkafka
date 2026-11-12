@@ -192,5 +192,5 @@ private[xkafka] object LibraryStateDirectory:
 
     def cleaned(held: Set[String], delay: FiniteDuration): F[Unit] =
       (F.realTime, files.directories(base)).tupled.flatMap: (now, owners) =>
-        owners.filterNot(owner => owner.startsWith(".") || owner == StateDirectory.Global || held(owner)).traverse_ : owner =>
+        owners.filter(owner => StateDirectory.isTask(owner) && !held(owner)).traverse_ : owner =>
           files.modified(s"$base/$owner").flatMap(at => files.removed(s"$base/$owner").whenA(now.toMillis - at >= delay.toMillis))

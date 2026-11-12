@@ -38,6 +38,7 @@ final class CommitRecoverySuite extends CatsEffectSuite:
     assertEquals(CommitRecovery.exponential(1, maxDelay = (-1).second), Left(ValidationError.NonPositiveDelay((-1).second)))
     assertEquals(CommitRecovery.exponential(1, jitter = 1.5), Left(ValidationError.JitterOutOfRange(1.5)))
     assertEquals(CommitRecovery.exponential(1, jitter = -0.1), Left(ValidationError.JitterOutOfRange(-0.1)))
+    assert(CommitRecovery.exponential(1, jitter = Double.NaN).left.exists(_.isInstanceOf[ValidationError.JitterOutOfRange]), "NaN is no fraction")
     assert(CommitRecovery.exponential(1).isRight)
 
   test("delays double from the first, and stop growing at the maximum"):

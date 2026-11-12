@@ -24,6 +24,7 @@ package xkafka
 import scala.concurrent.duration.*
 
 import cats.effect.{IO, Ref}
+import cats.syntax.all.*
 import fs2.Stream
 import munit.CatsEffectSuite
 
@@ -52,6 +53,13 @@ final class CommitBatchWithinSuite extends CatsEffectSuite:
       _ <- (Stream.emit(offset).covary[IO] ++ Stream.never[IO]).through(commitBatchWithin(10, 50.millis)).take(1).compile.drain.timeout(5.seconds)
       result <- committed.get
     yield assertEquals(result, Vector(Map(TopicPartition(topic, firstPartition) -> first)))
+
+  test("commitBatchWithin refuses a batch size or time that is not positive, which would never commit"):
+    Ref[IO].of(Vector.empty[Map[TopicPartition, Offset]]).flatMap: committed =>
+      val offset = offsetAt(firstPartition, first, recordingCommitter(committed))
+      List((0, 1.second), (-1, 1.second), (1, Duration.Zero)).traverse_ : (n, d) =>
+        Stream.emit(offset).covary[IO].through(commitBatchWithin(n, d)).compile.drain.attempt.timeout(5.seconds).map: outcome =>
+          assert(outcome.left.exists(_.isInstanceOf[IllegalArgumentException]), s"$n and $d gave $outcome")
 
   private def recordingCommitter(committed: Ref[IO, Vector[Map[TopicPartition, Offset]]]): OffsetCommitter[IO] =
     new OffsetCommitter[IO]:

@@ -147,6 +147,31 @@ final class ClientSuite extends FunSuite:
       ))
     )
 
+  test("durations that are not whole milliseconds are refused, as both backends count in milliseconds"):
+    val serializer   = Serializer.const[IO, String](None)
+    val deserializer = Deserializer.utf8[IO]
+    val partial      = 500.micros
+    assertEquals(
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = partial).toEither,
+      Left(NonEmptyList.one(SettingsError.PartialMilliseconds(SettingsError.DurationField.MetadataRefreshInterval, partial)))
+    )
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, closeTimeout = 1500.micros).toEither,
+      Left(NonEmptyList.one(SettingsError.PartialMilliseconds(SettingsError.DurationField.CloseTimeout, 1500.micros)))
+    )
+    assertEquals(
+      ConsumerSettings.from(clientSettings, group, deserializer, deserializer, pollTimeout = partial, maxPollInterval = 1001.micros).toEither,
+      Left(NonEmptyList.of(
+        SettingsError.PartialMilliseconds(SettingsError.DurationField.PollTimeout, partial),
+        SettingsError.PartialMilliseconds(SettingsError.DurationField.MaxPollInterval, 1001.micros)
+      ))
+    )
+    assertEquals(
+      ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get.withFetchWait(partial).toEither,
+      Left(NonEmptyList.one(SettingsError.PartialMilliseconds(SettingsError.DurationField.FetchWait, partial)))
+    )
+    assert(ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get.withFetchWait(Duration.Zero).isValid)
+
   test("every duration accepts the largest portable millisecond value"):
     val serializer   = Serializer.const[IO, String](None)
     val deserializer = Deserializer.utf8[IO]

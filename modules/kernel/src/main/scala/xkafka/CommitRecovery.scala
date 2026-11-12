@@ -76,7 +76,7 @@ object CommitRecovery:
     if maxAttempts < 0 then Left(ValidationError.NegativeAttemptCount(maxAttempts))
     else if initialDelay <= Duration.Zero then Left(ValidationError.NonPositiveDelay(initialDelay))
     else if maxDelay <= Duration.Zero then Left(ValidationError.NonPositiveDelay(maxDelay))
-    else if jitter < 0d || jitter > 1d then Left(ValidationError.JitterOutOfRange(jitter))
+    else if !(jitter >= 0d && jitter <= 1d) then Left(ValidationError.JitterOutOfRange(jitter))
     else Right(new CommitRecovery(maxAttempts, initialDelay, maxDelay, jitter) {})
 
   given Show[CommitRecovery] = Show.fromToString

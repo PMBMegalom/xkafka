@@ -49,8 +49,10 @@ A rejected value raises `KafkaException.InvalidValue`, which carries the
 accumulation survives the lift.
 
 Bootstrap servers must be `host:port`, including bracketed IPv6 literals.
-Property names must not be blank. Every duration must be positive and at most
-`Int.MaxValue` milliseconds (about 24.9 days), with these exceptions:
+Property names must not be blank. Every duration, in these settings and in
+`StreamsSettings`, must be a whole number of milliseconds, since Kafka's clients
+count no finer. It must also be positive and at most `Int.MaxValue`
+milliseconds (about 24.9 days), with these exceptions:
 
 - `linger` may be zero, and at most `ProducerSettings.LingerLimit` (15 minutes).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
