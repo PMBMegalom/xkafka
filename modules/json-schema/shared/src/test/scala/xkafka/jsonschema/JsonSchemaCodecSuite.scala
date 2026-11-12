@@ -28,7 +28,7 @@ import cats.data.NonEmptyList
 import cats.effect.IO
 import fs2.Chunk
 import io.circe.Json
-import io.circe.parser.parse
+import io.circe.jawn.parse
 import munit.CatsEffectSuite
 import xkafka.{Headers, Topic}
 import xkafka.schemaregistry.*
@@ -89,6 +89,11 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       1,
       Chunk[Byte](1, 2, 3)
     )
+
+  test("a record's long keeps every digit, beyond what a double holds"):
+    final case class Big(n: Long) derives JsonSchemaCodec
+    val bytes = Chunk.array("""{"n":9007199254740993}""".getBytes("UTF-8"))
+    assertEquals(JsonSchemaFormat.read(bytes).flatMap(JsonSchemaCodec[Big].decode), Right(Big(9007199254740993L)))
 
   test("a case class is a closed object of its fields, those without a default required"):
     assertEquals(

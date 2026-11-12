@@ -26,7 +26,7 @@ import java.nio.charset.StandardCharsets
 import cats.effect.Concurrent
 import cats.syntax.all.*
 import fs2.Chunk
-import io.circe.{parser, Json}
+import io.circe.{jawn, Json}
 import xkafka.{Deserializer, Serde}
 import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
 
@@ -51,10 +51,10 @@ object JsonSchemaFormat:
   private[jsonschema] def json(schema: Schema): Either[String, Json] =
     if schema.schemaType != SchemaType.Json then Left(s"the schema is ${schema.schemaType.name}, not JSON Schema")
     else if schema.references.nonEmpty then Left("the schema names schemas registered under other subjects, which xkafka does not read yet")
-    else parser.parse(schema.text).leftMap(error => s"the schema is not JSON: ${error.message}")
+    else jawn.parse(schema.text).leftMap(error => s"the schema is not JSON: ${error.message}")
 
   private[jsonschema] def read(bytes: Chunk[Byte]): Either[String, Json] =
-    parser.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).leftMap(error => s"the record is not JSON: ${error.message}")
+    jawn.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).leftMap(error => s"the record is not JSON: ${error.message}")
 
 /** Serdes writing and reading JSON with the schemas the registry keeps, in Confluent's wire format, as Confluent's `KafkaJsonSchemaSerializer` does:
   * the schema's id, then the JSON as UTF-8 text.

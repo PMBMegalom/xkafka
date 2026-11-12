@@ -23,7 +23,7 @@ package xkafka.avro
 
 import cats.syntax.all.*
 import fs2.Chunk
-import io.circe.{parser, Json, JsonObject}
+import io.circe.{jawn, Json, JsonObject}
 
 /** Avro schemas as the JSON of an `.avsc` file, as the registry keeps them. */
 object AvroSchemaJson:
@@ -55,8 +55,7 @@ object AvroSchemaJson:
     )
 
   /** The schema `text` writes, or why it is not one. A named type is defined where it is first named, and named again by its name alone. */
-  def parse(text: String): Either[String, AvroSchema] =
-    parser.parse(text).leftMap(_.getMessage).flatMap(json => read(json, None, Map.empty).map(_._1))
+  def parse(text: String): Either[String, AvroSchema] = jawn.parse(text).leftMap(_.getMessage).flatMap(json => read(json, None, Map.empty).map(_._1))
 
   /** The schema as compact JSON: each named type defined where it first appears, and named by its name after. */
   def render(schema: AvroSchema): String = write(schema, None, AvroSchema.definitions(schema), Set.empty)._1.noSpaces

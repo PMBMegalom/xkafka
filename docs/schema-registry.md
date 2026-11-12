@@ -515,7 +515,7 @@ they are, and reads each record's JSON as it is:
 ```scala mdoc:compile-only
 // Write a line of an order as JSON, with a schema read from its text as the program runs
 import cats.effect.IO
-import io.circe.{Json, parser}
+import io.circe.{jawn, Json}
 
 import xkafka.Serde
 import xkafka.jsonschema.JsonSchemaSerde
@@ -524,7 +524,7 @@ import xkafka.schemaregistry.{Part, SchemaRegistry}
 val text = """{"type":"object","title":"com.example.Line","properties":{"sku":{"type":"string"},"quantity":{"type":"integer"}}}"""
 
 def lines(registry: SchemaRegistry[IO]): IO[Serde[IO, Json]] =
-  IO.fromEither(parser.parse(text)).flatMap(schema => JsonSchemaSerde.generic[IO](registry, schema, Part.Value))
+  IO.fromEither(jawn.parse(text)).flatMap(schema => JsonSchemaSerde.generic[IO](registry, schema, Part.Value))
 
 val line = Json.obj("sku" -> Json.fromString("apple"), "quantity" -> Json.fromInt(3))
 ```

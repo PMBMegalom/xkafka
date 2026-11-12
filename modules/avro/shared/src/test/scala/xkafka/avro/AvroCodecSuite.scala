@@ -339,6 +339,10 @@ class AvroCodecSuite extends FunSuite:
       assertEquals(AvroCodec[Int | Long | String].encode(value).flatMap(AvroCodec[Int | Long | String].decode), Right(value))
     assertEquals(AvroCodec[Int | Long | String].encode(7L), Right(AvroValue.Long(7L)))
 
+  test("a schema's long default keeps every digit, beyond what a double holds"):
+    val text = """{"type":"record","name":"Big","fields":[{"name":"n","type":"long","default":9007199254740993}]}"""
+    assertEquals(AvroSchemaJson.parse(text).map(AvroSchemaJson.render), Right(text))
+
   test("bytes, sets, vectors and maps read back as they were written"):
     final case class Kinds(raw: Chunk[Byte], set: Set[Int], vector: Vector[Double], map: Map[String, Option[Boolean]], float: Float) derives AvroCodec
     val kinds = Kinds(Chunk[Byte](0, -1, 7), Set(3, 1), Vector(1.5, -2.25), Map("a" -> Some(true), "b" -> None), 0.5f)

@@ -26,7 +26,7 @@ import java.nio.charset.StandardCharsets
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
-import io.circe.{parser, Json}
+import io.circe.{jawn, Json}
 
 /** A registry in memory answering the part of Confluent's REST API the client uses, as Confluent's answers them, and keeping every request. A schema
   * is incompatible with a subject where `incompatible` says so of its text.
@@ -48,7 +48,7 @@ final class FakeRegistry(state: Ref[IO, FakeRegistry.State], val requests: Ref[I
   private def answer(method: Method, target: String, body: Option[Chunk[Byte]]): IO[RegistryResponse] =
     val (path, query) = target.span(_ != '?')
     val parts         = path.split('/').toList.drop(1).map(decode)
-    def stored        = body.flatMap(bytes => parser.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).toOption).flatMap(Stored.from)
+    def stored        = body.flatMap(bytes => jawn.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).toOption).flatMap(Stored.from)
     (method, parts) match
       case (Method.Get, List("schemas", "ids", id)) => state.get
           .map(_.byId.get(id.toInt).fold(refused(404, 40403, "Schema not found"))(schema => ok(schema.json)))

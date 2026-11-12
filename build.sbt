@@ -774,7 +774,7 @@ lazy val schemaRegistry = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .settings(
     name        := "xkafka-schema-registry",
     description := "Serdes that keep their schemas in a schema registry, for xkafka",
-    libraryDependencies ++= Seq("io.circe" %%% "circe-core" % circeVersion, "io.circe" %%% "circe-parser" % circeVersion)
+    libraryDependencies ++= Seq("io.circe" %%% "circe-core" % circeVersion, "io.circe" %%% "circe-jawn" % circeVersion)
   )
 
 // The registry is reached through an HTTP client the application chooses; this module adapts http4s's.

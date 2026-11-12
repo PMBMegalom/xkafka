@@ -31,7 +31,7 @@ import com.google.protobuf.DynamicMessage
 import com.google.protobuf.util.JsonFormat
 import fs2.Chunk
 import io.circe.Json
-import io.circe.parser.parse
+import io.circe.jawn.parse
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException
 import io.confluent.kafka.schemaregistry.protobuf.{ProtobufSchema, ProtobufSchemaProvider}
