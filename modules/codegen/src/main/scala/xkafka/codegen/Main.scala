@@ -53,10 +53,21 @@ object Main extends IOApp:
       case option :: _ if option.startsWith("--") => None
       case rest                                   => Some((json, rest))
 
-  private def generate(files: List[Path], json: JsonSchemaOptions): Either[NonEmptyList[String], List[GeneratedFile]] =
+  private[codegen] def generate(files: List[Path], json: JsonSchemaOptions): Either[NonEmptyList[String], List[GeneratedFile]] =
     val (schemas, avro) = files.partition(_.toString.endsWith(".json"))
     val fromAvro        = if avro.isEmpty then Right(Nil) else AvroGenerator.generate(avro)
-    (fromAvro.toValidated, JsonSchemaGenerator.generate(schemas, json).toValidated).mapN(_ ++ _).toEither
+    (fromAvro.toValidated, JsonSchemaGenerator.generate(schemas, json).toValidated).mapN(_ ++ _).toEither.flatMap(apart)
+
+  /** The files, unless two would be one: one type's would replace the other's, as where an Avro and a JSON Schema type have one name, or where two
+    * names differ only in case, which macOS and Windows take to be one file.
+    */
+  private def apart(files: List[GeneratedFile]): Either[NonEmptyList[String], List[GeneratedFile]] =
+    val clashes =
+      files.groupBy(_.path.toString.toLowerCase).values.filter(_.size > 1).toList.map: group =>
+        group.map(_.path.toString).distinct.sorted match
+          case List(one) => s"${group.size} types would be written to $one"
+          case paths     => s"${group.size} types would be written to ${paths.mkString(" and ")}, which are one file where case is ignored"
+    NonEmptyList.fromList(clashes.sorted).toLeft(files)
 
   /** `input`, a file, or the schema files in `input`, a directory, in the order of their paths. */
   private def schemas(input: Path): IO[List[Path]] =

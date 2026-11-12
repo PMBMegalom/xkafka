@@ -465,13 +465,18 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
         if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
                 return 0;
 
+        /* Any failure but the client giving up on the brokers is the delivery's own. */
+        if (!xkafka_unreached(err)) {
+                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);
+                return -1;
+        }
         /* A delivery report that never reached a broker reports the retries
          * ending, so a recorded security failure is the cause. */
-        if (xkafka_unreached(err) && !batch->security_read) {
+        if (!batch->security_read) {
                 batch->security_read = 1;
                 xkafka_take_security_error(producer, batch->security_message, sizeof(batch->security_message), &batch->security_error);
         }
-        if (xkafka_unreached(err) && batch->security_error != 0)
+        if (batch->security_error != 0)
                 xkafka_set_error_at(error, error_size, error_code, batch->security_message, batch->security_error);
         else
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);

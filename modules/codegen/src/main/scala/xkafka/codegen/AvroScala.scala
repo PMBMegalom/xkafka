@@ -219,7 +219,7 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
         Right(
           header(enumeration.name) + annotations(enumeration.doc, enumeration.aliases) +
             enumeration.default.fold("")(symbol => s"@xkafka.avro.AvroEnumDefault(${Names.quote(symbol)})\n") +
-            s"enum $scala:\n${lines.mkString("\n")}\n\n" + companion(scala, enumeration, Nil)
+            s"enum $scala${Names.opening(scala)}\n${lines.mkString("\n")}\n\n" + companion(scala, enumeration, Nil)
         )
 
   private def fixedSource(fixed: AvroSchema.Fixed): String =
@@ -240,7 +240,7 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
 
   private def companion(scala: String, schema: AvroSchema, givens: List[String]): String =
     val extra = givens.map(line => s"  $line\n").mkString
-    s"""object $scala:
+    s"""object $scala${Names.opening(scala)}
        |  /** The Avro schema $scala was generated from, which its codec must have. */
        |  val avroSchema: String = ${Names.quote(AvroSchemaJson.render(schema))}
        |

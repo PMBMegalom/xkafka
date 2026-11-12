@@ -1,0 +1,10 @@
+{
+  "title": "example.json.Note_",
+  "description": "A note on a path such as /api/*, whose name ends with an underscore",
+  "type": "object",
+  "properties": {
+    "path": { "type": "string", "description": "Where it applies: /* and */ in text" },
+    "shade": { "description": "Light /* or */ dark", "enum": ["light", "dark"] }
+  },
+  "required": ["path", "shade"]
+}

@@ -131,6 +131,9 @@ private[codegen] object Names:
   /** What goes between a parameter's name and its type: a name ending in an underscore would take a colon right after it as part of itself. */
   def colon(name: String): String = if name.endsWith("_") then " : " else ": "
 
+  /** The colon that opens a type's body after its name, apart from a name ending in an underscore for the same reason. */
+  def opening(name: String): String = if name.endsWith("_") then " :" else ":"
+
   private val identifier = """[\p{L}_][\p{L}\p{Nd}_]*""".r
 
   /** Whether `text` is a Scala identifier made of letters, digits and underscores, which a name may be as it is. */

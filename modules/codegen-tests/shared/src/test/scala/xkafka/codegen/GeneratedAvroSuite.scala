@@ -59,6 +59,9 @@ class GeneratedAvroSuite extends FunSuite:
       copy_ = 9
     )
 
+  test("types whose names end with an underscore are generated, and read back"):
+    assertEquals(roundTrip(Marked_(Kind_.MARKED)), Right(Marked_(Kind_.MARKED)))
+
   test("every generated type's codec has the schema it was generated from"):
     registers[Order](Order.avroSchema)
     registers[Status](Status.avroSchema)

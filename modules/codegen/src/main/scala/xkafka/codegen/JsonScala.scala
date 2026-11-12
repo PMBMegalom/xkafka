@@ -409,7 +409,7 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
           val decode = if byPath.get(path).exists(_.isInstanceOf[Decl.Record]) then "decodeJson(_, false)" else "decodeJson"
           if path == rootPath then s"given $codecs[$name] = $helpers.codec(jsonSchema, encodeJson, $decode)"
           else s"$access given $codecs[$name] = $helpers.part(encodeJson, $decode)"
-        s"object $name:\n" + (schema.toList ++ inner ++ members :+ codec).map(indent).mkString("\n\n") + "\n"
+        s"object $name${Names.opening(name)}\n" + (schema.toList ++ inner ++ members :+ codec).map(indent).mkString("\n\n") + "\n"
 
     private def recordSource(record: Decl.Record): Either[String, String] =
       val name   = Names.typeName(record.path.last)
@@ -528,7 +528,7 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
           s"$access def encodeJson(value: $full): ${result(jsonType)} = jsonSymbols._1(value)",
           s"$access def decodeJson(json: $jsonType): ${result(full)} = jsonSymbols._2(json)"
         )
-      s"${scaladoc(symbols.doc, Nil)}enum $name:\n$cases\n\n" + companion(symbols.path, members).fold(identity, identity)
+      s"${scaladoc(symbols.doc, Nil)}enum $name${Names.opening(name)}\n$cases\n\n" + companion(symbols.path, members).fold(identity, identity)
 
     private def choiceSource(choice: Decl.Choice): String =
       val name     = Names.typeName(choice.path.last)
@@ -645,7 +645,8 @@ private[codegen] object JsonScala:
   def indent(text: String): String = text.linesIterator.map(line => if line.isEmpty then line else s"  $line").mkString("\n")
 
   def scaladoc(doc: Option[String], params: List[(String, String)]): String =
-    def safe(text: String) = text.replace("*/", "*&#47;")
+    // Scala's comments nest, so text must neither end the comment nor open another inside it.
+    def safe(text: String) = text.replace("*/", "*&#47;").replace("/*", "&#47;*")
     val lines              =
       doc.toList.flatMap(text => safe(text).linesIterator.toList) ++ (if params.nonEmpty && doc.nonEmpty then List("") else Nil) ++
         params.map((name, text) => s"@param $name ${safe(text).linesIterator.mkString(" ")}")

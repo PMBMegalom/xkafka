@@ -1,0 +1,2 @@
+{"type": "record", "name": "Marked_", "namespace": "example.shop", "doc": "A record and an enum whose names end with an underscore",
+ "fields": [{"name": "kind", "type": {"type": "enum", "name": "Kind_", "symbols": ["PLAIN", "MARKED"]}}]}

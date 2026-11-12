@@ -24,7 +24,7 @@ package xkafka.codegen
 import java.time.{Instant, LocalDate, OffsetTime, ZoneOffset}
 import java.util.UUID
 
-import example.json.{Order, Payment}
+import example.json.{Note_, Order, Payment, Shade_}
 import example.json.decimal.Price
 import example.json.untitled.{Level, Tree}
 import fs2.Chunk
@@ -78,6 +78,10 @@ class GeneratedJsonSuite extends FunSuite:
       size = Some(Order.Large(1, Some(2))),
       shipping = Order.Shipping("Via Po 2", "Turin", Some(3.25))
     )
+
+  test("descriptions with comment markers, and types whose names end with an underscore, are generated, and read back"):
+    assertEquals(read[Note_]("""{"path":"/api/*","shade":"dark"}"""), Right(Note_("/api/*", Note_.Shade.dark)))
+    assertEquals(read[Shade_](""""light""""), Right(Shade_.light))
 
   test("each file's type registers the file's schema, named by its title"):
     assertEquals(JsonSchemaFormat[Order].schema.text, Order.jsonSchema.noSpaces)

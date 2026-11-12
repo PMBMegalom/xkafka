@@ -269,3 +269,7 @@ file, and why:
   of itself;
 - two types of one name in one companion, or a type named as its file's;
 - a `default` that is not a value of its property.
+
+Whatever the format, two types whose classes would be one file are refused too:
+an Avro and a JSON Schema type of one full name, or two whose names differ only
+in case, which macOS and Windows treat as one file name.
