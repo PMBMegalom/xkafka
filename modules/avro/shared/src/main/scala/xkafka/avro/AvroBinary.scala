@@ -28,6 +28,9 @@ import fs2.Chunk
 
 /** Avro's binary encoding, and reading what was written with one schema as another, as the specification resolves them. */
 object AvroBinary:
+  /** How deep records may hold records, as a list's nodes do, before a value is refused instead of read. */
+  private[avro] val MaxDepth = 100
+
   /** `value` written as `schema` describes it, or why it does not fit the schema. */
   def encode(schema: AvroSchema, value: AvroValue): Either[String, Chunk[Byte]] =
     write(schema, value, AvroSchema.definitions(schema)).map(parts => Chunk.concat(parts.toList))
@@ -43,7 +46,7 @@ object AvroBinary:
     Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).plan(writer, reader, Map.empty).map: step =>
       bytes =>
         val array = bytes.toArray
-        step(array, 0).flatMap: (value, end) =>
+        step(array, 0, 0).flatMap: (value, end) =>
           Either.cond(end == array.length, value, s"${array.length - end} bytes are left after the value")
 
   // Writing
@@ -123,8 +126,11 @@ object AvroBinary:
 
   // Reading
 
-  /** Reads a value from `bytes` at a position, giving the position after it. */
-  private type Step = (Array[Byte], Int) => Either[String, (AvroValue, Int)]
+  /** Reads a value from `bytes` at a position, inside as many records as the depth says, giving the position after it. */
+  private type Step = (Array[Byte], Int, Int) => Either[String, (AvroValue, Int)]
+
+  /** How many items of a type written as no bytes, such as `null`, an array may hold, since the bytes left cannot bound their count. */
+  private[avro] val MaxEmptyItems = 1 << 20
 
   private def readLong(bytes: Array[Byte], at: Int, most: Int): Either[String, (Long, Int)] =
     def from(index: Int, shift: Int, sofar: Long): Either[String, (Long, Int)] =
@@ -141,7 +147,7 @@ object AvroBinary:
 
   private def readFixed(bytes: Array[Byte], at: Int, size: Int): Either[String, (Chunk[Byte], Int)] =
     Either.cond(
-      size >= 0 && at + size <= bytes.length,
+      size >= 0 && size <= bytes.length - at,
       (Chunk.array(java.util.Arrays.copyOfRange(bytes, at, at + size)), at + size),
       "the value ends before its last byte"
     )
@@ -157,8 +163,12 @@ object AvroBinary:
       "the value ends before its last byte"
     )
 
-  /** Reads the blocks of an array or map, each item with `item`, until the empty block. A negative count is followed by the block's size in bytes. */
-  private def readBlocks[A](bytes: Array[Byte], at: Int, item: (Array[Byte], Int) => Either[String, (A, Int)]): Either[String, (Vector[A], Int)] =
+  /** Reads the blocks of an array or map, each item with `item`, until the empty block. A negative count is followed by the block's size in bytes.
+    * Items `empty` says are written as no bytes are refused past `MaxEmptyItems`, and others past one for each byte left.
+    */
+  private def readBlocks[A](bytes: Array[Byte], at: Int, empty: Boolean)(
+      item: (Array[Byte], Int) => Either[String, (A, Int)]
+  ): Either[String, (Vector[A], Int)] =
     @scala.annotation.tailrec
     def items(left: Long, position: Int, sofar: Vector[A]): Either[String, (Vector[A], Int)] =
       if left == 0 then Right((sofar, position))
@@ -171,9 +181,13 @@ object AvroBinary:
       val read =
         readLong(bytes, position, 10).flatMap: (count, after) =>
           if count == 0 then Right(None)
+          else if count == Long.MinValue then Left(s"a count of $count items does not fit the value")
           else
             val start = if count < 0 then readLong(bytes, after, 10).map(_._2) else Right(after)
-            start.flatMap(begin => items(math.abs(count), begin, sofar).map(Some(_)))
+            start.flatMap: begin =>
+              val most = if empty then MaxEmptyItems - sofar.size else bytes.length - begin
+              if math.abs(count) > most then Left(s"a count of ${math.abs(count)} items does not fit the value")
+              else items(math.abs(count), begin, sofar).map(Some(_))
       read match
         case Right(Some((more, next))) => block(next, more)
         case Right(None)               => readLong(bytes, position, 10).map((_, end) => (sofar, end))
@@ -185,45 +199,51 @@ object AvroBinary:
     /** How what `writer` wrote is read as `reader`; `pending` holds the record pairs being planned, which a recursive record reads through. */
     def plan(writer: AvroSchema, reader: AvroSchema, pending: Map[(FullName, FullName), Pending]): Either[String, Step] =
       (writer, reader) match
-        case (AvroSchema.Named(name), _)          => writers.get(name).toRight(s"'${name.value}' is not defined").flatMap(plan(_, reader, pending))
-        case (_, AvroSchema.Named(name))          => readers.get(name).toRight(s"'${name.value}' is not defined").flatMap(plan(writer, _, pending))
+        case (AvroSchema.Named(name), _) => writers.get(name).toRight(s"'${name.value}' is not defined").flatMap(plan(_, reader, pending))
+        case (_, AvroSchema.Named(name)) => readers.get(name).toRight(s"'${name.value}' is not defined").flatMap(plan(writer, _, pending))
+        // A decimal's bytes mean nothing without its scale, so they are read only as a decimal of that scale, with room for their digits.
+        case (AvroSchema.Logical(Digits(precision, scale)), AvroSchema.Logical(Digits(readPrecision, readScale)))
+            if scale != readScale || precision > readPrecision =>
+          Left(s"a decimal of precision $precision and scale $scale is not read as one of precision $readPrecision and scale $readScale")
         case (AvroSchema.Logical(logicalType), _) => plan(logicalType.underlying, reader, pending)
         case (_, AvroSchema.Logical(logicalType)) => plan(writer, logicalType.underlying, pending)
         case (AvroSchema.Union(branches), _)      =>
           // Each branch is planned now, and one the reader cannot take fails only a value written with it.
           val steps = branches.map(branch => plan(branch, reader, pending)).toVector
-          Right: (bytes, at) =>
+          Right: (bytes, at, depth) =>
             readLong(bytes, at, 10).flatMap: (index, after) =>
               steps.lift(index.toInt).filter(_ => index.isValidInt).toRight(s"union branch $index is not one of the writer's ${steps.size}").flatten
-                .flatMap(_(bytes, after))
+                .flatMap(_(bytes, after, depth))
         case (_, AvroSchema.Union(branches)) => branches.find(same(writer, _)).orElse(branches.find(promotes(writer, _)))
             .toRight(s"no branch of ${render(reader)} reads ${render(writer)}").flatMap(plan(writer, _, pending))
-        case (AvroSchema.Null, AvroSchema.Null)       => Right((_, at) => Right((AvroValue.Null, at)))
+        case (AvroSchema.Null, AvroSchema.Null)       => Right((_, at, _) => Right((AvroValue.Null, at)))
         case (AvroSchema.Boolean, AvroSchema.Boolean) =>
-          Right((bytes, at) => Either.cond(at < bytes.length, (AvroValue.Boolean(bytes(at) != 0), at + 1), "the value ends before its last byte"))
-        case (AvroSchema.Int, AvroSchema.Int)   => Right((bytes, at) => readInt(bytes, at).map((value, end) => (AvroValue.Int(value), end)))
-        case (AvroSchema.Int, AvroSchema.Long)  => Right((bytes, at) => readInt(bytes, at).map((value, end) => (AvroValue.Long(value.toLong), end)))
-        case (AvroSchema.Int, AvroSchema.Float) => Right((bytes, at) => readInt(bytes, at).map((value, end) => (AvroValue.Float(value.toFloat), end)))
+          Right((bytes, at, _) => Either.cond(at < bytes.length, (AvroValue.Boolean(bytes(at) != 0), at + 1), "the value ends before its last byte"))
+        case (AvroSchema.Int, AvroSchema.Int)  => Right((bytes, at, _) => readInt(bytes, at).map((value, end) => (AvroValue.Int(value), end)))
+        case (AvroSchema.Int, AvroSchema.Long) => Right((bytes, at, _) => readInt(bytes, at).map((value, end) => (AvroValue.Long(value.toLong), end)))
+        case (AvroSchema.Int, AvroSchema.Float) =>
+          Right((bytes, at, _) => readInt(bytes, at).map((value, end) => (AvroValue.Float(value.toFloat), end)))
         case (AvroSchema.Int, AvroSchema.Double) =>
-          Right((bytes, at) => readInt(bytes, at).map((value, end) => (AvroValue.Double(value.toDouble), end)))
-        case (AvroSchema.Long, AvroSchema.Long)  => Right((bytes, at) => readLong(bytes, at, 10).map((value, end) => (AvroValue.Long(value), end)))
+          Right((bytes, at, _) => readInt(bytes, at).map((value, end) => (AvroValue.Double(value.toDouble), end)))
+        case (AvroSchema.Long, AvroSchema.Long)  => Right((bytes, at, _) => readLong(bytes, at, 10).map((value, end) => (AvroValue.Long(value), end)))
         case (AvroSchema.Long, AvroSchema.Float) =>
-          Right((bytes, at) => readLong(bytes, at, 10).map((value, end) => (AvroValue.Float(value.toFloat), end)))
+          Right((bytes, at, _) => readLong(bytes, at, 10).map((value, end) => (AvroValue.Float(value.toFloat), end)))
         case (AvroSchema.Long, AvroSchema.Double) =>
-          Right((bytes, at) => readLong(bytes, at, 10).map((value, end) => (AvroValue.Double(value.toDouble), end)))
-        case (AvroSchema.Float, AvroSchema.Float)  => Right((bytes, at) => float(bytes, at).map((value, end) => (AvroValue.Float(value), end)))
+          Right((bytes, at, _) => readLong(bytes, at, 10).map((value, end) => (AvroValue.Double(value.toDouble), end)))
+        case (AvroSchema.Float, AvroSchema.Float)  => Right((bytes, at, _) => float(bytes, at).map((value, end) => (AvroValue.Float(value), end)))
         case (AvroSchema.Float, AvroSchema.Double) =>
-          Right((bytes, at) => float(bytes, at).map((value, end) => (AvroValue.Double(value.toDouble), end)))
+          Right((bytes, at, _) => float(bytes, at).map((value, end) => (AvroValue.Double(value.toDouble), end)))
         case (AvroSchema.Double, AvroSchema.Double) =>
-          Right((bytes, at) => readLittleEndian(bytes, at, 8).map((bits, end) => (AvroValue.Double(java.lang.Double.longBitsToDouble(bits)), end)))
+          Right((bytes, at, _) => readLittleEndian(bytes, at, 8).map((bits, end) => (AvroValue.Double(java.lang.Double.longBitsToDouble(bits)), end)))
         case (AvroSchema.Bytes | AvroSchema.String, AvroSchema.Bytes) =>
-          Right((bytes, at) => readBytes(bytes, at).map((value, end) => (AvroValue.Bytes(value), end)))
-        case (AvroSchema.Bytes | AvroSchema.String, AvroSchema.String) =>
-          Right((bytes, at) => readBytes(bytes, at).map((value, end) => (AvroValue.String(new String(value.toArray, StandardCharsets.UTF_8)), end)))
+          Right((bytes, at, _) => readBytes(bytes, at).map((value, end) => (AvroValue.Bytes(value), end)))
+        case (AvroSchema.Bytes | AvroSchema.String, AvroSchema.String) => Right((bytes, at, _) =>
+            readBytes(bytes, at).map((value, end) => (AvroValue.String(new String(value.toArray, StandardCharsets.UTF_8)), end))
+          )
         case (AvroSchema.Fixed(written, size, _), AvroSchema.Fixed(read, expected, aliases)) =>
           if !named(written, read, aliases) then Left(s"fixed '${written.value}' is not read as '${read.value}'")
           else if size != expected then Left(s"fixed '${read.value}' is $expected bytes, but '${written.value}' was written as $size")
-          else Right((bytes, at) => readFixed(bytes, at, size).map((value, end) => (AvroValue.Fixed(read, value), end)))
+          else Right((bytes, at, _) => readFixed(bytes, at, size).map((value, end) => (AvroValue.Fixed(read, value), end)))
         case (AvroSchema.Enum(written, symbols, _, _, _), AvroSchema.Enum(read, known, default, _, aliases)) =>
           if !named(written, read, aliases) then Left(s"enum '${written.value}' is not read as '${read.value}'")
           else
@@ -231,31 +251,39 @@ object AvroBinary:
               symbols.map(symbol =>
                 Some(symbol).filter(known.contains).orElse(default).toRight(s"enum '${read.value}' has no symbol '$symbol' and no default")
               ).toVector
-            Right: (bytes, at) =>
+            Right: (bytes, at, _) =>
               readInt(bytes, at).flatMap: (index, end) =>
                 mapped.lift(index).toRight(s"enum symbol $index is not one of the writer's ${mapped.size}").flatten
                   .map(symbol => (AvroValue.Enum(read, symbol), end))
-        case (AvroSchema.Array(written), AvroSchema.Array(read)) => plan(written, read, pending)
-            .map(item => (bytes, at) => readBlocks(bytes, at, item).map((items, end) => (AvroValue.Array(items), end)))
+        case (AvroSchema.Array(written), AvroSchema.Array(read)) =>
+          val empty = writesNothing(written, Set.empty)
+          plan(written, read, pending).map: item =>
+            (bytes, at, depth) => readBlocks(bytes, at, empty)(item(_, _, depth)).map((items, end) => (AvroValue.Array(items), end))
         case (AvroSchema.Map(written), AvroSchema.Map(read)) => plan(written, read, pending).map: value =>
-            val entry =
-              (bytes: Array[Byte], at: Int) =>
-                readBytes(bytes, at)
-                  .flatMap((key, after) => value(bytes, after).map((read, end) => ((new String(key.toArray, StandardCharsets.UTF_8), read), end)))
-            (bytes, at) => readBlocks(bytes, at, entry).map((entries, end) => (AvroValue.Map(entries), end))
+            (bytes, at, depth) =>
+              val entry =
+                (bytes: Array[Byte], at: Int) =>
+                  readBytes(bytes, at).flatMap: (key, after) =>
+                    value(bytes, after, depth).map((read, end) => ((new String(key.toArray, StandardCharsets.UTF_8), read), end))
+              readBlocks(bytes, at, empty = false)(entry).map((entries, end) => (AvroValue.Map(entries), end))
         case (written: AvroSchema.Record, read: AvroSchema.Record) =>
           if !named(written.name, read.name, read.aliases) then Left(s"record '${written.name.value}' is not read as '${read.name.value}'")
           else
             pending.get((written.name, read.name)) match
-              case Some(planning) => Right((bytes, at) => planning.step.flatMap(_(bytes, at)))
+              case Some(planning) => Right((bytes, at, depth) => planning.step.flatMap(_(bytes, at, depth)))
               case None           =>
                 lazy val planning: Pending = Pending(record(written, read, pending.updated((written.name, read.name), planning)))
-                planning.step.map(_ => (bytes, at) => planning.step.flatMap(_(bytes, at)))
+                planning.step.map(_ => (bytes, at, depth) => planning.step.flatMap(_(bytes, at, depth)))
         case _ => Left(s"${render(reader)} cannot read what ${render(writer)} wrote")
 
     private def record(written: AvroSchema.Record, read: AvroSchema.Record, pending: Map[(FullName, FullName), Pending]): Either[String, Step] =
       def readerField(field: AvroField) = read.fields.find(candidate => candidate.name == field.name || candidate.aliases.contains(field.name))
-      written.fields.traverse(field => plan(field.schema, readerField(field).fold(field.schema)(_.schema), pending).map(field -> _)).flatMap: steps =>
+      // A field the reader lacks is read only to be skipped, as the writer's own schema reads it, whatever the reader names the same.
+      def skipped(field: AvroField) = Resolution(writers, writers).plan(field.schema, field.schema, Map.empty)
+      val planned                   =
+        written.fields
+          .traverse(field => readerField(field).fold(skipped(field))(target => plan(field.schema, target.schema, pending)).map(field -> _))
+      planned.flatMap: steps =>
         val taken    = written.fields.flatMap(readerField).map(_.name).toSet
         val defaults =
           read.fields.filterNot(field => taken.contains(field.name)).traverse: field =>
@@ -263,12 +291,25 @@ object AvroBinary:
               .toRight(s"record '${read.name.value}' has no default for field '${field.name}', which '${written.name.value}' does not write")
               .map(field.name -> _)
         defaults.map: filled =>
-          (bytes, at) =>
-            steps.foldM((Map.empty[String, AvroValue], at)) { case ((values, position), (field, step)) =>
-              step(bytes, position).map((value, next) => (readerField(field).fold(values)(target => values.updated(target.name, value)), next))
-            }.map: (values, end) =>
-              val all = values ++ filled
-              (AvroValue.Record(read.name, read.fields.map(field => field.name -> all(field.name)).toVector), end)
+          (bytes, at, depth) =>
+            if depth >= MaxDepth then Left(s"the value is nested more than $MaxDepth deep")
+            else
+              steps.foldM((Map.empty[String, AvroValue], at)) { case ((values, position), (field, step)) =>
+                step(bytes, position, depth + 1)
+                  .map((value, next) => (readerField(field).fold(values)(target => values.updated(target.name, value)), next))
+              }.map: (values, end) =>
+                val all = values ++ filled
+                (AvroValue.Record(read.name, read.fields.map(field => field.name -> all(field.name)).toVector), end)
+
+    /** Whether values of `schema` are written as no bytes, as `null` and records of only such fields are. */
+    private def writesNothing(schema: AvroSchema, seen: Set[FullName]): Boolean =
+      schema match
+        case AvroSchema.Null                 => true
+        case AvroSchema.Fixed(_, size, _)    => size == 0
+        case AvroSchema.Logical(logicalType) => writesNothing(logicalType.underlying, seen)
+        case AvroSchema.Named(name)          => !seen(name) && writers.get(name).exists(writesNothing(_, seen + name))
+        case record: AvroSchema.Record       => !seen(record.name) && record.fields.forall(field => writesNothing(field.schema, seen + record.name))
+        case _                               => false
 
     private def float(bytes: Array[Byte], at: Int): Either[String, (Float, Int)] =
       readLittleEndian(bytes, at, 4).map((bits, end) => (java.lang.Float.intBitsToFloat(bits.toInt), end))
@@ -305,3 +346,11 @@ object AvroBinary:
   /** A record's plan, made once it is first needed, so a record that holds itself reads through the plan being made. */
   private final class Pending(make: => Either[String, Step]):
     lazy val step: Either[String, Step] = make
+
+  /** The precision and scale of a decimal, whichever type holds its bytes. */
+  private object Digits:
+    def unapply(logicalType: LogicalType): Option[(Int, Int)] =
+      logicalType match
+        case LogicalType.Decimal(precision, scale)            => Some((precision, scale))
+        case LogicalType.FixedDecimal(_, _, precision, scale) => Some((precision, scale))
+        case _                                                => None

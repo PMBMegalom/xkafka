@@ -70,6 +70,68 @@ class AvroBinarySuite extends ScalaCheckSuite:
     assertEquals(AvroBinary.decode(AvroSchema.Int, bytes(0x02, 0x02)), Left("1 bytes are left after the value"))
     assertEquals(AvroBinary.decode(AvroSchema.Union(List(AvroSchema.Null)), bytes(0x02)), Left("union branch 1 is not one of the writer's 1"))
 
+  test("a field the reader lacks is skipped as the writer wrote it, whatever the reader's types of the same names are"):
+    val writer =
+      parsed("""{"type":"record","name":"Visit","fields":[{"name":"id","type":"int"},
+        |{"name":"billing","type":{"type":"record","name":"Address","fields":[{"name":"street","type":"string"}]}},
+        |{"name":"shipping","type":["null","Address"]}]}""".stripMargin)
+    val readers =
+      List(
+        """{"type":"record","name":"Visit","fields":[{"name":"id","type":"int"}]}""",
+        """{"type":"record","name":"Visit","fields":[{"name":"id","type":"int"},
+        |{"name":"other","type":{"type":"record","name":"Address","fields":[{"name":"zip","type":"int"}]},"default":{"zip":0}}]}""".stripMargin
+      ).map(parsed)
+    val street  = AvroValue.Record(FullName(None, "Address"), Vector("street" -> AvroValue.String("Main")))
+    val written =
+      AvroBinary
+        .encode(writer, AvroValue.Record(FullName(None, "Visit"), Vector("id" -> AvroValue.Int(7), "billing" -> street, "shipping" -> street)))
+    readers.foreach: reader =>
+      val read = written.flatMap(bytes => AvroBinary.decoder(writer, reader).flatMap(_(bytes)))
+      assertEquals(
+        read.map { case AvroValue.Record(_, fields) => fields.head; case other => fail(s"not a record: $other") },
+        Right("id" -> AvroValue.Int(7))
+      )
+
+  test("counts of arrays and maps that the bytes left cannot hold are refused before their items are read"):
+    def count(value: Long) = AvroBinary.encode(AvroSchema.Long, AvroValue.Long(value)).fold(fail(_), identity)
+    val nulls              = AvroSchema.Array(AvroSchema.Null)
+    assertEquals(AvroBinary.decode(nulls, count(1L << 62) ++ bytes(0x00)), Left(s"a count of ${1L << 62} items does not fit the value"))
+    assertEquals(
+      AvroBinary.decode(nulls, count(Long.MinValue) ++ count(0) ++ bytes(0x00)),
+      Left(s"a count of ${Long.MinValue} items does not fit the value")
+    )
+    assertEquals(
+      AvroBinary.decode(AvroSchema.Array(AvroSchema.Long), count(1000) ++ bytes(0x00)),
+      Left("a count of 1000 items does not fit the value")
+    )
+    assertEquals(AvroBinary.decode(AvroSchema.Map(AvroSchema.Null), count(1000) ++ bytes(0x00)), Left("a count of 1000 items does not fit the value"))
+    assertEquals(
+      AvroBinary.decode(nulls, count(AvroBinary.MaxEmptyItems.toLong + 1) ++ bytes(0x00)).left.toOption,
+      Some(s"a count of ${AvroBinary.MaxEmptyItems + 1} items does not fit the value")
+    )
+    assertEquals(AvroBinary.decode(nulls, bytes(0x0a, 0x00)), Right(AvroValue.Array(Vector.fill(5)(AvroValue.Null))), "a few nulls in fewer bytes")
+
+  test("a fixed type of more bytes than are left is refused"):
+    val schema =
+      parsed(
+        """{"type":"record","name":"R","fields":[{"name":"a","type":"int"},{"name":"f","type":{"type":"fixed","name":"F","size":2147483647}}]}"""
+      )
+    assertEquals(AvroBinary.decode(schema, bytes(0x00)), Left("the value ends before its last byte"))
+
+  test("decimals are read as decimals of another scale or a smaller precision only by refusing them"):
+    def decimal(precision: Int, scale: Int) = parsed(s"""{"type":"bytes","logicalType":"decimal","precision":$precision,"scale":$scale}""")
+    assert(AvroBinary.decoder(decimal(10, 2), decimal(10, 4)).isLeft, "another scale")
+    assert(AvroBinary.decoder(decimal(10, 2), decimal(8, 2)).isLeft, "a smaller precision")
+    assert(AvroBinary.decoder(decimal(8, 2), decimal(10, 2)).isRight, "a larger precision")
+    assert(AvroBinary.decoder(AvroSchema.Bytes, decimal(10, 2)).isRight, "bytes, which carry no scale")
+
+  test("values nested deeper than the limit are refused, not read until the stack runs out"):
+    val list   = parsed("""{"type":"record","name":"Node","fields":[{"name":"next","type":["null","Node"]}]}""")
+    val nested = Chunk.from(Array.fill(1000000)(0x02.toByte)) ++ bytes(0x00)
+    assertEquals(AvroBinary.decode(list, nested), Left(s"the value is nested more than ${AvroBinary.MaxDepth} deep"))
+    val within = Chunk.from(Array.fill(AvroBinary.MaxDepth - 1)(0x02.toByte)) ++ bytes(0x00)
+    assert(AvroBinary.decode(list, within).isRight)
+
   test("schemas with unknown types, a union in a union or of one type twice, or a name defined twice are refused"):
     assertEquals(AvroSchemaJson.parse("\"Missing\""), Left("'Missing' names no type defined before it"))
     assertEquals(AvroSchemaJson.parse("""["null",["int"]]"""), Left("a union cannot hold a union"))

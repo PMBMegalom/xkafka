@@ -211,7 +211,9 @@ object AvroCodec:
           .leftMap(_ => s"$value has more than $scale digits after the point")
           .filterOrElse(_.precision <= precision, s"$value has more than $precision digits")
           .map(scaled => Chunk.array(scaled.unscaledValue.toByteArray))
-    val read = (bytes: Chunk[Byte]) => Right(BigDecimal(new java.math.BigDecimal(new java.math.BigInteger(bytes.toArray), scale)))
+    val read =
+      (bytes: Chunk[Byte]) =>
+        Either.cond(bytes.nonEmpty, BigDecimal(new java.math.BigDecimal(new java.math.BigInteger(bytes.toArray), scale)), "a decimal of no bytes")
     instance(
       AvroSchema.Logical(LogicalType.Decimal(precision, scale)),
       value => write(value).flatMap(AvroCodec[Chunk[Byte]].encode),

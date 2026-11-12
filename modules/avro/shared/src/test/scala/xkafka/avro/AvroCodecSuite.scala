@@ -132,6 +132,10 @@ class AvroCodecSuite extends FunSuite:
     assertEquals(roundTrip[Payment](Card("4242")), Right(Card("4242")))
     assertEquals(roundTrip(Node(1, Some(Node(2, Some(Node(3)))))), Right(Node(1, Some(Node(2, Some(Node(3)))))))
 
+  test("a record that holds itself reads back as deep as records may be nested"):
+    val deepest = (1 until AvroBinary.MaxDepth).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    assertEquals(roundTrip(deepest), Right(deepest))
+
   test("a record that holds itself names itself inside"):
     assertEquals(
       json(AvroCodec[Node]),
@@ -178,6 +182,7 @@ class AvroCodecSuite extends FunSuite:
     assertEquals(money.encode(BigDecimal("-0.01")).flatMap(money.decode), Right(BigDecimal("-0.01")))
     assertEquals(money.encode(BigDecimal("1.005")), Left("1.005 has more than 2 digits after the point"))
     assertEquals(money.encode(BigDecimal("12345.67")), Left("12345.67 has more than 6 digits"))
+    assertEquals(money.decode(AvroValue.Bytes(Chunk.empty)), Left("a decimal of no bytes"))
 
   test("times keep what their logical type keeps"):
     val instant = Instant.parse("2026-11-10T07:00:00.123456789Z")
