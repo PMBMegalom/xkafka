@@ -47,6 +47,23 @@ class AvroGeneratorSuite extends FunSuite:
     assertEquals(generated.map(_.map(_.path.toString).sorted), Right(List("example/R.scala", "example/more/Kind.scala")))
     assert(generated.exists(_.exists(_.text.contains("kind: example.more.Kind = example.more.Kind.B"))), generated.toString)
 
+  directory.test("a time's default that is no time of day is refused, since the class could not hold it"): in =>
+    def time(logical: String, base: String, default: Long) =
+      record(s"""{"name": "t", "type": {"type": "$base", "logicalType": "$logical"}, "default": $default}""")
+    assertEquals(
+      refused(in, "a.avsc" -> time("time-millis", "int", -1)),
+      List("example.R.t has a default xkafka cannot write: -1 is no time of day in milliseconds")
+    )
+    assertEquals(
+      refused(in, "a.avsc" -> time("time-millis", "int", 86400000)),
+      List("example.R.t has a default xkafka cannot write: 86400000 is no time of day in milliseconds")
+    )
+    assertEquals(
+      refused(in, "a.avsc" -> time("time-micros", "long", 86400000000L)),
+      List("example.R.t has a default xkafka cannot write: 86400000000 is no time of day in microseconds")
+    )
+    assert(AvroGenerator.generate(files(in, "a.avsc" -> time("time-millis", "int", 86399999))).isRight)
+
   directory.test("a type without a namespace is refused, since its package is made from it"): in =>
     assertEquals(
       refused(in, "a.avsc" -> """{"type": "record", "name": "R", "fields": []}"""),

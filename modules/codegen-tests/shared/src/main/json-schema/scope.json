@@ -1,0 +1,5 @@
+{
+  "title": "example.json.Scope",
+  "description": "An enum whose values are named as the packages generated code names",
+  "enum": ["io", "java", "xkafka", "scala", "fs2"]
+}

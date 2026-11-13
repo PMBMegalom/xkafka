@@ -63,7 +63,9 @@ val registry: Resource[IO, SchemaRegistry[IO]] =
 ```
 
 To authenticate, wrap the client so it adds the credentials to every request,
-and pass the wrapped client to `Http4sTransport`:
+and pass the wrapped client to `Http4sTransport`. A registry URL holding
+credentials, such as `https://user:password@registry`, is refused, since no
+client would send them from there:
 
 ```scala mdoc:compile-only
 // Send basic authentication with every request to the registry

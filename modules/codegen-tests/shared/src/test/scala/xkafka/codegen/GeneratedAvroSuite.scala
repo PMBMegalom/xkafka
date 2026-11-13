@@ -59,6 +59,14 @@ class GeneratedAvroSuite extends FunSuite:
       copy_ = 9
     )
 
+  test("a schema longer than the JVM holds in one constant is generated, and its codec has it"):
+    registers[Large](Large.avroSchema)
+    assert(Large.avroSchema.length > 65535 / 3)
+
+  test("enums whose symbols are named as packages are generated, and read back"):
+    val scoped = Scoped(Scope.java, java.time.Instant.ofEpochMilli(1000L), fs2.Chunk[Byte](1, 2))
+    assertEquals(roundTrip(scoped), Right(scoped))
+
   test("types whose names end with an underscore are generated, and read back"):
     assertEquals(roundTrip(Marked_(Kind_.MARKED)), Right(Marked_(Kind_.MARKED)))
 

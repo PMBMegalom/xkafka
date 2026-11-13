@@ -52,19 +52,20 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
       typed = fields.map(_._3)
       codecs <-
         typed.flatMap(_.codecs.toList).groupMap(_._1)(_._2).toList.sortBy(_._1).traverse:
-          case (scala, List(one)) => Right(Option.when(one.nonEmpty)(s"private given xkafka.avro.AvroCodec[$scala] = $one"))
+          case (scala, List(one)) => Right(Option.when(one.nonEmpty)(s"private given _root_.xkafka.avro.AvroCodec[$scala] = $one"))
           case (scala, choices) if choices.distinct.size == 1 =>
-            Right(Option.when(choices.head.nonEmpty)(s"private given xkafka.avro.AvroCodec[$scala] = ${choices.head}"))
-          case (scala, _) => Left(s"$name has fields of $scala written with different precisions, which one record cannot hold")
+            Right(Option.when(choices.head.nonEmpty)(s"private given _root_.xkafka.avro.AvroCodec[$scala] = ${choices.head}"))
+          case (scala, _) =>
+            Left(s"$name has fields of ${scala.replace("_root_.", "")} written with different precisions, which one record cannot hold")
       unions = typed.flatMap(_.unions).distinct
       _ <-
         unions.groupBy(_.toSet).collectFirst { case (_, orders) if orders.size > 1 => orders.head.mkString(" | ") }.toLeft(())
-          .leftMap(types => s"$name has unions of $types in different orders, which one record cannot hold")
+          .leftMap(types => s"$name has unions of ${types.replace("_root_.", "")} in different orders, which one record cannot hold")
     yield
       // Givens of union types are named, since Scala names them all alike.
       val givens =
         codecs.flatten ++ unions.zipWithIndex.map: (types, index) =>
-          s"private given avroUnion${index + 1}: xkafka.avro.AvroCodec[${types.mkString(" | ")}] = xkafka.avro.AvroCodec.union[(${types
+          s"private given avroUnion${index + 1}: _root_.xkafka.avro.AvroCodec[${types.mkString(" | ")}] = _root_.xkafka.avro.AvroCodec.union[(${types
               .mkString(", ")})]"
       val scala      = Names.typeName(record.name.name)
       val parameters = if fields.isEmpty then "()" else fields.map(_._2).mkString("(\n    ", ",\n    ", "\n)")
@@ -85,10 +86,10 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
     yield
       val (scala, renamed) = Names.field(field.name)
       val marks            =
-        renamed.map(original => s"@xkafka.schemaregistry.SchemaName(${Names.quote(original)})").toList ++
-          field.doc.map(doc => s"@xkafka.schemaregistry.SchemaDoc(${Names.quote(doc)})") ++
-          field.aliases.map(alias => s"@xkafka.schemaregistry.SchemaAlias(${Names.quote(alias)})") ++
-          decimal.map((precision, scale) => s"@xkafka.schemaregistry.SchemaDecimal($precision, $scale)")
+        renamed.map(original => s"@_root_.xkafka.schemaregistry.SchemaName(${Names.quote(original)})").toList ++
+          field.doc.map(doc => s"@_root_.xkafka.schemaregistry.SchemaDoc(${Names.quote(doc)})") ++
+          field.aliases.map(alias => s"@_root_.xkafka.schemaregistry.SchemaAlias(${Names.quote(alias)})") ++
+          decimal.map((precision, scale) => s"@_root_.xkafka.schemaregistry.SchemaDecimal($precision, $scale)")
       (scala, (marks :+ s"$scala${Names.colon(scala)}${typed.scala}${default.fold("")(value => s" = $value")}").mkString(" "), typed)
 
   /** Fails where xkafka would write a field's union in another order than the file's: with null first, or with the branch its default is of. */
@@ -111,7 +112,7 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
       case AvroSchema.Float                  => Right(Typed.plain(Names.builtin("Float", neighbours)))
       case AvroSchema.Double                 => Right(Typed.plain(Names.builtin("Double", neighbours)))
       case AvroSchema.String                 => Right(Typed.plain(Names.builtin("String", neighbours)))
-      case AvroSchema.Bytes                  => Right(Typed.plain(s"fs2.Chunk[${Names.builtin("Byte", neighbours)}]"))
+      case AvroSchema.Bytes                  => Right(Typed.plain(s"_root_.fs2.Chunk[${Names.builtin("Byte", neighbours)}]"))
       case AvroSchema.Record(name, _, _, _)  => Right(Typed.plain(qualified(name)))
       case AvroSchema.Enum(name, _, _, _, _) => Right(Typed.plain(qualified(name)))
       case AvroSchema.Fixed(name, _, _)      => Right(Typed.plain(qualified(name)))
@@ -146,20 +147,20 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
     logicalType match
       case LogicalType.Decimal(precision, scale) => Right(Typed(Names.builtin("BigDecimal", neighbours), Nil, Map.empty, Set((precision, scale))))
       case LogicalType.FixedDecimal(_, _, _, _)  => Left(s"$where is a decimal held in a fixed type, which xkafka has no codec for")
-      case LogicalType.Uuid                      => Right(Typed.plain("java.util.UUID"))
-      case LogicalType.Date                      => Right(Typed.plain("java.time.LocalDate"))
-      case LogicalType.TimeMillis                => needing("java.time.LocalTime", "xkafka.avro.AvroCodec.localTimeMillis")
-      case LogicalType.TimeMicros                => needing("java.time.LocalTime", "")
-      case LogicalType.TimestampMillis           => needing("java.time.Instant", "")
-      case LogicalType.TimestampMicros           => needing("java.time.Instant", "xkafka.avro.AvroCodec.instantMicros")
-      case LogicalType.TimestampNanos            => needing("java.time.Instant", "xkafka.avro.AvroCodec.instantNanos")
-      case LogicalType.LocalTimestampMillis      => needing("java.time.LocalDateTime", "xkafka.avro.AvroCodec.localDateTimeMillis")
-      case LogicalType.LocalTimestampMicros      => needing("java.time.LocalDateTime", "")
+      case LogicalType.Uuid                      => Right(Typed.plain("_root_.java.util.UUID"))
+      case LogicalType.Date                      => Right(Typed.plain("_root_.java.time.LocalDate"))
+      case LogicalType.TimeMillis                => needing("_root_.java.time.LocalTime", "_root_.xkafka.avro.AvroCodec.localTimeMillis")
+      case LogicalType.TimeMicros                => needing("_root_.java.time.LocalTime", "")
+      case LogicalType.TimestampMillis           => needing("_root_.java.time.Instant", "")
+      case LogicalType.TimestampMicros           => needing("_root_.java.time.Instant", "_root_.xkafka.avro.AvroCodec.instantMicros")
+      case LogicalType.TimestampNanos            => needing("_root_.java.time.Instant", "_root_.xkafka.avro.AvroCodec.instantNanos")
+      case LogicalType.LocalTimestampMillis      => needing("_root_.java.time.LocalDateTime", "_root_.xkafka.avro.AvroCodec.localDateTimeMillis")
+      case LogicalType.LocalTimestampMicros      => needing("_root_.java.time.LocalDateTime", "")
       case LogicalType.LocalTimestampNanos       => Left(s"$where is a local-timestamp-nanos, which xkafka has no codec for")
 
   /** The Scala expression of `value`, a default of `schema`. */
   private def literal(schema: AvroSchema, value: AvroValue, definitions: Map[FullName, AvroSchema]): Either[String, String] =
-    def bytes(chunk: fs2.Chunk[Byte]) = chunk.toList.mkString(s"fs2.Chunk[${Names.builtin("Byte", neighbours)}](", ", ", ")")
+    def bytes(chunk: fs2.Chunk[Byte]) = chunk.toList.mkString(s"_root_.fs2.Chunk[${Names.builtin("Byte", neighbours)}](", ", ", ")")
     (schema, value) match
       case (AvroSchema.Named(name), _) => definitions.get(name).toRight(s"${name.value} is not defined").flatMap(literal(_, value, definitions))
       case (AvroSchema.Union(branches), AvroValue.Null) if branches.contains(AvroSchema.Null) => Right(Names.builtin("None", neighbours))
@@ -187,23 +188,36 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
       case (AvroSchema.Logical(logicalType), _) => logicalLiteral(logicalType, value)
       case _                                    => Left(s"$value is not a value of ${AvroSchemaJson.render(schema)}")
 
+  /** The milliseconds of a day, past which no time of day goes. */
+  private val DayMillis = 86400000
+
   private def logicalLiteral(logicalType: LogicalType, value: AvroValue): Either[String, String] =
-    val epoch = "java.time.Instant.EPOCH"
+    val epoch = "_root_.java.time.Instant.EPOCH"
     (logicalType, value) match
       case (LogicalType.Decimal(_, scale), AvroValue.Bytes(chunk)) =>
         val digits = chunk.toList.mkString(s"${Names.builtin("Array", neighbours)}[${Names.builtin("Byte", neighbours)}](", ", ", ")")
         Right(s"${Names.builtin("BigDecimal", neighbours)}(${Names.builtin("BigInt", neighbours)}($digits), $scale)")
-      case (LogicalType.Uuid, AvroValue.String(text))                 => Right(s"java.util.UUID.fromString(${Names.quote(text)})")
-      case (LogicalType.Date, AvroValue.Int(days))                    => Right(s"java.time.LocalDate.ofEpochDay(${days}L)")
-      case (LogicalType.TimeMillis, AvroValue.Int(millis))            => Right(s"java.time.LocalTime.ofNanoOfDay(${millis.toLong * 1000000L}L)")
-      case (LogicalType.TimeMicros, AvroValue.Long(micros))           => Right(s"java.time.LocalTime.ofNanoOfDay(${micros * 1000L}L)")
-      case (LogicalType.TimestampMillis, AvroValue.Long(millis))      => Right(s"java.time.Instant.ofEpochMilli(${millis}L)")
-      case (LogicalType.TimestampMicros, AvroValue.Long(micros))      => Right(s"$epoch.plus(${micros}L, java.time.temporal.ChronoUnit.MICROS)")
-      case (LogicalType.TimestampNanos, AvroValue.Long(nanos))        => Right(s"$epoch.plus(${nanos}L, java.time.temporal.ChronoUnit.NANOS)")
+      case (LogicalType.Uuid, AvroValue.String(text)) => Right(s"_root_.java.util.UUID.fromString(${Names.quote(text)})")
+      case (LogicalType.Date, AvroValue.Int(days))    => Right(s"_root_.java.time.LocalDate.ofEpochDay(${days}L)")
+      // A default past a day would make a time the class cannot hold, failing each time the default is taken.
+      case (LogicalType.TimeMillis, AvroValue.Int(millis)) => Either.cond(
+          millis >= 0 && millis < DayMillis,
+          s"_root_.java.time.LocalTime.ofNanoOfDay(${millis.toLong * 1000000L}L)",
+          s"$millis is no time of day in milliseconds"
+        )
+      case (LogicalType.TimeMicros, AvroValue.Long(micros)) => Either.cond(
+          micros >= 0L && micros < DayMillis * 1000L,
+          s"_root_.java.time.LocalTime.ofNanoOfDay(${micros * 1000L}L)",
+          s"$micros is no time of day in microseconds"
+        )
+      case (LogicalType.TimestampMillis, AvroValue.Long(millis)) => Right(s"_root_.java.time.Instant.ofEpochMilli(${millis}L)")
+      case (LogicalType.TimestampMicros, AvroValue.Long(micros)) => Right(s"$epoch.plus(${micros}L, _root_.java.time.temporal.ChronoUnit.MICROS)")
+      case (LogicalType.TimestampNanos, AvroValue.Long(nanos))   => Right(s"$epoch.plus(${nanos}L, _root_.java.time.temporal.ChronoUnit.NANOS)")
       case (LogicalType.LocalTimestampMillis, AvroValue.Long(millis)) =>
-        Right(s"java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(${millis}L), java.time.ZoneOffset.UTC)")
-      case (LogicalType.LocalTimestampMicros, AvroValue.Long(micros)) =>
-        Right(s"java.time.LocalDateTime.ofInstant($epoch.plus(${micros}L, java.time.temporal.ChronoUnit.MICROS), java.time.ZoneOffset.UTC)")
+        Right(s"_root_.java.time.LocalDateTime.ofInstant(_root_.java.time.Instant.ofEpochMilli(${millis}L), _root_.java.time.ZoneOffset.UTC)")
+      case (LogicalType.LocalTimestampMicros, AvroValue.Long(micros)) => Right(
+          s"_root_.java.time.LocalDateTime.ofInstant($epoch.plus(${micros}L, _root_.java.time.temporal.ChronoUnit.MICROS), _root_.java.time.ZoneOffset.UTC)"
+        )
       case _ => Left(s"$value is not a value of the logical type ${logicalType.name}")
 
   private def enumSource(enumeration: AvroSchema.Enum): Either[String, String] =
@@ -214,18 +228,18 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
         val scala = Names.typeName(enumeration.name.name)
         val lines =
           cases.map((name, renamed) =>
-            renamed.fold(s"  case $name")(original => s"  @xkafka.schemaregistry.SchemaName(${Names.quote(original)}) case $name")
+            renamed.fold(s"  case $name")(original => s"  @_root_.xkafka.schemaregistry.SchemaName(${Names.quote(original)}) case $name")
           )
         Right(
           header(enumeration.name) + annotations(enumeration.doc, enumeration.aliases) +
-            enumeration.default.fold("")(symbol => s"@xkafka.avro.AvroEnumDefault(${Names.quote(symbol)})\n") +
+            enumeration.default.fold("")(symbol => s"@_root_.xkafka.avro.AvroEnumDefault(${Names.quote(symbol)})\n") +
             s"enum $scala${Names.opening(scala)}\n${lines.mkString("\n")}\n\n" + companion(scala, enumeration, Nil)
         )
 
   private def fixedSource(fixed: AvroSchema.Fixed): String =
     val scala = Names.typeName(fixed.name.name)
-    header(fixed.name) + annotations(None, fixed.aliases) + s"@xkafka.avro.AvroFixed(${fixed.size})\n" +
-      s"final case class $scala(bytes: fs2.Chunk[${Names.builtin("Byte", neighbours)}])\n\n" + companion(scala, fixed, Nil)
+    header(fixed.name) + annotations(None, fixed.aliases) + s"@_root_.xkafka.avro.AvroFixed(${fixed.size})\n" +
+      s"final case class $scala(bytes: _root_.fs2.Chunk[${Names.builtin("Byte", neighbours)}])\n\n" + companion(scala, fixed, Nil)
 
   private def header(name: FullName): String =
     s"""// Generated by xkafka-codegen from the Avro schema ${name.value}. Changes made here are lost when it is generated again.
@@ -235,16 +249,18 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
        |""".stripMargin
 
   private def annotations(doc: Option[String], aliases: List[FullName]): String =
-    (doc.map(text => s"@xkafka.schemaregistry.SchemaDoc(${Names.quote(text)})\n").toList ++
-      aliases.map(alias => s"@xkafka.schemaregistry.SchemaAlias(${Names.quote(alias.value)})\n")).mkString
+    (doc.map(text => s"@_root_.xkafka.schemaregistry.SchemaDoc(${Names.quote(text)})\n").toList ++
+      aliases.map(alias => s"@_root_.xkafka.schemaregistry.SchemaAlias(${Names.quote(alias.value)})\n")).mkString
 
   private def companion(scala: String, schema: AvroSchema, givens: List[String]): String =
     val extra = givens.map(line => s"  $line\n").mkString
     s"""object $scala${Names.opening(scala)}
        |  /** The Avro schema $scala was generated from, which its codec must have. */
-       |  val avroSchema: String = ${Names.quote(AvroSchemaJson.render(schema))}
+       |  val avroSchema: String = ${Names.text(AvroSchemaJson.render(schema))}
        |
-       |$extra${if extra.isEmpty then "" else "\n"}  given xkafka.avro.AvroCodec[$scala] = xkafka.avro.AvroCodec.derived[$scala].matching(avroSchema)
+       |$extra${
+        if extra.isEmpty then "" else "\n"
+      }  given _root_.xkafka.avro.AvroCodec[$scala] = _root_.xkafka.avro.AvroCodec.derived[$scala].matching(avroSchema)
        |""".stripMargin
 
   /** How code in this type's package names the type `name`. */

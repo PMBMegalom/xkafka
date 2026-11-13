@@ -116,6 +116,8 @@ field, and why:
 - `local-timestamp-nanos`, and a `decimal` held in a `fixed` type, which xkafka
   has no codec for;
 - a `decimal` in a union of several types;
+- a `time-millis` or `time-micros` default that is no time of day, such as a
+  negative one;
 - `null` in a union anywhere but first, or right after the type of the field's
   default;
 - a record with fields of one Scala type at two precisions, such as a

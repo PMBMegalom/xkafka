@@ -349,9 +349,9 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
     private val byPath   = decls.map(decl => decl.path -> decl).toMap
     private val names    = neighbours ++ decls.map(_.path.last) ++ decls.collect { case Decl.Symbols(_, _, symbols) => symbols.map(_._1) }.flatten
     private val access   = s"private[${Names.term(root.packageName.split('.').last)}]"
-    private val codecs   = "xkafka.jsonschema.JsonSchemaCodec"
-    private val helpers  = "xkafka.jsonschema.Generated"
-    private val jsonType = "io.circe.Json"
+    private val codecs   = "_root_.xkafka.jsonschema.JsonSchemaCodec"
+    private val helpers  = "_root_.xkafka.jsonschema.Generated"
+    private val jsonType = "_root_.io.circe.Json"
 
     private def builtin(name: String): String = Names.builtin(name, names)
 
@@ -382,11 +382,11 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
         case Kind.Number   => builtin("Double")
         case Kind.Decimal  => builtin("BigDecimal")
         case Kind.Text     => builtin("String")
-        case Kind.Uuid     => "java.util.UUID"
-        case Kind.DateTime => "java.time.Instant"
-        case Kind.Date     => "java.time.LocalDate"
-        case Kind.Time     => "java.time.OffsetTime"
-        case Kind.Bytes    => s"fs2.Chunk[${builtin("Byte")}]"
+        case Kind.Uuid     => "_root_.java.util.UUID"
+        case Kind.DateTime => "_root_.java.time.Instant"
+        case Kind.Date     => "_root_.java.time.LocalDate"
+        case Kind.Time     => "_root_.java.time.OffsetTime"
+        case Kind.Bytes    => s"_root_.fs2.Chunk[${builtin("Byte")}]"
 
     private def label(path: List[String]): String = Names.quote(fullName(path))
 
@@ -403,7 +403,7 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
       nested(path).map: inner =>
         val schema =
           Option.when(path == rootPath)(s"/** The JSON Schema ${root
-              .name} was generated from, which its codec registers. */\nval jsonSchema: $jsonType =\n${indent(json(root.schema))}")
+              .name} was generated from, which its codec registers. */\nval jsonSchema: $jsonType =\n${indent(schemaValue(root.schema))}")
         val name  = Names.typeName(path.last)
         val codec =
           val decode = if byPath.get(path).exists(_.isInstanceOf[Decl.Record]) then "decodeJson(_, false)" else "decodeJson"
@@ -485,8 +485,8 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
       val all     = shapes.flatMap(inside).distinct
       val special =
         all.collect {
-          case Shape.Plain(Kind.DateTime) => s"private given $codecs[java.time.Instant] = $helpers.dateTime"
-          case Shape.Plain(Kind.Time)     => s"private given $codecs[java.time.OffsetTime] = $helpers.time"
+          case Shape.Plain(Kind.DateTime) => s"private given $codecs[_root_.java.time.Instant] = $helpers.dateTime"
+          case Shape.Plain(Kind.Time)     => s"private given $codecs[_root_.java.time.OffsetTime] = $helpers.time"
           case Shape.Plain(Kind.Anything) => s"private given $codecs[$jsonType] = $helpers.anything"
         }
       val unions = all.collect { case union: Shape.Union => union }.distinct
@@ -512,7 +512,7 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
     /** The type a value of a union's branch is matched by, where its type arguments cannot be checked. */
     private def pattern(shape: Shape): String =
       shape match
-        case Shape.Plain(Kind.Bytes) => s"fs2.Chunk[${builtin("Byte")} @unchecked]"
+        case Shape.Plain(Kind.Bytes) => s"_root_.fs2.Chunk[${builtin("Byte")} @unchecked]"
         case Shape.Many(items)       => s"${builtin("List")}[${scala(items)} @unchecked]"
         case Shape.Keyed(values)     => s"${builtin("Map")}[${builtin("String")} @unchecked, ${scala(values)} @unchecked]"
         case other                   => scala(other)
@@ -585,16 +585,16 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
                 .toRight(s"${value.noSpaces} is not a number")
             case Kind.Text => text.map(Names.quote)
             case Kind.Uuid => text.flatMap(found => Try(UUID.fromString(found)).toEither.leftMap(_ => s"'$found' is not a UUID"))
-                .map(uuid => s"java.util.UUID.fromString(${Names.quote(uuid.toString)})")
+                .map(uuid => s"_root_.java.util.UUID.fromString(${Names.quote(uuid.toString)})")
             case Kind.DateTime => text
                 .flatMap(found => Try(OffsetDateTime.parse(found).toInstant).toEither.leftMap(_ => s"'$found' is not a date-time"))
-                .map(instant => s"java.time.Instant.parse(${Names.quote(instant.toString)})")
+                .map(instant => s"_root_.java.time.Instant.parse(${Names.quote(instant.toString)})")
             case Kind.Date => text.flatMap(found => Try(LocalDate.parse(found)).toEither.leftMap(_ => s"'$found' is not a date"))
-                .map(date => s"java.time.LocalDate.parse(${Names.quote(date.toString)})")
+                .map(date => s"_root_.java.time.LocalDate.parse(${Names.quote(date.toString)})")
             case Kind.Time => text.flatMap(found => Try(OffsetTime.parse(found)).toEither.leftMap(_ => s"'$found' is not a time with an offset"))
-                .map(time => s"java.time.OffsetTime.parse(${Names.quote(time.toString)})")
+                .map(time => s"_root_.java.time.OffsetTime.parse(${Names.quote(time.toString)})")
             case Kind.Bytes => text.flatMap(found => Try(Base64.getDecoder.decode(found)).toEither.leftMap(_ => s"'$found' is not base64"))
-                .map(bytes => bytes.mkString(s"fs2.Chunk[${builtin("Byte")}](", ", ", ")"))
+                .map(bytes => bytes.mkString(s"_root_.fs2.Chunk[${builtin("Byte")}](", ", ", ")"))
 
 private[codegen] object JsonScala:
   /** What a JSON Schema's value is read into, where it is not a type of the file's own. */
@@ -654,14 +654,24 @@ private[codegen] object JsonScala:
       case Nil => ""
       case _   => lines.mkString("/** ", "\n  * ", "\n  */\n").replace(" \n", "\n")
 
+  /** The schema as an expression: built value by value where it is small, and read from its text where building it would take more code than one
+    * method of the JVM holds.
+    */
+  private def schemaValue(schema: Json): String =
+    val text = schema.noSpaces
+    if text.length <= LargeSchema then json(schema) else s"_root_.xkafka.jsonschema.Generated.parsed(${Names.text(text)})"
+
+  /** The length of schema text past which the schema is read from its text. */
+  private val LargeSchema = 8192
+
   /** The Scala expression of a JSON value, as it is. */
   def json(value: Json): String =
     def listed(open: String, items: List[String]) = if items.isEmpty then s"$open()" else s"$open(\n${indent(items.mkString(",\n"))}\n)"
     value.fold(
-      "io.circe.Json.Null",
-      boolean => if boolean then "io.circe.Json.True" else "io.circe.Json.False",
-      number => s"io.circe.Json.fromJsonNumber(io.circe.JsonNumber.fromDecimalStringUnsafe(${Names.quote(number.toString)}))",
-      text => s"io.circe.Json.fromString(${Names.quote(text)})",
-      items => listed("io.circe.Json.arr", items.toList.map(json)),
-      fields => listed("io.circe.Json.obj", fields.toList.map((key, item) => s"${Names.quote(key)} -> ${json(item)}"))
+      "_root_.io.circe.Json.Null",
+      boolean => if boolean then "_root_.io.circe.Json.True" else "_root_.io.circe.Json.False",
+      number => s"_root_.io.circe.Json.fromJsonNumber(_root_.io.circe.JsonNumber.fromDecimalStringUnsafe(${Names.quote(number.toString)}))",
+      text => s"_root_.io.circe.Json.fromString(${Names.quote(text)})",
+      items => listed("_root_.io.circe.Json.arr", items.toList.map(json)),
+      fields => listed("_root_.io.circe.Json.obj", fields.toList.map((key, item) => s"${Names.quote(key)} -> ${json(item)}"))
     )

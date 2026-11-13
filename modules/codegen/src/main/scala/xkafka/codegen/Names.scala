@@ -95,19 +95,19 @@ private[codegen] object Names:
 
   private val qualifiedBuiltins =
     Map(
-      "Boolean"    -> "scala.Boolean",
-      "Byte"       -> "scala.Byte",
-      "Int"        -> "scala.Int",
-      "Long"       -> "scala.Long",
-      "Float"      -> "scala.Float",
-      "Double"     -> "scala.Double",
-      "String"     -> "scala.Predef.String",
+      "Boolean"    -> "_root_.scala.Boolean",
+      "Byte"       -> "_root_.scala.Byte",
+      "Int"        -> "_root_.scala.Int",
+      "Long"       -> "_root_.scala.Long",
+      "Float"      -> "_root_.scala.Float",
+      "Double"     -> "_root_.scala.Double",
+      "String"     -> "_root_.scala.Predef.String",
       "List"       -> "scala.collection.immutable.List",
       "Map"        -> "scala.collection.immutable.Map",
-      "Option"     -> "scala.Option",
-      "Some"       -> "scala.Some",
-      "None"       -> "scala.None",
-      "Array"      -> "scala.Array",
+      "Option"     -> "_root_.scala.Option",
+      "Some"       -> "_root_.scala.Some",
+      "None"       -> "_root_.scala.None",
+      "Array"      -> "_root_.scala.Array",
       "BigDecimal" -> "scala.math.BigDecimal",
       "BigInt"     -> "scala.math.BigInt",
       "Set"        -> "scala.collection.immutable.Set",
@@ -154,6 +154,22 @@ private[codegen] object Names:
         Some((head :: rest.map(_.capitalize)).mkString).map(name => if name.head.isDigit then s"_$name" else name)
 
   /** `text` as a Scala string literal. */
+  /** The Scala expression of `text`: one literal, or where it could be longer than the JVM holds in one constant (65535 bytes), literals of its parts
+    * joined as the program runs, since the compiler would join literals added together back into one constant.
+    */
+  def text(value: String): String =
+    if value.length <= ConstantChars then quote(value) else parts(value).map(quote).mkString("_root_.scala.List(", ", ", ").mkString")
+
+  /** As many characters as one constant holds whatever they are: each takes at most three bytes there. */
+  private val ConstantChars = 65535 / 3
+
+  /** `value` in parts of at most `ConstantChars` characters, none of which splits a character written as two. */
+  private def parts(value: String): List[String] =
+    if value.length <= ConstantChars then List(value)
+    else
+      val cut = if value.charAt(ConstantChars - 1).isHighSurrogate then ConstantChars - 1 else ConstantChars
+      value.take(cut) :: parts(value.drop(cut))
+
   def quote(text: String): String =
     text.flatMap:
       case '"'                                                   => "\\\""

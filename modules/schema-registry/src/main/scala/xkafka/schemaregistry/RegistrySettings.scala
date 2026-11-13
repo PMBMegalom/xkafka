@@ -41,14 +41,23 @@ final case class RegistrySettings private (urls: NonEmptyList[String], latestCac
   def withoutLatestExpiry: RegistrySettings = copy(latestCachedFor = None)
 
 object RegistrySettings:
-  /** The registry at `urls`, each an `http` or `https` URL, refused where one is not or where `latestCachedFor` is negative. */
+  /** The registry at `urls`, each an `http` or `https` URL, refused where one is not, where one holds credentials, which belong to the HTTP client,
+    * or where `latestCachedFor` is negative.
+    */
   def from(urls: NonEmptyList[String], latestCachedFor: Option[FiniteDuration] = None): Either[SchemaRegistryError, RegistrySettings] =
     (urls.traverse(url), latestCachedFor.traverse(cached)).mapN(new RegistrySettings(_, _))
 
   private def url(value: String): Either[SchemaRegistryError, String] =
-    val trimmed = value.reverse.dropWhile(_ == '/').reverse
-    val host    = trimmed.dropWhile(_ != ':').drop(3)
-    Either.cond((trimmed.startsWith("http://") || trimmed.startsWith("https://")) && host.nonEmpty, trimmed, SchemaRegistryError.InvalidUrl(value))
+    val trimmed   = value.reverse.dropWhile(_ == '/').reverse
+    val host      = trimmed.dropWhile(_ != ':').drop(3)
+    val authority =
+      value.indexOf("://") match
+        case -1    => ""
+        case start => value.drop(start + 3).takeWhile(_ != '/')
+    // Checked first, so that no refusal repeats the credentials.
+    if authority.contains('@') then Left(SchemaRegistryError.CredentialsInUrl)
+    else
+      Either.cond((trimmed.startsWith("http://") || trimmed.startsWith("https://")) && host.nonEmpty, trimmed, SchemaRegistryError.InvalidUrl(value))
 
   private def cached(duration: FiniteDuration): Either[SchemaRegistryError, FiniteDuration] =
     Either.cond(duration.length >= 0, duration, SchemaRegistryError.NegativeLatestCacheTime(duration))
@@ -58,12 +67,14 @@ enum SchemaRegistryError derives CanEqual:
   case InvalidUrl(value: String)
   case NegativeLatestCacheTime(value: FiniteDuration)
   case EmptySubject
+  case CredentialsInUrl
 
   def message: String =
     this match
       case InvalidUrl(value)              => s"a registry URL must be an http or https URL with a host, but was '$value'"
       case NegativeLatestCacheTime(value) => s"the time a latest version is kept must not be negative, but was $value"
       case EmptySubject                   => "a subject must not be empty"
+      case CredentialsInUrl               => "a registry URL must not hold credentials: give them to the HTTP client, which sends them"
 
 object SchemaRegistryError:
   given Show[SchemaRegistryError] = Show.show(_.message)

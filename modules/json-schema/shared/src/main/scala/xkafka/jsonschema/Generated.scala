@@ -32,6 +32,9 @@ import io.circe.{Json, JsonObject}
 /** What the classes xkafka-codegen generates from JSON Schema files call: codecs of their schemas, and the writing and reading of their properties.
   */
 object Generated:
+  /** A schema generated code holds as its text, which the generator wrote from a valid schema. */
+  def parsed(text: String): Json = io.circe.jawn.parse(text).fold(error => throw new IllegalArgumentException(error.message), identity)
+
   /** The codec of a type generated from a whole schema file, whose JSON is `described`, registered as it is and named by its `title`. */
   def codec[A](described: Json, encode: A => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
     val (write, read) = (encode, decode)
