@@ -1,8 +1,7 @@
 # Tables
 
 A `KTable` holds the latest value of each key. Besides the tables that `count`,
-`reduce` and `aggregate` make, a table can be read straight from a topic, as Java
-Kafka Streams' `StreamsBuilder.table` reads it:
+`reduce` and `aggregate` make, a table can be read straight from a topic:
 
 ```scala mdoc:compile-only
 // Read a table from a topic, and write every change to it
@@ -25,23 +24,24 @@ a record without a key is skipped. The table is kept in the named store, whose
 changelog is `<application id>-<store>-changelog`, here
 `<application id>-users-changelog`. If the topic is partitioned some other way than
 by Kafka's default, give the table its partitioner (see
-[Choosing partitions](README.md#choosing-partitions)).
+[Choosing partitions](partitioning.md)).
 
 A table read from a topic can delete keys, so its `toStream` gives `Option`
-values: `Some` for an update and `None` for a delete, which a serde's `.option`
-writes as a tombstone. A table that only ever updates
-its keys, such as a `count`, gives its values as they are. The table's `Change`
-type member says which, and `KTable.Of` names it in an annotation:
-`KTable.Of[F, K, V, Option]` can delete, and `KTable.Of[F, K, V, KTable.Updated]`
-only updates. Writing a table that can delete without `.option` does not
-compile. A plain `KTable[F, K, V]` does not say, so its `toStream` cannot be
-written with either serde.
+values: `Some` for an update and `None` for a delete. Write it with a serde's
+`.option`, which writes `None` as a tombstone; writing it without `.option` does
+not compile. A table that only ever updates its keys, such as a `count`, gives its
+values as they are.
+
+To annotate a table's type, use `KTable.Of`: `KTable.Of[F, K, V, Option]` can
+delete, and `KTable.Of[F, K, V, KTable.Updated]` only updates. A plain
+`KTable[F, K, V]` does not say, so its `toStream` cannot be written with either
+serde.
 
 A stream becomes a table with `toTable`, which keeps each key's latest value in a
 store. Records whose key may have changed go through the repartition topic
 `<application id>-<step>-repartition` first, so the step's name also names that
-topic. For a stream of `Option` values, passing the serde of the values inside
-makes none delete the key:
+topic. If the stream's values are `Option`s, pass the serde of the inner values,
+and a `None` value deletes the key:
 
 ```scala mdoc:compile-only
 // Keep each user's latest address as a table, and write every change to it
@@ -95,8 +95,7 @@ is suppressed; `Topology.of` refuses it otherwise.
 
 ## Grouping a table
 
-A table's `groupBy` puts its values in new groups, as Java Kafka Streams'
-`KTable.groupBy` does, and `count`, `reduce` or `aggregate` keep a result for each
+A table's `groupBy` puts its values in new groups, and `count`, `reduce` or `aggregate` keep a result for each
 group in a store. A value can leave its group, when it is replaced or deleted, so
 `reduce` and `aggregate` take two functions, one to put a value in and one to take
 it out. Here each user's balance counts towards their country's total, and moving
@@ -122,19 +121,15 @@ def totals(balances: Topic, output: Topic): Pipeline[IO] =
 ```
 
 Each change goes through the repartition topic
-`<application id>-<name>-repartition`, which the application's Java Kafka Streams
-members can read and write too. A group that loses its last value stays in the
+`<application id>-<name>-repartition`. A group that loses its last value stays in the
 result, so a count stays at 0. To leave such groups out, `filter` the result.
 
 Changes to the result are `Option`s, which is why the example writes them with
 `amount.option`. A change is `None` when a value leaves a group that holds nothing.
-You can see this when you group a `count` by its value: a key's first count also
-leaves the group for 0, so if that group is empty, its change is `None`.
 
 ## Folding streams together
 
-`cogroup` folds several grouped streams into one store, as Java Kafka Streams'
-`cogroup` does. Each group has its own function, and each can hold a different
+`cogroup` folds several grouped streams into one store. Each group has its own function, and each can hold a different
 type of value. Here orders and refunds, both keyed by the user, make one balance
 for each user:
 
@@ -172,10 +167,9 @@ To fold two paths of one stream, group each with its `flow` and send the stream
 into the result with `into`, as in [Branching](branching.md).
 
 @:callout(warning)
-Java Kafka Streams cannot start a program in which several groups are folded
-together and any of them goes through a repartition topic. Such a program runs on
-xkafka, but cannot have Java members, and the application's `state` lists
-`StreamsProblem.JavaMembersMayBeRefused`, naming the topics.
+If any of the groups goes through a repartition topic, the application cannot have
+Java Kafka Streams members (see
+[Mixing with Java Kafka Streams](java-kafka-streams.md#folding-groups-together)).
 @:@
 
 Folding in windows works as for one group, with `windowedBy` before `aggregate`.
@@ -188,7 +182,7 @@ grouped
   .aggregate(Named("balance"), Store("balances"), cents)(0L)
 ```
 
-A record is late by the latest time read from its own group, not from the others,
-so a group that falls behind keeps its records, as in Java. As in Java, these
+Each group decides whether a record is late from its own records' times, not the
+other groups', so a group whose records run behind still has them counted. These
 windows have no `emitOnWindowClose`. To send only each window's final result, use
 [`suppress`](holding-back-updates.md).

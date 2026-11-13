@@ -1,7 +1,6 @@
 # Joins
 
-`join` pairs each record of a stream with its key's value in a table, as Java
-Kafka Streams' stream-table join does. Here each order, keyed by the user who
+`join` pairs each record of a stream with its key's value in a table. Here each order, keyed by the user who
 placed it, is joined with that user's name:
 
 ```scala mdoc:compile-only
@@ -28,42 +27,25 @@ dropped. `leftJoin` keeps it, passing `None` instead of the table's value. The
 result keeps each record's timestamp and headers.
 
 The table can be read from a topic, made by `count`, `reduce`, `aggregate` or
-`toTable`, or come from another table's `filter`, `mapValues` or join. A join with a
-suppressed table sees, for a key whose update is held back, the value from before
-that update, as in Java.
+`toTable`, or come from another table's `filter`, `mapValues` or join. If the
+table holds back updates with `suppress`, the join sees each key's value from
+before any update still held back.
 
 A stream and the table it joins are processed together, so their topics must
-have the same number of partitions, as in Java. If they do not, the broker
+have the same number of partitions. If they do not, the broker
 refuses the application's topics, which shows up in `state` as
 `StreamsProblem.IncorrectlyPartitionedTopics`. A member processes the records
-it has read from both topics earliest timestamp first, as Java does.
+it has read from both topics earliest timestamp first.
 
 An application whose members all run xkafka can run any join. If some members run
-Java Kafka Streams, the broker requires every member to describe the application
-in the same way, and may refuse the Java members otherwise. For some pairs of
-joined topic names, xkafka cannot tell whether its description will match Java's.
-The application's `state` then lists `StreamsProblem.JavaMembersMayBeRefused`,
-naming the topics. Joining topics with other names avoids it.
-
-`state` lists the same problem for a join with an input that has sub-topologies of
-its own, for example a table counted after a repartition. To keep the Java members,
-build what `join` is called on first in the Java program, before anything of the
-other input:
-
-```java
-// In the Java program: build the stream that join is called on first
-KStream<String, String> orders = builder.stream("orders");
-KTable<String, Long> visits = builder.<String, String>stream("visits")
-    .groupBy((key, page) -> page, Grouped.as("by-page"))
-    .count(Materialized.as("visits"));
-orders.join(visits, (order, count) -> order + count).to("out");
-```
+Java Kafka Streams, some joins need the Java program built in a certain order (see
+[Mixing with Java Kafka Streams](java-kafka-streams.md#joins)).
 
 If the stream's key may have changed since it was read, for example after
 `selectKey`, its records first go through a repartition topic, and `join` and
 `leftJoin` compile only with serdes to write it with, as `groupByKey` compiles
 only with a name. The topic is named after the join,
-`<application id>-<name>-repartition`, as Java names it after its `Joined` name:
+`<application id>-<name>-repartition`:
 
 ```scala mdoc:compile-only
 // Key orders by user, then join them with the users table
@@ -87,8 +69,7 @@ keys them by the user before the join.
 
 ## Joining tables
 
-Two tables with the same key join into a table, as Java Kafka Streams' table-table
-joins do. Every change to either table updates the result for its key:
+Two tables with the same key join into a table. Every change to either table updates the result for its key:
 
 ```scala mdoc:compile-only
 // Join users and plans into one account per user, whichever of the two a user has
@@ -121,8 +102,8 @@ def accounts(users: Topic, plans: Topic, output: Topic): Pipeline[IO] =
   an `Ior`: the left, the right, or both.
 
 The result can delete keys, whichever tables were joined, so its changes are
-`Option` values, and `toStream` writes a delete as a tombstone. As in Java, a
-delete on either side of `join` deletes the key from the result, even a key the
+`Option` values, and `toStream` writes a delete as a tombstone. A delete on
+either side of `join` deletes the key from the result, even a key the
 result never held. The joining function cannot delete a key itself. Each
 result takes the later timestamp of the two values it was made from.
 
@@ -202,23 +183,15 @@ With the name `order-customer`, the join adds these to the application:
 Windowed tables cannot join on a foreign key, and there is no outer version. (Other
 joins of windowed tables are in [Windows](windows.md#joining-windowed-tables).) If the
 other table's topic is partitioned some other way than by Kafka's default, give that
-table its partitioner (see [Choosing partitions](README.md#choosing-partitions)).
+table its partitioner (see [Choosing partitions](partitioning.md)).
 
-If some members run Java Kafka Streams, name the join with `TableJoined.as` and build
-the left table first, or the broker may refuse the Java members:
-
-```java
-// In the Java program: build the left table first, and name the join as the xkafka program does
-KTable<String, String> orders = builder.table("orders");
-KTable<String, String> customers = builder.table("customers");
-orders.join(customers, order -> order.contains(":") ? order.split(":")[0] : null, (order, customer) -> order + " for " + customer,
-    TableJoined.as("order-customer")).toStream().to("out");
-```
+If some members run Java Kafka Streams, see
+[Mixing with Java Kafka Streams](java-kafka-streams.md#joins) for how to name the
+join and build the Java program.
 
 ## Joining streams
 
-Two streams with the same key join within windows of time, as Java Kafka
-Streams' stream-stream joins do. Each record joins every record of the other
+Two streams with the same key join within windows of time. Each record joins every record of the other
 stream with its key whose time is close enough to its own. Here orders and
 payments are both keyed by the order, and each order should be paid within
 five minutes:
@@ -275,7 +248,7 @@ arrive they wait.
 
 Each stream's records are kept in a store for the windows' size and grace, and
 a left or outer join keeps the records that matched nothing in a third store.
-The stores are named from the store's name, as Java names them:
+The stores are named from the store's name:
 
 | Join        | Stores                                                                                                  |
 |-------------|---------------------------------------------------------------------------------------------------------|
@@ -287,8 +260,9 @@ The three serdes write the key and each stream's values to the stores. A
 stream whose key has changed is written first to a repartition topic named
 after the join, `<application id>-<join>-left-repartition` or
 `<application id>-<join>-right-repartition`, with the same serdes. A Java
-program names everything the same way with
-`StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(join).withStoreName(store)`.
+program names everything the same way with `StreamJoined`, as
+[Mixing with Java Kafka Streams](java-kafka-streams.md#writing-the-java-program)
+shows.
 
 A record without a key, one whose key serde writes none, is written alone at
 once by a left join's left stream and by either stream of an outer join, and
@@ -301,8 +275,7 @@ number of partitions. To join a stream with itself, see
 ## Joining a global table
 
 A `GlobalKTable` holds the latest value of each key of a topic, and every member
-of the application keeps all of it, as with Java Kafka Streams' `GlobalKTable`. It
-suits reference data small enough for each member to hold. A stream joins it by a
+of the application keeps all of it. It suits reference data small enough for each member to hold. A stream joins it by a
 key taken from each record, so the two need not share a key or a number of
 partitions. Here each order is joined with the product named in its value:
 
@@ -315,7 +288,7 @@ import xkafka.streams.*
 
 def ordersWithProducts(orders: Topic, products: Topic, output: Topic): Pipeline[IO] =
   val text    = Serde.utf8[IO]
-  val catalog = GlobalKTable(Named("products"), products, text, text, Store("products"))  // Every running instance holds all of this table
+  val catalog = GlobalKTable(Named("products"), products, text, text, Store("products"))  // Every member holds all of this table
   KStream(Named("orders"), orders, text, text)
     // Find the table's key in each record, then make the result
     .join(Named("with-product"), catalog)((_, product) => product)((product, details) => s"$product: $details")
@@ -334,13 +307,8 @@ not exist. It then follows the topic for as long as it runs. If it cannot read a
 record it finds there, `run` fails. The table's topic is all that backs it, so it has
 no changelog. `Topology.of` refuses a program that also reads that topic elsewhere.
 
-When some members run Java Kafka Streams, the Java program must build the table
-after the stream that first joins it, or the broker may refuse the Java members. The
-application's `state` lists `StreamsProblem.JavaMembersMayBeRefused` as a reminder:
-
-```java
-// In the Java program: build the global table after the stream that joins it
-KStream<String, String> orders = builder.stream("orders");
-GlobalKTable<String, String> catalog = builder.globalTable("products");
-orders.join(catalog, (order, product) -> product, (product, details) -> product + ": " + details).to("out");
-```
+The application's `state` lists `StreamsProblem.JavaMembersMayBeRefused` for every
+program with a global table, whether or not any members run Java Kafka Streams. An
+application whose members all run xkafka can ignore it. If some members run Java
+Kafka Streams, see [Mixing with Java Kafka Streams](java-kafka-streams.md#joins)
+for how to build the Java program.

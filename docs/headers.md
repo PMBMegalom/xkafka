@@ -97,5 +97,4 @@ given HeaderDeserializer[Tenant] = HeaderDeserializer.utf8.map(Tenant(_))   // R
 val tenant = Headers.empty.append("tenant", Tenant("acme")).get[Tenant]("tenant")
 ```
 
-These are plain functions, not effects, because a header value is already in memory
-by the time one is applied.
+Header codecs are plain functions, not effects.

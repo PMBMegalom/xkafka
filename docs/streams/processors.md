@@ -27,11 +27,12 @@ def runningTotals(input: Topic, output: Topic): Pipeline[IO] =
     .to(Named("write-totals"), output, user, amount)
 ```
 
+The function you give `Processor.onRecord`, the handler, runs for each record.
 `Processor.withStore` hands your code the store already typed, so you cannot
 read a store you did not declare. Use `Processor.withStores` for two or three
 stores, and `Processor.withoutStores` for none.
 
-## What comes out
+## Sending records on
 
 Each record you return goes on to the next step. A record made with `withKey` or
 `withValue` keeps the time and headers of the one it was made from, and
@@ -225,14 +226,12 @@ end written to the store is a whole retention past its own end. Reads do not fin
 expired session, and a `put` to one keeps nothing and raises no error, so choose a
 retention at least as long as the oldest session you still write to or read.
 
-A `remove` does not count towards the latest end while
-the store runs, but it does once the store is restored. So a restart can expire a
-session you could read just before it, if you removed a session ending later than
-any you have written. Java Kafka Streams' session stores do the same.
+After a restart, a `remove` counts towards the latest end, though it did not
+before. So if you removed a session ending later than any you wrote, a restart can
+expire sessions you could read just before it.
 
 A retention under a millisecond, or holding part of one, is refused when you call
-`Topology.of`. Writes are
-saved and restored as for a `KeyValueStore`, to the topic
+`Topology.of`. Writes are saved and restored as for a `KeyValueStore`, to the topic
 `<application id>-<store>-changelog`, which keeps records for the retention plus a
 day.
 
@@ -286,8 +285,8 @@ clock time it runs at. An interval below a millisecond, or holding part of one,
 is refused when you call `Topology.of`.
 
 What a punctuator writes to a store is saved at the next commit, as a handler's
-writes are. Under exactly-once processing, a wall-clock punctuator that runs while no records arrive
-commits a transaction each time, so avoid very short intervals.
+writes are. Under exactly-once processing, a wall-clock punctuator that runs while no
+records arrive commits a transaction each time, so avoid very short intervals.
 
 Schedules are not saved. When a task starts again, here or on another member, a
 stream-time punctuator runs as soon as the task has a stream time, even if its
@@ -309,7 +308,7 @@ name are refused when you call `Topology.of`.
 
 On the JVM, a `Processor` or `FixedKeyProcessor` written for Java Kafka Streams can
 run as a step. It comes with the `xkafka-streams-java` module (see
-[Java partitioners](README.md#java-partitioners-jvm-only)).
+[Adding the module](java-kafka-streams.md#adding-the-module)).
 
 ```scala mdoc:compile-only
 // Run a processor written for Java Kafka Streams as a step, with the store it uses
@@ -328,14 +327,14 @@ def withJava(input: Topic, output: Topic, make: () => JavaProcessor[String, Stri
     .to(Named("write"), output, text, text)
 ```
 
-The processor runs as it does in Java Kafka Streams:
+The processor runs as it would in Java Kafka Streams:
 
 - Each task makes its own instance, calls `init` when the task starts, and `close`
   when the task stops or moves to another member. Fields keep their values in
   between.
 - `forward` sends records on, with the times and headers they are given.
 - `schedule` runs punctuators by stream time or by the clock, from the start time
-  given where there is one, and `cancel` stops them. Each task's instance schedules
+  given if there is one, and `cancel` stops them. Each task's instance schedules
   its own.
 - `recordMetadata` gives the topic, partition and offset of the record being read,
   and `taskId`, `applicationId`, `currentStreamTimeMs` and `currentSystemTimeMs`
@@ -344,12 +343,11 @@ The processor runs as it does in Java Kafka Streams:
 Declare each store the Java code reads with `JavaStore.keyValue`, which it takes as a
 `KeyValueStore<K, V>`, or `JavaStore.timestamped`, which it takes as a
 `TimestampedKeyValueStore<K, V>`. Keys and values must be objects, such as `String`
-or `java.lang.Long`. Window and session stores cannot be given yet, and a store given
+or `java.lang.Long`. Window and session stores cannot be given, and a store given
 to a Java processor cannot also be given to one of xkafka's.
 
-Each call into the Java code runs on a thread meant for waiting, since its calls to
-stores wait for them. That can cost a switch of threads for each record such a step
-handles; xkafka's own steps do not pay it.
+Java processors run on a blocking thread, so each record they handle can cost a
+switch of threads that xkafka's own steps avoid.
 
 These fail with an error saying so: writing to a store or sending records on in
 `init`, sending records to a named next step, `stateDir`, `keySerde` and `valueSerde`.
@@ -357,5 +355,6 @@ These fail with an error saying so: writing to a store or sending records on in
 sensors from `metrics()` record what they are given, which nothing reports.
 
 If some members run Java Kafka Streams, give their program the same processor under
-the same name, with the same stores.
+the same name, with the same stores (see
+[Mixing with Java Kafka Streams](java-kafka-streams.md)).
 

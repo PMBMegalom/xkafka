@@ -45,7 +45,7 @@ sliding windows and sessions, below, do.
 
 ## Final results only
 
-By default, every update to a window goes downstream. To send only each
+By default, every update to a window is sent on. To send only each
 window's final result, once the window has closed, add `emitOnWindowClose`:
 
 ```scala mdoc:compile-only
@@ -71,7 +71,7 @@ def finalViewsPerMinute(input: Topic, output: Topic): Pipeline[IO] =
 ```
 
 A closed window's result is sent when the next record arrives, at most once a
-second, as in Java Kafka Streams. So results do not go out at the exact moment
+second. So results do not go out at the exact moment
 a window closes, and while no records arrive, they wait.
 
 If the work moves to another member, results that were already sent and
@@ -86,14 +86,13 @@ records, timestamped:
 - 12:02:05, the next record.
 
 The record at 12:02:05 closes the window from 12:00, whose grace ended at
-12:01:10. But it also starts the window from 12:02, which is more than seventy
-seconds after 12:00, so the window from 12:00 is removed before its result is
-sent. Its count never goes downstream. The same can happen when the records in
+12:01:10. It also starts the window from 12:02, and a window is removed once a
+later window starts more than its seventy seconds after it. So the window from
+12:00 is removed before its result is sent, and its count is never sent on. The same can happen when the records in
 between arrive quickly, since closed windows are looked for at most once a second.
 
 Keeping windows longer, as `withRetention(10.minutes)` does in the example,
-keeps the window from 12:00 until its result has been sent. Java Kafka Streams
-has the same limit, and the same remedy.
+keeps the window from 12:00 until its result has been sent.
 
 ## Sliding windows
 
@@ -167,7 +166,7 @@ def visits(input: Topic, output: Topic): Pipeline[IO] =
 ```
 
 A new record within the gap of two separate sessions merges them into one, so a
-session already sent downstream can be replaced. A table of
+session already sent on can be replaced. A table of
 sessions is therefore a table that can delete keys (see [Tables](tables.md)): its
 `toStream` gives `None` for each replaced session, then the merged session with
 its value. For example, with a five-minute gap, records of one key at 10:00 and
@@ -176,8 +175,7 @@ record then gives `None` for that session and a count of 2 for the session from
 10:00 to 10:02.
 
 Write session results with an `option` serde, such as `Serde.long[IO].option`:
-`None` is written as a record with no value, a tombstone, exactly as Java Kafka
-Streams writes a replaced session.
+`None` is written as a record with no value, a tombstone.
 
 `count` and `reduce` know how to merge sessions. `aggregate` takes a function
 for it as well, given the two sessions' values. Over a stream of purchases in
@@ -193,7 +191,7 @@ inactivity gap plus the grace, and later records no longer join it.
 `SessionWindows.withNoGrace` gives no grace. By
 default, sessions are kept for the gap plus the grace after they end, which is
 also the shortest `withRetention` accepts. With `emitOnWindowClose`, only each
-session's final value goes downstream, and no `None` values are sent.
+session's final value is sent on, and no `None` values are sent.
 
 ## Joining windowed tables
 

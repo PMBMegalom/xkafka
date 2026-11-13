@@ -84,10 +84,10 @@ val settings =
     ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 
-Producer or consumer properties override client properties. Each platform's client reads
-the names and values itself: the Java client on the JVM, and librdkafka on Scala.js
-and Scala Native. For code that runs on more than one platform, use only properties
-that both accept with the same meaning.
+Producer or consumer properties override client properties. Properties go
+straight to the platform's client: the Java client on the JVM, and librdkafka on
+Scala.js and Scala Native. The two accept different names, so for code that runs
+on the JVM and elsewhere, use only properties both accept with the same meaning.
 
 ## Managed properties
 
@@ -119,6 +119,22 @@ def tuned[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[
   settings.withFetchWait(100.millis).andThen(_.withProperty("fetch.min.bytes", "65536")).liftTo[IO]
 ```
 
+## Client settings
+
+`ClientSettings` applies to producers and consumers alike:
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `metadataRefreshInterval` | 5m | how long a new topic, partition, or leader can go unnoticed |
+
+Setting this once covers every platform. Kafka spells it
+`metadata.max.age.ms` and librdkafka spells it
+`topic.metadata.refresh.interval.ms`, so look for those names when comparing
+against their documentation.
+
+`ClientSettings` also carries the bootstrap servers, an optional client id, and
+the security settings. See [Transport security](transport-security.md).
+
 ## Consumer settings
 
 Beyond the group and the deserializers, `ConsumerSettings` carries:
@@ -142,8 +158,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, `seek`, `seekToBeginning`, and
-`seekToEnd`. Its default matches
-what Kafka's own clients use.
+`seekToEnd`.
 
 `fetchWait` is the longest the broker holds a fetch while fewer than
 `fetch.min.bytes` of records are waiting. `fetch.min.bytes` is an ordinary
@@ -167,7 +182,7 @@ Beyond the serializers, `ProducerSettings` carries:
 | setting | default | meaning |
 | --- | --- | --- |
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
-| `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
+| `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered yet |
 | `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
 | `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
@@ -183,7 +198,7 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | setting | default | meaning |
 | --- | --- | --- |
 | `guarantee` | `ProcessingGuarantee.AtLeastOnce` | whether a record can be processed again after work moves |
-| `commitInterval` | unset, which is 30s at least once and 100ms exactly once | how often tasks commit |
+| `commitInterval` | unset, which is 30s with at-least-once and 100ms with exactly-once processing | how often tasks commit |
 | `concurrency` | 1 | how many tasks process records at once |
 | `closeTimeout` | 30s | how long releasing the application waits to give back its tasks and leave |
 | `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
@@ -194,19 +209,3 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 See [Streams](streams/running.md#guarantees) for each of them. `fetchWait` works
 as a [consumer's](#consumer-settings) does, and `fetch.min.bytes`, set in the
 client settings' properties, reaches the application's consumers too.
-
-## Client settings
-
-`ClientSettings` applies to producers and consumers alike:
-
-| setting | default | meaning |
-| --- | --- | --- |
-| `metadataRefreshInterval` | 5m | how long a new topic, partition, or leader can go unnoticed |
-
-Setting this once covers every platform. Kafka spells it
-`metadata.max.age.ms` and librdkafka spells it
-`topic.metadata.refresh.interval.ms`, so look for those names when comparing
-against their documentation.
-
-`ClientSettings` also carries the bootstrap servers, an optional client id, and
-the security settings. See [Transport security](transport-security.md).

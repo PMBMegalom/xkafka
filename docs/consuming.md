@@ -16,7 +16,7 @@ val program =
   for
     client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     group    <- ConsumerGroup.from("workers").liftTo[IO]
-    // Start at the first record where the group has no committed offset
+    // Start at the first record if the group has no committed offset
     settings <- ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).liftTo[IO]
     topic    <- Topic.from("events").liftTo[IO]
     records  <-
@@ -35,19 +35,20 @@ has:
 
 | field | meaning |
 | --- | --- |
-| `timestamp` | `RecordTimestamp.CreateTime` where the producer set the time, or `LogAppendTime` where the topic's `message.timestamp.type` is `LogAppendTime` and the broker set it |
-| `leaderEpoch` | the leader epoch of the partition when the record was written |
+| `timestamp` | `RecordTimestamp.CreateTime` if the producer or its client set the time, `LogAppendTime` if the broker set it because the topic's `message.timestamp.type` is `LogAppendTime`, or `None` |
+| `leaderEpoch` | the leader epoch of the partition when the record was written, or `None` if the client did not report it |
 | `serializedKeySize` | the key's size in bytes as it was read, or `None` for a record without a key |
 | `serializedValueSize` | the value's size in bytes as it was read, or `None` for a record without a value |
 
-## What a consumer reads
+## Choosing topics or partitions
 
 `Selection` says where a consumer's records come from.
 
 `Selection.Topics` takes a non-empty set of topics. `Selection.Pattern` takes a
-`TopicPattern`, which matches complete topic names. The JVM matches it as a Java
-regular expression, and Scala.js and Native through librdkafka, so a pattern
-meant for every platform should keep to simple syntax, such as `events-.*`.
+`TopicPattern`, which matches complete topic names. The JVM reads it as a Java
+regular expression, and Scala.js and Scala Native as one of librdkafka's, which
+differ. For code that runs on every platform, keep to simple patterns such as
+`events-.*`.
 Both join a consumer group, so the partitions a consumer holds follow the
 group's rebalances.
 
@@ -60,8 +61,8 @@ promptly.
 
 `Selection.Partitions` takes a non-empty set of topic-partitions and reads
 exactly those. It joins no group, so the assignment never changes. Two consumers
-naming the same partition each read all of it, even when they share a consumer
-group, because no group membership divides the partition between them.
+that name the same partition both read all of it, even in the same consumer
+group.
 
 Committed offsets are still stored under the consumer group. Consumers reading
 the same partitions under one group therefore share those offsets, and one
@@ -82,7 +83,7 @@ committed. Set `isolationLevel` to change that. See
 
 ## Where a consumer starts
 
-A consumer resumes each partition from its group's committed offset. Where the
+A consumer resumes each partition from its group's committed offset. If the
 group has none, `autoOffsetReset` decides:
 
 | value | where the consumer starts |
@@ -91,12 +92,12 @@ group has none, `autoOffsetReset` decides:
 | `Latest` | at the end of the partition, reading only records written from then on |
 | `Fail` | nowhere: the record stream fails as `ErrorCode.OffsetResetRequired` |
 
-A committed offset that is no longer in the partition, because the records it
-pointed at were deleted, is handled by the same setting. `Earliest` starts at the
-first record still there, and `Fail` fails the record stream.
+The same setting applies if the committed offset is no longer in the partition,
+for example because its records were deleted. `Earliest` starts at the first
+record still there, and `Fail` fails the record stream.
 
-Choose `Fail` where skipping or replaying records would be wrong, such as for a
-replica rebuilt from a snapshot and the log written after it.
+Choose `Fail` if skipping or replaying records would be wrong, for example when
+you rebuild state from a snapshot plus the records written after it.
 
 ## Processing records
 
@@ -114,13 +115,13 @@ consumer.consumeChunk: records =>
 ```
 
 Partitions are processed concurrently, so a slow chunk holds back only the
-partition it came from. Returning `CommitNow` is what triggers the commit.
+partition it came from.
 
 `consumeChunk` runs until it is cancelled, until something fails, or until
 `stopConsuming` has been called and everything already fetched has been
 processed.
 
-## Partition streams
+## A stream per partition
 
 `partitionedRecords` exposes a record stream for each assigned topic-partition
 and ends that stream after the partition is revoked.
@@ -132,11 +133,12 @@ consumer.partitionedRecords(maxQueuedRecords = 256).map { partition =>  // Pause
 }.parJoinUnbounded  // Consume every partition's stream at once
 ```
 
-Every emitted stream must be consumed concurrently. `maxQueuedRecords` is the
-point at which the consumer pauses a partition. Records already in flight can
-temporarily take its buffer past that threshold.
+Read every partition's stream at the same time, for example with
+`parJoinUnbounded`. The consumer pauses a partition once `maxQueuedRecords` of
+its records are waiting. Records already being fetched can briefly take it past
+that limit.
 
-## Stopping
+## Stopping without losing records
 
 `stopConsuming` stops fetching. The record streams then end once the records
 already fetched have been handed over. Nothing read from the broker is dropped,
@@ -146,8 +148,7 @@ Run it alongside the stream:
 
 ```scala
 // Consume until a shutdown is requested, then finish what was already fetched
-// Handle and commit each record
-val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain
+val consume = consumer.records.evalMap(record => handle(record) *> record.offset.commit).compile.drain  // Handle and commit each record
 val stop    = shutdownRequested.get *> consumer.stopConsuming  // Stop fetching when a shutdown is requested
 
 (consume, stop).parTupled  // Run both side by side
@@ -159,14 +160,14 @@ effect, and a stream started after it is empty.
 
 Interrupting the stream instead, with `interruptWhen` for example, stops it
 mid-record and discards whatever had been fetched. Releasing the consumer
-resource, or cancelling whatever reads it, does the same. In those cases whoever
-resumes the group reads those offsets again.
+resource, or cancelling whatever reads it, does the same. The consumer that next
+reads those partitions gets the uncommitted records again.
 
 ## Group membership
 
-A consumer that joins a group stays in it while it keeps in touch with the
-group. Four settings govern that, and each is checked when the settings are
-built, so a combination that would be refused on any platform is a `SettingsError`:
+Four settings control how a consumer stays in its group. They are checked
+together when you build the settings, and a combination any platform would
+refuse is a `SettingsError`:
 
 - `sessionTimeout` is how long the group waits to hear from the consumer before
   handing its partitions to the others. The broker also bounds it, through its
@@ -175,16 +176,15 @@ built, so a combination that would be refused on any platform is a `SettingsErro
 - `heartbeatInterval` is how often the consumer tells the group it is alive. It
   must be less than the session timeout.
 - `maxPollInterval` is how long the consumer can go without fetching records.
-  Fetching stops while too many records wait unread, so a consumer whose records
-  go unread for longer than this leaves its group. It must be at least the
-  session timeout.
+  It stops fetching while too many records wait unread, so if your code reads no
+  records for longer than this, the consumer leaves its group. It must be at
+  least the session timeout.
 - `groupInstanceId` makes the consumer a static member of its group.
 
 Unless they are set, the session timeout and heartbeat interval are 45 seconds
-and 3 seconds on every platform. Under the consumer group protocol, which the
-`group.protocol` property set to `consumer` selects, the broker decides both, so
-leave them unset: a consumer with either one set fails as
-`ErrorCode.InvalidConfiguration`.
+and 3 seconds on every platform. If you set the property `group.protocol` to
+`consumer`, the broker decides both. Leave them unset then: a consumer with
+either one set fails as `ErrorCode.InvalidConfiguration`.
 
 ```scala mdoc:compile-only
 // Make a consumer a static member, with an identity of its own and a longer session timeout
@@ -256,7 +256,6 @@ After a seek, the next record the stream hands out of that partition comes from
 the offset sought, and no record fetched before the seek is handed out. A seek
 of a partition the consumer has not been assigned fails with
 `ErrorCode.UnknownTopicOrPartition`. On Scala.js and Scala Native, a seek is
-also refused until the partition it names is being fetched, which happens
-shortly after the assignment arrives, so code meant for every platform should
-retry briefly if it seeks immediately after starting a consumer.
+also refused until the partition is being fetched, which happens shortly after
+it is assigned. If you seek right after starting a consumer, retry briefly.
 @:@

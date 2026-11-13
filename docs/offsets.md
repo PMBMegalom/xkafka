@@ -53,7 +53,7 @@ or a group that is rebalancing. Others never will, and retrying them only delays
 the failure.
 
 `ConsumerSettings.commitRecovery` retries the first kind. `ErrorCode.retriable`
-decides which failures qualify, and it answers the same on every platform:
+decides which failures qualify, and it is the same on every platform:
 
 ```scala mdoc:compile-only
 // Retry a failed commit up to five times, waiting longer between attempts
@@ -78,11 +78,9 @@ val settings =
 
 `maxAttempts` counts the retries after the first failure. The default policy
 retries up to ten times, waiting 10ms before the first retry, doubling the wait
-each time, and stopping the doubling at 10s. Each delay is then spread by a
-fifth, so that consumers which hit one condition together do not all retry at
-the same moment.
-The spread is applied after the cap, so a delay can exceed `maxDelay` by that
-fraction.
+each time, and stopping the doubling at 10s. Each delay then varies randomly by
+up to 20% either way, so consumers that fail together do not retry together. A
+delay can therefore be up to 20% above `maxDelay`.
 
 `CommitRecovery.none` disables retrying. A failure that is not retriable fails
 the commit at once, as reported. One that is still retriable after every retry
@@ -114,9 +112,8 @@ def withCommitTimeout[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[Consu
   settings.withCommitTimeout(5.seconds).liftTo[IO]
 ```
 
-Like every method that sets a duration, it validates the settings again and returns
-`ValidatedNel[SettingsError, ConsumerSettings[F, K, V]]`. See
-[Settings](settings.md).
+Like every method that sets a duration, it returns a `ValidatedNel`; see
+[Changing settings](settings.md#changing-settings).
 
 @:callout(warning)
 A commit that timed out may still be applied by the broker afterwards, because
@@ -125,19 +122,18 @@ further effect, so a later attempt that succeeds leaves the group in the same
 place.
 @:@
 
-## Leader epoch and metadata
+## Storing a note with an offset
 
-An offset commits with the leader epoch of the record it was read with. It can
-also carry text of your own, which the broker stores beside it and `committed`
-returns:
+Each offset is committed with its record's leader epoch, which you don't need to
+set. It can also carry text of your own, which the broker stores beside it and
+`committed` returns:
 
 ```scala
 // Commit this record's offset, with a note of your own stored beside it
 record.offset.withMetadata("processed by worker 3").commit
 ```
 
-The broker keeps no difference between empty metadata and none, so empty means
-none. It refuses metadata longer than its `offset.metadata.max.bytes`, 4096
+The broker treats empty metadata as no metadata. It refuses metadata longer than its `offset.metadata.max.bytes`, 4096
 bytes by default, and the commit fails with `ErrorCode.OffsetMetadataTooLarge`.
 A batch keeps the metadata of the offset it keeps, and a
 [transaction](transactions.md) stores both the epoch and the metadata of the
@@ -167,14 +163,13 @@ How many offsets a rebalance affects depends on the partition assignment strateg
   offsets for the partitions a consumer keeps can still be committed. Choose
   one through the `partition.assignment.strategy` property:
   `org.apache.kafka.clients.consumer.CooperativeStickyAssignor` on the JVM, and
-  `cooperative-sticky` on Scala.js and Native.
+  `cooperative-sticky` on Scala.js and Scala Native.
 
 To commit offsets that did not come from a record, use the consumer's committer,
 `record.offset.committer`. Its `commit` takes a `Map[TopicPartition, Offset]` and
 commits each with no leader epoch and no metadata; `commitWithMetadata` takes an
-`OffsetAndMetadata` for each partition. Since these offsets were not read under
-any particular assignment, fencing can only check that the consumer owns each
-partition at the time of the commit.
+`OffsetAndMetadata` for each partition. For these offsets, fencing only checks
+that the consumer owns each partition when the commit runs.
 
 To turn fencing off:
 
@@ -195,7 +190,7 @@ again. Rebalance-safe commits give those records time to be committed first:
 
 ```scala
 // Give records up to 30 seconds to be committed before their partition moves
-settings.withRebalanceSafeCommits(30.seconds)
+settings.withRebalanceSafeCommits(30.seconds).liftTo[IO]  // Raise invalid settings as a failure
 ```
 
 Before the consumer gives up a partition, it waits until every record it has
@@ -216,7 +211,7 @@ partition anyway, and those records are read again. To stop consuming instead:
 
 ```scala
 // Wait in the same way, but fail the record stream if records are still uncommitted after 30 seconds
-settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail)
+settings.withRebalanceSafeCommits(30.seconds, RebalanceSafeCommits.AtLimit.Fail).liftTo[IO]
 ```
 
 The record stream then fails with `KafkaException.UncommittedRevocation`, whose
@@ -237,31 +232,31 @@ starts:
 
 ```scala
 // Start each assigned partition from the offset your application stored
-settings.withStartingOffsets(10.seconds): partitions =>  // The function must answer within 10 seconds
-  loadPositions(partitions) // F[Map[TopicPartition, StartingOffset]]
+settings
+  .withStartingOffsets(10.seconds)(loadPositions)  // loadPositions must answer within 10 seconds with an F[Map[TopicPartition, StartingOffset]]
+  .liftTo[IO]                                      // Raise invalid settings as a failure
 ```
 
 The consumer calls the function with the partitions each rebalance assigns,
 before it reads any of their records. A consumer reading `Selection.Partitions`
-calls it once, when it is created. Each partition it answers for starts at the offset given, and
-no earlier record of it is handed out. A `StartingOffset` can also carry the
+calls it once, when it is created. Each partition the function returns an offset
+for starts there, and no earlier record of it is handed out. A `StartingOffset` can also carry the
 leader epoch of the last record you handled, `record.offset.leaderEpoch`, if
 you stored it.
 
-- A partition the function answers nothing for starts as it would without the
+- A partition the function returns nothing for starts as it would without the
   function: at its committed offset, or where `autoOffsetReset` says if it has
   none.
 - An offset past the end of the partition also starts where `autoOffsetReset`
   says.
-- The function must answer within its limit, which must be less than
+- The function must return within its limit, which must be less than
   `maxPollInterval`. If it fails or passes the limit, the record stream fails,
   with the function's own failure or with
   `KafkaException.StartingOffsetsTimedOut`. With `Selection.Partitions`,
   creating the consumer fails instead.
 
-## Transformations
+## Changing the effect type
 
-`CommittableOffset`, `CommittableOffsetBatch`, and `CommittableConsumerRecord`
-all have cats-tagless `FunctorK` instances, so an offset can be moved between
-effects with a natural transformation and still commit through the consumer it
-came from.
+An offset can be moved to another effect with a natural transformation and
+still commit through the consumer it came from. See
+[Changing the effect type](platform-notes.md#changing-the-effect-type).

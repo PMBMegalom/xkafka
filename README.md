@@ -14,7 +14,7 @@ The API uses `Resource` for producer and consumer lifecycles, `Stream` for
 consumer records, effectful serializers and deserializers, and explicit offset
 commits. On Scala.js it runs on Node.js, not in browsers.
 
-## Usage
+## Adding xkafka to your build
 
 Add `xkafka-client` to your build, where `latestVersion` is the
 [latest release](https://github.com/PMBMegalom/xkafka/releases/latest). The
@@ -25,11 +25,10 @@ Add `xkafka-client` to your build, where `latestVersion` is the
 libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % latestVersion
 ```
 
-`KafkaClient[IO]` then gives you the client for that platform, and settings
-are the same on every platform. On Scala.js a prebuilt librdkafka comes from
-npm, and on Scala Native your application links an installed librdkafka; see
-[Getting started](https://pmbmegalom.github.io/xkafka/getting-started.html)
-for what each platform needs. For example:
+`KafkaClient[IO]` gives you the client for your platform, with the same
+settings everywhere. Scala.js and Scala Native need a little setup; see
+[Getting started](https://pmbmegalom.github.io/xkafka/getting-started.html).
+This program writes one record:
 
 ```scala
 // Write one record to the topic "events", and wait until it is delivered
@@ -56,25 +55,36 @@ object ProduceExample extends IOApp.Simple:
 
 ## Streams
 
-xkafka also runs Kafka Streams programs, written with its own DSL. An
-application can run some instances on xkafka and others on Java Kafka Streams,
-and processes each record at least once or exactly once. It needs brokers of
-Kafka 4.2 or newer:
+xkafka also runs Kafka Streams programs, written with its own DSL. One
+application can run some instances on xkafka and others on Java Kafka Streams.
+It processes each record at least once or exactly once, as you choose. Streams
+need Kafka brokers 4.2 or newer:
 
 ```scala
 // Count the records of each key, and write every new count to a topic
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+import xkafka.*
 import xkafka.streams.*
 
 val text = Serde.utf8[IO]
-val words =
-  KStream(Named("read"), input, text, text)
-    .groupByKey(text, text)
-    .count(Named("count"), Store("counts"))            // Keep each key's count in a store
-    .toStream(Named("changes"))                        // Turn each change to a count into a record
-    .to(Named("write"), output, text, Serde.long[IO])  // Write each change to the output topic
 
-Topology.of(words).liftTo[IO].flatMap: topology =>
-  KafkaClient[IO].streams(settings, topology).use(_.run)  // Join the application and keep processing
+val program =
+  for
+    input    <- Topic.from("words").liftTo[IO]
+    output   <- Topic.from("word-counts").liftTo[IO]
+    words     = KStream(Named("read"), input, text, text)
+                  .groupByKey(text, text)
+                  .count(Named("count"), Store("counts"))            // Keep each key's count in a store
+                  .toStream(Named("changes"))                        // Turn each change to a count into a record
+                  .to(Named("write"), output, text, Serde.long[IO])  // Write each change to the output topic
+    topology <- Topology.of(words).liftTo[IO]
+    client   <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
+    id       <- ApplicationId.from("word-counter").liftTo[IO]
+    settings <- StreamsSettings.from(client, id).liftTo[IO]
+    _        <- KafkaClient[IO].streams(settings, topology).use(_.run)  // Join the application and keep processing
+  yield ()
 ```
 
 See [Streams](https://pmbmegalom.github.io/xkafka/streams/index.html) for programs,
@@ -82,17 +92,47 @@ guarantees, state and standby tasks.
 
 ## Schema registry
 
-xkafka writes and reads Avro, JSON Schema and Protobuf with schemas kept in a Confluent
-Schema Registry, on every platform, in Confluent's wire format, so Confluent's
-Java serializers read what it writes. Derive a codec for your type and make a
-serde from it:
+xkafka writes and reads Avro, JSON Schema and Protobuf with schemas kept in a
+Confluent Schema Registry, on every platform. Records use Confluent's format, so
+Java applications using Confluent's serializers can read them. Add the module of
+your format, and reach the registry through an http4s client:
+
+```scala
+// Add Avro serdes, and the http4s client that reaches the registry
+libraryDependencies ++= Seq(
+  "io.github.pmbmegalom" %%% "xkafka-avro"                   % latestVersion,
+  "io.github.pmbmegalom" %%% "xkafka-schema-registry-http4s" % latestVersion,
+  "org.http4s"           %%% "http4s-ember-client"           % "0.23.38"
+)
+```
+
+Derive a codec for your type, and make a serde from it:
 
 ```scala
 // Write orders as Avro, registering their schema under "orders-value" on the first write
+import java.time.Instant
+
+import cats.data.NonEmptyList
+import cats.effect.{IO, Resource}
+import org.http4s.ember.client.EmberClientBuilder
+
+import xkafka.*
+import xkafka.avro.{AvroCodec, AvroSerde}
+import xkafka.schemaregistry.{Part, RegistrySettings, SchemaRegistry}
+import xkafka.schemaregistry.http4s.Http4sTransport
+
 final case class Order(id: String, placedAt: Instant, note: Option[String] = None) derives AvroCodec
 
-AvroSerde.of[IO, Order](registry, Part.Value).flatMap: serde =>
-  ProducerSettings.from(client, Serializer.utf8[IO], serde.serializer).liftTo[IO]
+val orders: Resource[IO, KafkaProducer[IO, String, Order]] =
+  for
+    http     <- EmberClientBuilder.default[IO].build
+    address  <- Resource.eval(RegistrySettings.from(NonEmptyList.one("http://localhost:8081")).liftTo[IO])
+    registry <- Resource.eval(SchemaRegistry.of(address, Http4sTransport(http)))
+    serde    <- Resource.eval(AvroSerde.of[IO, Order](registry, Part.Value))
+    client   <- Resource.eval(ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO])
+    settings <- Resource.eval(ProducerSettings.from(client, Serializer.utf8[IO], serde.serializer).liftTo[IO])
+    producer <- KafkaClient[IO].producer(settings)
+  yield producer
 ```
 
 See [Schema registry](https://pmbmegalom.github.io/xkafka/schema-registry.html) for
@@ -105,45 +145,17 @@ The full documentation lives at
 settings and validation, producing and consuming, offsets and commits,
 transactions, streams, topic administration, transport security, the error
 model, headers, serialization, the schema registry with Avro, JSON Schema and
-Protobuf, and what differs between the three platforms.
+Protobuf, generating classes from schema files, and what differs between the
+three platforms.
 
-## Versioning
-
-xkafka follows early semantic versioning. Upgrading within a series keeps binary
-compatibility, so code built against `0.1.0` runs against `0.1.1`. Upgrading
-across a series, from `0.1.x` to `0.2.0`, may break compatibility in both binary
-and source form. While the major version is `0`, expect the API to change between
-series.
+[Getting started](https://pmbmegalom.github.io/xkafka/getting-started.html)
+lists the other modules, such as those for ScalaPB, smithy4s, vulcan and
+avro4s, and describes how xkafka is versioned.
 
 ## Building
 
 To build xkafka or run its tests, see
 [Contributing](https://pmbmegalom.github.io/xkafka/contributing.html).
-
-## Modules
-
-- `xkafka-kernel` contains the data types, serializers, deserializers and
-  serdes, the producer, consumer, and administration interfaces, and the
-  streams DSL, and connects to nothing itself.
-- `xkafka-client` contains `KafkaClient`, which connects to Kafka on the JVM,
-  Scala.js, and Scala Native.
-- `xkafka-schema-registry` reaches a Confluent Schema Registry, and
-  `xkafka-schema-registry-http4s` reaches it through an http4s client.
-- `xkafka-avro`, `xkafka-json-schema` and `xkafka-protobuf` write and read Avro,
-  JSON Schema and Protobuf with the registry's schemas, with codecs derived from
-  Scala types.
-- `xkafka-protobuf-scalapb` writes and reads the Protobuf messages
-  [ScalaPB](https://scalapb.github.io) generates, with the registry's schemas.
-- `xkafka-smithy4s` writes and reads the types smithy4s generates from Smithy
-  files, as smithy4s's JSON or Protobuf, with the registry's schemas.
-- `xkafka-avro-vulcan` and `xkafka-avro4s` write and read the types vulcan and
-  avro4s have codecs for, with the registry's schemas, on the JVM.
-- `sbt-xkafka-codegen` generates Scala classes from Avro and JSON Schema files
-  while sbt compiles; `xkafka-codegen` is the generator it runs.
-- `xkafka-streams-http4s` lets the members of a streams application query each
-  other's stores over http4s.
-- `xkafka-streams-java`, on the JVM, lets streams programs use code written for
-  Java Kafka Streams.
 
 ## License
 

@@ -24,12 +24,12 @@ val program =
   yield ()
 ```
 
-## Two stages
+## Sending without waiting for delivery
 
 `produce` returns `F[F[NonEmptyList[Produced]]]`. The outer effect completes
 once the client has accepted the records for delivery, and the inner one once
-it reports their delivery outcome. With acknowledgements enabled this
-includes the broker's response. Holding the inner effect lets several batches be
+it reports their delivery outcome. Unless `acks` is `NoAcknowledgement`, that
+includes the broker's acknowledgement. Holding the inner effect lets several batches be
 in flight at once:
 
 ```scala
@@ -60,25 +60,25 @@ stream instead would send one batch at a time.
 To write records and consumer offsets atomically, use a transactional producer.
 See [Transactions](transactions.md).
 
-## Results
+## Reading delivery results
 
 Each `Produced` holds a record and the metadata reported for it, in
 the order the records were given:
 
 ```scala
-// Send a batch, and read the offset each record was written at, where Kafka reported one
+// Send a batch, and read the offset each record was written at, if Kafka reported one
 producer.produceAndAwait(batch).map(_.map(produced => produced.metadata.offset))
 ```
 
 `RecordMetadata` carries the topic-partition, and the offset and timestamp,
-each an `Option` that is set where Kafka reports it.
+each an `Option` that is set if Kafka reports it.
 
 If any record is not delivered, the inner effect fails with the failure of the
 first such record. If the client refuses a record as it is enqueued, the outer
 effect fails instead.
 
-These records are not refused as they are enqueued. They fail the inner effect,
-as records that are not delivered do:
+Two kinds of bad record are only caught after they are enqueued, so they fail
+the inner effect like a record that is not delivered:
 
 - A record larger than the client takes fails with
   `ErrorCode.MessageTooLarge`.
@@ -86,8 +86,8 @@ as records that are not delivered do:
   `ErrorCode.UnknownTopicOrPartition`.
 
 While the client's buffer is full, the outer effect waits for room, then
-enqueues the rest of the records. A record that finds no room within the
-enqueue timeout, a minute unless set with `withEnqueueTimeout`, fails with
+enqueues the rest of the records. If no room frees up within the enqueue timeout
+(one minute unless you set `withEnqueueTimeout`), that record fails with
 `ErrorCode.RequestTimedOut`, and so does every record after it in the batch.
 Cancelling the outer effect stops the wait.
 
@@ -96,7 +96,7 @@ them apart.
 
 ## When some records fail
 
-`produceAttemptEach` answers for every record, so you can tell which records
+`produceAttemptEach` reports on every record, so you can tell which records
 were delivered when others were not. Each `Attempted` holds a record and either
 its metadata or why it was not delivered:
 
@@ -110,8 +110,10 @@ producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
 
 - If the client refuses a record as it is enqueued, that record fails with the
   refusal, and so does every record after it in the batch.
-- A record that is not delivered fails neither effect. The outer effect still
-  fails, with nothing enqueued, where a record cannot be serialized.
+- A record that is not delivered fails neither effect: its `Attempted` holds
+  the failure.
+- If a record cannot be serialized, the outer effect still fails, and nothing in
+  the batch is enqueued.
 
 `produceAttemptEach` has the same two stages as `produce`, and
 `produceAttemptEachAndAwait` and `pipeAttemptEach` match `produceAndAwait` and
@@ -134,7 +136,9 @@ nor a partition goes to a partition the platform's client chooses.
 
 `partitionsFor` returns the partitions a topic currently has. Use it to pick a
 partition to produce to. Asking about a topic the cluster does not have creates
-it if the broker creates topics on request, which Kafka brokers do by default.
+it if the broker creates topics on request, which Kafka brokers do by default. A
+[consumer's `partitionsFor`](consuming.md#inspecting-the-consumer) does not create
+a topic.
 
 ```scala mdoc:compile-only
 // List the partitions the topic "events" has now
@@ -174,16 +178,15 @@ settings.withoutIdempotence.withAcks(Acks.Leader)
 ## Idempotence
 
 Producers are idempotent by default: xkafka turns on Kafka's
-`enable.idempotence` on every platform. See Kafka's documentation of that setting
-for what it guarantees.
+[`enable.idempotence`](https://kafka.apache.org/documentation/#producerconfigs_enable.idempotence)
+on every platform, so a send the client retries does not write the record twice.
 
 Idempotence requires `Acks.AllReplicas`. Settings that combine it with another
 `acks` value are rejected with `SettingsError.IdempotenceRequiresAllReplicas`,
 which is why `withAcks` and `withIdempotence` return a `ValidatedNel`. Call
 `withoutIdempotence` to turn it off.
 
-[Transactional producers](transactions.md) are always idempotent, because Kafka
-requires it for transactions.
+[Transactional producers](transactions.md) are always idempotent.
 
 ## Batching and compression
 
@@ -254,9 +257,8 @@ def withCloseTimeout[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[Produc
   settings.withCloseTimeout(10.seconds).liftTo[IO]
 ```
 
-Like every method that sets a duration, it validates the settings again and returns
-`ValidatedNel[SettingsError, ProducerSettings[F, K, V]]`. See
-[Settings](settings.md).
+Like every method that sets a duration, it returns a `ValidatedNel`; see
+[Changing settings](settings.md#changing-settings).
 
 Records still undelivered when the timeout expires are dropped. Closing the
 producer comes after that wait, so releasing can take somewhat longer than

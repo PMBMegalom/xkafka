@@ -7,8 +7,7 @@ branches.
 
 `fork` sends each record down the first path, including everything that follows
 on it, then down the next, so a later path sees what an earlier one did to a store.
-Only then does the next record start. Java runs the paths of a branching stream in
-the same way. Each path starts from the stream's records and ends in a topic or a
+Only then does the next record start. Each path starts from the stream's records and ends in a topic or a
 table:
 
 ```scala mdoc:compile-only
@@ -29,8 +28,8 @@ def audited(orders: Topic, all: Topic, audit: Topic): Pipeline[IO] =
 `forkMerge` works like `fork`, and what the paths make goes on as one stream.
 
 `merge` makes one stream of two, and their topics need not have the same number
-of partitions. A merge is keyed as read only if each of its
-sides is:
+of partitions. Grouping or joining after `merge` needs a repartition topic if
+either side may have changed its key:
 
 ```scala mdoc:compile-only
 // Merge orders and refunds, flag large amounts, and write them all to one topic
@@ -49,8 +48,7 @@ def movements(orders: Topic, refunds: Topic, output: Topic): Pipeline[IO] =
     .to(Named("write"), output, text, text)
 ```
 
-`split` sends each record down the first branch that takes it, as Java's `split`
-does. A branch's node is named by the split's name followed by the branch's, here
+`split` sends each record down the first branch that takes it. A branch's node is named by the split's name followed by the branch's, here
 `route-large`. `defaultBranch` takes what no branch took; with `noDefaultBranch`,
 those records go no further:
 
@@ -71,8 +69,9 @@ def routed(orders: Topic, large: Topic, small: Topic): Pipeline[IO] =
 
 ## Paths that share what follows
 
-`fork` writes each path once, so it cannot send two paths to the same place. For
-that, write the shared part first as a flow, then send records to it with `into`.
+With `fork`, each path has steps of its own, so two paths cannot lead into the same
+steps. To share steps between paths, write them first as a flow, then send records
+to it with `into`.
 A flow starts from one of:
 
 - `Flow.asRead[F, K, V]`, for records keyed as they were read;
@@ -80,8 +79,8 @@ A flow starts from one of:
 - `s.flow`, for the records of the stream `s`, whose types and key it takes on.
 
 `into` sends each record to any number of flows, in the order given, one finishing
-before the next starts, as `fork` does. Java goes by the order the paths were
-written in, so to match a Java program, list them in that order.
+before the next starts, as `fork` does. To match a Java program, list the flows in
+the order its paths are written in.
 
 Here large orders and every refund go to both of two topics:
 
@@ -107,14 +106,16 @@ def reviewed(orders: Topic, refunds: Topic, all: Topic, review: Topic) =
 
 When a flow gets records from several places, they all go straight to its first
 step. `merged` adds a step of its own to receive them, as `merge` would. Use it when the
-program's description must match a Java program that merges those paths.
+program's description must match a Java program that merges those paths (see
+[Mixing with Java Kafka Streams](java-kafka-streams.md)).
 
 ## Joining a stream or a table with itself
 
 Flows are also how a stream is joined with something made from itself, such as its
-own count, or with itself. `consumer` ends a table with no further steps, so that
-it can be sent to while a join reads it. Here the count's path comes first, so the
-join sees a count that includes the record it is joining:
+own count, or with itself. `counts.consumer` ends the count's flow without further
+steps: the stream sends records into it, and the join reads the count. Here the
+count's path comes first, so the join sees a count that includes the record it is
+joining:
 
 ```scala mdoc:compile-only
 // Two programs: one joins each click with its key's count, the other with clicks close to it in time
@@ -143,7 +144,7 @@ def pairs(clicks: Topic, output: Topic): Pipeline[IO] =
   )
 ```
 
-As in Java, a stream joined with itself pairs each record with itself too, as well
+A stream joined with itself pairs each record with itself too, as well
 as with the other records in its window.
 
 A table is sent down several paths in the same way, with its own `flow`, `into` and
@@ -164,9 +165,10 @@ def selfJoined(users: Topic, output: Topic): Pipeline[IO] =
   )
 ```
 
-`Topology.of` refuses, with a `TopologyError`, a join reading a table no records
-reach. A table read from a topic needs none of this to be read by several joins, or
-to be read while its changes are written somewhere: use the one table in each.
+If a join reads a table that no records reach, `Topology.of` refuses the program
+with `TopologyError.UnfedTable`. A table read from a topic needs none of this to be
+read by several joins, or to be read while its changes are written somewhere: use
+the one table in each.
 
 ## Flows whose records may have a new key
 

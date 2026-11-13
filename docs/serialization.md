@@ -36,8 +36,8 @@ val serde = Serde(write, read)
 
 To work with the bytes, the topic or the headers directly, use
 `Serializer.instance` and `Deserializer.instance`, which take a function of the
-topic, the headers, and the value or its bytes. A serializer answers
-`Option[Chunk[Byte]]`, where `None` writes a record without a value. A
+topic, the headers, and the value or its bytes. A serializer returns
+`F[Option[Chunk[Byte]]]`, and `None` writes a record without a value. A
 deserializer is given `None` for a record without a value.
 
 ## Nulls and tombstones
@@ -81,14 +81,14 @@ val read  = Deserializer.fromJava[IO](new StringDeserializer).option    // Reads
 val serde = Serde.fromJava[IO](Serdes.String())                         // Both at once, as a streams program takes them
 ```
 
-- The Java codec is given each record's topic and headers, as it is in Java.
+- The Java codec is given each record's topic and headers.
 - Configure it before you pass it in, and close it once nothing uses it: xkafka calls
   neither `configure` nor `close`.
-- Headers a Java serializer adds are not written: it is given a copy of the record's
-  headers. Configure a serializer that can write headers of its own not to.
+- A Java serializer gets a copy of the record's headers, so headers it adds are
+  not written. If your serializer can add headers, turn that off.
 - A record without a value fails the deserializer, as it does xkafka's own;
   read with `.option` to get `None` for it. If the Java deserializer returns `null`
-  for a value, the record fails with `JavaNullValueException`.
+  for a value, the record fails with `JavaNullValueException`, in `xkafka.interop`.
 - Whatever the Java codec throws fails the effect it runs in.
 
 ## Schema registry

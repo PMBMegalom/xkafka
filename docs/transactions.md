@@ -38,8 +38,7 @@ If the commit itself fails, `transactionally` fails with that error:
 - Any other failure aborts the transaction, and the producer is ready for the
   next one.
 
-A transactional producer only writes inside transactions. Create one with
-`transactionalProducer`, from `TransactionalProducerSettings`.
+A transactional producer only writes inside transactions.
 
 Kafka allows one transaction at a time per transactional id, so concurrent calls
 to `transactionally` on one producer run one after another.

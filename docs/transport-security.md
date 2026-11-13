@@ -71,10 +71,16 @@ val tls =
 ```
 
 The private key must be PKCS#8, which PEM marks as `PRIVATE KEY`, or as
-`ENCRYPTED PRIVATE KEY` when it needs `keyPassword`. Other forms are not
-supported, and an inline key in another form, such as `RSA PRIVATE KEY`, is a
-`SettingsError`, as is an empty `keyPassword`. `openssl pkcs8 -topk8` converts
-one. The certificate's key and password are kept out of `toString`.
+`ENCRYPTED PRIVATE KEY` if it needs `keyPassword`. Other forms, such as
+`RSA PRIVATE KEY`, are not supported. An inline key in another form is a
+`SettingsError`, and so is an empty `keyPassword`. To convert a key:
+
+```sh
+# Convert a private key to PKCS#8, unencrypted; leave out -nocrypt to encrypt it with a password openssl asks for
+openssl pkcs8 -topk8 -nocrypt -in key.pem -out key-pkcs8.pem
+```
+
+The certificate's key and password are kept out of `toString`.
 
 Java 17 can't read a key encrypted with PBES2, the scheme `openssl pkcs8`
 uses by default, so on the JVM with Java 17 acquiring the client fails with a
