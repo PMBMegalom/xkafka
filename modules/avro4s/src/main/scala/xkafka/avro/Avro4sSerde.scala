@@ -49,7 +49,7 @@ object Avro4sFormat:
         override val recordName: Option[String] = Avro4sBinary.recordName(own)
 
         override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-          Avro4sBinary.parse(target).map: written =>
+          AvroBinary.writableText(text, target.text) *> Avro4sBinary.parse(target).map: written =>
             value =>
               Either.catchNonFatal(encode(value)).leftMap(error => s"the value cannot be encoded: ${error.getMessage}")
                 .flatMap(Avro4sBinary.write(own, _)).flatMap(bytes =>

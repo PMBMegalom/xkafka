@@ -28,10 +28,10 @@ import xkafka.avro.{AvroField, AvroSchema, AvroSchemaJson, AvroValue, FullName, 
 private[codegen] final class AvroScala(namespace: String, neighbours: Set[String]):
   def source(schema: AvroSchema): Either[String, String] =
     schema match
-      case record: AvroSchema.Record                                   => recordSource(record)
-      case enumeration: AvroSchema.Enum                                => enumSource(enumeration)
-      case fixed: AvroSchema.Fixed                                     => Right(fixedSource(fixed))
-      case AvroSchema.Logical(LogicalType.FixedDecimal(name, _, _, _)) =>
+      case record: AvroSchema.Record                                      => recordSource(record)
+      case enumeration: AvroSchema.Enum                                   => enumSource(enumeration)
+      case fixed: AvroSchema.Fixed                                        => Right(fixedSource(fixed))
+      case AvroSchema.Logical(LogicalType.FixedDecimal(name, _, _, _, _)) =>
         Left(s"${name.value} is a decimal held in a fixed type, which xkafka has no codec for")
       case other => Left(s"${AvroSchemaJson.render(other)} is not a record, an enum or a fixed type")
 
@@ -101,7 +101,22 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
           field.default.filterNot(_ == AvroValue.Null).fold(AvroSchema.Null :: others)(_ => others.head :: AvroSchema.Null :: others.tail)
         Either
           .cond(expected == branches, (), s"$where has null at another place in its union than xkafka writes it, first or after the default's type")
-      case _ => Right(())
+          .flatMap(_ => nestedUnions(field.schema, where))
+      case schema => nestedUnions(schema, where)
+
+  /** Fails where a union inside a field's lists or maps has null other than first, the place xkafka writes it in a union with no default. */
+  private def nestedUnions(schema: AvroSchema, where: String): Either[String, Unit] =
+    def inner(schema: AvroSchema): Either[String, Unit] =
+      schema match
+        case AvroSchema.Union(branches) if branches.contains(AvroSchema.Null) && branches.head != AvroSchema.Null =>
+          Left(s"$where has null at another place in a union inside it than xkafka writes it, first")
+        case AvroSchema.Union(branches) => branches.traverse_(nestedUnions(_, where))
+        case other                      => nestedUnions(other, where)
+    schema match
+      case AvroSchema.Array(items)    => inner(items)
+      case AvroSchema.Map(values)     => inner(values)
+      case AvroSchema.Union(branches) => branches.traverse_(nestedUnions(_, where))
+      case _                          => Right(())
 
   private def typeOf(schema: AvroSchema, where: String): Either[String, Typed] =
     schema match
@@ -145,18 +160,18 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
   private def logical(logicalType: LogicalType, where: String): Either[String, Typed] =
     def needing(scala: String, codec: String) = Right(Typed(scala, Nil, Map(scala -> codec), Set.empty))
     logicalType match
-      case LogicalType.Decimal(precision, scale) => Right(Typed(Names.builtin("BigDecimal", neighbours), Nil, Map.empty, Set((precision, scale))))
-      case LogicalType.FixedDecimal(_, _, _, _)  => Left(s"$where is a decimal held in a fixed type, which xkafka has no codec for")
-      case LogicalType.Uuid                      => Right(Typed.plain("_root_.java.util.UUID"))
-      case LogicalType.Date                      => Right(Typed.plain("_root_.java.time.LocalDate"))
-      case LogicalType.TimeMillis                => needing("_root_.java.time.LocalTime", "_root_.xkafka.avro.AvroCodec.localTimeMillis")
-      case LogicalType.TimeMicros                => needing("_root_.java.time.LocalTime", "")
-      case LogicalType.TimestampMillis           => needing("_root_.java.time.Instant", "")
-      case LogicalType.TimestampMicros           => needing("_root_.java.time.Instant", "_root_.xkafka.avro.AvroCodec.instantMicros")
-      case LogicalType.TimestampNanos            => needing("_root_.java.time.Instant", "_root_.xkafka.avro.AvroCodec.instantNanos")
-      case LogicalType.LocalTimestampMillis      => needing("_root_.java.time.LocalDateTime", "_root_.xkafka.avro.AvroCodec.localDateTimeMillis")
-      case LogicalType.LocalTimestampMicros      => needing("_root_.java.time.LocalDateTime", "")
-      case LogicalType.LocalTimestampNanos       => Left(s"$where is a local-timestamp-nanos, which xkafka has no codec for")
+      case LogicalType.Decimal(precision, scale)   => Right(Typed(Names.builtin("BigDecimal", neighbours), Nil, Map.empty, Set((precision, scale))))
+      case LogicalType.FixedDecimal(_, _, _, _, _) => Left(s"$where is a decimal held in a fixed type, which xkafka has no codec for")
+      case LogicalType.Uuid                        => Right(Typed.plain("_root_.java.util.UUID"))
+      case LogicalType.Date                        => Right(Typed.plain("_root_.java.time.LocalDate"))
+      case LogicalType.TimeMillis                  => needing("_root_.java.time.LocalTime", "_root_.xkafka.avro.AvroCodec.localTimeMillis")
+      case LogicalType.TimeMicros                  => needing("_root_.java.time.LocalTime", "")
+      case LogicalType.TimestampMillis             => needing("_root_.java.time.Instant", "")
+      case LogicalType.TimestampMicros             => needing("_root_.java.time.Instant", "_root_.xkafka.avro.AvroCodec.instantMicros")
+      case LogicalType.TimestampNanos              => needing("_root_.java.time.Instant", "_root_.xkafka.avro.AvroCodec.instantNanos")
+      case LogicalType.LocalTimestampMillis        => needing("_root_.java.time.LocalDateTime", "_root_.xkafka.avro.AvroCodec.localDateTimeMillis")
+      case LogicalType.LocalTimestampMicros        => needing("_root_.java.time.LocalDateTime", "")
+      case LogicalType.LocalTimestampNanos         => Left(s"$where is a local-timestamp-nanos, which xkafka has no codec for")
 
   /** The Scala expression of `value`, a default of `schema`. */
   private def literal(schema: AvroSchema, value: AvroValue, definitions: Map[FullName, AvroSchema]): Either[String, String] =

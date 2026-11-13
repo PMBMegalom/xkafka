@@ -30,6 +30,16 @@ import xkafka.schemaregistry.{Schema, SchemaAlias, SchemaDecimal, SchemaDoc, Sch
 
 final case class Line(sku: String, quantity: Int = 1) derives AvroCodec
 
+final case class Charged(
+    @SchemaDecimal(10, 4)
+    price: BigDecimal,
+    at: Instant,
+    @SchemaDecimal(10, 4)
+    tip: Option[BigDecimal]
+) derives AvroCodec
+
+final case class Reading(level: Double = Double.NaN, peak: Float = Float.PositiveInfinity, low: Double = Double.NegativeInfinity) derives AvroCodec
+
 enum Status derives AvroCodec:
   case Open, Paid, Shipped
 
@@ -175,6 +185,28 @@ class AvroCodecSuite extends FunSuite:
       written.flatMap(AvroBinary.decode(AvroSchemaJson.parse(after.text).toOption.get, _)),
       Right(AvroValue.Record(FullName(Some("xkafka.avro"), "Line"), Vector("sku" -> AvroValue.String("apple"), "colour" -> AvroValue.String("red"))))
     )
+
+  test("a record whose defaults are not numbers, NaN or an infinity, is written and read with its own schema"):
+    val format = AvroFormat[Reading]
+    val value  = Reading(1.5, 2.5f, -3.5)
+    assertEquals(format.writer(format.schema).flatMap(_(value)).flatMap(bytes => format.reader(format.schema).flatMap(_(bytes))), Right(value))
+
+  test("a value is not written with another schema whose decimals have another scale or fewer digits, or whose times count another unit"):
+    def target(price: String, at: String, tip: String) =
+      Schema(
+        s"""{"type":"record","name":"Charged","namespace":"xkafka.avro","fields":[{"name":"price","type":$price},""" +
+          s"""{"name":"at","type":$at},{"name":"tip","type":["null",$tip]}]}""",
+        SchemaType.Avro
+      )
+    def decimal(precision: Int, scale: Int) = s"""{"type":"bytes","logicalType":"decimal","precision":$precision,"scale":$scale}"""
+    val millis                              = """{"type":"long","logicalType":"timestamp-millis"}"""
+    def writes(schema: Schema)              = AvroFormat[Charged].writer(schema).isRight
+    assert(writes(target(decimal(10, 4), millis, decimal(10, 4))), "the codec's own")
+    assert(writes(target(decimal(12, 4), millis, decimal(12, 4))), "room for more digits")
+    assert(!writes(target(decimal(10, 2), millis, decimal(10, 4))), "another scale")
+    assert(!writes(target(decimal(8, 4), millis, decimal(10, 4))), "fewer digits")
+    assert(!writes(target(decimal(10, 4), millis, decimal(10, 2))), "another scale in a union")
+    assert(!writes(target(decimal(10, 4), """{"type":"long","logicalType":"timestamp-micros"}""", decimal(10, 4))), "microseconds")
 
   test("decimals keep their digits, and refuse a number with more than the schema allows rather than round it"):
     val money = AvroCodec.decimal(6, 2)

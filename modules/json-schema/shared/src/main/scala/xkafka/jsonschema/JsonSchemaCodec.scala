@@ -276,9 +276,10 @@ private[jsonschema] final class ObjectCodec[A, T <: Tuple](
 
   override def decode(json: Json): Either[String, A] =
     json.asObject.toRight(s"expected an object of $full, found ${Shown(json.noSpaces)}").flatMap: read =>
-      // A field is read under its name or one of its aliases; one the record lacks takes its default, and an optional one none.
+      // A field is read under its name or one of its aliases; one the record lacks takes its default, unless it is marked SchemaNoDefault, and an
+      // optional one none.
       infos.lazyZip(written).lazyZip(fields.optional).toList.traverse: (info, default, optional) =>
-        (info.name :: info.aliases).collectFirstSome(read(_)).orElse(default).orElse(Option.when(optional)(Json.Null))
+        (info.name :: info.aliases).collectFirstSome(read(_)).orElse(default.filterNot(_ => info.noDefault)).orElse(Option.when(optional)(Json.Null))
           .toRight(s"no field '${info.name}'")
       .flatMap(fields.decode).bimap(reason => s"$full: $reason", fromTuple)
 

@@ -42,7 +42,7 @@ object AvroFormat:
       override val recordName: Option[String] = own.fullName.map(_.value)
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        codec.mismatch.toLeft(()) *> avro(target).map: written =>
+        codec.mismatch.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).map: written =>
           // A value is written as its codec gives it; where the schema is another, the fields it lacks are left out and those it adds take their
           // defaults.
           value => codec.encode(value).flatMap(AvroBinary.encode(written, _))

@@ -124,6 +124,30 @@ class AvroBinarySuite extends ScalaCheckSuite:
     assert(AvroBinary.decoder(decimal(10, 2), decimal(8, 2)).isLeft, "a smaller precision")
     assert(AvroBinary.decoder(decimal(8, 2), decimal(10, 2)).isRight, "a larger precision")
     assert(AvroBinary.decoder(AvroSchema.Bytes, decimal(10, 2)).isRight, "bytes, which carry no scale")
+    def optional(schema: AvroSchema) = AvroSchema.Union(List(AvroSchema.Null, schema))
+    assert(AvroBinary.decoder(decimal(10, 2), optional(decimal(10, 4))).isLeft, "another scale, the reader's in a union")
+    // A writer's branch the reader cannot take fails only the values written with it: 1.23, unscaled 123, as the union's second branch.
+    val written                                      = bytes(0x02, 0x02, 0x7b)
+    def read(writer: AvroSchema, reader: AvroSchema) = AvroBinary.decoder(writer, reader).flatMap(_(written))
+    assert(read(optional(decimal(10, 2)), optional(decimal(10, 4))).isLeft, "another scale, each in a union")
+    assert(read(optional(decimal(10, 2)), optional(decimal(8, 2))).isLeft, "a smaller precision, each in a union")
+    assert(read(optional(decimal(8, 2)), optional(decimal(10, 2))).isRight, "a larger precision, each in a union")
+
+  test("a decimal held in a fixed type keeps its aliases, and is read through one"):
+    val written = parsed("""{"type":"fixed","name":"Money","size":4,"logicalType":"decimal","precision":6,"scale":2}""")
+    val reader  = parsed("""{"type":"fixed","name":"Money2","aliases":["Money"],"size":4,"logicalType":"decimal","precision":6,"scale":2}""")
+    assertEquals(AvroSchemaJson.parse(AvroSchemaJson.render(reader)), Right(reader))
+    assert(AvroSchemaJson.render(reader).contains("\"aliases\":[\"Money\"]"), AvroSchemaJson.render(reader))
+    assert(AvroBinary.decoder(written, reader).isRight)
+
+  test("a writer's record in a union is read as the reader's branch of the same full name, before one that shares only its simple name"):
+    val union =
+      parsed(
+        """[{"type":"record","name":"E","namespace":"a","fields":[{"name":"x","type":"int"}]},""" +
+          """{"type":"record","name":"E","namespace":"b","fields":[{"name":"x","type":"int"}]}]"""
+      )
+    val second = AvroValue.Record(FullName(Some("b"), "E"), Vector("x" -> AvroValue.Int(1)))
+    assertEquals(AvroBinary.encode(union, second).flatMap(AvroBinary.decode(union, _)), Right(second))
 
   test("values nested deeper than the limit are refused, not read until the stack runs out"):
     val list   = parsed("""{"type":"record","name":"Node","fields":[{"name":"next","type":["null","Node"]}]}""")

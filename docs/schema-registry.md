@@ -760,6 +760,12 @@ the registry read another path.
 - `Pinned(id)`: writes with the schema registered as `id`. Use it when every
   writer must use one exact schema.
 
+With Avro, including the vulcan and avro4s serdes, `Latest` and `Pinned` refuse
+a schema that would change what a value means: one with a decimal of another
+scale or fewer digits than your codec writes, or a time in another unit, such
+as microseconds for your milliseconds. Writing then fails with
+`RegistryException.Unserializable`.
+
 ## Registry operations
 
 `SchemaRegistry` also offers the registry's operations directly: `schema(id)`,

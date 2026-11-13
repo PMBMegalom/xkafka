@@ -38,6 +38,12 @@ final case class Line(sku: String, quantity: Int = 1) derives JsonSchemaCodec
 @SchemaName("Line")
 final case class LineBefore(sku: String) derives JsonSchemaCodec
 
+final case class Strict(
+    sku: String,
+    @SchemaNoDefault
+    quantity: Int = 1
+) derives JsonSchemaCodec
+
 enum Status derives JsonSchemaCodec:
   case Open, Paid
 
@@ -88,6 +94,13 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       Map("priority" -> 2L),
       1,
       Chunk[Byte](1, 2, 3)
+    )
+
+  test("a field marked SchemaNoDefault is required when read, as its schema says, though its type has a default"):
+    assertEquals(JsonSchemaCodec[Strict].decode(Json.obj("sku" -> Json.fromString("apple"))).left.map(_.contains("quantity")), Left(true))
+    assertEquals(
+      JsonSchemaCodec[Strict].decode(Json.obj("sku" -> Json.fromString("apple"), "quantity" -> Json.fromInt(2))),
+      Right(Strict("apple", 2))
     )
 
   test("a record's long keeps every digit, beyond what a double holds"):

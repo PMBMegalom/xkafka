@@ -130,7 +130,7 @@ field, and why:
 - a `time-millis` or `time-micros` default that is no time of day, such as a
   negative one;
 - `null` in a union anywhere but first, or right after the type of the field's
-  default;
+  default, and in a union inside a list or a map anywhere but first;
 - a record with fields of one Scala type at two precisions, such as a
   `timestamp-millis` and a `timestamp-micros`, or with the same union in two
   orders;

@@ -103,6 +103,22 @@ class AvroGeneratorSuite extends FunSuite:
       )
     )
 
+  directory.test("a union inside a list or a map with null elsewhere than first is refused, as xkafka writes it first"): in =>
+    assertEquals(
+      refused(
+        in,
+        "a.avsc" -> record(
+          """{"name": "a", "type": {"type": "array", "items": ["string", "null"]}}, """ +
+            """{"name": "b", "type": ["null", {"type": "map", "values": ["int", "null"]}]}, """ +
+            """{"name": "c", "type": {"type": "array", "items": ["null", "string"]}}"""
+        )
+      ),
+      List(
+        "example.R.a has null at another place in a union inside it than xkafka writes it, first; " +
+          "example.R.b has null at another place in a union inside it than xkafka writes it, first"
+      )
+    )
+
   directory.test("types xkafka has no codec for, and fields that would need two codecs of one Scala type, are refused"): in =>
     val problems =
       refused(

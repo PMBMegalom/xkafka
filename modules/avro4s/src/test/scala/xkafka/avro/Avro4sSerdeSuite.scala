@@ -29,7 +29,7 @@ import munit.CatsEffectSuite
 import org.apache.avro.{Schema as ApacheSchema, SchemaBuilder}
 import org.apache.avro.generic.GenericRecord
 import xkafka.{Headers, Topic}
-import xkafka.schemaregistry.{Part, RegistryException, SchemaFormat, Writing}
+import xkafka.schemaregistry.{Part, RegistryException, Schema, SchemaFormat, SchemaType, Writing}
 
 @AvroNamespace("example.web")
 final case class Visit(id: String, pages: Int = 1, referrer: Option[String] = None)
@@ -60,6 +60,12 @@ class Avro4sSerdeSuite extends CatsEffectSuite:
   private val visit = Visit("v-1", 3, Some("search"))
 
   private def format[A: SchemaFor: Encoder: Decoder]: SchemaFormat[A] = Avro4sFormat[A].fold(fail(_), identity)
+
+  test("a value is not written with another schema whose decimal has another scale"):
+    // avro4s writes a BigDecimal as a decimal of precision 8 and scale 2 by default.
+    def decimal(scale: Int) = Schema(s"""{"type":"bytes","logicalType":"decimal","precision":8,"scale":$scale}""", SchemaType.Avro)
+    assert(format[BigDecimal].writer(decimal(2)).isRight)
+    assert(format[BigDecimal].writer(decimal(4)).isLeft)
 
   test("the format registers avro4s's schema, named by its record"):
     assertEquals(format[Visit].schema.text, AvroSchema[Visit].toString)

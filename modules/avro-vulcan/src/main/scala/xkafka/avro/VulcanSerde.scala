@@ -46,7 +46,7 @@ object VulcanFormat:
         override val recordName: Option[String] = VulcanBinary.recordName(own)
 
         override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-          VulcanBinary.parse(target).map: written =>
+          AvroBinary.writableText(text, target.text) *> VulcanBinary.parse(target).map: written =>
             value =>
               codec.encode(value).leftMap(_.message).flatMap(VulcanBinary.write(own, _)).flatMap: bytes =>
                 if target.text == text then Right(bytes) else VulcanBinary.read(own, written, bytes).flatMap(VulcanBinary.write(written, _))

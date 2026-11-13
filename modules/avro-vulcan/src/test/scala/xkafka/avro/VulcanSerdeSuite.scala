@@ -28,7 +28,7 @@ import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient
 import munit.CatsEffectSuite
 import org.apache.avro.generic.GenericRecord
 import xkafka.{Headers, Topic}
-import xkafka.schemaregistry.{Part, RegistryException, SchemaFormat, Writing}
+import xkafka.schemaregistry.{Part, RegistryException, Schema, SchemaFormat, SchemaType, Writing}
 
 final case class Visit(id: String, pages: Int = 1, referrer: Option[String] = None)
 
@@ -75,6 +75,12 @@ class VulcanSerdeSuite extends CatsEffectSuite:
   private val visit = Visit("v-1", 3, Some("search"))
 
   private def format[A: vulcan.Codec]: SchemaFormat[A] = VulcanFormat[A].fold(fail(_), identity)
+
+  test("a value is not written with another schema whose decimal has another scale"):
+    val money               = format[BigDecimal](using vulcan.Codec.decimal(10, 4))
+    def decimal(scale: Int) = Schema(s"""{"type":"bytes","logicalType":"decimal","precision":10,"scale":$scale}""", SchemaType.Avro)
+    assert(money.writer(decimal(4)).isRight)
+    assert(money.writer(decimal(2)).isLeft)
 
   test("a codec's format registers the codec's schema, named by its record"):
     assertEquals(format[Visit].schema.text, vulcan.Codec[Visit].schema.map(_.toString).fold(error => fail(error.message), identity))

@@ -133,7 +133,7 @@ object AvroSchemaJson:
                 val schema =
                   (string("logicalType"), number("precision")) match
                     case (Some("decimal"), Some(precision)) if precision > 0 && number("scale").getOrElse(0) <= precision =>
-                      AvroSchema.Logical(LogicalType.FixedDecimal(name, size, precision, number("scale").getOrElse(0)))
+                      AvroSchema.Logical(LogicalType.FixedDecimal(name, size, precision, number("scale").getOrElse(0), aliases(name.namespace)))
                     case _ => fixed
                 define(name, schema, defined).map((schema, _))
           case "array" => fields("items").toRight("an array needs 'items'").flatMap(read(_, namespace, defined))
@@ -170,13 +170,20 @@ object AvroSchemaJson:
     def bytes  =
       text.flatMap: chars =>
         if chars.forall(_ < 256) then Right(Chunk.array(chars.map(_.toByte).toArray)) else Left(s"'$chars' holds a character above 255")
+    // A default that is not a number, NaN or an infinity, is written as its name, which JSON has no number for.
+    def floating =
+      json.asString match
+        case Some("NaN")       => Right(Double.NaN)
+        case Some("Infinity")  => Right(Double.PositiveInfinity)
+        case Some("-Infinity") => Right(Double.NegativeInfinity)
+        case _                 => number.map(_.toDouble)
     schema match
       case AvroSchema.Null                       => Either.cond(json.isNull, AvroValue.Null, s"expected null, found ${json.noSpaces}")
       case AvroSchema.Boolean                    => json.asBoolean.map(AvroValue.Boolean(_)).toRight(s"expected a boolean, found ${json.noSpaces}")
       case AvroSchema.Int                        => number.flatMap(_.toInt.toRight(s"${json.noSpaces} is not an int")).map(AvroValue.Int(_))
       case AvroSchema.Long                       => number.flatMap(_.toLong.toRight(s"${json.noSpaces} is not a long")).map(AvroValue.Long(_))
-      case AvroSchema.Float                      => number.map(value => AvroValue.Float(value.toDouble.toFloat))
-      case AvroSchema.Double                     => number.map(value => AvroValue.Double(value.toDouble))
+      case AvroSchema.Float                      => floating.map(value => AvroValue.Float(value.toFloat))
+      case AvroSchema.Double                     => floating.map(AvroValue.Double(_))
       case AvroSchema.Bytes                      => bytes.map(AvroValue.Bytes(_))
       case AvroSchema.String                     => text.map(AvroValue.String(_))
       case AvroSchema.Record(name, fields, _, _) => json.asObject.toRight(s"expected an object, found ${json.noSpaces}").flatMap: supplied =>
@@ -280,7 +287,7 @@ object AvroSchemaJson:
       case AvroSchema.Union(branches) => branches.foldLeft((List.empty[Json], written)) { case ((sofar, seen), branch) =>
           write(branch, namespace, defined, seen).leftMap(sofar :+ _)
         }.leftMap(Json.fromValues)
-      case AvroSchema.Logical(LogicalType.FixedDecimal(full, size, precision, scale)) =>
+      case AvroSchema.Logical(LogicalType.FixedDecimal(full, size, precision, scale, names)) =>
         val json =
           Json.fromFields(
             header("fixed", full) ++ List(
@@ -288,7 +295,7 @@ object AvroSchemaJson:
               "logicalType" -> Json.fromString("decimal"),
               "precision"   -> Json.fromInt(precision),
               "scale"       -> Json.fromInt(scale)
-            )
+            ) ++ aliases(names, full.namespace)
           )
         (json, written + full)
       case AvroSchema.Logical(logicalType @ LogicalType.Decimal(precision, scale)) => (
