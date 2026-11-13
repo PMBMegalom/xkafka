@@ -67,10 +67,11 @@ private[xkafka] trait GroupMember[F[_]]:
     */
   def reports: Signal[F, Member]
 
-  /** Commits offsets for the group under the member's id and current epoch, through its connection to the coordinator, answering each partition's
-    * error code, or 0. The coordinator checks the epoch, not which tasks the member runs, so the engine commits only for its own.
+  /** Commits offsets for the group under the member's id and `epoch`, the one its tasks were given at, through its connection to the coordinator,
+    * answering each partition's error code, or 0. The coordinator takes any partition at the member's current epoch, and at an older one only those
+    * it still gives the member, so a member that lost its tasks and joined again since has the commit of theirs refused.
     */
-  def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]]
+  def commit(topics: List[OffsetCommitRequest.Topic], epoch: Int): F[List[OffsetCommitRequest.Answer]]
 
   /** The offsets the group stored for these partitions, read under the member's id and current epoch. A partition whose offsets a transaction has yet
     * to settle answers an error to ask again with.
@@ -126,8 +127,8 @@ private[xkafka] object GroupMember:
       def epoch: F[Int]                    = current.get.map(_.epoch)
       def reports: Signal[F, Member]       = current
 
-      def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]] =
-        current.get.flatMap(member => loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, member.epoch, None, topics)))
+      def commit(topics: List[OffsetCommitRequest.Topic], epoch: Int): F[List[OffsetCommitRequest.Answer]] =
+        loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, epoch, None, topics))
 
       def offsetsFrom(read: F[TaskOffsets]): F[Unit] = offsets.set(Some(read))
 
@@ -204,7 +205,7 @@ private[xkafka] object GroupMember:
         case Wait(after)                         => due(after)
         case Retry(attempt, rediscover, delayed) => drop.whenA(rediscover) *>
             (if delayed then backoff(attempt, random).flatMap(due) else due(Duration.Zero))
-        case change @ (Revoke(_, _) | Assign(_, _) | LoseAll) => out.offer(Some(Right(change)))
+        case change @ (Revoke(_, _) | Assign(_, _, _) | LoseAll) => out.offer(Some(Right(change)))
         case Fail(error)                                      => out.offer(Some(Left(error))) *> ended.complete(Left(error)).void
         case Done                                             => out.offer(None) *> ended.complete(Right(())).void
 

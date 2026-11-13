@@ -57,8 +57,8 @@ final class GroupMemberSuite extends CatsEffectSuite:
       Coordinator((_, request) => IO.pure(answer(request, active = Some(Set(TaskId("0", 0))), interval = 1000))).flatMap: coordinator =>
         member(coordinator).use: member =>
           member.changes.head.compile.lastOrError.flatMap:
-            case MemberAction.Assign(round, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(1200.millis)
-            case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+            case MemberAction.Assign(round, _, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(1200.millis)
+            case other                            => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
         *> coordinator.sent
     TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
       assertEquals(sent.map(_._1).take(3), List(0L, 500L, 1500L))
@@ -111,9 +111,9 @@ final class GroupMemberSuite extends CatsEffectSuite:
             before <- member.epoch
             _      <- IO.sleep(100.millis)
             after  <- member.epoch
-            first  <- member.commit(offsets).attempt
+            first  <- member.commit(offsets, after).attempt
             opened <- coordinator.opened
-            second <- member.commit(offsets)
+            second <- member.commit(offsets, after)
             read   <- member.committed(asked)
             counts <- (coordinator.opened, coordinator.closed).tupled
             made   <- coordinator.requests
@@ -147,7 +147,7 @@ final class GroupMemberSuite extends CatsEffectSuite:
               case other                  => Coordinator.unexpected(other)
       ).flatMap: coordinator =>
         // The second heartbeat fails a second in, while the commit waits two more seconds for its answer.
-        member(coordinator).use(member => IO.sleep(100.millis) *> member.commit(offsets).attempt).product(coordinator.opened)
+        member(coordinator).use(member => IO.sleep(100.millis) *> member.epoch.flatMap(member.commit(offsets, _)).attempt).product(coordinator.opened)
     TestControl.executeEmbed(run.timeout(1.minute)).map: (committed, opened) =>
       assertEquals(committed, Right(List(OffsetCommitRequest.Answer("input", 0, 0))))
       assertEquals(opened, 2)
@@ -166,7 +166,8 @@ final class GroupMemberSuite extends CatsEffectSuite:
         connecting = 1.second
       ).flatMap: coordinator =>
         // The first heartbeat and the commit both wait for the connection the first of them asked for.
-        member(coordinator).use(member => member.commit(offsets)) *> (coordinator.opened, coordinator.sent.map(_.size)).tupled
+        member(coordinator).use(member => member.epoch.flatMap(member.commit(offsets, _))) *> (coordinator.opened, coordinator.sent.map(_.size))
+          .tupled
     TestControl.executeEmbed(run.timeout(1.minute)).map: (opened, heartbeats) =>
       assertEquals(opened, 1)
       assert(heartbeats >= 1)
@@ -233,8 +234,8 @@ final class GroupMemberSuite extends CatsEffectSuite:
           coordinator =>
             member(coordinator).use: member =>
               member.offsetsFrom(reads.updateAndGet(_ + 1).map(offsetsAt)) *> member.changes.head.compile.lastOrError.flatMap:
-                case MemberAction.Assign(round, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(100.millis)
-                case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+                case MemberAction.Assign(round, _, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(100.millis)
+                case other                            => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
             *> coordinator.sent
     TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
       val reporting = sent.filter((_, request) => request.memberEpoch > 0 && request.activeTasks.nonEmpty)
@@ -290,13 +291,13 @@ final class GroupMemberSuite extends CatsEffectSuite:
         member(coordinator).use: member =>
           val engine =
             member.changes.evalTap {
-              case MemberAction.Assign(round, _) => member.assigned(round) *> IO.sleep(100.millis) *> member.leave.start.void
-              case MemberAction.Revoke(round, _) => member.revoked(round)
-              case _                             => IO.unit
+              case MemberAction.Assign(round, _, _) => member.assigned(round) *> IO.sleep(100.millis) *> member.leave.start.void
+              case MemberAction.Revoke(round, _)    => member.revoked(round)
+              case _                                => IO.unit
             }.compile.toList
           engine.flatMap(changes => coordinator.sent.map((changes, _)))
     TestControl.executeEmbed(run.timeout(1.minute)).map: (changes, sent) =>
-      assertEquals(changes, List(MemberAction.Assign(1, Assignment(tasks, Set.empty, Set.empty)), MemberAction.Revoke(2, tasks)))
+      assertEquals(changes, List(MemberAction.Assign(1, Assignment(tasks, Set.empty, Set.empty), 1), MemberAction.Revoke(2, tasks)))
       assertEquals(sent.last._2.memberEpoch, -1)
       assertEquals(sent.last._2.activeTasks, Some(Nil))
 
@@ -306,8 +307,8 @@ final class GroupMemberSuite extends CatsEffectSuite:
         val engine =
           (member: GroupMember[IO]) =>
             member.changes.head.compile.lastOrError.flatMap:
-              case MemberAction.Assign(round, _) => member.assigned(round) *> IO.sleep(100.millis)
-              case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+              case MemberAction.Assign(round, _, _) => member.assigned(round) *> IO.sleep(100.millis)
+              case other                            => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
         member(coordinator).use(engine).timed.map(_._1).flatMap(took => coordinator.sent.map((took, _)))
     TestControl.executeEmbed(run.timeout(1.minute)).map: (took, sent) =>
       assertEquals(took, 100.millis + CloseTimeout)

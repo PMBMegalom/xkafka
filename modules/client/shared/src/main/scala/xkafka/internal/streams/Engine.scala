@@ -177,7 +177,7 @@ private[xkafka] object Engine:
               .liftTo[Resource[F, *]].flatMap: (id, group) =>
                 TransactionalProducerSettings.from(settings, id, bytes, bytes, TransactionTimeout, ClientProperties.producer).toEither
                   .leftMap(new KafkaException.InvalidSettings(_)).liftTo[Resource[F, *]].flatMap(client.transactionalProducer)
-                  .map(producer => Some(transactional(driver, producer, member, group, memberId)))
+                  .map(producer => Some(transactional(driver, producer, group, memberId)))
       plane =
         new Plane[F]:
           def read(starts: Vector[StartAt]): F[Unit] = driver.assign(input, starts.map(_.partition), starts)
@@ -219,36 +219,34 @@ private[xkafka] object Engine:
     (name, time, held) =>
       state.filterNot(_ => inMemory(name)).fold(TaskStore.memory[F].apply(name, time, held))(_.open(StateDirectory.Global, name, time))
 
-  /** Transactions of `producer` that record offsets for `group` under the member's id and its epoch as each commits. */
+  /** Transactions of `producer` that record offsets for `group` under the member's id and the epoch each is given, the one its tasks were given at. */
   private def transactional[F[_]](
       driver: KafkaDriver[F],
       producer: KafkaTransactionalProducer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]],
-      member: GroupMember[F],
       group: ConsumerGroup,
       memberId: String
   )(using F: Async[F]): Transactions[F] =
     new Transactions[F]:
-      def apply[A](body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A] =
+      def apply[A](epoch: Int)(body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A] =
         producer.transactionally: transaction =>
           body(records => transaction.produce(records).void).flatMap: (result, offsets) =>
             if offsets.isEmpty then F.pure(result)
             else
-              member.epoch.flatMap: epoch =>
-                val named =
-                  GroupMembership.Backend[F](
-                    driver.groupMetadataFor(group, epoch, memberId).widen[GroupHandle],
-                    handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
-                  )
-                val committable =
-                  offsets.toList.map: (partition, offset) =>
-                    new CommittableOffset[F]:
-                      override val topicPartition: TopicPartition                 = partition
-                      override val nextOffset: Offset                             = offset.offset
-                      override val leaderEpoch: Option[LeaderEpoch]               = offset.leaderEpoch
-                      override val metadata: String                               = offset.metadata
-                      override val committer: OffsetCommitter[F]                  = InTransaction[F]
-                      override private[xkafka] def membership: GroupMembership[F] = named
-                transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(committable)).as(result)
+              val named =
+                GroupMembership.Backend[F](
+                  driver.groupMetadataFor(group, epoch, memberId).widen[GroupHandle],
+                  handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
+                )
+              val committable =
+                offsets.toList.map: (partition, offset) =>
+                  new CommittableOffset[F]:
+                    override val topicPartition: TopicPartition                 = partition
+                    override val nextOffset: Offset                             = offset.offset
+                    override val leaderEpoch: Option[LeaderEpoch]               = offset.leaderEpoch
+                    override val metadata: String                               = offset.metadata
+                    override val committer: OffsetCommitter[F]                  = InTransaction[F]
+                    override private[xkafka] def membership: GroupMembership[F] = named
+              transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(committable)).as(result)
 
   /** Offsets the engine records only in its transactions. */
   private final class InTransaction[F[_]](using F: Async[F]) extends OffsetCommitter[F]:
@@ -262,7 +260,7 @@ private[xkafka] object Engine:
     * commit that does, aborts the transaction.
     */
   trait Transactions[F[_]]:
-    def apply[A](body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A]
+    def apply[A](epoch: Int)(body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A]
 
   /** The engine of `application` running `topology` as `member`, reading and writing through `plane`. Released, it gives back its tasks through the
     * member, committing them, waiting at most `closeTimeout`.
@@ -488,7 +486,9 @@ private[xkafka] object Engine:
       committed: FiniteDuration,
       purged: FiniteDuration,
       standbys: Map[TaskId, Standby[F]] = Map.empty[TaskId, Standby[F]],
-      kept: Map[TaskId, (Standby[F], FiniteDuration)] = Map.empty[TaskId, (Standby[F], FiniteDuration)]
+      kept: Map[TaskId, (Standby[F], FiniteDuration)] = Map.empty[TaskId, (Standby[F], FiniteDuration)],
+      // The member's epoch when it gave the tasks, which their commits carry.
+      epoch: Int = 0
   )
 
   private final class Loop[F[_]](
@@ -589,7 +589,7 @@ private[xkafka] object Engine:
                 (F.monotonic, changes.size).tupled.flatMap: (now, waiting) =>
                   if now - after.committed >= commitInterval || waiting > 0 then F.pure(after)
                   else poll(after).flatMap(process(after, _, write)).flatMap(more(_, write))
-              transaction(write =>
+              transaction(running.epoch)(write =>
                 process(running, polled, write).flatMap(more(_, write)).flatMap(flushed(_, write)).map(after => (after, offsetsOf(after)))
               ).flatMap(after =>
                 (after.tasks.toList.traverse((id, live) => live.stored.map(id -> _.settled)), F.monotonic)
@@ -646,7 +646,7 @@ private[xkafka] object Engine:
       told.liftTo[F].flatMap:
         case Revoke(round, tasks) => commit(running, tasks).flatMap(gaveUp(_, tasks))
             .flatTap(after => reassign(after) *> report(after) *> member.revoked(round))
-        case Assign(round, assignment) =>
+        case Assign(round, assignment, epoch) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
           val added = (assignment.active -- kept.keySet).toList
           closed(running.tasks.view.filterKeys(id => !assignment.active(id)).toList) *> F.monotonic.flatMap: now =>
@@ -659,7 +659,7 @@ private[xkafka] object Engine:
                   dropped(gone).flatMap: left =>
                     val keeping = (stillKept ++ left.view.mapValues(_ -> now)).view.filterKeys(id => !standbys.contains(id) && !assignment.active(id))
                       .toMap
-                    val after = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping)
+                    val after = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping, epoch = epoch)
                     val owned = (after.tasks.keySet ++ after.standbys.keySet).map(ownerOf)
                     reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running) *>
                       state.traverse_(_.cleaned(owned, StateCleanupDelay)).as(after)
@@ -817,9 +817,10 @@ private[xkafka] object Engine:
             OffsetCommitRequest.Partition(partition.partition.value, next, leaderEpoch, Some(time))
         .toList.map(OffsetCommitRequest.Topic(_, _))
       val sent =
-        untilAnswered("committing", member.commit(topics)): answers =>
-          answers.map(_.errorCode).find(code => code != 0 && !Again(code)) match
-            case Some(code) if Gone(code) => F.pure(Right(()))
+        // STALE_MEMBER_EPOCH answers a commit at an older epoch for a task the member no longer has, which goes to another as Gone ones do.
+        untilAnswered("committing", member.commit(topics, running.epoch)): answers =>
+          answers.map(_.errorCode).find(code => code != 0 && (!Again(code) || code == StaleEpoch)) match
+            case Some(code) if Gone(code) || code == StaleEpoch => F.pure(Right(()))
             case Some(code)               => F.raiseError(failure("committing", code))
             case None                     => F.pure(answers.map(_.errorCode).find(_ != 0).toLeft(()))
       sent.whenA(topics.nonEmpty) *> wrote.traverse((id, live) => live.stored.map(id -> _.settled))

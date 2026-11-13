@@ -74,7 +74,7 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
         member.changes.evalMap: change =>
           told.update(_ :+ change) *>
             (change match
-              case MemberAction.Assign(round, assignment)        => owned.set(assignment) *> member.assigned(round)
+              case MemberAction.Assign(round, assignment, _)     => owned.set(assignment) *> member.assigned(round)
               case MemberAction.Revoke(round, tasks) if obliging => owned.update(o => o.copy(active = o.active -- tasks)) *> member.revoked(round)
               case MemberAction.LoseAll                          => owned.set(Assignment.empty)
               case _                                             => IO.unit)
@@ -146,8 +146,10 @@ final class GroupMemberBrokerSuite extends CatsEffectSuite:
         import OffsetCommitRequest.{Answer, Partition, Topic as Committed}
         import OffsetFetchRequest.{Stored, Topic as Asked}
         for
-          answers <- one.member.commit(List(Committed(topic, List(Partition(0, 5L, -1, Some("first")), Partition(1, 7L, 3, None)))))
-          stored  <- one.member.committed(List(Asked(topic, List(0, 1))))
+          answers <-
+            one.member.epoch
+              .flatMap(one.member.commit(List(Committed(topic, List(Partition(0, 5L, -1, Some("first")), Partition(1, 7L, 3, None)))), _))
+          stored <- one.member.committed(List(Asked(topic, List(0, 1))))
         yield
           assertEquals(answers, List(Answer(topic, 0, 0), Answer(topic, 1, 0)))
           assertEquals(stored, OffsetFetchRequest.Answer(List(Stored(topic, 0, 5L, -1, Some("first"), 0), Stored(topic, 1, 7L, 3, Some(""), 0)), 0))

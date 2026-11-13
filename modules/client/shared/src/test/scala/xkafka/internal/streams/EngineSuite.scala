@@ -53,7 +53,7 @@ final class EngineSuite extends CatsEffectSuite:
       OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, 3, Some(PartitionTime.encode(1234L)), 0), Fetched("in", 1, -1L, -1, None, 0)), 0)
     run(committed = _ => IO.pure(fetched)): world =>
       for
-        _ <- world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0), TaskId("0", 1)), Set.empty, Set.empty)))
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0), TaskId("0", 1)), Set.empty, Set.empty), 1))
         _ <- IO.sleep(100.millis)
         // Older than the partition time stored with the offset, which the task keeps.
         _       <- world.records(record(0, 5L, "k", 1000L))
@@ -140,10 +140,31 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(log.last, Event.Read(Vector.empty))
 
   test("a commit the coordinator cannot take yet goes again after a wait"):
-    val answers = List(113, 16, 0).map(code => List(OffsetCommitRequest.Answer("in", 0, code.toShort)))
+    val answers = List(14, 16, 0).map(code => List(OffsetCommitRequest.Answer("in", 0, code.toShort)))
     run(commit = (n, _) => IO.pure(answers(n))): world =>
       world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
         world.committedAt.get.map(times => assertEquals(times.map(_ - times.head), List(0L, 100L, 300L)))
+
+  test("commits and transactions carry the epoch the member gave the tasks at, not the member's epoch when they are sent"):
+    val at =
+      (world: World) =>
+        // The fake member's own epoch is 1.
+        world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0)), Set.empty, Set.empty), 3)) *> IO.sleep(100.millis) *>
+          world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *> world.epochs.get.map(epochs => assertEquals(epochs.distinct, List(3)))
+    run()(at) *> run(failing = Some(_ => None))(at)
+
+  test("a commit refused as STALE_MEMBER_EPOCH, for a task the member no longer has at that epoch, is dropped, and the engine goes on"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 113)))): world =>
+      for
+        _         <- world.tell(assign(TaskId("0", 0)))
+        _         <- IO.sleep(100.millis)
+        _         <- world.records(record(0, 5L, "k", 1000L))
+        _         <- IO.sleep(3.seconds)
+        committed <- world.committedAt.get
+        ended     <- world.ended
+      yield
+        assertEquals(committed.size, 1)
+        assertEquals(ended, None)
 
   test("a commit from a member the group no longer counts is dropped, and the engine goes on"):
     run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 25)))): world =>
@@ -199,9 +220,9 @@ final class EngineSuite extends CatsEffectSuite:
               Some((Some(ErrorCode.fromProtocol(code.toInt)), Some(ErrorCode.fromProtocol(code.toInt).retriable))),
               s"code $code"
             )
-    // REBALANCE_IN_PROGRESS stops a commit at once though its code is worth retrying; STALE_MEMBER_EPOCH is asked again until the timeout though
-    // its code is not.
-    ended(27) *> ended(113)
+    // REBALANCE_IN_PROGRESS stops a commit at once though its code is worth retrying; UNSTABLE_OFFSET_COMMIT is asked again until the timeout
+    // though its code is not.
+    ended(27) *> ended(88)
 
   test("any other refusal of a commit stops the engine with it"):
     run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 29)))): world =>
@@ -649,7 +670,7 @@ final class EngineSuite extends CatsEffectSuite:
   test("a standby task follows its changelog from the start, and where it is and where the changelog ends are its task offsets"):
     run(): world =>
       for
-        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _       <- IO.sleep(500.millis)
         _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
         _       <- world.endsAt(Map(changelog(1) -> 5L))
@@ -664,11 +685,11 @@ final class EngineSuite extends CatsEffectSuite:
   test("a standby task made active restores only what it had not read, onto what it holds, and is no longer followed"):
     run(): world =>
       for
-        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _       <- IO.sleep(500.millis)
         _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
         _       <- IO.sleep(500.millis)
-        _       <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _       <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _       <- IO.sleep(500.millis)
         log     <- world.log.get
         from    <- world.restoredFrom.get
@@ -682,13 +703,13 @@ final class EngineSuite extends CatsEffectSuite:
   test("a changelog record read again from before where a standby task has read to is not applied again"):
     run(): world =>
       for
-        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(logged("k", 1L, 0L))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       yield
@@ -883,12 +904,12 @@ final class EngineSuite extends CatsEffectSuite:
       PolledRecord("app-sessions-changelog", 1, offset, Some(end), 1, -1, Some(session(key, start, end)), Some(counted(1L).value), Headers.empty)
     run(topology = sessioning): world =>
       for
-        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _ <- IO.sleep(500.millis)
         // By its end, which a session store expires it by, [0, 25000] is not expired; read as a window's start, it would be.
         _    <- world.changelogs(sessionLogged("k", 0L, 25000L, 0L), sessionLogged("gone", 0L, 5000L, 1L), sessionLogged("other", 30000L, 30000L, 2L))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       yield assertEquals(from.map(_._2("sessions").keySet), List(Set(session("k", 0L, 25000L), session("other", 30000L, 30000L))))
@@ -911,11 +932,11 @@ final class EngineSuite extends CatsEffectSuite:
       PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), Some(counted(1L).value), Headers.empty)
     run(topology = windowing): world =>
       for
-        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(windowLogged("k", 0L, 0L), windowLogged("other", 30000L, 1L))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       yield assertEquals(from.map(_._2("windows").keySet), List(Set(window("other", 30000L))))
@@ -925,11 +946,11 @@ final class EngineSuite extends CatsEffectSuite:
       PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), value, Headers.empty)
     run(topology = windowing): world =>
       for
-        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(windowLogged("k", 0L, 0L, Some(counted(1L).value)), windowLogged("other", 30000L, 1L, None))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       // The plane records only the stores holding something.
@@ -938,15 +959,15 @@ final class EngineSuite extends CatsEffectSuite:
   /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
   private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
     for
-      _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+      _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
       _       <- IO.sleep(500.millis)
       _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
       _       <- IO.sleep(500.millis)
-      _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty)))
+      _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty), 1))
       _       <- IO.sleep(500.millis)
       offsets <- world.taskOffsets
       _       <- IO.sleep(later)
-      _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+      _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
       _       <- IO.sleep(500.millis)
       from    <- world.restoredFrom.get
     yield (from.map(_._1), offsets)
@@ -964,7 +985,7 @@ final class EngineSuite extends CatsEffectSuite:
           _       <- IO.sleep(200.millis)
           offsets <- world.taskOffsets
           gaveUp  <- directory.held
-          _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
           _       <- IO.sleep(200.millis)
           from    <- world.restoredFrom.get
         yield
@@ -977,14 +998,14 @@ final class EngineSuite extends CatsEffectSuite:
     MemoryStateDirectory().flatMap: directory =>
       run(state = Some(directory)): world =>
         for
-          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
           _      <- IO.sleep(500.millis)
           _      <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
           _      <- IO.sleep(500.millis)
-          _      <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty)))
+          _      <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty), 1))
           _      <- IO.sleep(500.millis)
           gaveUp <- directory.held
-          _      <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _      <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
           _      <- IO.sleep(500.millis)
           from   <- world.restoredFrom.get
         yield
@@ -995,14 +1016,14 @@ final class EngineSuite extends CatsEffectSuite:
     MemoryStateDirectory().flatMap: directory =>
       run(state = Some(directory)): world =>
         for
-          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
           _      <- IO.sleep(500.millis)
           _      <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
           _      <- IO.sleep(500.millis)
           _      <- world.tell(MemberAction.LoseAll)
           _      <- IO.sleep(500.millis)
           gaveUp <- directory.held
-          _      <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _      <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
           _      <- IO.sleep(500.millis)
           from   <- world.restoredFrom.get
           opened <- directory.opened.get
@@ -1046,7 +1067,7 @@ final class EngineSuite extends CatsEffectSuite:
   test("lost tasks are no longer stood by, but their stores are kept and reported, as Java keeps a lost task's state directory"):
     run(): world =>
       for
-        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _       <- IO.sleep(500.millis)
         _       <- world.tell(MemberAction.LoseAll)
         _       <- IO.sleep(500.millis)
@@ -1168,7 +1189,7 @@ object EngineSuite:
 
   def partition(topic: String, n: Int): TopicPartition = TopicPartition(Topic.from(topic).orFail, Partition.from(n).orFail)
 
-  def assign(tasks: TaskId*): MemberAction = MemberAction.Assign(1, Assignment(tasks.toSet, Set.empty, Set.empty))
+  def assign(tasks: TaskId*): MemberAction = MemberAction.Assign(1, Assignment(tasks.toSet, Set.empty, Set.empty), 1)
 
   def record(
       partition: Int,
@@ -1226,7 +1247,8 @@ object EngineSuite:
       ending: Ref[IO, Map[TopicPartition, Long]],
       val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, StoreContents])]],
       offsetsRead: Ref[IO, IO[TaskOffsets]],
-      val restoredAlso: Ref[IO, Map[String, StoreContents]]
+      val restoredAlso: Ref[IO, Map[String, StoreContents]],
+      val epochs: Ref[IO, List[Int]]
   ):
     /** Changelog records for the standby tasks to follow. */
     def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
@@ -1263,25 +1285,26 @@ object EngineSuite:
       val (fetch, send) = (committed, commit)
       val leaving       = leave
       new GroupMember[IO]:
-        def changes: Stream[IO, MemberAction]                                                     = Stream.fromQueueNoneTerminated(World.this.changes)
-        def revoked(round: Long): IO[Unit]                                                        = logged(Event.Revoked(round))
-        def assigned(round: Long): IO[Unit]                                                       = logged(Event.Assigned(round))
-        def leave: IO[Unit]                                                                       = logged(Event.Leave) *> leaving
-        def abandon: IO[Unit]                                                                     = logged(Event.Abandon)
-        def epoch: IO[Int]                                                                        = IO.pure(1)
-        def reports: Signal[IO, Member]                                                           = reported
-        def offsetsFrom(read: IO[TaskOffsets]): IO[Unit]                                          = offsetsRead.set(read)
-        def commit(topics: List[OffsetCommitRequest.Topic]): IO[List[OffsetCommitRequest.Answer]] =
-          (now.flatMap(at => committedAt.update(_ :+ at)) *> commits.modify(before => (before :+ topics, before.size))).flatMap: n =>
-            send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
+        def changes: Stream[IO, MemberAction]            = Stream.fromQueueNoneTerminated(World.this.changes)
+        def revoked(round: Long): IO[Unit]               = logged(Event.Revoked(round))
+        def assigned(round: Long): IO[Unit]              = logged(Event.Assigned(round))
+        def leave: IO[Unit]                              = logged(Event.Leave) *> leaving
+        def abandon: IO[Unit]                            = logged(Event.Abandon)
+        def epoch: IO[Int]                               = IO.pure(1)
+        def reports: Signal[IO, Member]                  = reported
+        def offsetsFrom(read: IO[TaskOffsets]): IO[Unit] = offsetsRead.set(read)
+        def commit(topics: List[OffsetCommitRequest.Topic], epoch: Int): IO[List[OffsetCommitRequest.Answer]] =
+          (now.flatMap(at => committedAt.update(_ :+ at)) *> epochs.update(_ :+ epoch) *> commits.modify(before => (before :+ topics, before.size)))
+            .flatMap: n =>
+              send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
         def committed(topics: List[OffsetFetchRequest.Topic]): IO[OffsetFetchRequest.Answer] =
           (now.flatMap(at => fetchedAt.update(_ :+ at)) *> fetches.modify(before => (before :+ topics, before.size))).flatMap(fetch)
 
     /** Transactions that record what they wrote and the offsets they took, failing as `failing` says for the `n`th. */
     def transactions(failing: Int => Option[Throwable]): Engine.Transactions[IO] =
       new Engine.Transactions[IO]:
-        def apply[A](body: Engine.Writer[IO] => IO[(A, Map[TopicPartition, OffsetAndMetadata])]): IO[A] =
-          IO.ref(0).flatMap: count =>
+        def apply[A](epoch: Int)(body: Engine.Writer[IO] => IO[(A, Map[TopicPartition, OffsetAndMetadata])]): IO[A] =
+          epochs.update(_ :+ epoch) *> IO.ref(0).flatMap: count =>
             body(records => count.update(_ + records.size)).flatMap: (result, offsets) =>
               transacted.modify(n => (n + 1, n)).flatMap: n =>
                 failing(n).fold(count.get.flatMap(written => logged(Event.Transaction(written, offsets))).as(result))(IO.raiseError)
@@ -1332,8 +1355,9 @@ object EngineSuite:
         IO.ref(Map.empty[TopicPartition, Long]),
         IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, StoreContents])]),
         IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
-        IO.ref(Map.empty[String, StoreContents])
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(Map.empty[String, StoreContents]),
+        IO.ref(List.empty[Int])
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.

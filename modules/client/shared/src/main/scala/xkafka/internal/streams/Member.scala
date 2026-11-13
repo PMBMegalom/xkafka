@@ -117,8 +117,10 @@ private[xkafka] enum MemberAction derives CanEqual:
   /** Finish these active tasks, commit them and stop them, then answer `Revoked(round)`. */
   case Revoke(round: Long, tasks: Set[TaskId])
 
-  /** Run exactly this assignment, then answer `Assigned(round)`. */
-  case Assign(round: Long, assignment: Assignment)
+  /** Run exactly this assignment, then answer `Assigned(round)`. `epoch` is the member's when it was given, which commits for these tasks carry, so
+    * that the coordinator refuses those of tasks the member has since lost.
+    */
+  case Assign(round: Long, assignment: Assignment, epoch: Int)
 
   /** Stop every task without committing: the group no longer counts them as this member's. */
   case LoseAll
@@ -288,7 +290,7 @@ private[xkafka] final case class Member(
         case Some(wanted) =>
           val giveBack = owned.active -- wanted.active
           if giveBack.nonEmpty then (copy(step = Some(Step.Revoking(round + 1, giveBack)), round = round + 1), List(Revoke(round + 1, giveBack)))
-          else if wanted != owned then (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1), List(Assign(round + 1, wanted)))
+          else if wanted != owned then (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1), List(Assign(round + 1, wanted, epoch)))
           else (this, Nil)
 
   private def retry(rediscover: Boolean, backoff: Boolean): (Member, List[MemberAction]) =
