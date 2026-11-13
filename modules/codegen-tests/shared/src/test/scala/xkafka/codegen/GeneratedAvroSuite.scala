@@ -70,6 +70,9 @@ class GeneratedAvroSuite extends FunSuite:
   test("types whose names end with an underscore are generated, and read back"):
     assertEquals(roundTrip(Marked_(Kind_.MARKED)), Right(Marked_(Kind_.MARKED)))
 
+  test("text holding half of a surrogate pair is generated as it is"):
+    assertEquals(Lone().text, "\ud800 and \ud83d\ude00")
+
   test("every generated type's codec has the schema it was generated from"):
     registers[Order](Order.avroSchema)
     registers[Status](Status.avroSchema)
@@ -114,6 +117,12 @@ class GeneratedAvroSuite extends FunSuite:
     assertEquals(roundTrip(example.`type`.List(List("a"), Some("b"))), Right(example.`type`.List(List("a"), Some("b"))))
     assertEquals(roundTrip(Entry("me", Level.HIGH, Some(5L))), Right(Entry("me", Level.HIGH, Some(5L))))
     Status.values.foreach(status => assertEquals(roundTrip(status), Right(status)))
+
+  test("a record named String and a symbol named as the schema's own value are generated, the symbol renamed"):
+    import example.named.{Member, String as Named}
+    assert(Member.avroSchema.contains("\"symbols\":[\"avroSchema\",\"other\"]"), Member.avroSchema)
+    assertEquals(AvroCodec[Member].encode(Member.avroSchema_).map(_.toString), Right("Enum(FullName(Some(example.named),Member),avroSchema)"))
+    assertEquals(roundTrip(Named(Member.avroSchema_)), Right(Named(Member.avroSchema_)))
 
   test("names Scala keeps for itself are renamed in Scala and keep their Avro names in the schema"):
     assert(Order.avroSchema.contains("\"name\":\"copy\""), Order.avroSchema)

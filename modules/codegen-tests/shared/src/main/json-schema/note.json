@@ -1,6 +1,6 @@
 {
   "title": "example.json.Note_",
-  "description": "A note on a path such as /api/*, whose name ends with an underscore",
+  "description": "A note on a path such as /api/*, whose name ends with an underscore, and half of a surrogate pair: \udbff",
   "type": "object",
   "properties": {
     "path": { "type": "string", "description": "Where it applies: /* and */ in text" },

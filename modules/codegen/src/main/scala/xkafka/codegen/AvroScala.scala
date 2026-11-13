@@ -179,7 +179,7 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
       case (AvroSchema.Map(inner), AvroValue.Map(entries)) => entries.toList
           .traverse((key, item) => literal(inner, item, definitions).map(item => s"${Names.quote(key)} -> $item"))
           .map(_.mkString(s"${Names.builtin("Map", neighbours)}(", ", ", ")"))
-      case (AvroSchema.Enum(name, _, _, _, _), AvroValue.Enum(_, symbol))       => Right(s"${qualified(name)}.${Names.symbol(symbol)._1}")
+      case (AvroSchema.Enum(name, _, _, _, _), AvroValue.Enum(_, symbol))       => Right(s"${qualified(name)}.${symbolOf(symbol)._1}")
       case (AvroSchema.Fixed(name, _, _), AvroValue.Fixed(_, chunk))            => Right(s"${qualified(name)}(${bytes(chunk)})")
       case (AvroSchema.Record(name, fields, _, _), AvroValue.Record(_, values)) => values.toList.traverse: (field, item) =>
           fields.find(_.name == field).toRight(s"${name.value} has no field $field").flatMap(known => literal(known.schema, item, definitions))
@@ -221,7 +221,7 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
       case _ => Left(s"$value is not a value of the logical type ${logicalType.name}")
 
   private def enumSource(enumeration: AvroSchema.Enum): Either[String, String] =
-    val cases = enumeration.symbols.map(Names.symbol)
+    val cases = enumeration.symbols.map(symbolOf)
     cases.map(_._1).groupBy(identity).collectFirst { case (scala, copies) if copies.size > 1 => scala } match
       case Some(scala) => Left(s"${enumeration.name.value} has two symbols named $scala in Scala")
       case None        =>
@@ -252,11 +252,15 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
     (doc.map(text => s"@_root_.xkafka.schemaregistry.SchemaDoc(${Names.quote(text)})\n").toList ++
       aliases.map(alias => s"@_root_.xkafka.schemaregistry.SchemaAlias(${Names.quote(alias.value)})\n")).mkString
 
+  /** A symbol's case, renamed where it would clash with the enum's members or its companion's schema, with the name the schema gives it. */
+  private def symbolOf(symbol: String): (String, Option[String]) =
+    if symbol == "avroSchema" then ("avroSchema_", Some(symbol)) else Names.symbol(symbol)
+
   private def companion(scala: String, schema: AvroSchema, givens: List[String]): String =
     val extra = givens.map(line => s"  $line\n").mkString
     s"""object $scala${Names.opening(scala)}
        |  /** The Avro schema $scala was generated from, which its codec must have. */
-       |  val avroSchema: String = ${Names.text(AvroSchemaJson.render(schema))}
+       |  val avroSchema: _root_.scala.Predef.String = ${Names.text(AvroSchemaJson.render(schema))}
        |
        |$extra${
         if extra.isEmpty then "" else "\n"

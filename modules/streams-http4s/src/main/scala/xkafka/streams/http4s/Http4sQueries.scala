@@ -40,7 +40,10 @@ object Http4sQueries:
 
   /** The URI of `path` at `member`'s endpoint. */
   def uri(member: Endpoint, path: Uri.Path = defaultPath, scheme: Uri.Scheme = Uri.Scheme.http): Uri =
-    val host = Uri.Host.fromString(member.host).getOrElse(Uri.RegName(member.host))
+    // An IPv6 address is written in brackets, which an endpoint may give it or not.
+    val host =
+      Uri.Ipv6Address.fromString(member.host.stripPrefix("[").stripSuffix("]")).toOption
+        .getOrElse(Uri.Host.fromString(member.host).getOrElse(Uri.RegName(member.host)))
     Uri(scheme = Some(scheme), authority = Some(Uri.Authority(host = host, port = Some(member.port))), path = path)
 
   /** Posts each query to `path` at the endpoint of the member that holds what it needs, through `client`, which decides on TLS, authentication and

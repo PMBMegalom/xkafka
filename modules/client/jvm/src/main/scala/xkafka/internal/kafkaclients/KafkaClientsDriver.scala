@@ -147,7 +147,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
         JavaClient.Consumer(thread)
     )
 
-  override def destroyConsumer(consumer: Client): F[Unit] = onThread(consumer)(thread => F.async_[Unit](callback => thread.close(callback)))
+  override def destroyConsumer(consumer: Client): F[Unit] = onThread(consumer)(thread => javaCall(F.async_[Unit](callback => thread.close(callback))))
 
   override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
     javaCall(F.blocking(JavaClient.Administration(clients.admin(connection(bootstrapServers, clientId, properties)))))
@@ -295,11 +295,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def takeRebalances(consumer: Client): F[List[Rebalance[Event]]] =
     onThread(consumer): thread =>
-      F.async_[List[ConsumerThread.Rebalancing]](thread.takeRebalances).map(_.map(taken => Rebalance(taken, taken.kind, taken.partitions)))
+      javaCall(F.async_[List[ConsumerThread.Rebalancing]](thread.takeRebalances)).map(_.map(taken => Rebalance(taken, taken.kind, taken.partitions)))
 
   /** Inside the listener, which an assignment is still waiting in, a seek decides where the partition starts. */
   override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit] =
-    onThread(consumer)(thread => F.async_[Unit](thread.apply(event, startAt(_, starts))))
+    onThread(consumer)(thread => javaCall(F.async_[Unit](thread.apply(event, startAt(_, starts)))))
 
   private def startAt(consumer: JavaConsumer[Array[Byte], Array[Byte]], starts: Vector[StartAt]): Unit =
     starts.foreach: start =>

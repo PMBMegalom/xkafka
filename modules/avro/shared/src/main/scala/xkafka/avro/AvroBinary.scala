@@ -23,8 +23,10 @@ package xkafka.avro
 
 import java.nio.charset.StandardCharsets
 
+import cats.data.{EitherT, State}
 import cats.syntax.all.*
 import fs2.Chunk
+import xkafka.schemaregistry.Shown
 
 /** Avro's binary encoding, and reading what was written with one schema as another, as the specification resolves them. */
 object AvroBinary:
@@ -43,7 +45,7 @@ object AvroBinary:
     * the reader cannot take fails only a value that has it.
     */
   def decoder(writer: AvroSchema, reader: AvroSchema): Either[String, Chunk[Byte] => Either[String, AvroValue]] =
-    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).plan(writer, reader, Map.empty).map: step =>
+    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).plan(writer, reader).map: step =>
       bytes =>
         val array = bytes.toArray
         step(array, 0, 0).flatMap: (value, end) =>
@@ -122,7 +124,7 @@ object AvroBinary:
       case AvroValue.Record(name, _) => s"a value of record '${name.value}'"
       case AvroValue.Enum(name, _)   => s"a value of enum '${name.value}'"
       case AvroValue.Fixed(name, _)  => s"a value of fixed '${name.value}'"
-      case other                     => s"the value $other"
+      case other                     => s"the value ${Shown(other)}"
 
   // Reading
 
@@ -139,7 +141,10 @@ object AvroBinary:
       else
         val byte  = bytes(index)
         val value = sofar | ((byte & 0x7fL) << shift)
-        if (byte & 0x80) == 0 then Right(((value >>> 1) ^ -(value & 1), index + 1)) else from(index + 1, shift + 7, value)
+        // The tenth byte holds the 64th bit alone.
+        if shift == 63 && (byte & 0x7e) != 0 then Left("a number does not fit 64 bits")
+        else if (byte & 0x80) == 0 then Right(((value >>> 1) ^ -(value & 1), index + 1))
+        else from(index + 1, shift + 7, value)
     from(at, 0, 0L)
 
   private def readInt(bytes: Array[Byte], at: Int): Either[String, (Int, Int)] =
@@ -194,28 +199,79 @@ object AvroBinary:
         case Left(reason)              => Left(reason)
     block(at, Vector.empty)
 
-  /** The plans for reading one schema's values as another's, for the named types of each. */
+  /** The record pairs planned so far, and those being planned, which a record that holds itself reads through. */
+  private final case class Planned(done: Map[(FullName, FullName), Either[String, Step]], planning: Map[(FullName, FullName), Pending])
+
+  private type Planning[A] = EitherT[[S] =>> State[Planned, S], String, A]
+
+  /** The plans for reading one schema's values as another's, for the named types of each. Each pair of records is planned once, however often the
+    * schemas use it.
+    */
   private final case class Resolution(writers: Defined, readers: Defined):
-    /** How what `writer` wrote is read as `reader`; `pending` holds the record pairs being planned, which a recursive record reads through. */
-    def plan(writer: AvroSchema, reader: AvroSchema, pending: Map[(FullName, FullName), Pending]): Either[String, Step] =
+    /** How what `writer` wrote is read as `reader`. */
+    def plan(writer: AvroSchema, reader: AvroSchema): Either[String, Step] = planning(writer, reader).value.runA(Planned(Map.empty, Map.empty)).value
+
+    private def planning(writer: AvroSchema, reader: AvroSchema): Planning[Step] =
       (writer, reader) match
-        case (AvroSchema.Named(name), _) => writers.get(name).toRight(s"'${name.value}' is not defined").flatMap(plan(_, reader, pending))
-        case (_, AvroSchema.Named(name)) => readers.get(name).toRight(s"'${name.value}' is not defined").flatMap(plan(writer, _, pending))
+        case (AvroSchema.Named(name), _) => found(writers.get(name).toRight(s"'${name.value}' is not defined")).flatMap(planning(_, reader))
+        case (_, AvroSchema.Named(name)) => found(readers.get(name).toRight(s"'${name.value}' is not defined")).flatMap(planning(writer, _))
         // A decimal's bytes mean nothing without its scale, so they are read only as a decimal of that scale, with room for their digits.
         case (AvroSchema.Logical(Digits(precision, scale)), AvroSchema.Logical(Digits(readPrecision, readScale)))
             if scale != readScale || precision > readPrecision =>
-          Left(s"a decimal of precision $precision and scale $scale is not read as one of precision $readPrecision and scale $readScale")
-        case (AvroSchema.Logical(logicalType), _) => plan(logicalType.underlying, reader, pending)
-        case (_, AvroSchema.Logical(logicalType)) => plan(writer, logicalType.underlying, pending)
+          found(Left(s"a decimal of precision $precision and scale $scale is not read as one of precision $readPrecision and scale $readScale"))
+        case (AvroSchema.Logical(logicalType), _) => planning(logicalType.underlying, reader)
+        case (_, AvroSchema.Logical(logicalType)) => planning(writer, logicalType.underlying)
         case (AvroSchema.Union(branches), _)      =>
           // Each branch is planned now, and one the reader cannot take fails only a value written with it.
-          val steps = branches.map(branch => plan(branch, reader, pending)).toVector
-          Right: (bytes, at, depth) =>
-            readLong(bytes, at, 10).flatMap: (index, after) =>
-              steps.lift(index.toInt).filter(_ => index.isValidInt).toRight(s"union branch $index is not one of the writer's ${steps.size}").flatten
-                .flatMap(_(bytes, after, depth))
-        case (_, AvroSchema.Union(branches)) => branches.find(same(writer, _)).orElse(branches.find(promotes(writer, _)))
-            .toRight(s"no branch of ${render(reader)} reads ${render(writer)}").flatMap(plan(writer, _, pending))
+          EitherT.liftF(branches.toVector.traverse(branch => planning(branch, reader).value)).map: steps =>
+            (bytes, at, depth) =>
+              readLong(bytes, at, 10).flatMap: (index, after) =>
+                steps.lift(index.toInt).filter(_ => index.isValidInt).toRight(s"union branch $index is not one of the writer's ${steps.size}").flatten
+                  .flatMap(_(bytes, after, depth))
+        case (_, AvroSchema.Union(branches)) => found(
+            branches.find(same(writer, _)).orElse(branches.find(promotes(writer, _)))
+              .toRight(s"no branch of ${render(reader)} reads ${render(writer)}")
+          ).flatMap(planning(writer, _))
+        case (written: AvroSchema.Record, read: AvroSchema.Record) =>
+          if !named(written.name, read.name, read.aliases) then found(Left(s"record '${written.name.value}' is not read as '${read.name.value}'"))
+          else recordOnce(written, read)
+        case (AvroSchema.Array(written), AvroSchema.Array(read)) =>
+          val empty = writesNothing(written)
+          planning(written, read).map: item =>
+            (bytes, at, depth) => readBlocks(bytes, at, empty)(item(_, _, depth)).map((items, end) => (AvroValue.Array(items), end))
+        case (AvroSchema.Map(written), AvroSchema.Map(read)) => planning(written, read).map: value =>
+            (bytes, at, depth) =>
+              val entry =
+                (bytes: Array[Byte], at: Int) =>
+                  readBytes(bytes, at).flatMap: (key, after) =>
+                    value(bytes, after, depth).map((read, end) => ((new String(key.toArray, StandardCharsets.UTF_8), read), end))
+              readBlocks(bytes, at, empty = false)(entry).map((entries, end) => (AvroValue.Map(entries), end))
+        case _ => found(single(writer, reader))
+
+    private def found[A](result: Either[String, A]): Planning[A] = EitherT.fromEither(result)
+
+    /** The plan of a pair of records: the one made before, or, for a pair being planned, one reading through it, or else a new one. */
+    private def recordOnce(written: AvroSchema.Record, read: AvroSchema.Record): Planning[Step] =
+      val pair = (written.name, read.name)
+      EitherT:
+        State: state =>
+          state.done.get(pair) match
+            case Some(step) => (state, step)
+            case None       => state.planning.get(pair) match
+                case Some(pending) => (state, Right(through(pending)))
+                case None          =>
+                  lazy val made: (Planned, Either[String, Step]) =
+                    record(written, read).value.run(state.copy(planning = state.planning.updated(pair, pending))).value
+                  lazy val pending: Pending = Pending(made._2)
+                  val (after, step)         = made
+                  val result                = step.map(_ => through(pending))
+                  (after.copy(done = after.done.updated(pair, result), planning = state.planning), result)
+
+    private def through(pending: Pending): Step = (bytes, at, depth) => pending.step.flatMap(_(bytes, at, depth))
+
+    /** How a value of a type that holds no other is read, or why it cannot be. */
+    private def single(writer: AvroSchema, reader: AvroSchema): Either[String, Step] =
+      (writer, reader) match
         case (AvroSchema.Null, AvroSchema.Null)       => Right((_, at, _) => Right((AvroValue.Null, at)))
         case (AvroSchema.Boolean, AvroSchema.Boolean) =>
           Right((bytes, at, _) => Either.cond(at < bytes.length, (AvroValue.Boolean(bytes(at) != 0), at + 1), "the value ends before its last byte"))
@@ -255,34 +311,14 @@ object AvroBinary:
               readInt(bytes, at).flatMap: (index, end) =>
                 mapped.lift(index).toRight(s"enum symbol $index is not one of the writer's ${mapped.size}").flatten
                   .map(symbol => (AvroValue.Enum(read, symbol), end))
-        case (AvroSchema.Array(written), AvroSchema.Array(read)) =>
-          val empty = writesNothing(written, Set.empty)
-          plan(written, read, pending).map: item =>
-            (bytes, at, depth) => readBlocks(bytes, at, empty)(item(_, _, depth)).map((items, end) => (AvroValue.Array(items), end))
-        case (AvroSchema.Map(written), AvroSchema.Map(read)) => plan(written, read, pending).map: value =>
-            (bytes, at, depth) =>
-              val entry =
-                (bytes: Array[Byte], at: Int) =>
-                  readBytes(bytes, at).flatMap: (key, after) =>
-                    value(bytes, after, depth).map((read, end) => ((new String(key.toArray, StandardCharsets.UTF_8), read), end))
-              readBlocks(bytes, at, empty = false)(entry).map((entries, end) => (AvroValue.Map(entries), end))
-        case (written: AvroSchema.Record, read: AvroSchema.Record) =>
-          if !named(written.name, read.name, read.aliases) then Left(s"record '${written.name.value}' is not read as '${read.name.value}'")
-          else
-            pending.get((written.name, read.name)) match
-              case Some(planning) => Right((bytes, at, depth) => planning.step.flatMap(_(bytes, at, depth)))
-              case None           =>
-                lazy val planning: Pending = Pending(record(written, read, pending.updated((written.name, read.name), planning)))
-                planning.step.map(_ => (bytes, at, depth) => planning.step.flatMap(_(bytes, at, depth)))
         case _ => Left(s"${render(reader)} cannot read what ${render(writer)} wrote")
 
-    private def record(written: AvroSchema.Record, read: AvroSchema.Record, pending: Map[(FullName, FullName), Pending]): Either[String, Step] =
+    private def record(written: AvroSchema.Record, read: AvroSchema.Record): Planning[Step] =
       def readerField(field: AvroField) = read.fields.find(candidate => candidate.name == field.name || candidate.aliases.contains(field.name))
       // A field the reader lacks is read only to be skipped, as the writer's own schema reads it, whatever the reader names the same.
-      def skipped(field: AvroField) = Resolution(writers, writers).plan(field.schema, field.schema, Map.empty)
+      def skipped(field: AvroField) = found(Resolution(writers, writers).plan(field.schema, field.schema))
       val planned                   =
-        written.fields
-          .traverse(field => readerField(field).fold(skipped(field))(target => plan(field.schema, target.schema, pending)).map(field -> _))
+        written.fields.traverse(field => readerField(field).fold(skipped(field))(target => planning(field.schema, target.schema)).map(field -> _))
       planned.flatMap: steps =>
         val taken    = written.fields.flatMap(readerField).map(_.name).toSet
         val defaults =
@@ -290,7 +326,7 @@ object AvroBinary:
             field.default
               .toRight(s"record '${read.name.value}' has no default for field '${field.name}', which '${written.name.value}' does not write")
               .map(field.name -> _)
-        defaults.map: filled =>
+        found(defaults).map: filled =>
           (bytes, at, depth) =>
             if depth >= MaxDepth then Left(s"the value is nested more than $MaxDepth deep")
             else
@@ -301,14 +337,27 @@ object AvroBinary:
                 val all = values ++ filled
                 (AvroValue.Record(read.name, read.fields.map(field => field.name -> all(field.name)).toVector), end)
 
+    /** The writer's records written as no bytes, those whose fields all are: found by adding them until no more are, so a record that holds itself is
+      * not one.
+      */
+    private lazy val silent: Set[FullName] =
+      val records = writers.values.collect { case record: AvroSchema.Record => record }.toList
+      @scala.annotation.tailrec
+      def grow(found: Set[FullName]): Set[FullName] =
+        val more = records.filter(record => !found(record.name) && record.fields.forall(field => writesNothing(field.schema, found))).map(_.name)
+        if more.isEmpty then found else grow(found ++ more)
+      grow(Set.empty)
+
     /** Whether values of `schema` are written as no bytes, as `null` and records of only such fields are. */
-    private def writesNothing(schema: AvroSchema, seen: Set[FullName]): Boolean =
+    private def writesNothing(schema: AvroSchema): Boolean = writesNothing(schema, silent)
+
+    private def writesNothing(schema: AvroSchema, silent: Set[FullName]): Boolean =
       schema match
         case AvroSchema.Null                 => true
         case AvroSchema.Fixed(_, size, _)    => size == 0
-        case AvroSchema.Logical(logicalType) => writesNothing(logicalType.underlying, seen)
-        case AvroSchema.Named(name)          => !seen(name) && writers.get(name).exists(writesNothing(_, seen + name))
-        case record: AvroSchema.Record       => !seen(record.name) && record.fields.forall(field => writesNothing(field.schema, seen + record.name))
+        case AvroSchema.Logical(logicalType) => writesNothing(logicalType.underlying, silent)
+        case AvroSchema.Named(name)          => writers.get(name).exists(writesNothing(_, silent))
+        case record: AvroSchema.Record       => silent(record.name)
         case _                               => false
 
     private def float(bytes: Array[Byte], at: Int): Either[String, (Float, Int)] =

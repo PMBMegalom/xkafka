@@ -1017,6 +1017,9 @@ name it:
 none, such as a `String` in Avro, or a JSON schema without a `title`, fails with
 `RegistryException.Unserializable`.
 
+`Subject.from` refuses an empty subject, and `.` and `..`, which a URL reads as
+steps between folders, so the registry would be asked about another path.
+
 ## Which schema is written
 
 `of` and `generic` take a `Writing`:
@@ -1063,8 +1066,16 @@ Failures are `RegistryException`s:
 | `NoSchema` | your type has no schema in the serde's format, as a list of lists has none in Protobuf |
 
 A record nested more than 100 deep, such as a list of 101 nodes that each hold
-the next, is also `Unserializable`, in every format. So is an Avro record whose
-arrays or maps claim more items than its bytes can hold.
+the next, is also `Unserializable`, in every format. So are:
+
+- an Avro record whose arrays or maps claim more items than its bytes can hold,
+  or that has bytes left after its value, with xkafka's codecs or with vulcan's
+  and avro4s's;
+- a JSON or Protobuf record whose text is not UTF-8. An Avro record's text is
+  read with such bytes replaced.
+
+A value an error names is cut short after 200 characters, saying how long it
+was, so that a large record does not fill your logs.
 
 Settings the registry client refuses raise `InvalidRegistrySetting`, and a
 record without a value raises `Deserializer.NullValueException` (see

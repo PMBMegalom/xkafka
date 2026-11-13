@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets
 import cats.syntax.all.*
 import fs2.Chunk
 import xkafka.protobuf.ProtobufSchema.{Enum, Field, FieldType, File, Label, Message, Syntax}
+import xkafka.schemaregistry.{Shown, Utf8}
 
 /** The messages and enums of a file and the files it imports, by full name without a leading dot. */
 private[protobuf] final class Pool(messages: Map[String, (Message, Syntax)], enums: Map[String, Enum]):
@@ -89,7 +90,7 @@ private[protobuf] final class Dynamic(pool: Pool):
                     case None                                  => Right(Chunk.empty[Byte])
                     case Some(set) => writeField(full, syntax, field, set).leftMap(reason => s"field ${field.name} of $full: $reason")
                 .map(written => (written ++ unknown.map(_.bytes)).foldLeft(Chunk.empty[Byte])(_ ++ _))
-      case other => Left(s"expected a message $full, found $other")
+      case other => Left(s"expected a message $full, found ${Shown(other)}")
 
   private def writeField(scope: String, syntax: Syntax, field: Field, value: ProtobufValue): Either[String, Chunk[Byte]] =
     (field.fieldType, value) match
@@ -105,8 +106,8 @@ private[protobuf] final class Dynamic(pool: Pool):
           else if packable && field.packed.getOrElse(syntax == Syntax.Proto3) then
             ProtobufWire.field(field.number, Raw.Bytes(raws.foldLeft(Chunk.empty[Byte])(_ ++ ProtobufWire.payload(_))))
           else raws.foldLeft(Chunk.empty[Byte])(_ ++ ProtobufWire.field(field.number, _))
-      case (FieldType.Map(_, _), other)                => Left(s"expected a map, found $other")
-      case (_, other) if field.label == Label.Repeated => Left(s"expected a list, found $other")
+      case (FieldType.Map(_, _), other)                => Left(s"expected a map, found ${Shown(other)}")
+      case (_, other) if field.label == Label.Repeated => Left(s"expected a list, found ${Shown(other)}")
       case (fieldType, set)                            => single(scope, fieldType, set).map: raw =>
           // A field without presence is left out where it is zero.
           if field.label == Label.Implicit && zero(raw, fieldType) then Chunk.empty else ProtobufWire.field(field.number, raw)
@@ -148,10 +149,10 @@ private[protobuf] final class Dynamic(pool: Pool):
           case Right(full)              => encode(full, set).map(Raw.Bytes(_))
           case Left((full, enumerated)) => set match
               case ProtobufValue.Enum(value) => enumerated.values.collectFirst { case (`value`, number) => Raw.Varint(number.toLong) }
-                  .toRight(s"$value is not a value of $full")
+                  .toRight(s"${Shown(value)} is not a value of $full")
               case ProtobufValue.EnumNumber(number) => Right(Raw.Varint(number.toLong))
-              case other                            => Left(s"expected a value of $full, found $other")
-      case (expected, other) => Left(s"expected a value of ${expected.toString.toLowerCase}, found $other")
+              case other                            => Left(s"expected a value of $full, found ${Shown(other)}")
+      case (expected, other) => Left(s"expected a value of ${expected.toString.toLowerCase}, found ${Shown(other)}")
 
   def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] = decode(full, bytes, 0)
 
@@ -241,7 +242,7 @@ private[protobuf] final class Dynamic(pool: Pool):
       case (FieldType.UInt64, Raw.Varint(value))    => Right(ProtobufValue.UInt64(BigInt(java.lang.Long.toUnsignedString(value))))
       case (FieldType.Fixed64, Raw.Fixed64(value))  => Right(ProtobufValue.UInt64(BigInt(java.lang.Long.toUnsignedString(value))))
       case (FieldType.Bool, Raw.Varint(value))      => Right(ProtobufValue.Bool(value != 0))
-      case (FieldType.String, Raw.Bytes(bytes))     => Right(ProtobufValue.String(new String(bytes.toArray, StandardCharsets.UTF_8)))
+      case (FieldType.String, Raw.Bytes(bytes))     => Utf8.decode(bytes.toArray).map(ProtobufValue.String(_))
       case (FieldType.Bytes, Raw.Bytes(bytes))      => Right(ProtobufValue.Bytes(bytes))
       case (FieldType.Named(name), _)               => pool.resolve(scope, name).flatMap:
           case Right(full) => raw match

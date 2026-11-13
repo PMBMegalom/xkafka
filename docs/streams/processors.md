@@ -157,8 +157,9 @@ raises no error, so choose a retention at least as long as the oldest window you
 still write to or read.
 
 `size` is only what the `end` of a `Windowed` key says: a `put` does not check that
-starts are a size apart. A size under a millisecond, or a retention shorter than the
-size, is refused when you call `Topology.of`.
+starts are a size apart. A size under a millisecond, a retention shorter than the
+size, or either holding part of a millisecond, is refused when you call
+`Topology.of`.
 
 Writes are saved and restored as for a `KeyValueStore`, to the topic
 `<application id>-<store>-changelog`, which keeps records for the retention plus a
@@ -229,7 +230,8 @@ the store runs, but it does once the store is restored. So a restart can expire 
 session you could read just before it, if you removed a session ending later than
 any you have written. Java Kafka Streams' session stores do the same.
 
-A retention under a millisecond is refused when you call `Topology.of`. Writes are
+A retention under a millisecond, or holding part of one, is refused when you call
+`Topology.of`. Writes are
 saved and restored as for a `KeyValueStore`, to the topic
 `<application id>-<store>-changelog`, which keeps records for the retention plus a
 day.
@@ -280,8 +282,8 @@ schedules:
 With `Punctuation.streamTime(1.minute)` and a first record timestamped 12:00:30,
 it runs at 12:00:30, and next for the first record timestamped 12:01:00 or later.
 If several intervals have passed, it runs once. It is given the stream time or
-clock time it runs at. An interval below a millisecond is refused when you call
-`Topology.of`.
+clock time it runs at. An interval below a millisecond, or holding part of one,
+is refused when you call `Topology.of`.
 
 What a punctuator writes to a store is saved at the next commit, as a handler's
 writes are. Under exactly-once processing, a wall-clock punctuator that runs while no records arrive

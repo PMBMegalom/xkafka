@@ -91,6 +91,16 @@ class VulcanSerdeSuite extends CatsEffectSuite:
       yield back
     assertEquals(read, Right(visit))
 
+  test("a record with bytes left after its value is refused, as xkafka's own Avro refuses it"):
+    val read =
+      for
+        write <- format[Visit].writer(format[Visit].schema)
+        bytes <- write(visit)
+        read  <- format[Visit].reader(format[Visit].schema)
+        back  <- read(bytes ++ Chunk[Byte](0, 0))
+      yield back
+    assertEquals(read, Left("2 bytes are left after the value"))
+
   test("the serde writes the bytes Confluent's serializer writes, and each reads what the other writes"):
     val mock   = new MockSchemaRegistryClient()
     val record = vulcan.Codec[Visit].encode(visit).fold(error => fail(error.message), identity)

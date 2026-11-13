@@ -32,7 +32,7 @@ import scala.util.Try
 
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.schemaregistry.{Decimals, DefaultOf, Meta}
+import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown}
 
 /** How values of `A` are written as Avro values of a schema, and read back from them.
   *
@@ -136,7 +136,7 @@ object AvroCodec:
       override def decode(value: AvroValue): Either[String, C]                 =
         value match
           case AvroValue.Array(values) => values.traverse(inner.decode).map(make)
-          case other                   => Left(s"expected an array, found $other")
+          case other                   => Left(s"expected an array, found ${Shown(other)}")
 
   given [A](using inner: AvroCodec[A]): AvroCodec[List[A]]   = array(inner)(identity, _.toList)
   given [A](using inner: AvroCodec[A]): AvroCodec[Vector[A]] = array(inner)(identity, identity)
@@ -151,7 +151,7 @@ object AvroCodec:
     override def decode(value: AvroValue): Either[String, Map[String, A]] =
       value match
         case AvroValue.Map(entries) => entries.traverse((key, item) => inner.decode(item).map(key -> _)).map(_.toMap)
-        case other                  => Left(s"expected a map, found $other")
+        case other                  => Left(s"expected a map, found ${Shown(other)}")
 
   private def logical[A, B](logicalType: LogicalType, underlying: AvroCodec[B])(from: B => A)(to: A => B): AvroCodec[A] =
     instance(
@@ -208,8 +208,8 @@ object AvroCodec:
     val write =
       (value: BigDecimal) =>
         attempt(value.bigDecimal.setScale(scale, java.math.RoundingMode.UNNECESSARY))
-          .leftMap(_ => s"$value has more than $scale digits after the point")
-          .filterOrElse(_.precision <= precision, s"$value has more than $precision digits")
+          .leftMap(_ => s"${Shown(value)} has more than $scale digits after the point")
+          .filterOrElse(_.precision <= precision, s"${Shown(value)} has more than $precision digits")
           .map(scaled => Chunk.array(scaled.unscaledValue.toByteArray))
     val read =
       (bytes: Chunk[Byte]) =>
@@ -305,7 +305,7 @@ private[avro] final class RecordCodec[A, T <: Tuple](
       case AvroValue.Record(_, values) => infos
           .traverse(info => values.collectFirst { case (info.name, read) => read }.toRight(s"no field '${info.name}'")).flatMap(fields.decode)
           .bimap(reason => s"record '${name.value}': $reason", fromTuple)
-      case other => Left(s"expected a record '${name.value}', found $other")
+      case other => Left(s"expected a record '${name.value}', found ${Shown(other)}")
 
 /** A case class's codec as a `fixed` of `size` bytes, the bytes of its one field. */
 private[avro] final class FixedCodec[A, T <: Tuple](
@@ -323,23 +323,24 @@ private[avro] final class FixedCodec[A, T <: Tuple](
     field.encode(toTuple(value)).flatMap:
       case List(AvroValue.Bytes(bytes)) if bytes.size == size => Right(AvroValue.Fixed(name, bytes))
       case List(AvroValue.Bytes(bytes))                       => Left(s"fixed '${name.value}': ${bytes.size} bytes, not $size")
-      case other                                              => Left(s"fixed '${name.value}': expected bytes, found $other")
+      case other                                              => Left(s"fixed '${name.value}': expected bytes, found ${Shown(other)}")
 
   override def decode(value: AvroValue): Either[String, A] =
     value match
       case AvroValue.Fixed(_, bytes) => field.decode(List(AvroValue.Bytes(bytes))).map(fromTuple)
-      case other                     => Left(s"expected a fixed '${name.value}', found $other")
+      case other                     => Left(s"expected a fixed '${name.value}', found ${Shown(other)}")
 
 /** A union type's codec, as an Avro union of its branches. */
 private[avro] final class UnionCodec[U](branches: List[Branch[U]]) extends AvroCodec[U]:
   override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = AvroSchema.Union(branches.map(_.codec.schemaWithin(seen)))
 
   override def encode(value: U): Either[String, AvroValue] =
-    branches.collectFirstSome(branch => branch.tag.unapply(value).map(branch.codec.encode)).getOrElse(Left(s"$value is of none of the union's types"))
+    branches.collectFirstSome(branch => branch.tag.unapply(value).map(branch.codec.encode))
+      .getOrElse(Left(s"${Shown(value)} is of none of the union's types"))
 
   override def decode(value: AvroValue): Either[String, U] =
     branches.find(branch => AvroBinary.fits(branch.codec.schema, value, AvroSchema.definitions(branch.codec.schema)))
-      .toRight(s"$value is of none of the union's types").flatMap(branch => branch.codec.decode(value).map(branch.widen))
+      .toRight(s"${Shown(value)} is of none of the union's types").flatMap(branch => branch.codec.decode(value).map(branch.widen))
 
 /** One type of a union type `U`: its codec, and how a value of `U` is told to be of it. */
 private[avro] trait Branch[U]:
@@ -455,7 +456,7 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
   override def encode(value: A): Either[String, AvroValue] =
     cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encode(narrowed)))) match
       case Some((known, encoded)) => if singletons.isDefined then Right(AvroValue.Enum(name, symbol(known))) else encoded
-      case None                   => Left(s"$value is none of the cases of '${name.value}'")
+      case None                   => Left(s"${Shown(value)} is none of the cases of '${name.value}'")
 
   override def decode(value: AvroValue): Either[String, A] =
     value match
@@ -464,7 +465,7 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
       case AvroValue.Record(written, _) => names
           .collectFirst { case (known, owned) if owned.contains(written) => known.codec.decode(value).map(known.widen) }
           .getOrElse(Left(s"'${written.value}' is not a case of '${name.value}'"))
-      case other => Left(s"expected a case of '${name.value}', found $other")
+      case other => Left(s"expected a case of '${name.value}', found ${Shown(other)}")
 
 /** A codec found for a type where one is given, and derived where none is, made once it is first needed so that a type can hold itself. */
 private[avro] final class Resolved[A](make: => AvroCodec[A]):

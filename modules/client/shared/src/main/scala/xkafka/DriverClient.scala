@@ -408,14 +408,20 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     if partitions.isEmpty then F.pure(Vector.empty)
     else
       val entries = partitions.toVector
-      untilAnswered(client(driver.committed(client.handle, entries, settings.requestTimeout.toMillis.toInt)), 0).map: stored =>
-        entries.zip(stored).flatMap: (partition, value) =>
-          if value.offset >= 0L then Some(StartAt(partition, value.offset, value.leaderEpoch))
-          else
-            settings.autoOffsetReset match
-              case AutoOffsetReset.Earliest => Some(StartAt(partition, BeginningOffset, -1))
-              case AutoOffsetReset.Latest   => Some(StartAt(partition, EndOffset, -1))
-              case AutoOffsetReset.Fail     => None
+      untilAnswered(client(driver.committed(client.handle, entries, settings.requestTimeout.toMillis.toInt)), 0).flatMap(paired(entries, _)).map:
+        stored =>
+          stored.flatMap: (partition, value) =>
+            if value.offset >= 0L then Some(StartAt(partition, value.offset, value.leaderEpoch))
+            else
+              settings.autoOffsetReset match
+                case AutoOffsetReset.Earliest => Some(StartAt(partition, BeginningOffset, -1))
+                case AutoOffsetReset.Latest   => Some(StartAt(partition, EndOffset, -1))
+                case AutoOffsetReset.Fail     => None
+
+  /** Each of `requested` with the backend's answer for it, which comes in request order, one for each. */
+  private def paired[A, B](requested: Vector[A], answers: Vector[B]): F[Vector[(A, B)]] =
+    if answers.size == requested.size then F.pure(requested.zip(answers))
+    else F.raiseError(new KafkaException.InvalidBackendResponse(s"expected ${requested.size} answers, got ${answers.size}"))
 
   /** Refuses times before 1970, which Kafka cannot hold: the Java client refuses them, and librdkafka would take -1 and -2 for the latest and
     * earliest offsets.
@@ -801,8 +807,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else
         val entries = topicPartitions.toVector
-        client(driver.committed(client.handle, entries, requestTimeoutMillis))
-          .flatMap(values => F.delay(entries.zip(values).map((tp, value) => tp -> Option.when(value.offset >= 0L)(stored(value))).toMap))
+        client(driver.committed(client.handle, entries, requestTimeoutMillis)).flatMap(paired(entries, _))
+          .flatMap(values => F.delay(values.map((tp, value) => tp -> Option.when(value.offset >= 0L)(stored(value))).toMap))
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "beginning offset", (low, _) => low)
@@ -814,9 +820,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       if timestampsToSearch.isEmpty then F.pure(Map.empty)
       else
         val entries = timestampsToSearch.toVector
-        before1970(timestampsToSearch.values.toList) *> client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis)).flatMap:
-          values =>
-            F.delay(entries.zip(values).map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
+        before1970(timestampsToSearch.values.toList) *> client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis))
+          .flatMap(paired(entries, _)).flatMap: values =>
+            F.delay(values.map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
 
     override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] = client(readPartitionsFor(client.handle, requestTimeoutMillis, topic))
 

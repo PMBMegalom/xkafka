@@ -85,7 +85,8 @@ Each named type is a file of its own, in the package of its namespace:
 Documentation and aliases become `@SchemaDoc` and `@SchemaAlias`. A name that
 is a Scala keyword, such as `type`, is written in backquotes. A field or symbol
 named as a case class's or enum's own members are, such as `copy` or `values`,
-takes an underscore in Scala, `copy_`, and keeps its name in the schema.
+or a symbol named `avroSchema`, as the companion's schema is, takes an
+underscore in Scala, `copy_`, and keeps its name in the schema.
 
 Each type's companion holds the schema it was generated from, `avroSchema`, and
 its codec, which must have that schema: the codec is made with

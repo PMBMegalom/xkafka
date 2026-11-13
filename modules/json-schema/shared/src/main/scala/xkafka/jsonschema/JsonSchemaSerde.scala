@@ -28,7 +28,7 @@ import cats.syntax.all.*
 import fs2.Chunk
 import io.circe.{jawn, Json}
 import xkafka.{Deserializer, Serde}
-import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
+import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Utf8, Writing}
 
 /** A record as it was written: the schema its writer registered, and its JSON. */
 final case class JsonSchemaWritten(schema: Json, value: Json)
@@ -57,7 +57,8 @@ object JsonSchemaFormat:
     else jawn.parse(schema.text).leftMap(error => s"the schema is not JSON: ${error.message}")
 
   private[jsonschema] def read(bytes: Chunk[Byte]): Either[String, Json] =
-    jawn.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).leftMap(error => s"the record is not JSON: ${error.message}")
+    Utf8.decode(bytes.toArray).leftMap(_ => "the record is not UTF-8")
+      .flatMap(text => jawn.parse(text).leftMap(error => s"the record is not JSON: ${error.message}"))
       .filterOrElse(shallow, s"the record is nested more than $MaxDepth deep")
 
   /** Whether no array or object in `json` is inside `MaxDepth` others, found without recursion, so that no record runs the stack out. */

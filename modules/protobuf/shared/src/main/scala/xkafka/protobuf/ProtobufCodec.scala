@@ -33,7 +33,7 @@ import scala.util.Try
 
 import cats.syntax.all.*
 import fs2.Chunk
-import xkafka.schemaregistry.{Decimals, DefaultOf, Meta}
+import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown, Utf8}
 
 /** A message or enum that a .proto file declares, by its names, with its declaration once it is asked for, so that a type can hold itself. */
 private[protobuf] final case class Declared(namespace: Option[String], simple: String, message: Boolean, body: () => Body):
@@ -234,20 +234,19 @@ object ProtobufCodec:
     ) { case Raw.Fixed64(value) => java.lang.Double.longBitsToDouble(value) }
 
   given ProtobufCodec[String] =
-    scalar[String]("string", ProtobufWire.BytesType, "", _.isEmpty)(value => Raw.Bytes(Chunk.array(value.getBytes(StandardCharsets.UTF_8)))) {
-      case Raw.Bytes(value) => new String(value.toArray, StandardCharsets.UTF_8)
-    }
+    scalar[Chunk[Byte]]("string", ProtobufWire.BytesType, Chunk.empty, _.isEmpty)(Raw.Bytes(_)) { case Raw.Bytes(value) => value }
+      .emap(value => Utf8.decode(value.toArray))(value => Chunk.array(value.getBytes(StandardCharsets.UTF_8)))
 
   given ProtobufCodec[Chunk[Byte]] =
     scalar[Chunk[Byte]]("bytes", ProtobufWire.BytesType, Chunk.empty, _.isEmpty)(Raw.Bytes(_)) { case Raw.Bytes(value) => value }
 
   /** Text that `parse` reads, which a field of reads as `empty` where it is absent. */
   private def text[A](parse: String => A)(write: A => String): ProtobufCodec[A] =
-    ProtobufCodec[String].emap(value => Try(parse(value)).toEither.leftMap(_ => s"'$value' is not in its ISO-8601 form"))(write)
+    ProtobufCodec[String].emap(value => Try(parse(value)).toEither.leftMap(_ => s"'${Shown(value)}' is not in its ISO-8601 form"))(write)
 
   /** A decimal number as text, as `BigDecimal` writes it. */
   given ProtobufCodec[BigDecimal] =
-    ProtobufCodec[String].emap(value => Try(BigDecimal(value)).toEither.leftMap(_ => s"'$value' is not a decimal number"))(_.toString)
+    ProtobufCodec[String].emap(value => Try(BigDecimal(value)).toEither.leftMap(_ => s"'${Shown(value)}' is not a decimal number"))(_.toString)
 
   /** A decimal number of a field marked `SchemaDecimal`, written as any `BigDecimal` is: Protobuf records no precision. */
   given [P <: Int, S <: Int]: ProtobufCodec[Decimals.Decimal[P, S]] = Decimals.lift(ProtobufCodec[BigDecimal])
@@ -516,7 +515,8 @@ private[protobuf] final class EnumCodec[A](named: Meta.Named, values: List[(Case
     Body(ProtobufCodec.comment(named.doc, "") + s"enum ${named.name} {\n${lines.mkString}}", Nil, Nil, Nil)
 
   private def numberOf(value: A): Either[String, Int] =
-    values.collectFirst { case (known, _) if known.test.unapply(value).isDefined => known.number }.toRight(s"$value is none of the cases of $full")
+    values.collectFirst { case (known, _) if known.test.unapply(value).isDefined => known.number }
+      .toRight(s"${Shown(value)} is none of the cases of $full")
 
   override def wire: Int                          = ProtobufWire.VarintType
   override def zero(value: A): Boolean            = numberOf(value).contains(0)
@@ -559,7 +559,7 @@ private[protobuf] final class OneofCodec[A](named: Meta.Named, cases: List[Case[
 
   override def put(value: A): Either[String, Raw] =
     cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => known.codec.write(known.number, narrowed, presence = true)))
-      .getOrElse(Left(s"$value is none of the cases of $full")).map(Raw.Bytes(_))
+      .getOrElse(Left(s"${Shown(value)} is none of the cases of $full")).map(Raw.Bytes(_))
 
   override def take(raw: Raw): Either[String, A] = takeWithin(raw, 0)
 

@@ -81,12 +81,15 @@ private[xkafka] object LibraryStore:
 
   /** Opens the store at `path`, making it where there is none, finding keys by the time `time` reads if given. */
   def open[F[_]](access: RocksdbAccess[F], path: String, time: Option[TaskStore.TimeOf])(using F: Concurrent[F]): F[TaskStore[F]] =
-    access.open(path, Families).flatMap: db =>
-      val prefix = Position.getBytes
-      (access.get(db, Meta, ClockKey), access.range(db, Meta, Some(prefix), StoreContents.past(Chunk.array(prefix)).map(_.toArray))).tupled.flatMap:
-        (clock, held) =>
-          val positions = held.flatMap((key, value) => new String(key).drop(Position.length).toIntOption.map(_ -> long(value))).toMap
-          (Ref.of[F, Long](clock.fold(WindowStore.NoTime)(long)), Ref.of[F, Map[Int, Long]](positions)).mapN(new Store(access, db, time, _, _))
+    // A store that cannot be read once open, or whose opening is cancelled, is closed again, so that RocksDB's lock on its directory goes with it.
+    F.uncancelable: _ =>
+      access.open(path, Families).flatMap: db =>
+        val prefix = Position.getBytes
+        (access.get(db, Meta, ClockKey), access.range(db, Meta, Some(prefix), StoreContents.past(Chunk.array(prefix)).map(_.toArray))).tupled.flatMap:
+          (clock, held) =>
+            val positions = held.flatMap((key, value) => new String(key).drop(Position.length).toIntOption.map(_ -> long(value))).toMap
+            (Ref.of[F, Long](clock.fold(WindowStore.NoTime)(long)), Ref.of[F, Map[Int, Long]](positions)).mapN(new Store(access, db, time, _, _))
+        .onError(_ => access.close(db))
 
   private def long(bytes: Array[Byte]): Long = ByteBuffer.wrap(bytes).getLong
 

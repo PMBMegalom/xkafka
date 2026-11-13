@@ -483,6 +483,21 @@ final class DriverClientSuite extends CatsEffectSuite:
       assertEquals(one, NonEmptyMap.one(eventsAt(0), Right(())))
       assert(two.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]), s"a short answer should be refused, got $two")
 
+  test("offsets the backend answers for a different number of partitions than asked fail as an invalid response"):
+    def invalid(outcome: Either[Throwable, ?]) = outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse])
+    FakeDriver().flatMap: fake =>
+      val client = new DriverClient[IO](fake)
+      val named  = Selection.Partitions(NonEmptySet.one(eventsZero))
+      (
+        client.consumer(consumerSettings, topics).use(_.committed(Set(eventsZero))).attempt,
+        client.consumer(consumerSettings, topics).use(_.offsetsForTimes(Map(eventsZero -> Timestamp.fromEpochMillis(0L)))).attempt,
+        client.consumer(consumerSettings, named).use_.attempt
+      ).tupled.timeout(10.seconds)
+    .map: (committed, searched, started) =>
+      assert(invalid(committed), committed)
+      assert(invalid(searched), searched)
+      assert(invalid(started), started)
+
   test("a topic's partitions are never empty: one the backend knows none for is unknown, and a listing with such a topic is an invalid response"):
     FakeDriver().flatMap: fake =>
       consuming(fake): consumer =>
@@ -789,12 +804,14 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = record("resume")
 
-    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = unused("committed")
+    // Answers for one partition fewer than asked, as no backend should.
+    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] =
+      IO.pure(partitions.drop(1).map(_ => StoredOffset(1L, -1, "")))
 
     override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)] = unused("watermarks")
 
     override def offsetsForTimes(consumer: Client, searches: Vector[(TopicPartition, Timestamp)], timeoutMillis: Int): IO[Vector[Long]] =
-      unused("offsetsForTimes")
+      IO.pure(searches.drop(1).map(_ => 1L))
 
     override def positions(consumer: Client, partitions: Vector[TopicPartition]): IO[Vector[Long]] = unused("positions")
 

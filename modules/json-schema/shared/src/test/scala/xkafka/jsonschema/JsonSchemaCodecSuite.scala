@@ -95,6 +95,10 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
     val bytes = Chunk.array("""{"n":9007199254740993}""".getBytes("UTF-8"))
     assertEquals(JsonSchemaFormat.read(bytes).flatMap(JsonSchemaCodec[Big].decode), Right(Big(9007199254740993L)))
 
+  test("a record that is not UTF-8 is refused, not read with its bad bytes replaced"):
+    assertEquals(JsonSchemaFormat.read(Chunk[Byte]('"', 'a', 0xff.toByte, '"')), Left("the record is not UTF-8"))
+    assertEquals(JsonSchemaFormat.read(Chunk.array("\"é\"".getBytes("UTF-8"))), Right(Json.fromString("é")))
+
   test("records nested deeper than the limit are refused, not read until the stack runs out"):
     val nested = Chunk.array(("[" * 1000 + "]" * 1000).getBytes("UTF-8"))
     assertEquals(JsonSchemaFormat.read(nested), Left(s"the record is nested more than ${JsonSchemaFormat.MaxDepth} deep"))
@@ -214,3 +218,7 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       assertEquals(read, Line("apple", 1))
       assertEquals(written, JsonSchemaWritten(JsonSchemaCodec[LineBefore].schema, json("""{"sku":"apple"}""")))
       assertEquals(subject.map(_.schema.schemaType), Some(SchemaType.Json))
+
+  test("a large value an error names is cut short, saying how long it was"):
+    val refused = JsonSchemaCodec[Line].decode(Json.fromString("x" * 100000))
+    assert(refused.left.exists(reason => reason.length < 300 && reason.endsWith("... (100002 characters)")), refused)

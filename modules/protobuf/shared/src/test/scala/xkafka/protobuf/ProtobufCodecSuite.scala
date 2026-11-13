@@ -475,3 +475,16 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         case Left(error: RegistryException.NoSchema) => assert(error.reason.contains("a list holding lists"), error.reason)
         case other                                   => fail(s"expected no schema, got $other")
       assertEquals(asked, Vector.empty, "nothing is registered")
+
+  test("text that is not UTF-8 is refused, not read with its bad bytes replaced"):
+    val read = ProtobufCodec[Line].decode(bytes(0x0a, 2, 'a', 0xff))
+    assert(read.left.exists(_.contains("is not UTF-8")), read)
+    assertEquals(ProtobufCodec[Line].decode(bytes(0x0a, 2, 0xc3, 0xa9)), Right(Line("é", 1)))
+
+  test("a large value an error names is cut short, saying how long it was"):
+    final case class Day(
+        @ProtobufField(1)
+        day: LocalDate
+    ) derives ProtobufCodec
+    val refused = ProtobufCodec[Day].decode(bytes(0x0a, 0xe8, 0x07) ++ Chunk.array(Array.fill(1000)('x'.toByte)))
+    assert(refused.left.exists(reason => reason.length < 300 && reason.contains("... (1000 characters)")), refused)

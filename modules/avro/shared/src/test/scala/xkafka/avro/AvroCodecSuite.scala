@@ -372,3 +372,7 @@ class AvroCodecSuite extends FunSuite:
     val bytes = AvroFormat[Line].writer(AvroFormat[Line].schema).flatMap(_(Line("x", 2)))
     val read  = bytes.flatMap(written => AvroFormat[Status].reader(AvroFormat[Line].schema).flatMap(_(written)))
     assert(read.left.exists(_.contains("cannot read what")), read.toString)
+
+  test("a large value an error names is cut short, saying how long it was"):
+    val refused = AvroCodec[Line].decode(AvroValue.String("x" * 100000))
+    assert(refused.left.exists(reason => reason.length < 300 && reason.endsWith("... (100008 characters)")), refused)

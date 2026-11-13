@@ -381,3 +381,10 @@ class ProtobufGenericSuite extends CatsEffectSuite:
             .Message("google.protobuf.Timestamp", Vector("seconds" -> ProtobufValue.Int64(1794294000L), "nanos" -> ProtobufValue.Int32(123000000)))
         )
       )
+
+  test("text that is not UTF-8 is refused, in a field and in a map's key"):
+    val file  = parsed("syntax = \"proto3\"; message T { string s = 1; map<string, int32> m = 2; }")
+    val field = dynamic(file).decode("T", Chunk[Byte](0x0a, 1, 0xff.toByte))
+    assert(field.left.exists(_.contains("is not UTF-8")), field)
+    val key = dynamic(file).decode("T", Chunk[Byte](0x12, 3, 0x0a, 1, 0xff.toByte))
+    assert(key.left.exists(_.contains("is not UTF-8")), key)

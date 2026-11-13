@@ -646,7 +646,7 @@ private[codegen] object JsonScala:
 
   def scaladoc(doc: Option[String], params: List[(String, String)]): String =
     // Scala's comments nest, so text must neither end the comment nor open another inside it.
-    def safe(text: String) = text.replace("*/", "*&#47;").replace("/*", "&#47;*")
+    def safe(text: String) = Names.paired(text).replace("*/", "*&#47;").replace("/*", "&#47;*")
     val lines              =
       doc.toList.flatMap(text => safe(text).linesIterator.toList) ++ (if params.nonEmpty && doc.nonEmpty then List("") else Nil) ++
         params.map((name, text) => s"@param $name ${safe(text).linesIterator.mkString(" ")}")

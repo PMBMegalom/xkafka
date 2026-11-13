@@ -93,8 +93,10 @@ private[xkafka] object Held:
   /** A change as [[Held.encode]] writes it, or none where it is not one. */
   def decode(bytes: Chunk[Byte]): Option[Held] =
     Try:
-      val buffer             = ByteBuffer.wrap(bytes.toArray)
+      val buffer = ByteBuffer.wrap(bytes.toArray)
+      // A length is checked against the bytes left before room is made for it, so that a damaged change asks for no more.
       def array(length: Int) =
+        if length < 0 || length > buffer.remaining then throw new java.nio.BufferUnderflowException
         val read = new Array[Byte](length); buffer.get(read); read
       def part(): Option[Chunk[Byte]] =
         buffer.getInt match

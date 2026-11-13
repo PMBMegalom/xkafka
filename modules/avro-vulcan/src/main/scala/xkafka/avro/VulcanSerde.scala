@@ -92,5 +92,7 @@ private[avro] object VulcanBinary:
 
   /** The value `bytes` hold, written with `writer`, as `reader` describes it. */
   def read(writer: ApacheSchema, reader: ApacheSchema, bytes: Chunk[Byte]): Either[String, Any] =
-    Either.catchNonFatal(new GenericDatumReader[Any](writer, reader).read(null, DecoderFactory.get.binaryDecoder(bytes.toArray, null)))
+    val decoder = DecoderFactory.get.binaryDecoder(bytes.toArray, null)
+    Either.catchNonFatal((new GenericDatumReader[Any](writer, reader).read(null, decoder), decoder.inputStream.available))
       .leftMap(error => s"the record cannot be read: ${error.getMessage}")
+      .flatMap((value, left) => Either.cond(left == 0, value, s"$left bytes are left after the value"))

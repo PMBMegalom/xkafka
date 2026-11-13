@@ -68,6 +68,7 @@ enum SchemaRegistryError derives CanEqual:
   case NegativeLatestCacheTime(value: FiniteDuration)
   case EmptySubject
   case CredentialsInUrl
+  case DotSubject(value: String)
 
   def message: String =
     this match
@@ -75,6 +76,7 @@ enum SchemaRegistryError derives CanEqual:
       case NegativeLatestCacheTime(value) => s"the time a latest version is kept must not be negative, but was $value"
       case EmptySubject                   => "a subject must not be empty"
       case CredentialsInUrl               => "a registry URL must not hold credentials: give them to the HTTP client, which sends them"
+      case DotSubject(value)              => s"a subject must not be '$value', which a URL path reads as a step between folders"
 
 object SchemaRegistryError:
   given Show[SchemaRegistryError] = Show.show(_.message)

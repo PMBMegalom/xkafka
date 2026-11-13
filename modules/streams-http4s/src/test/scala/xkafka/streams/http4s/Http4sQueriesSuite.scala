@@ -57,6 +57,13 @@ class Http4sQueriesSuite extends CatsEffectSuite:
         List((Method.POST, Uri.unsafeFromString("http://orders-3.internal:8080/xkafka/query")))
       )
 
+  test("a member at an IPv6 address is reached at it in brackets, and one at a name or an IPv4 address as it is"):
+    def at(host: String) = Http4sQueries.uri(Endpoint.from(host, 8080).toOption.get).renderString
+    assertEquals(at("::1"), "http://[::1]:8080/xkafka/query")
+    assertEquals(at("[fe80::1]"), "http://[fe80::1]:8080/xkafka/query")
+    assertEquals(at("10.0.0.7"), "http://10.0.0.7:8080/xkafka/query")
+    assertEquals(at("orders-3.internal"), "http://orders-3.internal:8080/xkafka/query")
+
   test("another path and scheme are posted to and answered at"):
     val path = Uri.Path.unsafeFromString("/internal/queries")
     for

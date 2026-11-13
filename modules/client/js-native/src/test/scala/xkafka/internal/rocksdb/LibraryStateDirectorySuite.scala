@@ -105,3 +105,19 @@ final class LibraryStateDirectorySuite extends CatsEffectSuite:
           assertEquals(recent, held)
           assertEquals(cleaned, Map("0_2" -> Map("counts" -> 2L), "notes" -> Map("counts" -> 1L)), "a directory no task is named as is not removed")
           assertEquals(global, None)
+
+  test("a store that fails to open after RocksDB opened it lets go of it, so that it can be opened again"):
+    PlatformRocksdb.temporaryDirectory.use: root =>
+      PlatformStateDirectory[IO](root, "app").use: directory =>
+        // A clock is eight bytes, so one of three cannot be read.
+        val damage =
+          PlatformRocksdb.open(s"$root/app/0_1/store", Vector("default", "time", "meta")).flatMap: store =>
+            PlatformRocksdb.write(store, Vector(RocksdbWrite.Put(2, "clock".getBytes, Array[Byte](1, 2, 3)))).guarantee(PlatformRocksdb.close(store))
+        for
+          _     <- directory.open("0_1", "store", None).flatMap(_.close)
+          _     <- damage
+          first <- directory.open("0_1", "store", None).attempt
+          again <- directory.open("0_1", "store", None).attempt
+        yield
+          assert(first.left.exists(_.isInstanceOf[java.nio.BufferUnderflowException]), first)
+          assert(again.left.exists(_.isInstanceOf[java.nio.BufferUnderflowException]), again)

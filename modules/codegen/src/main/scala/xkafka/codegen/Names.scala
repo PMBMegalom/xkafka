@@ -170,6 +170,18 @@ private[codegen] object Names:
       val cut = if value.charAt(ConstantChars - 1).isHighSurrogate then ConstantChars - 1 else ConstantChars
       value.take(cut) :: parts(value.drop(cut))
 
+  /** `text` with each half of a surrogate pair that stands alone replaced by the replacement character, since UTF-8 cannot hold it, for text that
+    * escapes do not reach, such as documentation.
+    */
+  def paired(text: String): String =
+    text.indices.map: index =>
+      val character = text(index)
+      val alone     =
+        character.isHighSurrogate && !(index + 1 < text.length && text(index + 1).isLowSurrogate) ||
+          character.isLowSurrogate && !(index > 0 && text(index - 1).isHighSurrogate)
+      if alone then '\ufffd' else character
+    .mkString
+
   def quote(text: String): String =
     text.flatMap:
       case '"'                                                   => "\\\""
@@ -178,5 +190,7 @@ private[codegen] object Names:
       case '\r'                                                  => "\\r"
       case '\t'                                                  => "\\t"
       case character if character < ' ' || character == '\u007f' => f"\\u${character.toInt}%04x"
-      case character                                             => character.toString
+      // Half of a surrogate pair cannot be written in UTF-8 alone, so each half is written as an escape, which reads back as it was.
+      case character if character.isSurrogate => f"\\u${character.toInt}%04x"
+      case character                          => character.toString
     .mkString("\"", "", "\"")

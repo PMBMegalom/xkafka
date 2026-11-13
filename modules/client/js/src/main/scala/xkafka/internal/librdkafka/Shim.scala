@@ -367,6 +367,19 @@ private[internal] object Completions:
     waiting.remove(token): Unit
     settle()
 
+  /** Makes `call`, the start of the call `token` was given for, forgetting the call where starting it throws, as koffi does for arguments it cannot
+    * pass.
+    */
+  def guarded[A](token: Long)(call: => A): A =
+    try call
+    catch
+      case failure: Throwable =>
+        forget(token)
+        throw failure
+
+  /** How many calls have not reported yet. */
+  private[internal] def outstanding: Int = waiting.size
+
   private def complete(token: Long): Unit =
     val onDone = waiting.remove(token)
     settle()

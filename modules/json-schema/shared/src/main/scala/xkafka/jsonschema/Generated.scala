@@ -28,6 +28,7 @@ import scala.util.Try
 
 import cats.syntax.all.*
 import io.circe.{Json, JsonObject}
+import xkafka.schemaregistry.Shown
 
 /** What the classes xkafka-codegen generates from JSON Schema files call: codecs of their schemas, and the writing and reading of their properties.
   */
@@ -53,13 +54,15 @@ object Generated:
 
   /** A time of day with its offset from UTC, JSON Schema's `time`, written with its seconds, as RFC 3339 has it. */
   val time: JsonSchemaCodec[OffsetTime] =
-    JsonSchemaCodec[String].emap(text => Try(OffsetTime.parse(text)).toEither.leftMap(_ => s"'$text' is not a time with an offset"))(_.format(
-      DateTimeFormatter.ISO_OFFSET_TIME
-    ))
+    JsonSchemaCodec[String]
+      .emap(text => Try(OffsetTime.parse(text)).toEither.leftMap(_ => s"'${Shown(text)}' is not a time with an offset"))(_.format(
+        DateTimeFormatter.ISO_OFFSET_TIME
+      ))
 
   /** An instant, JSON Schema's `date-time`, read with any offset from UTC and written in UTC. */
   val dateTime: JsonSchemaCodec[Instant] =
-    JsonSchemaCodec[String].emap(text => Try(OffsetDateTime.parse(text).toInstant).toEither.leftMap(_ => s"'$text' is not a date-time"))(_.toString)
+    JsonSchemaCodec[String]
+      .emap(text => Try(OffsetDateTime.parse(text).toInstant).toEither.leftMap(_ => s"'${Shown(text)}' is not a date-time"))(_.toString)
 
   /** An object of `properties`, each written where it is not left out. */
   def write(properties: Either[String, Option[(String, Json)]]*): Either[String, Json] =
@@ -78,7 +81,7 @@ object Generated:
 
   /** The properties of `json`, an object of the type `name`, whose properties are `known`; where `strict`, it must have no others. */
   def read(json: Json, name: String, strict: Boolean, known: Set[String]): Either[String, JsonObject] =
-    json.asObject.toRight(s"expected an object of $name, found ${json.noSpaces}").flatMap: fields =>
+    json.asObject.toRight(s"expected an object of $name, found ${Shown(json.noSpaces)}").flatMap: fields =>
       fields.keys.filterNot(known).toList match
         case others if strict && others.nonEmpty => Left(s"$name has no properties ${others.mkString(", ")}")
         case _                                   => Right(fields)
@@ -107,10 +110,11 @@ object Generated:
 
   /** The text of each of an enum's values, written and read as text. */
   def symbols[A](name: String, symbols: List[(A, String)]): (A => Either[String, Json], Json => Either[String, A]) = (
-    value => symbols.collectFirst { case (known, text) if known == value => Json.fromString(text) }.toRight(s"$value is not a value of $name"),
+    value =>
+      symbols.collectFirst { case (known, text) if known == value => Json.fromString(text) }.toRight(s"${Shown(value)} is not a value of $name"),
     json =>
       json.asString.flatMap(text => symbols.collectFirst { case (known, `text`) => known })
-        .toRight(s"expected a value of $name, found ${json.noSpaces}")
+        .toRight(s"expected a value of $name, found ${Shown(json.noSpaces)}")
   )
 
   /** Reads a value of the `oneOf` or `anyOf` `name` by its `branches`, named, each reading strictly, refusing properties its schema does not name, or
@@ -121,8 +125,8 @@ object Generated:
     json =>
       def reading(strict: Boolean) = branches.flatMap((branch, read) => read(json, strict).toOption.map(branch -> _))
       reading(strict = true).some.filter(_.nonEmpty).getOrElse(reading(strict = false)) match
-        case Nil                            => Left(s"expected a value of $name, found ${json.noSpaces}, which none of its branches reads")
+        case Nil                            => Left(s"expected a value of $name, found ${Shown(json.noSpaces)}, which none of its branches reads")
         case (_, value) :: Nil              => Right(value)
         case (_, value) :: _ if !exactlyOne => Right(value)
         case several                        =>
-          Left(s"expected a value of exactly one branch of $name, found ${json.noSpaces}, which ${several.map(_._1).mkString(", ")} all read")
+          Left(s"expected a value of exactly one branch of $name, found ${Shown(json.noSpaces)}, which ${several.map(_._1).mkString(", ")} all read")

@@ -158,6 +158,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(error.retriable, Some(true))
       assertEquals(error.getCause, cause)
 
+  test("a Java client failure while the consumer closes reaches the application as one of xkafka's"):
+    val cause    = new TimeoutException("closing timed out")
+    val consumer =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        override def close(): Unit = throw cause
+    consumer.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
+    interceptIO[KafkaException.BackendFailure](consuming(consumer)(_ => IO.unit)).map(error => assertEquals(error.getCause, cause))
+
   test("producer delegates serialization and production to the Java producer"):
     val mock    = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
     val backend =

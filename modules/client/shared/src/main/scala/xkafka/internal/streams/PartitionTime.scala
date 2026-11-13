@@ -60,7 +60,10 @@ private[xkafka] object PartitionTime:
         val count = meta.getInt
         Map.from(
           List.fill(count):
-            val name = new Array[Byte](meta.getInt)
+            val length = meta.getInt
+            // Checked against the bytes left before room is made for it, so that damaged metadata asks for no more.
+            if length < 0 || length > meta.remaining then throw new java.nio.BufferUnderflowException
+            val name = new Array[Byte](length)
             meta.get(name)
             String(name, UTF_8) -> meta.getLong
         )

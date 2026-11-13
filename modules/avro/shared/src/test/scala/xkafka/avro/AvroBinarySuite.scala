@@ -151,3 +151,20 @@ class AvroBinarySuite extends ScalaCheckSuite:
     assertEquals(AvroSchemaJson.parse("""{"type":"string","logicalType":"date"}"""), Right(AvroSchema.String))
     assertEquals(AvroSchemaJson.parse("""{"type":"long","logicalType":"made-up"}"""), Right(AvroSchema.Long))
     assertEquals(AvroSchemaJson.parse("""{"type":"bytes","logicalType":"decimal","precision":2,"scale":3}"""), Right(AvroSchema.Bytes))
+
+  test("a record each of whose fields uses the next record is planned once for each record, however often it is used"):
+    // R0 holds two R1, which hold two R2, and so on: planned once for each use, R39 would be planned 2^39 times.
+    val records = (0 until 40).foldRight("""{"type":"record","name":"R40","fields":[{"name":"n","type":"null"}]}"""): (level, inner) =>
+      s"""{"type":"record","name":"R$level","fields":[{"name":"a","type":$inner},{"name":"b","type":"R${level + 1}"}]}"""
+    val schema = parsed(s"""{"type":"array","items":$records}""")
+    assertEquals(AvroBinary.decode(schema, bytes(0x00)), Right(AvroValue.Array(Vector.empty)))
+    val skipping = parsed(s"""{"type":"record","name":"Outer","fields":[{"name":"r","type":$records}]}""")
+    assert(AvroBinary.decoder(skipping, parsed("""{"type":"record","name":"Outer","fields":[]}""")).isRight)
+
+  test("a number whose tenth byte holds bits past 64 is refused, not read without them"):
+    val overlong = bytes(0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f)
+    assertEquals(AvroBinary.decode(AvroSchema.Long, overlong), Left("a number does not fit 64 bits"))
+    assertEquals(
+      AvroBinary.decode(AvroSchema.Long, bytes(0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01)),
+      Right(AvroValue.Long(Long.MaxValue))
+    )

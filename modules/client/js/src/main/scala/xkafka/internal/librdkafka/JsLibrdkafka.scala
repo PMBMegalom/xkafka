@@ -61,7 +61,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     shim.flatMap: loaded =>
       F.async_[Unit]: callback =>
         val token   = Completions.expect(arguments)(() => callback(Right(())))
-        val started = function(loaded)((arguments ++ Seq[js.Any](Completions.done, bigInt(token)))*)
+        val started = Completions.guarded(token)(function(loaded)((arguments ++ Seq[js.Any](Completions.done, bigInt(token)))*))
         if started.asInstanceOf[Int] != 0 then
           Completions.forget(token)
           callback(Left(Failures.plain("could not start a thread for a librdkafka call")))

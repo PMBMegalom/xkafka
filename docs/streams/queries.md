@@ -28,7 +28,8 @@ libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-streams-http4s" % "@VE
 `Http4sQueries.forward(client)` posts each query to the member that holds the
 key, through your http4s client, and `Http4sQueries.routes(streams)` is the
 internal route that answers them. Both use the path `/xkafka/query` unless you
-give another. This example serves the route and reaches other members with
+give another. An endpoint's host may be a name or an IPv4 or IPv6 address, the
+IPv6 one with or without brackets. This example serves the route and reaches other members with
 Ember, from `http4s-ember-server` and `http4s-ember-client`, which you add
 yourself; any http4s client and server work:
 

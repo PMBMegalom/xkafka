@@ -63,8 +63,22 @@ private[xkafka] object RocksdbStore:
       val handles                = new java.util.ArrayList[ColumnFamilyHandle]()
       val db                     = RocksDB.open(options, directory.toString, names.map(new ColumnFamilyDescriptor(_, family)).asJava, handles)
       def long(key: Array[Byte]) = Option(db.get(handles.get(2), key)).map(ByteBuffer.wrap(_).getLong)
-      val positions              = positionsIn(db, handles.get(2))
-      Opened(db, handles.asScala.toList, List(options, family, cache, filter), time, long(ClockKey).getOrElse(WindowStore.NoTime), positions)
+      // A store that cannot be read once open is closed again, so that RocksDB's lock on its directory goes with it.
+      try
+        Opened(
+          db,
+          handles.asScala.toList,
+          List(options, family, cache, filter),
+          time,
+          long(ClockKey).getOrElse(WindowStore.NoTime),
+          positionsIn(db, handles.get(2))
+        )
+      catch
+        case failure: Throwable =>
+          handles.asScala.foreach(_.close())
+          db.close()
+          List(options, family, cache, filter).foreach(_.close())
+          throw failure
     }.flatMap(opened => (Ref.of[F, Long](opened.clock), Ref.of[F, Map[Int, Long]](opened.positions)).mapN(new Store(opened, _, _)))
 
   /** What an open store holds open, the column families to close before the database and the options after it, and its clock and position. */

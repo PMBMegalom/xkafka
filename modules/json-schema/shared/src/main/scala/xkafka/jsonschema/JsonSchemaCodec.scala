@@ -32,7 +32,7 @@ import scala.util.Try
 import cats.syntax.all.*
 import fs2.Chunk
 import io.circe.Json
-import xkafka.schemaregistry.{Decimals, DefaultOf, Meta}
+import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown}
 
 /** A schema as it is described inside another: its JSON, and the types it names by reference, by name, with how to describe each. */
 private[jsonschema] final case class Described(json: Json, definitions: Map[String, () => Described])
@@ -150,8 +150,8 @@ object JsonSchemaCodec:
 
   /** Bytes as base64 text. */
   given JsonSchemaCodec[Chunk[Byte]] =
-    JsonSchemaCodec[String].emap(text => Try(Chunk.array(Base64.getDecoder.decode(text))).toEither.leftMap(_ => s"'$text' is not base64"))(bytes =>
-      Base64.getEncoder.encodeToString(bytes.toArray)
+    JsonSchemaCodec[String].emap(text => Try(Chunk.array(Base64.getDecoder.decode(text))).toEither.leftMap(_ => s"'${Shown(text)}' is not base64"))(
+      bytes => Base64.getEncoder.encodeToString(bytes.toArray)
     ).withSchema(Json.obj("type" -> Json.fromString("string"), "contentEncoding" -> Json.fromString("base64")))
 
   extension [A](codec: JsonSchemaCodec[A])
@@ -160,7 +160,7 @@ object JsonSchemaCodec:
 
   /** Text in ISO-8601 form, with JSON Schema's `format` where it names one. */
   private def text[A](format: Option[String])(parse: String => A)(write: A => String): JsonSchemaCodec[A] =
-    JsonSchemaCodec[String].emap(value => Try(parse(value)).toEither.leftMap(_ => s"'$value' is not in its ISO-8601 form"))(write)
+    JsonSchemaCodec[String].emap(value => Try(parse(value)).toEither.leftMap(_ => s"'${Shown(value)}' is not in its ISO-8601 form"))(write)
       .withSchema(Json.fromFields(List("type" -> Json.fromString("string")) ++ format.map("format" -> Json.fromString(_))))
 
   given JsonSchemaCodec[UUID]      = text(Some("uuid"))(UUID.fromString)(_.toString)
@@ -189,7 +189,7 @@ object JsonSchemaCodec:
         described.copy(json = Json.obj("type" -> Json.fromString("array"), "items" -> described.json))
       override def encode(value: C): Either[String, Json] = items(value).toVector.traverse(inner.encode).map(Json.fromValues)
       override def decode(json: Json): Either[String, C]  =
-        json.asArray.toRight(s"expected an array, found ${json.noSpaces}").flatMap(_.traverse(inner.decode)).map(make)
+        json.asArray.toRight(s"expected an array, found ${Shown(json.noSpaces)}").flatMap(_.traverse(inner.decode)).map(make)
 
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[List[A]]   = array(inner)(identity, _.toList)
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[Vector[A]] = array(inner)(identity, identity)
@@ -204,8 +204,8 @@ object JsonSchemaCodec:
     override def encode(value: Map[String, A]): Either[String, Json] =
       value.toList.traverse((key, item) => inner.encode(item).map(key -> _)).map(Json.fromFields)
     override def decode(json: Json): Either[String, Map[String, A]] =
-      json.asObject.toRight(s"expected an object, found ${json.noSpaces}").flatMap(_.toList.traverse((key, item) => inner.decode(item).map(key -> _)))
-        .map(_.toMap)
+      json.asObject.toRight(s"expected an object, found ${Shown(json.noSpaces)}")
+        .flatMap(_.toList.traverse((key, item) => inner.decode(item).map(key -> _))).map(_.toMap)
 
   /** A field's default as its codec writes it, which derived schemas take. */
   given [A](using resolved: Resolved[A]): DefaultOf[JsonSchemaCodec, Json, A] = value => resolved.codec.encode(value)
@@ -275,7 +275,7 @@ private[jsonschema] final class ObjectCodec[A, T <: Tuple](
     fields.encode(toTuple(value)).bimap(reason => s"$full: $reason", values => Json.fromFields(infos.map(_.name).zip(values)))
 
   override def decode(json: Json): Either[String, A] =
-    json.asObject.toRight(s"expected an object of $full, found ${json.noSpaces}").flatMap: read =>
+    json.asObject.toRight(s"expected an object of $full, found ${Shown(json.noSpaces)}").flatMap: read =>
       // A field is read under its name or one of its aliases; one the record lacks takes its default, and an optional one none.
       infos.lazyZip(written).lazyZip(fields.optional).toList.traverse: (info, default, optional) =>
         (info.name :: info.aliases).collectFirstSome(read(_)).orElse(default).orElse(Option.when(optional)(Json.Null))
@@ -337,7 +337,7 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
 
   override def encode(value: A): Either[String, Json] =
     cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encode(narrowed)))) match
-      case None                   => Left(s"$value is none of the cases of $full")
+      case None                   => Left(s"${Shown(value)} is none of the cases of $full")
       case Some((known, encoded)) =>
         if singletons.isDefined then Right(Json.fromString(known.tag))
         else if known.codec.tags.isDefined then encoded
@@ -350,9 +350,9 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
   override def decode(json: Json): Either[String, A] =
     if singletons.isDefined then
       json.asString.flatMap(name => cases.find(_.tag == name)).flatMap(_.singleton)
-        .toRight(s"expected one of the cases of $full, found ${json.noSpaces}")
+        .toRight(s"expected one of the cases of $full, found ${Shown(json.noSpaces)}")
     else
-      json.hcursor.get[String]("type").leftMap(_ => s"expected an object of a case of $full, with its case in 'type', found ${json.noSpaces}")
+      json.hcursor.get[String]("type").leftMap(_ => s"expected an object of a case of $full, with its case in 'type', found ${Shown(json.noSpaces)}")
         .flatMap: tag =>
           tagged.collectFirst { case (known, owned) if owned.contains(tag) => known.codec.decode(json).map(known.widen) }
             .getOrElse(Left(s"'$tag' is not a case of $full"))
