@@ -56,6 +56,7 @@ milliseconds (about 24.9 days), with these exceptions:
 
 - `linger` may be zero, and at most `ProducerSettings.LingerLimit` (15 minutes).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
+- The streams `taskTimeout` may be zero.
 - The group membership intervals are at most
   `ConsumerSettings.SessionTimeoutLimit` (1 hour),
   `ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
@@ -205,6 +206,7 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | `queryEndpoint` | unset, so other members cannot query this one | where this member answers other members' [queries](streams/queries.md) |
 | `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Keeping stores on disk](streams/running.md#keeping-stores-on-disk)) |
 | `fetchWait` | 500ms | how long the broker may hold a fetch of the application's consumers, from zero up to 5m |
+| `taskTimeout` | 5m | how long the application keeps asking the group's coordinator to read or commit offsets while it is not ready, before it stops with the last refusal; with zero, it stops at the first |
 
 See [Streams](streams/running.md#guarantees) for each of them. `fetchWait` works
 as a [consumer's](#consumer-settings) does, and `fetch.min.bytes`, set in the

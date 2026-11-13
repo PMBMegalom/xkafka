@@ -115,5 +115,13 @@ final class StreamsSettingsSuite extends FunSuite:
     )
     assertEquals(settings.withCloseTimeout(1500.micros), Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("close timeout", 1500.micros)))
     assertEquals(settings.withFetchWait(500.micros), Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("fetch wait", 500.micros)))
+    assertEquals(settings.taskTimeout, StreamsSettings.DefaultTaskTimeout)
+    assertEquals(settings.withTaskTimeout(Duration.Zero).map(_.taskTimeout), Validated.validNel(Duration.Zero))
+    assertEquals(settings.withTaskTimeout((-1).milli), Validated.invalidNel(StreamsSettingsError.NegativeTaskTimeout((-1).milli)))
+    assertEquals(settings.withTaskTimeout(500.micros), Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("task timeout", 500.micros)))
+    assertEquals(
+      StreamsSettings.from(client, app, taskTimeout = (-1).second).toEither.left.map(_.toList),
+      Left(List(StreamsSettingsError.NegativeTaskTimeout((-1).second)))
+    )
     List(".", "..").foreach: id =>
       assertEquals(ApplicationId.from(id), Left(StreamsSettingsError.ReservedApplicationId(id)), "a directory's own names are no application's")

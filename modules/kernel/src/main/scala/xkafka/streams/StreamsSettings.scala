@@ -68,6 +68,7 @@ enum StreamsSettingsError derives CanEqual:
   case FetchWaitOutOfRange(value: FiniteDuration)
   case PartialMilliseconds(setting: String, value: FiniteDuration)
   case ReservedApplicationId(value: String)
+  case NegativeTaskTimeout(value: FiniteDuration)
 
   def message: String =
     this match
@@ -82,6 +83,7 @@ enum StreamsSettingsError derives CanEqual:
       case FetchWaitOutOfRange(value)            => s"fetch wait must be from 0 to ${ConsumerSettings.FetchWaitLimit}, was $value"
       case PartialMilliseconds(setting, value)   => s"$setting must be whole milliseconds, was $value"
       case ReservedApplicationId(value)          => s"application id must not be '$value'"
+      case NegativeTaskTimeout(value)            => s"task timeout must not be negative, was $value"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -117,6 +119,9 @@ final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError
   * @param fetchWait
   *   the longest the broker holds a fetch of the application's consumers while fewer than `fetch.min.bytes` of records wait, as `ConsumerSettings`'
   *   `fetchWait` does for a consumer
+  * @param taskTimeout
+  *   how long the application asks the group's coordinator again while it is not ready to read or commit the group's offsets, or a request to it
+  *   fails in a way worth retrying, before it stops with the last refusal, as Java Streams' `task.timeout.ms`; with zero, it stops at the first
   */
 sealed abstract case class StreamsSettings private (
     client: ClientSettings,
@@ -128,7 +133,8 @@ sealed abstract case class StreamsSettings private (
     topologyDescriptionPush: Boolean,
     stateDirectory: Option[String],
     queryEndpoint: Option[Endpoint],
-    fetchWait: FiniteDuration
+    fetchWait: FiniteDuration,
+    taskTimeout: FiniteDuration
 ):
   def withClient(value: ClientSettings): StreamsSettings = copy(client = value)
 
@@ -174,6 +180,10 @@ sealed abstract case class StreamsSettings private (
   def withFetchWait(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.fetchWaitOf(value).map(valid => copy(fetchWait = valid))
 
+  /** How long the application asks the group's coordinator again before it stops, from zero, which stops it at the first refusal. */
+  def withTaskTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    StreamsSettings.taskTimeoutOf(value).map(valid => copy(taskTimeout = valid))
+
   private def copy(
       client: ClientSettings = client,
       applicationId: ApplicationId = applicationId,
@@ -184,7 +194,8 @@ sealed abstract case class StreamsSettings private (
       topologyDescriptionPush: Boolean = topologyDescriptionPush,
       stateDirectory: Option[String] = stateDirectory,
       queryEndpoint: Option[Endpoint] = queryEndpoint,
-      fetchWait: FiniteDuration = fetchWait
+      fetchWait: FiniteDuration = fetchWait,
+      taskTimeout: FiniteDuration = taskTimeout
   ): StreamsSettings =
     new StreamsSettings(
       client,
@@ -196,11 +207,15 @@ sealed abstract case class StreamsSettings private (
       topologyDescriptionPush,
       stateDirectory,
       queryEndpoint,
-      fetchWait
+      fetchWait,
+      taskTimeout
     ) {}
 
 object StreamsSettings:
   val DefaultCloseTimeout: FiniteDuration = 30.seconds
+
+  /** Java Streams' default `task.timeout.ms`. */
+  val DefaultTaskTimeout: FiniteDuration = 5.minutes
 
   def from(
       client: ClientSettings,
@@ -212,16 +227,18 @@ object StreamsSettings:
       topologyDescriptionPush: Boolean = true,
       stateDirectory: Option[String] = None,
       queryEndpoint: Option[Endpoint] = None,
-      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
+      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait,
+      taskTimeout: FiniteDuration = DefaultTaskTimeout
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
       commitInterval.traverse(positive(_, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))),
       atLeastOne(concurrency),
       positive(closeTimeout, "close timeout")(StreamsSettingsError.NonPositiveCloseTimeout(_)),
       stateDirectory.traverse(directory),
-      fetchWaitOf(fetchWait)
-    ).mapN((interval, tasks, timeout, kept, wait) =>
-      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait) {}
+      fetchWaitOf(fetchWait),
+      taskTimeoutOf(taskTimeout)
+    ).mapN((interval, tasks, timeout, kept, wait, stall) =>
+      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait, stall) {}
     )
 
   // 0.7.0's signature, before the fetch wait, which code compiled against 0.7.0 calls.
@@ -246,7 +263,8 @@ object StreamsSettings:
       topologyDescriptionPush,
       stateDirectory,
       queryEndpoint,
-      ConsumerSettings.DefaultFetchWait
+      ConsumerSettings.DefaultFetchWait,
+      DefaultTaskTimeout
     )
 
   private def directory(value: String): ValidatedNel[StreamsSettingsError, String] =
@@ -259,6 +277,9 @@ object StreamsSettings:
   private def fetchWaitOf(value: FiniteDuration): ValidatedNel[StreamsSettingsError, FiniteDuration] =
     if value >= Duration.Zero && value <= ConsumerSettings.FetchWaitLimit then whole(value, "fetch wait")
     else StreamsSettingsError.FetchWaitOutOfRange(value).invalidNel
+
+  private def taskTimeoutOf(value: FiniteDuration): ValidatedNel[StreamsSettingsError, FiniteDuration] =
+    if value >= Duration.Zero then whole(value, "task timeout") else StreamsSettingsError.NegativeTaskTimeout(value).invalidNel
 
   /** The clients count durations in milliseconds, so a part of one would be dropped, and a duration under one would become none. */
   private def whole(value: FiniteDuration, setting: String): ValidatedNel[StreamsSettingsError, FiniteDuration] =

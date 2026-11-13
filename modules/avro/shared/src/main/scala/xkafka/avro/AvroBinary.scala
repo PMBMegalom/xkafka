@@ -265,7 +265,9 @@ object AvroBinary:
                   lazy val pending: Pending = Pending(made._2)
                   val (after, step)         = made
                   val result                = step.map(_ => through(pending))
-                  (after.copy(done = after.done.updated(pair, result), planning = state.planning), result)
+                  // Pairs planned meanwhile may read through this one, so a failure forgets them, to be planned again and fail as well.
+                  val kept = if result.isLeft then state.done else after.done
+                  (after.copy(done = kept.updated(pair, result), planning = state.planning), result)
 
     private def through(pending: Pending): Step = (bytes, at, depth) => pending.step.flatMap(_(bytes, at, depth))
 

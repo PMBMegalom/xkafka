@@ -38,8 +38,8 @@ import group.{Connections, PlatformCrypto, PlatformSockets}
 import protocol.{OffsetCommitRequest, OffsetFetchRequest, StreamsGroup}
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.streams.{
-  Endpoint, Forward, GlobalStore, KafkaStreams, ProcessingGuarantee, Query, QueryProblem, Source, StreamsPhase, StreamsProblem, StreamsState,
-  Subtopology, Topology
+  Endpoint, Forward, GlobalStore, KafkaStreams, ProcessingGuarantee, Query, QueryProblem, Source, StreamsPhase, StreamsProblem, StreamsSettings,
+  StreamsState, Subtopology, Topology
 }
 
 /** Runs a streams program as one member of its application's group: the tasks the coordinator gives the member read their input partitions through
@@ -114,6 +114,7 @@ private[xkafka] object Engine:
       stateDirectory: Option[String] = None,
       queryEndpoint: Option[Endpoint] = None,
       fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait,
+      taskTimeout: FiniteDuration = StreamsSettings.DefaultTaskTimeout,
       forward: Option[Forward[F]] = None,
       watch: Plane[F] => Plane[F] = identity[Plane[F]]
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
@@ -207,7 +208,8 @@ private[xkafka] object Engine:
           globals,
           state,
           queryEndpoint,
-          forward
+          forward,
+          taskTimeout
         )
     yield running
 
@@ -280,7 +282,8 @@ private[xkafka] object Engine:
       globals: Option[GlobalStores.Held[F]] = None,
       state: Option[StateDirectory[F]] = None,
       own: Option[Endpoint] = None,
-      forward: Option[Forward[F]] = None
+      forward: Option[Forward[F]] = None,
+      taskTimeout: FiniteDuration = StreamsSettings.DefaultTaskTimeout
   )(using F: Async[F]): Resource[F, KafkaStreams[F]] =
     val subtopologies = topology.numbered.map((id, subtopology) => id.toString -> subtopology).toMap
     val unordered     =
@@ -346,7 +349,8 @@ private[xkafka] object Engine:
           open,
           opened,
           state,
-          stores
+          stores,
+          taskTimeout
         )
       running <-
         // The tasks still open once the loop has stopped close with the engine, and with them their processors' instances.
@@ -506,7 +510,8 @@ private[xkafka] object Engine:
       open: TaskStore.Open[F],
       opened: Ref[F, Map[TaskId, Task[F]]],
       state: Option[StateDirectory[F]],
-      holding: Ref[F, Map[TaskId, Map[String, TaskStore[F]]]]
+      holding: Ref[F, Map[TaskId, Map[String, TaskStore[F]]]],
+      taskTimeout: FiniteDuration
   )(using F: Async[F]):
     import MemberAction.*
 
@@ -762,11 +767,11 @@ private[xkafka] object Engine:
 
     /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */
     private def stored(asked: List[OffsetFetchRequest.Topic]): F[Map[(String, Int), OffsetFetchRequest.Stored]] =
-      untilAnswered(member.committed(asked)): answer =>
+      untilAnswered("reading the group's offsets", member.committed(asked)): answer =>
         val codes = answer.errorCode :: answer.partitions.map(_.errorCode)
         codes.find(code => code != 0 && !Again(code)) match
           case Some(code) => F.raiseError(failure("reading the group's offsets", code))
-          case None       => F.pure(Option.when(codes.forall(_ == 0))(answer.partitions.map(p => (p.topic, p.partition) -> p).toMap))
+          case None       => F.pure(codes.find(_ != 0).toLeft(answer.partitions.map(p => (p.topic, p.partition) -> p).toMap))
 
     /** Each task's stores, read back from the task's partition of their changelogs, one task after another: a task that stood by from where it read
       * to, into the stores it holds, and any other from the start into stores opened empty, each without what has expired once it is read.
@@ -809,11 +814,11 @@ private[xkafka] object Engine:
             OffsetCommitRequest.Partition(partition.partition.value, next, leaderEpoch, Some(time))
         .toList.map(OffsetCommitRequest.Topic(_, _))
       val sent =
-        untilAnswered(member.commit(topics)): answers =>
+        untilAnswered("committing", member.commit(topics)): answers =>
           answers.map(_.errorCode).find(code => code != 0 && !Again(code)) match
-            case Some(code) if Gone(code) => F.pure(Some(()))
+            case Some(code) if Gone(code) => F.pure(Right(()))
             case Some(code)               => F.raiseError(failure("committing", code))
-            case None                     => F.pure(Option.when(answers.forall(_.errorCode == 0))(()))
+            case None                     => F.pure(answers.map(_.errorCode).find(_ != 0).toLeft(()))
       sent.whenA(topics.nonEmpty) *> wrote.traverse((id, live) => live.stored.map(id -> _.settled))
         .map(done => running.copy(tasks = running.tasks ++ done))
 
@@ -883,17 +888,31 @@ private[xkafka] object Engine:
     private def partitionOf(topic: String, partition: Int): F[TopicPartition] =
       (Topic.from(topic), Partition.from(partition)).mapN(TopicPartition(_, _)).leftMap(new KafkaException.InvalidValue(_)).liftTo[F]
 
-    /** Sends `request` until `answered` gives a result, waiting from 100 ms, doubling up to a second, between tries, and also after a retriable
-      * failure of the request itself.
+    /** Sends `request` until `answered` gives a result, not the code of a refusal to ask again after, waiting from 100 ms, doubling up to a second,
+      * between tries, and also after a retriable failure of the request itself. Once `taskTimeout` has passed since the first try, it fails with the
+      * last refusal.
       */
-    private def untilAnswered[A, B](request: F[A])(answered: A => F[Option[B]]): F[B] =
-      def attempt(wait: FiniteDuration): F[B] =
-        request.attempt.flatMap:
-          case Right(answer)                                                                => answered(answer).flatMap(_.fold(again(wait))(F.pure))
-          case Left(error: KafkaException.BackendFailure) if error.retriable.contains(true) => again(wait)
-          case Left(error)                                                                  => F.raiseError(error)
-      def again(wait: FiniteDuration): F[B] = F.sleep(wait) *> attempt((wait * 2).min(MaxBackoff))
-      attempt(Backoff)
+    private def untilAnswered[A, B](what: String, request: F[A])(answered: A => F[Either[Short, B]]): F[B] =
+      F.monotonic.flatMap: start =>
+        def attempt(wait: FiniteDuration): F[B] =
+          request.attempt.flatMap:
+            case Right(answer) => answered(answer).flatMap:
+                case Right(result) => F.pure(result)
+                case Left(code)    => again(wait, refused(what, code))
+            case Left(error: KafkaException.BackendFailure) if error.retriable.contains(true) => again(wait, error)
+            case Left(error)                                                                  => F.raiseError(error)
+        def again(wait: FiniteDuration, last: KafkaException): F[B] =
+          F.monotonic.flatMap: now =>
+            val left = taskTimeout - (now - start)
+            if left <= Duration.Zero then F.raiseError(last) else F.sleep(wait.min(left)) *> attempt((wait * 2).min(MaxBackoff))
+        attempt(Backoff)
+
+    private def refused(what: String, code: Short): KafkaException =
+      new KafkaException.BackendFailure(
+        s"$what was refused with error $code for longer than the task timeout of $taskTimeout",
+        Some(ErrorCode.fromProtocol(code.toInt)),
+        Some(true)
+      )
 
     private def failure(what: String, code: Short): KafkaException =
       new KafkaException.BackendFailure(s"$what failed with error $code", Some(ErrorCode.fromProtocol(code.toInt)), Some(false))

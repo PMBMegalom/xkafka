@@ -974,31 +974,36 @@ xkafka_topic_partition_list(const char *const *topics,
 }
 
 /* Offsets to commit, each with its leader epoch, negative for none, and its
- * metadata, empty for none. librdkafka frees the metadata with the list, so
- * it is allocated through librdkafka. */
+ * metadata: `metadata_sizes[index]` bytes of `metadata`, each after the one
+ * before, so a metadata holding NUL is kept whole; none where the size is 0.
+ * librdkafka frees the metadata with the list, so it is allocated through
+ * librdkafka. */
 static rd_kafka_topic_partition_list_t *
 xkafka_commit_list(rd_kafka_t *client,
                    const char *const *topics,
                    const int32_t *partitions,
                    const int64_t *offset_values,
                    const int32_t *leader_epochs,
-                   const char *const *metadata,
+                   const char *metadata,
+                   const int32_t *metadata_sizes,
                    size_t count) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, offset_values, count);
         size_t index;
+        size_t at = 0;
 
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
-                size_t size = strlen(metadata[index]);
+                size_t size = metadata_sizes[index] > 0 ? (size_t)metadata_sizes[index] : 0;
 
                 if (leader_epochs[index] >= 0)
                         rd_kafka_topic_partition_set_leader_epoch(entry, leader_epochs[index]);
                 if (size > 0) {
                         entry->metadata = rd_kafka_mem_malloc(client, size);
-                        memcpy(entry->metadata, metadata[index], size);
+                        memcpy(entry->metadata, metadata + at, size);
                         entry->metadata_size = size;
                 }
+                at += size;
         }
         return native_offsets;
 }
@@ -2298,7 +2303,8 @@ int xkafka_admin_alter_group_offsets(rd_kafka_t *client,
                                      const int32_t *partitions,
                                      const int64_t *offset_values,
                                      const int32_t *leader_epochs,
-                                     const char *const *metadata,
+                                     const char *metadata,
+                                     const int32_t *metadata_sizes,
                                      size_t count,
                                      int timeout_ms,
                                      int32_t *codes,
@@ -2318,7 +2324,7 @@ int xkafka_admin_alter_group_offsets(rd_kafka_t *client,
         xkafka_partition_codes(NULL, topics, partitions, count, codes);
         if (options == NULL)
                 return -1;
-        offsets = xkafka_commit_list(client, topics, partitions, offset_values, leader_epochs, metadata, count);
+        offsets = xkafka_commit_list(client, topics, partitions, offset_values, leader_epochs, metadata, metadata_sizes, count);
         request = rd_kafka_AlterConsumerGroupOffsets_new(group, offsets);
         rd_kafka_topic_partition_list_destroy(offsets);
         queue = rd_kafka_queue_new(client);
@@ -2657,7 +2663,8 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
                                  const int32_t *partitions,
                                  const int64_t *offset_values,
                                  const int32_t *leader_epochs,
-                                 const char *const *offset_metadata,
+                                 const char *offset_metadata,
+                                 const int32_t *offset_metadata_sizes,
                                  size_t count,
                                  int timeout_ms,
                                  char *error,
@@ -2675,7 +2682,7 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
                 return -1;
         }
         native_offsets =
-            xkafka_commit_list(producer, topics, partitions, offset_values, leader_epochs, offset_metadata, count);
+            xkafka_commit_list(producer, topics, partitions, offset_values, leader_epochs, offset_metadata, offset_metadata_sizes, count);
         status = xkafka_take_error(
             rd_kafka_send_offsets_to_transaction(
                 producer, native_offsets,
@@ -2694,14 +2701,15 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
                            const int32_t *partitions,
                            const int64_t *offset_values,
                            const int32_t *leader_epochs,
-                           const char *const *metadata,
+                           const char *metadata,
+                           const int32_t *metadata_sizes,
                            size_t count,
                            int timeout_ms,
                            char *error,
                            size_t error_size,
                            int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
-            xkafka_commit_list(consumer, topics, partitions, offset_values, leader_epochs, metadata, count);
+            xkafka_commit_list(consumer, topics, partitions, offset_values, leader_epochs, metadata, metadata_sizes, count);
         rd_kafka_queue_t *queue = rd_kafka_queue_new(consumer);
         rd_kafka_resp_err_t enqueued;
         rd_kafka_event_t *event;

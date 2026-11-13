@@ -57,6 +57,11 @@ val cleaned = headers.remove("trace")        // No "trace" headers
 | `Long` | eight bytes, most significant first |
 | `Chunk[Byte]` | the bytes themselves |
 
+## Header names
+
+A header name cannot hold the character NUL (`\u0000`). Sending a record with
+such a name fails with an `IllegalArgumentException`, before anything is sent.
+
 ## Headers with no value
 
 Kafka allows a header to have no value, which is `Header(name, None)`. Every platform

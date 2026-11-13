@@ -108,7 +108,7 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val sendOffsets       =
     f(
       "int xkafka_async_producer_send_offsets(void *producer, void *metadata, const char **topics, const int32_t *partitions, const int64_t *offsets, " +
-        s"const int32_t *leader_epochs, const char **offset_metadata, size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
+        s"const int32_t *leader_epochs, const void *offset_metadata, const int32_t *offset_metadata_sizes, size_t count, int timeout_ms, $Classified, int32_t *result, $Done)"
     )
   val groupMetadata        = f("void *xkafka_consumer_group_metadata(void *consumer)")
   val groupMetadataNew     = f("void *xkafka_group_metadata_new(const char *group_id, int32_t generation_id, const char *member_id)")
@@ -155,7 +155,7 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val commit =
     f(
       "int xkafka_async_consumer_commit(void *consumer, const char **topics, const int32_t *partitions, const int64_t *offsets, " +
-        s"const int32_t *leader_epochs, const char **metadata, size_t count, int timeout_ms, $Error, int32_t *result, $Done)"
+        s"const int32_t *leader_epochs, const void *metadata, const int32_t *metadata_sizes, size_t count, int timeout_ms, $Error, int32_t *result, $Done)"
     )
   val committed           = f(s"int xkafka_async_consumer_committed(void *consumer, $PartitionNames, int timeout_ms, $Error, void **result, $Done)")
   val committedOffsetAt   = f("int64_t xkafka_committed_offset_at(void *committed, size_t index)")
@@ -277,8 +277,8 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val alterGroupOffsets =
     f(
       "int xkafka_async_admin_alter_group_offsets(void *client, const char *group, const char **topics, const int32_t *partitions, " +
-        "const int64_t *offsets, const int32_t *leader_epochs, const char **metadata, size_t count, int timeout_ms, int32_t *codes, " +
-        s"$Error, int32_t *result, $Done)"
+        "const int64_t *offsets, const int32_t *leader_epochs, const void *metadata, const int32_t *metadata_sizes, size_t count, int timeout_ms, " +
+        "int32_t *codes, " + s"$Error, int32_t *result, $Done)"
     )
   val deleteGroupOffsets =
     f(

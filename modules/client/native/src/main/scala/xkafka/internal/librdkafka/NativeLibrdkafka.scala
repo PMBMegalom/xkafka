@@ -259,8 +259,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
   ): F[Unit] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone                                         = zone
-        val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
+        given Zone                                                = zone
+        val (topics, partitions, values, epochs, comments, sizes) = commitArrays(offsets)
         failOnClassified((error, code, fatal, retriable, abort) =>
           Bindings.xkafka_producer_send_offsets(
             producer,
@@ -270,6 +270,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             values,
             epochs,
             comments,
+            sizes,
             offsets.size.toUSize,
             timeoutMillis,
             error,
@@ -426,10 +427,10 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone                                         = zone
-        val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
-        val (error, errorCode)                             = errorSlots
-        val result                                         =
+        given Zone                                                = zone
+        val (topics, partitions, values, epochs, comments, sizes) = commitArrays(offsets)
+        val (error, errorCode)                                    = errorSlots
+        val result                                                =
           Bindings.xkafka_consumer_commit(
             consumer,
             topics,
@@ -437,6 +438,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             values,
             epochs,
             comments,
+            sizes,
             offsets.size.toUSize,
             timeoutMillis,
             error,
@@ -923,7 +925,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       timeoutMillis: Int
   ): F[Vector[Either[KafkaException, Unit]]] =
     codedCall(offsets.map(_._1), _.show): (codes, error, errorCode) =>
-      val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
+      val (topics, partitions, values, epochs, comments, sizes) = commitArrays(offsets)
       Bindings.xkafka_admin_alter_group_offsets(
         admin,
         toCString(group.value),
@@ -932,6 +934,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         values,
         epochs,
         comments,
+        sizes,
         offsets.size.toUSize,
         timeoutMillis,
         codes,
@@ -1053,19 +1056,26 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       epochs(index) = start.leaderEpoch
     (topics, partitions, offsets, epochs)
 
-  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
+  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata: each one's UTF-8 bytes after the one before, and how many
+    * there are of each, so a metadata holding NUL is passed whole.
+    */
   private def commitArrays(offsets: Vector[(TopicPartition, OffsetAndMetadata)])(using
       Zone
-  ): (Ptr[CString], Ptr[CInt], Ptr[CLongLong], Ptr[CInt], Ptr[CString]) =
+  ): (Ptr[CString], Ptr[CInt], Ptr[CLongLong], Ptr[CInt], CString, Ptr[CInt]) =
     val (topics, partitions) = partitionArrays(offsets.map(_._1))
     val values               = alloc[CLongLong](offsets.size)
     val epochs               = alloc[CInt](offsets.size)
-    val metadata             = alloc[CString](offsets.size)
+    val encoded              = offsets.map(_._2.metadata.getBytes(StandardCharsets.UTF_8))
+    val bytes                = alloc[CChar](encoded.map(_.length).sum.max(1))
+    val sizes                = alloc[CInt](offsets.size)
     offsets.iterator.zipWithIndex.foreach: (entry, index) =>
       values(index) = entry._2.offset.value
       epochs(index) = entry._2.leaderEpoch.fold(-1)(_.value)
-      metadata(index) = toCString(entry._2.metadata)
-    (topics, partitions, values, epochs, metadata)
+    val starts = encoded.scanLeft(0)(_ + _.length)
+    encoded.iterator.zipWithIndex.foreach: (text, index) =>
+      text.indices.foreach(offset => bytes(starts(index) + offset) = text(offset))
+      sizes(index) = text.length
+    (topics, partitions, values, epochs, bytes, sizes)
 
   /** A call that names partitions and reports a failure through the usual out-parameters. */
   private def partitionCall(partitions: Vector[TopicPartition])(call: (Ptr[CString], Ptr[CInt], CSize, CString, Ptr[CInt]) => CInt): F[Unit] =

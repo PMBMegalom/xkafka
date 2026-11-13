@@ -226,6 +226,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       stateDirectory = settings.stateDirectory,
       queryEndpoint = settings.queryEndpoint,
       fetchWait = settings.fetchWait,
+      taskTimeout = settings.taskTimeout,
       forward = Some(forward)
     )
 
@@ -429,6 +430,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   private def before1970(times: List[Timestamp]): F[Unit] =
     times.find(_.epochMillis < 0L).traverse_(time => F.raiseError(new IllegalArgumentException(s"Kafka holds no time before 1970, was $time")))
 
+  /** Refuses a header name holding NUL, since librdkafka gives names back only up to it, so no backend writes one. */
+  private def nulInHeaderName(headers: Headers): F[Unit] =
+    headers.values.find(_.key.contains('\u0000')).traverse_ : header =>
+      F.raiseError(new IllegalArgumentException(s"a header name cannot hold the character NUL, was '${header.key.replace("\u0000", "\\u0000")}'"))
+
   /** Asks again after a failure the broker may get over, waiting 100 ms and twice as long each time up to a second, as the Java consumer does. */
   private def untilAnswered[A](request: F[A], attempt: Int): F[A] =
     request.handleErrorWith:
@@ -616,7 +622,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       else client(driver.awaitDeliveries(batch, DeliveryPollTimeoutMillis)).flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
-      before1970(record.timestamp.toList) *>
+      before1970(record.timestamp.toList) *> nulInHeaderName(record.headers) *>
         (
           settings.keySerializer.serialize(record.topic, record.headers, record.key),
           settings.valueSerializer.serialize(record.topic, record.headers, record.value)

@@ -161,6 +161,17 @@ class AvroBinarySuite extends ScalaCheckSuite:
     val skipping = parsed(s"""{"type":"record","name":"Outer","fields":[{"name":"r","type":$records}]}""")
     assert(AvroBinary.decoder(skipping, parsed("""{"type":"record","name":"Outer","fields":[]}""")).isRight)
 
+  test("a record planned through one whose plan fails is refused when the reader is made, wherever the schema uses it"):
+    // While A is planned, B is planned through it; A then fails, which `first`'s union only holds against values written as A, but `second` reads B.
+    def root(readerOnly: String) =
+      val b = """{"type":"record","name":"B","fields":[{"name":"as","type":{"type":"array","items":"A"}}]}"""
+      val a = s"""{"type":"record","name":"A","fields":[{"name":"b","type":$b}$readerOnly]}"""
+      parsed(s"""{"type":"record","name":"Root","fields":[{"name":"first","type":["null",$a]},{"name":"second","type":"B"}]}""")
+    assertEquals(
+      AvroBinary.decoder(root(""), root(""",{"name":"y","type":"int"}""")).map(_ => ()),
+      Left("record 'A' has no default for field 'y', which 'A' does not write")
+    )
+
   test("a number whose tenth byte holds bits past 64 is refused, not read without them"):
     val overlong = bytes(0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f)
     assertEquals(AvroBinary.decode(AvroSchema.Long, overlong), Left("a number does not fit 64 bits"))

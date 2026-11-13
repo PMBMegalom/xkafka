@@ -882,9 +882,9 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
       for
         _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), partition)))
         settings <- consumerSettings(server, uniqueGroup("commit-timeout"))
-        // A nanosecond cannot cover a round trip, so the outcome does not depend on how fast the broker is. Recovery is
+        // A millisecond, the least a timeout can be, cannot cover the coordinator's lookup and the commit. Recovery is
         // off, because the policy would otherwise retry this and report its own exhaustion instead.
-        bounded <- settings.withCommitTimeout(1.nanos).map(_.withCommitRecovery(CommitRecovery.none)).liftTo[IO]
+        bounded <- settings.withCommitTimeout(1.millis).map(_.withCommitRecovery(CommitRecovery.none)).liftTo[IO]
         outcome <-
           PlatformKafkaClient().consumer(bounded, Selection.Topics(NonEmptySet.one(topic)))
             .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(60.seconds)
@@ -924,7 +924,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         // Kafka stores whatever was committed last, so a commit can move a group's position backwards and replay records.
         assertEquals(afterBehind, Some(lower), "a later commit should replace the stored offset even where it is lower")
 
-  test(conformance("a commit stores its offset's leader epoch and metadata, and a bare offset stores neither")):
+  test(conformance("a commit stores its offset's leader epoch and metadata, NUL included, and a bare offset stores neither")):
     withBroker: server =>
       val topic = uniqueTopic("commit-metadata")
       val named = TopicPartition(topic, validPartition(0))
@@ -936,7 +936,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
             for
               taken     <- consumer.records.take(2).compile.toList
-              _         <- taken.head.offset.withMetadata("première note").commit
+              _         <- taken.head.offset.withMetadata("première\u0000note").commit
               annotated <- consumer.committed(Set(named))
               _         <- taken.last.offset.committer.commit(Map(named -> taken.last.offset.nextOffset))
               bare      <- consumer.committed(Set(named))
@@ -944,7 +944,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           .timeout(60.seconds)
       yield
         val (annotated, bare) = outcome
-        assertEquals(annotated, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "première note")))
+        assertEquals(annotated, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "première\u0000note")))
         assertEquals(bare, Some(OffsetAndMetadata(validOffset(2))))
 
   test(conformance("a commit whose metadata is longer than the broker keeps fails as too large")):
@@ -1356,11 +1356,12 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               for
                 taken <- consumer.records.take(1).compile.toList
                 _     <-
-                  producer.transactionally(_.commitOffsets(CommittableOffsetBatch.fromFoldable(taken.map(_.offset.withMetadata("in a transaction")))))
+                  producer
+                    .transactionally(_.commitOffsets(CommittableOffsetBatch.fromFoldable(taken.map(_.offset.withMetadata("in a\u0000transaction")))))
                 after <- consumer.committed(Set(named))
               yield after.get(named).flatten
           .timeout(90.seconds)
-      yield assertEquals(stored, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "in a transaction")))
+      yield assertEquals(stored, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "in a\u0000transaction")))
 
   test(conformance("a transaction cannot record an offset from a partition its consumer has since lost")):
     withBroker: server =>
@@ -1770,7 +1771,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               altered <-
                 admin.alterConsumerGroupOffsets(
                   group,
-                  NonEmptyMap.of(first -> OffsetAndMetadata(validOffset(3L), None, "kept"), unknown -> OffsetAndMetadata(validOffset(0L)))
+                  NonEmptyMap.of(first -> OffsetAndMetadata(validOffset(3L), None, "ke\u0000pt"), unknown -> OffsetAndMetadata(validOffset(0L)))
                 )
               all       <- admin.listConsumerGroupOffsets(group)
               named     <- admin.listConsumerGroupOffsets(group, NonEmptySet.of(first, second))
@@ -1782,8 +1783,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         val (altered, all, named, described, listed) = seen
         assertEquals(altered(first).map(_.leftMap(_.getMessage)), Some(Right(())))
         refusedWith(altered(unknown), ErrorCode.UnknownTopicOrPartition, "altering the offset of an unknown topic")
-        assertEquals(all, Map(first -> OffsetAndMetadata(validOffset(3L), None, "kept")))
-        assertEquals(named.toSortedMap.toMap, Map(first -> Some(OffsetAndMetadata(validOffset(3L), None, "kept")), second -> None))
+        assertEquals(all, Map(first -> OffsetAndMetadata(validOffset(3L), None, "ke\u0000pt")))
+        assertEquals(named.toSortedMap.toMap, Map(first -> Some(OffsetAndMetadata(validOffset(3L), None, "ke\u0000pt")), second -> None))
         described(group) match
           case Some(Right(description)) =>
             assertEquals(description.state, ConsumerGroupState.Empty)

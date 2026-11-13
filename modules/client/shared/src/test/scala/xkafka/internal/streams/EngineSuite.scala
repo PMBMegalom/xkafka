@@ -38,8 +38,8 @@ import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.Serde
 import xkafka.streams.{
-  BufferLimit, GlobalKTable, KafkaStreams, KStream, KTable, Named, Repartition, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState,
-  Suppressed, TimeWindows, Topology, Windowed
+  BufferLimit, GlobalKTable, KafkaStreams, KStream, KTable, Named, Repartition, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsSettings,
+  StreamsState, Suppressed, TimeWindows, Topology, Windowed
 }
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
@@ -161,6 +161,33 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(committed.size, 1)
         assertEquals(written.size, 4)
         assertEquals(ended, None)
+
+  test("a commit the coordinator is never ready for stops the engine once the task timeout has passed, with the last refusal"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 14))), taskTimeout = 10.seconds): world =>
+      for
+        _      <- world.tell(assign(TaskId("0", 0)))
+        _      <- IO.sleep(100.millis)
+        _      <- world.records(record(0, 5L, "k", 1000L))
+        _      <- IO.sleep(10.seconds)
+        before <- world.ended
+        _      <- IO.sleep(2.seconds)
+        after  <- world.ended
+      yield
+        assertEquals(before, None, "the commit started a second after the record, so its timeout has not passed")
+        assertEquals(
+          after.flatMap(_.left.toOption).collect { case error: KafkaException.BackendFailure => (error.code, error.retriable) },
+          Some((Some(ErrorCode.CoordinatorLoadInProgress), Some(true)))
+        )
+
+  test("a fetch of the group's offsets that keeps failing in a way worth retrying stops the engine with that failure after the task timeout"):
+    val unavailable = new KafkaException.BackendFailure("coordinator unreachable", Some(ErrorCode.CoordinatorNotAvailable), Some(true))
+    run(committed = _ => IO.raiseError(unavailable), taskTimeout = 5.seconds): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(6.seconds) *> world.ended.map(ended => assertEquals(ended, Some(Left(unavailable))))
+
+  test("with a task timeout of zero, a commit the coordinator is not ready for stops the engine at once"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 14))), taskTimeout = Duration.Zero): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1050.millis) *>
+        world.committedAt.get.map(times => assertEquals(times.size, 1)) *> world.ended.map(ended => assert(ended.exists(_.isLeft), ended))
 
   test("any other refusal of a commit stops the engine with it"):
     run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 29)))): world =>
@@ -1251,7 +1278,8 @@ object EngineSuite:
       topology: Topology[IO] = counting,
       concurrency: Int = 1,
       open: TaskStore.Open[IO] = TaskStore.memory[IO],
-      state: Option[StateDirectory[IO]] = None
+      state: Option[StateDirectory[IO]] = None,
+      taskTimeout: FiniteDuration = StreamsSettings.DefaultTaskTimeout
   )(script: World => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
@@ -1270,7 +1298,8 @@ object EngineSuite:
           _ => IO.pure(4),
           open,
           None,
-          state
+          state,
+          taskTimeout = taskTimeout
         ).use: running =>
           running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(15.minutes))

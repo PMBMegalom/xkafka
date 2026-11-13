@@ -234,11 +234,11 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       timeoutMillis: Int
   ): F[Unit] =
     F.defer:
-      val (topics, partitions)       = partitionArrays(offsets.map(_._1))
-      val (values, epochs, comments) = commitArrays(offsets.map(_._2))
+      val (topics, partitions)              = partitionArrays(offsets.map(_._1))
+      val (values, epochs, comments, sizes) = commitArrays(offsets.map(_._2))
       transactional((error, result) =>
         background(_.sendOffsets)(
-          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, epochs, comments, offsets.size, timeoutMillis) ++
+          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, epochs, comments, sizes, offsets.size, timeoutMillis) ++
             error.classifiedArguments :+ result.value)*
         )
       )
@@ -349,10 +349,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     F.defer:
-      val (topics, partitions)       = partitionArrays(offsets.map(_._1))
-      val (values, epochs, comments) = commitArrays(offsets.map(_._2))
-      val error                      = ErrorSlot()
-      val result                     = Result()
+      val (topics, partitions)              = partitionArrays(offsets.map(_._1))
+      val (values, epochs, comments, sizes) = commitArrays(offsets.map(_._2))
+      val error                             = ErrorSlot()
+      val result                            = Result()
       background(_.commit)(
         consumer,
         topics,
@@ -360,6 +360,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         values,
         epochs,
         comments,
+        sizes,
         offsets.size,
         timeoutMillis,
         error.message,
@@ -782,12 +783,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       offsets: Vector[(TopicPartition, OffsetAndMetadata)],
       timeoutMillis: Int
   ): F[Vector[Either[KafkaException, Unit]]] =
-    val (topics, partitions)       = partitionArrays(offsets.map(_._1))
-    val (values, epochs, comments) = commitArrays(offsets.map(_._2))
+    val (topics, partitions)              = partitionArrays(offsets.map(_._1))
+    val (values, epochs, comments, sizes) = commitArrays(offsets.map(_._2))
     codedCall(offsets.map(_._1), _.show)((codes, error, result) =>
       background(_.alterGroupOffsets)(
-        (Seq[js.Any](admin, group.value, topics, partitions, values, epochs, comments, offsets.size, timeoutMillis, codes) ++ errorArguments(error) :+
-          result.value)*
+        (Seq[js.Any](admin, group.value, topics, partitions, values, epochs, comments, sizes, offsets.size, timeoutMillis, codes) ++
+          errorArguments(error) :+ result.value)*
       )
     )
 
@@ -922,8 +923,14 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     Seq[js.Any](topics, partitions, longs(starts.map(_.offset)), ints(starts.map(_.leaderEpoch)), starts.size)
 
   /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
-  private def commitArrays(offsets: Vector[OffsetAndMetadata]): (Buffer, Buffer, js.Array[String]) =
-    (longs(offsets.map(_.offset.value)), ints(offsets.map(_.leaderEpoch.fold(-1)(_.value))), strings(offsets.map(_.metadata)))
+  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata: each one's UTF-8 bytes after the one before, and how many
+    * there are of each, so a metadata holding NUL is passed whole.
+    */
+  private def commitArrays(offsets: Vector[OffsetAndMetadata]): (Buffer, Buffer, Buffer, Buffer) =
+    val encoded = offsets.map(_.metadata.getBytes(UTF_8))
+    val bytes   = Buffers.alloc(encoded.map(_.length).sum.max(1))
+    bytes.set(byteArray2Int8Array(Array.concat(encoded*)), 0)
+    (longs(offsets.map(_.offset.value)), ints(offsets.map(_.leaderEpoch.fold(-1)(_.value))), bytes, ints(encoded.map(_.length)))
 
   private def ints(values: Vector[Int]): Buffer =
     val buffer = Buffers.alloc(4 * values.size.max(1))

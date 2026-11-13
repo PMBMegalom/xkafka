@@ -201,6 +201,15 @@ final class DriverClientSuite extends CatsEffectSuite:
       assert(searched.left.exists(_.isInstanceOf[IllegalArgumentException]), searched)
       assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
 
+  test("a header name holding NUL, which librdkafka cuts there, is refused before it reaches the client"):
+    FakeDriver().flatMap: fake =>
+      val client  = new DriverClient[IO](fake)
+      val records = values("a").map(_.copy(headers = Headers(Header("trace\u0000id", None))))
+      (client.producer(producerSettings).use(_.produceAndAwait(records).attempt).timeout(10.seconds), fake.enqueued).tupled
+    .map: (written, enqueued) =>
+      assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+      assertEquals(enqueued, Vector.empty, "nothing reached the driver")
+
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
@@ -628,6 +637,9 @@ final class DriverClientSuite extends CatsEffectSuite:
     type GroupMetadata = FakeGroupMetadata
 
     val calls: IO[Vector[String]] = log.get
+
+    /** Every record enqueued so far. */
+    val enqueued: IO[Vector[EncodedRecord]] = batches.get.map(_.values.toVector.flatten)
 
     def count(call: String): IO[Int] = calls.map(_.count(_ == call))
 
