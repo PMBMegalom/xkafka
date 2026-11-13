@@ -276,12 +276,12 @@ final class GroupMemberSuite extends CatsEffectSuite:
       assertEquals(changes.collect { case Left(error: KafkaException.BackendFailure) => error.code }, List(Some(ErrorCode.Other(42))))
       assertEquals(left.left.toOption.collect { case error: KafkaException.BackendFailure => error.code }, Some(Some(ErrorCode.Other(42))))
 
-  test("a failure the connection does not name stops the member with a failure that carries it"):
+  test("a failure the connection does not name stops the member with a failure that carries it, with no code and so nothing said of retrying"):
     val boom = new IllegalStateException("boom")
     val run  = Coordinator((_, _) => IO.raiseError(boom)).flatMap(coordinator => member(coordinator).use(_.changes.compile.drain.attempt))
     TestControl.executeEmbed(run.timeout(1.minute)).map: outcome =>
       assertEquals(outcome.left.toOption.map(_.getCause), Some(boom))
-      assertEquals(outcome.left.toOption.collect { case error: KafkaException.BackendFailure => error.retriable }, Some(Some(false)))
+      assertEquals(outcome.left.toOption.collect { case error: KafkaException.BackendFailure => (error.code, error.retriable) }, Some((None, None)))
 
   test("leaving gives back the active tasks first, then tells the coordinator, and the changes end"):
     val tasks = Set(TaskId("0", 0))

@@ -234,7 +234,8 @@ private[xkafka] final case class Member(
             copy(unauthorized = Some(detail)).retry(rediscover = false, backoff = true)
           case code =>
             val detail = response.errorMessage.getOrElse(s"the coordinator refused the heartbeat with error $code")
-            fail(new KafkaException.BackendFailure(detail, Some(ErrorCode.fromProtocol(code)), Some(false)))
+            val known  = ErrorCode.fromProtocol(code)
+            fail(new KafkaException.BackendFailure(detail, Some(known), Some(known.retriable)))
 
   private def accepted(response: StreamsGroupHeartbeatResponse): (Member, List[MemberAction]) =
     val known   = identity.topology.subtopologies.map(_.id).toSet

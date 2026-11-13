@@ -534,7 +534,8 @@ private[xkafka] object Engine:
               ))
             else F.unit
           settling *> changelogs.toList.traverse((partition, store) => stores(store).position.map(at => (partition, store, at))).flatMap: positions =>
-            stores.values.toList.traverse_(_.close) *> holding.update(_ - id) *> state.traverse: directory =>
+            // A release that cancels the loop meanwhile waits for the stores to close, so that it does not close them again.
+            F.uncancelable(_ => stores.values.toList.traverse_(_.close) *> holding.update(_ - id)) *> state.traverse: directory =>
               directory.released(ownerOf(id), positions.flatMap((_, store, at) => at.map(store -> _)).toMap)
                 .as(Standby(Map.empty, changelogs, positions.map((partition, _, at) => partition -> at.getOrElse(0L)).toMap))
 
@@ -662,9 +663,9 @@ private[xkafka] object Engine:
                     val owned = (after.tasks.keySet ++ after.standbys.keySet).map(ownerOf)
                     reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running) *>
                       state.traverse_(_.cleaned(owned, StateCleanupDelay)).as(after)
-        case LoseAll => closed(running.tasks.toList) *> F.monotonic.flatMap: now =>
-            val lost =
-              running.copy(tasks = Map.empty[TaskId, Live[F]], standbys = Map.empty, kept = running.kept ++ running.standbys.view.mapValues(_ -> now))
+        // Standby tasks are kept as those no longer wanted are, their stores on disk closed, so that a later open of them finds them free.
+        case LoseAll => (closed(running.tasks.toList) *> dropped(running.standbys.toList), F.monotonic).tupled.flatMap: (left, now) =>
+            val lost = running.copy(tasks = Map.empty[TaskId, Live[F]], standbys = Map.empty, kept = running.kept ++ left.view.mapValues(_ -> now))
             phase.set(StreamsPhase.Lost) *> reassign(lost) *> refollow(running, lost).as(lost)
         case _ => F.pure(running)
 
@@ -765,11 +766,13 @@ private[xkafka] object Engine:
                 .map(ready => id -> Live(task, ready, reads.toMap, stores.getOrElse(id, Map.empty)))
             .map(_.toMap)
 
-    /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer. */
+    /** The offsets the group stored, asking again while the coordinator or a transaction is not ready to answer, or while the group does not know the
+      * member, which joins again on its own after a refused transaction.
+      */
     private def stored(asked: List[OffsetFetchRequest.Topic]): F[Map[(String, Int), OffsetFetchRequest.Stored]] =
       untilAnswered("reading the group's offsets", member.committed(asked)): answer =>
         val codes = answer.errorCode :: answer.partitions.map(_.errorCode)
-        codes.find(code => code != 0 && !Again(code)) match
+        codes.find(code => code != 0 && !Again(code) && !Gone(code)) match
           case Some(code) => F.raiseError(failure("reading the group's offsets", code))
           case None       => F.pure(codes.find(_ != 0).toLeft(answer.partitions.map(p => (p.topic, p.partition) -> p).toMap))
 
@@ -908,11 +911,11 @@ private[xkafka] object Engine:
         attempt(Backoff)
 
     private def refused(what: String, code: Short): KafkaException =
-      new KafkaException.BackendFailure(
-        s"$what was refused with error $code for longer than the task timeout of $taskTimeout",
-        Some(ErrorCode.fromProtocol(code.toInt)),
-        Some(true)
-      )
+      coded(s"$what was refused with error $code for longer than the task timeout of $taskTimeout", code)
 
-    private def failure(what: String, code: Short): KafkaException =
-      new KafkaException.BackendFailure(s"$what failed with error $code", Some(ErrorCode.fromProtocol(code.toInt)), Some(false))
+    private def failure(what: String, code: Short): KafkaException = coded(s"$what failed with error $code", code)
+
+    /** A failure with `code`, worth retrying exactly when the code is, as every client's failures are. */
+    private def coded(detail: String, code: Short): KafkaException =
+      val known = ErrorCode.fromProtocol(code.toInt)
+      new KafkaException.BackendFailure(detail, Some(known), Some(known.retriable))

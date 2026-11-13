@@ -156,9 +156,8 @@ private[xkafka] object GroupMember:
     val exponent = math.min(attempt - 1, math.log(MaxBackoff / Backoff) / math.log(2))
     random.betweenDouble(0.8, 1.2).map(factor => (Backoff.toMillis * math.pow(2, exponent) * factor).toLong.millis.min(MaxBackoff))
 
-  /** A failure the connection's contract does not name, which stops the member. */
-  private def unexpected(error: Throwable): KafkaException =
-    new KafkaException.BackendFailure(s"the heartbeat failed: $error", retriable = Some(false), cause = error)
+  /** A failure the connection's contract does not name, which stops the member; with no code, it says nothing of retrying. */
+  private def unexpected(error: Throwable): KafkaException = new KafkaException.BackendFailure(s"the heartbeat failed: $error", cause = error)
 
   private def leaving[F[_]](events: Queue[F, MemberEvent], ended: Deferred[F, Either[Throwable, Unit]], timeout: FiniteDuration)(using
       F: Temporal[F]
