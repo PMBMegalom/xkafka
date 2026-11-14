@@ -67,6 +67,16 @@ final class BranchingSuite extends CatsEffectSuite:
       ))
     assertEquals(found, Some(List(TopologyError.DuplicateName("same"))))
 
+  test("a step named as a node a repartition or a join makes is refused, as Java refuses a second node of one name"):
+    val repartitioned =
+      read("in").selectKey(Named("key"))((_, v) => v).repartition(Repartition("x"), text, text).filter(Named("x-repartition-filter"))((_, _) => true)
+        .to(Named("write"), out, text, text)
+    assertEquals(refused(repartitioned), Some(List(TopologyError.DuplicateName("x-repartition-filter"))))
+    val joined =
+      read("in").join(Named("j"), read("other"), JoinWindows.withNoGrace(1.second), Store("s"), text, text, text)((a, b) => a + b)
+        .mapValues(Named("j-this-join"))(identity).to(Named("write"), out, text, text)
+    assertEquals(refused(joined), Some(List(TopologyError.DuplicateName("j-this-join"))))
+
   test("split branch names are checked as the steps they make"):
     val found =
       refused(

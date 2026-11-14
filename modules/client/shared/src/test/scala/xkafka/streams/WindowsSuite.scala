@@ -141,6 +141,21 @@ final class WindowsSuite extends CatsEffectSuite:
     KStream(Named("read-4"), topic, text, text).groupByKey(text, text).count(Named("count-4"), Store("counts")).suppress(held)
       .toStream(Named("to-stream-4")).to(Named("write-4"), topic, text, count)
 
+  test("a suppression until windows close is refused for a table no windowed aggregation reaches, and kept for one fed by one through a stream"):
+    val windowed = Windowed.timeSerde(text, 10.seconds)
+    val read     =
+      KTable(Named("read-w"), topic, windowed, count, Store("read-w")).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-w"))
+        .to(Named("write-w"), topic, windowed, count.option)
+    assertEquals(
+      Topology.of(read).left.toOption.map(_.toList),
+      Some(List(TopologyError.InvalidSuppression("final", "no windowed aggregation reaches the table, so its windows have no close time")))
+    )
+    val retabled =
+      KStream(Named("read-v"), topic, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds))
+        .count(Named("count-v"), Store("counts")).toStream(Named("again")).toTable(Named("table-v"), Store("table-v"), windowed, count)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-v")).to(Named("write-v"), topic, windowed, count.option)
+    assert(Topology.of(retabled).isRight)
+
   test("a suppression waiting a negative time or parts of a millisecond, or with a negative limit, is refused, and one waiting no time is not"):
     def refused(held: Suppressed.UntilTimeLimit) = Topology.of(suppressed(held)).left.toOption.map(_.toList)
     assertEquals(

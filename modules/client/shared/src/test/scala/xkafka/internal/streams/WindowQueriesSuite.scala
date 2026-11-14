@@ -73,7 +73,9 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       if subtopology == "0" then
         StoreContents.of(
           List(0L -> 1L, 10000L -> 2L, 20000L -> 3L).map((start, n) => WindowStore.key(bytes(key), start) -> count(n)) :+
-            (WindowStore.key(bytes(longer), 10000L) -> count(9L))
+            (WindowStore.key(bytes(longer), 10000L) -> count(9L)) :+
+            // A window so late its end would be past the largest time.
+            (WindowStore.key(bytes(s"${key}z"), Long.MaxValue - 10L) -> count(7L))
         )
       else
         StoreContents.of(List(
@@ -149,6 +151,11 @@ final class WindowQueriesSuite extends CatsEffectSuite:
             val here = plain.map(_ -> n) ++ (if start == 10000L then longer.map(_ -> 9L) else Nil)
             here.sortBy(_._1)(using byBytes).map((key, count) => (xkafka.streams.Windowed(key, Window(start, start + 10000L)), count))
         assertEquals(found, Right(expected.toVector))
+
+  test("a window whose end would be past the largest time ends at the largest time, as Java's windowed keys do"):
+    asking.flatMap: querying =>
+      querying.query(windows.fetchAll(Timestamp.fromEpochMillis(Long.MaxValue - 100L), Timestamp.fromEpochMillis(Long.MaxValue)), false).map: found =>
+        assertEquals(found.map(_.map(_._1.window).distinct), Right(Vector(Window(Long.MaxValue - 10L, Long.MaxValue))))
 
   test("a key's sessions come from the member holding the key, by their ends, without those of a longer key"):
     asking.flatMap: querying =>

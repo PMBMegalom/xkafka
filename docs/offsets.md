@@ -82,11 +82,12 @@ each time, and stopping the doubling at 10s. Each delay then varies randomly by
 up to 20% either way, so consumers that fail together do not retry together. A
 delay can therefore be up to 20% above `maxDelay`.
 
-`CommitRecovery.none` disables retrying. A failure that is not retriable fails
-the commit at once, as reported. One that is still retriable after every retry
-fails it with `KafkaException.CommitFailed`, which carries the number of
-attempts, the offsets that were not committed, and the failure from the last
-attempt.
+A failure that is not retriable fails the commit at once, as reported. With a
+policy that retries, one that is still retriable after every retry fails it with
+`KafkaException.CommitFailed`, which carries the number of attempts, the
+offsets that were not committed, and the failure from the last attempt.
+`CommitRecovery.none` disables retrying, so every failure fails the commit as
+reported, retriable or not.
 
 @:callout(info)
 The recovery policy applies wherever a commit happens: a single

@@ -188,7 +188,9 @@ final class WindowQueries[F[_], K, V] private[streams] (store: Store, key: Serde
             Ordering.Tuple2(using Ordering.Long, QueryRequest.unsigned)
           )
         F.fromOption(answering.windowSize, new IllegalStateException(s"the store ${store.value} has no window size")).flatMap: size =>
-          windows(answering.topic, ordered).map(_.map((k, start, v) => (Windowed(k, Window(start, start + size)), v)))
+          // An end past the largest time is the largest time, as Java's windowed keys give it.
+          windows(answering.topic, ordered)
+            .map(_.map((k, start, v) => (Windowed(k, Window(start, if start + size < 0 then Long.MaxValue else start + size)), v)))
     )
 
 /** The queries of a session store, whose keys are each key and its session's end and start. */

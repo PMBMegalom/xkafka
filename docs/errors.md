@@ -14,7 +14,7 @@ a serializer or a handler, reaches you unchanged. An invalid argument, such as a
 | `InvalidValue` | a value did not meet the rules of the type it was to become |
 | `InvalidSettings` | settings could not be constructed |
 | `StartingOffsetsTimedOut` | a consumer's [starting offsets](offsets.md#starting-from-offsets-you-keep) were not supplied within their limit |
-| `CommitFailed` | a commit kept failing as retriable after every retry its [recovery policy](offsets.md#retrying-a-failed-commit) allowed |
+| `CommitFailed` | a commit kept failing as retriable after every retry its [recovery policy](offsets.md#retrying-a-failed-commit) allowed, with a policy that retries at least once |
 | `Unsupported` | a transaction was asked to record offsets that did not come from a consumer of `KafkaClient`, such as offsets from a committer of your own |
 | `UncommittedRevocation` | a consumer whose [rebalance-safe commits](offsets.md#committing-before-a-partition-moves) fail at their limit gave up partitions with records still uncommitted |
 

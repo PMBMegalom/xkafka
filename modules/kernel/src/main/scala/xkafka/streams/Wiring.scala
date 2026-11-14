@@ -37,7 +37,8 @@ private[xkafka] object Wiring:
       globals: List[(Int, GlobalStore[F])],
       problems: List[TopologyError],
       steps: List[String],
-      inputs: List[Topic]
+      inputs: List[Topic],
+      generated: List[String]
   ):
     def subtopologies: List[Subtopology[F]] = numbered.map(_._2)
 
@@ -174,7 +175,9 @@ private[xkafka] object Wiring:
       unstartable: Vector[List[Source]],
       globals: Vector[GlobalStore[F]],
       problems: Vector[TopologyError],
-      steps: Vector[String]
+      steps: Vector[String],
+      // The names of the nodes the program makes that no step of its names, such as a repartition's and a join's own.
+      generated: Vector[String] = Vector.empty
   ):
     def writing(sources: List[Source]): Walk[F] = copy(written = written ++ sources)
 
@@ -191,7 +194,11 @@ private[xkafka] object Wiring:
 
     /** The node made, in the step `named` if the program names one. */
     def making(at: Path, node: Describing.Made, named: Boolean = true): Walk[F] =
-      copy(nodes = nodes :+ (at.home, node), steps = if named then steps :+ node.name else steps)
+      copy(
+        nodes = nodes :+ (at.home, node),
+        steps = if named then steps :+ node.name else steps,
+        generated = if named then generated else generated :+ node.name
+      )
 
     /** `stores` kept at `at`. A store processors share is kept once, and the processors sharing it are in one sub-topology, as Java's are. */
     def keeping(at: Path, stores: List[KeptStore]): Walk[F] =
@@ -277,7 +284,8 @@ private[xkafka] object Wiring:
       placed.collect { case (Right(global), id) => id -> global },
       walked.problems.toList ++ unfed,
       walked.steps.toList,
-      inputs
+      inputs,
+      walked.generated.toList
     )
 
   /** The copartition groups each join's topics make, as Java makes them: a join's topics go in the group of the first it finds already in one, and

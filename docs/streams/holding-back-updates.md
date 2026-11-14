@@ -27,8 +27,13 @@ def finalViews(input: Topic, output: Topic): Pipeline[IO] =
 
 A window's result is sent on once a record arrives timestamped at or after the
 window's end plus its grace. For sessions, the inactivity gap is added too,
-and a session merged into another is not sent at all. `untilWindowCloses` is
-only available on windowed tables.
+and a session merged into another is not sent at all.
+
+`untilWindowCloses` needs a table with windowed keys that a windowed
+aggregation reaches, directly or through steps such as `toStream` and
+`toTable`, and uses that aggregation's grace. `Topology.of` refuses it on a
+table that no windowed aggregation reaches, such as one read from a topic of
+windowed keys.
 
 To send each key's latest value at most once in a while, use
 `Suppressed.untilTimeLimit`, on any table:

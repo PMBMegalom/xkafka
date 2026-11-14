@@ -51,8 +51,9 @@ accumulation survives the lift.
 Bootstrap servers must be `host:port`, including bracketed IPv6 literals.
 Property names must not be blank. Every duration, in these settings and in
 `StreamsSettings`, must be a whole number of milliseconds, since Kafka's clients
-count no finer. It must also be positive and at most `Int.MaxValue`
-milliseconds (about 24.9 days), with these exceptions:
+count no finer. It must also be positive. In these settings it must be at most
+`Int.MaxValue` milliseconds (about 24.9 days); `StreamsSettings` sets no such
+limit. The exceptions are:
 
 - `linger` may be zero, and at most `ProducerSettings.LingerLimit` (15 minutes).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
@@ -105,7 +106,8 @@ another. Those that can make the settings invalid return
 `ValidatedNel[SettingsError, *]` and validate the result in full: every one
 that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
-`withRebalanceSafeCommits`, and `withStartingOffsets`. The others, such as
+`withRebalanceSafeCommits`, `withStartingOffsets`, `withoutSessionTimeout`, and
+`withoutHeartbeatInterval`. The others, such as
 `withCompression` or `withIsolationLevel`, return the settings directly.
 
 ```scala mdoc:compile-only
