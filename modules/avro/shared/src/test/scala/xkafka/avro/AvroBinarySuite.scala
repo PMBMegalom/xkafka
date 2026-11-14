@@ -133,6 +133,13 @@ class AvroBinarySuite extends ScalaCheckSuite:
     assert(read(optional(decimal(10, 2)), optional(decimal(8, 2))).isLeft, "a smaller precision, each in a union")
     assert(read(optional(decimal(8, 2)), optional(decimal(10, 2))).isRight, "a larger precision, each in a union")
 
+  test("a decimal held in a fixed type keeps its scale where a field names it, so another scale is refused there too"):
+    val amount = """{"type":"fixed","name":"Amt","size":8,"logicalType":"decimal","precision":10,"scale":%d}"""
+    val writer = parsed(s"""{"type":"record","name":"M","fields":[{"name":"price","type":${amount.format(2)}},{"name":"tax","type":"Amt"}]}""")
+    val reader = parsed(s"""{"type":"record","name":"M","fields":[{"name":"tax","type":${amount.format(4)}}]}""")
+    assert(AvroBinary.decoder(writer, reader).isLeft)
+    assert(AvroBinary.writable(writer, reader).isLeft)
+
   test("a decimal held in a fixed type keeps its aliases, and is read through one"):
     val written = parsed("""{"type":"fixed","name":"Money","size":4,"logicalType":"decimal","precision":6,"scale":2}""")
     val reader  = parsed("""{"type":"fixed","name":"Money2","aliases":["Money"],"size":4,"logicalType":"decimal","precision":6,"scale":2}""")

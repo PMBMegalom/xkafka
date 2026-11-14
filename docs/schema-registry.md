@@ -184,11 +184,16 @@ A record without a value, such as a tombstone, fails to read with
 | an enum or sealed trait whose cases are all objects | an `enum` of the cases' names |
 | any other sealed trait or enum | a union of its cases' records, an object's having no fields |
 
-- A record is named after its class, in the namespace of its package. A generic
-  class's name carries its type arguments: `Box[Int]` is `Box__Int`.
+- A record is named after its class, in the namespace of its package and the
+  objects it is in, so `Here.Line` and `There.Line` are two records. A generic
+  class's name carries its type arguments in full, `Box[List[Int]]` being
+  `Box__List__Int`, where the class is derived for those arguments.
+- Two types given one name, for example with `@SchemaName`, make no schema,
+  so writing or reading them fails.
 - A field's Scala default is its default in the schema. An optional field whose
   default is a value has that value's branch first in its union, since Avro takes
-  a union's default from its first branch.
+  a union's default from its first branch. A default the schema cannot place,
+  such as one of the record its field is in, is left out.
 - For a recursive type, such as a linked list's node, put `derives AvroCodec`
   on the type itself.
 - Writing a `fixed` value of the wrong size fails. Avro gives a
@@ -405,7 +410,7 @@ Records match what Confluent's `KafkaJsonSchemaSerializer` writes.
 | any other sealed trait or enum | `oneOf` its cases' objects | the case's object, with its name in the property `type` |
 
 - An object's `title` is the type's full name, in the namespace of its
-  package. With `SubjectNaming.RecordName`, the subject is that title.
+  package and the objects it is in. With `SubjectNaming.RecordName`, the subject is that title.
 - A field with a default, or an optional one, may be left out of a record; the
   others are required.
 - Objects are closed: their schema allows no other properties. Under the
@@ -692,7 +697,7 @@ calls things, for every format:
 | Annotation | On | Effect |
 | --- | --- | --- |
 | `@SchemaName("name")` | a type or field | names it in place of its Scala name |
-| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's |
+| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's and objects' |
 | `@SchemaDoc("text")` | a type or field | documents it |
 | `@SchemaAlias("Old")` | a type or field | another name it was known by, so records written under that name are read |
 | `@SchemaNoDefault` | a field | leaves its Scala default out of the schema |
@@ -764,9 +769,9 @@ the registry read another path.
 
 With Avro, including the vulcan and avro4s serdes, `Latest` and `Pinned` refuse
 a schema that would change what a value means: one with a decimal of another
-scale or fewer digits than your codec writes, or a time in another unit, such
-as microseconds for your milliseconds. Writing then fails with
-`RegistryException.Unserializable`.
+scale or fewer digits than your codec writes, a time in another unit, such as
+microseconds for your milliseconds, or text where your codec writes bytes.
+Writing then fails with `RegistryException.Unserializable`.
 
 ## Registry operations
 

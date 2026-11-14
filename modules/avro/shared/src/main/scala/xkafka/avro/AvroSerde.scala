@@ -42,7 +42,7 @@ object AvroFormat:
       override val recordName: Option[String] = own.fullName.map(_.value)
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        codec.mismatch.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).flatMap: written =>
+        codec.refusal.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).flatMap: written =>
           // A value is written as its codec gives it. Where the schema is another, it is read into that schema as Avro resolves the codec's into it,
           // as Java's serializer and the vulcan and avro4s serdes do: through aliases, widening numbers, leaving out the fields it lacks and taking
           // the defaults of those it adds.
@@ -52,7 +52,7 @@ object AvroFormat:
               value => codec.encode(value).flatMap(AvroBinary.encode(own, _)).flatMap(resolved).flatMap(AvroBinary.encode(written, _))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        codec.mismatch.toLeft(()) *> avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
+        codec.refusal.toLeft(()) *> avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
 
   private[avro] def avro(schema: Schema): Either[String, AvroSchema] =
     if schema.schemaType != SchemaType.Avro then Left(s"the schema is ${schema.schemaType.name}, not Avro")
@@ -66,7 +66,7 @@ object AvroSerde:
       F: Concurrent[F],
       codec: AvroCodec[A]
   ): F[Serde[F, A]] =
-    F.fromEither(codec.mismatch.map(new RegistryException.NoSchema(_)).toLeft(())) *> RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
+    F.fromEither(codec.refusal.map(new RegistryException.NoSchema(_)).toLeft(())) *> RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
 
   /** Serdes of values of `schema`, a schema known only as the program runs: values are written with it, and records read as it describes them. */
   def generic[F[_]: Concurrent](

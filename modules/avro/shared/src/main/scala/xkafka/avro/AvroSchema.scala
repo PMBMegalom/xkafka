@@ -160,9 +160,11 @@ object AvroSchema:
           fields.foldLeft(found.updated(name, record))((sofar, field) => from(field.schema, sofar))
         case named @ (Enum(_, _, _, _, _) | Fixed(_, _, _)) => named.fullName
             .fold(found)(name => if found.contains(name) then found else found.updated(name, named))
-        case Logical(logicalType) => from(logicalType.underlying, found)
-        case Array(items)         => from(items, found)
-        case Map(values)          => from(values, found)
-        case Union(branches)      => branches.foldLeft(found)((sofar, branch) => from(branch, sofar))
-        case _                    => found
+        // A decimal held in a fixed type is defined as the decimal, so a field naming it keeps its scale.
+        case logical @ Logical(LogicalType.FixedDecimal(name, _, _, _, _)) => if found.contains(name) then found else found.updated(name, logical)
+        case Logical(logicalType)                                          => from(logicalType.underlying, found)
+        case Array(items)                                                  => from(items, found)
+        case Map(values)                                                   => from(values, found)
+        case Union(branches)                                               => branches.foldLeft(found)((sofar, branch) => from(branch, sofar))
+        case _                                                             => found
     from(schema, scala.collection.immutable.Map.empty)

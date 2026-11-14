@@ -107,6 +107,7 @@ object AvroBinary:
     (schema, value) match
       case (AvroSchema.Named(name), _)                                    => defined.get(name).exists(fits(_, value, defined))
       case (AvroSchema.Logical(logicalType), _)                           => fits(logicalType.underlying, value, defined)
+      case (AvroSchema.Union(branches), _)                                => branches.exists(fits(_, value, defined))
       case (AvroSchema.Null, AvroValue.Null)                              => true
       case (AvroSchema.Boolean, AvroValue.Boolean(_))                     => true
       case (AvroSchema.Int, AvroValue.Int(_))                             => true
@@ -294,6 +295,9 @@ object AvroBinary:
               State.modify[Set[(FullName, FullName)]](_ + pair) *> first(written.fields): field =>
                 read.fields.find(candidate => candidate.name == field.name || candidate.aliases.contains(field.name))
                   .fold(State.pure(None))(target => clashing(field.schema, target.schema))
+        // Avro reads bytes as text, which changes bytes that are not UTF-8, so they are not written as it.
+        case (AvroSchema.Bytes, AvroSchema.String) => State
+            .pure(Some("bytes are not written as a string, which would change bytes that are not text"))
         case (AvroSchema.Array(written), AvroSchema.Array(read)) => clashing(written, read)
         case (AvroSchema.Map(written), AvroSchema.Map(read))     => clashing(written, read)
         case _                                                   => State.pure(None)

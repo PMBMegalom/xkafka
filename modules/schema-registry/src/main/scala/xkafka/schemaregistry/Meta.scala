@@ -109,15 +109,19 @@ private[xkafka] object Meta:
     val tpe         = TypeRepr.of[A]
     val symbol      = symbolOf(tpe)
     val annotations = symbol.annotations
-    val arguments   =
-      tpe.dealias match
-        case AppliedType(_, args) => args.map(arg => symbolOf(arg).name.stripSuffix("$"))
-        case _                    => Nil
-    // A generic type's name carries its type arguments, so Box[Int] and Box[String] are two records.
-    val scalaName = symbol.name.stripSuffix("$") + (if arguments.isEmpty then "" else arguments.mkString("__", "_", ""))
-    val packages  =
-      Iterator.iterate(symbol.owner)(_.owner).takeWhile(owner => !owner.isNoSymbol && owner != defn.RootClass).filter(_.isPackageDef).map(_.name)
-        .toList.reverse.filterNot(_ == "<empty>")
+    // A generic type's name carries its type arguments in full, so Box[Int], Box[String] and Box[List[Int]] are three records.
+    def written(of: TypeRepr): String =
+      val name = symbolOf(of).name.stripSuffix("$")
+      of.dealias match
+        case AppliedType(_, args) => name + args.map(written).mkString("__", "_", "")
+        case _                    => name
+    val scalaName = written(tpe)
+    // The namespace is the packages and the objects the type is in, so two types of one name in two objects are two types; the object Scala makes
+    // around a file's top-level definitions is left out.
+    val packages =
+      Iterator.iterate(symbol.owner)(_.owner).takeWhile(owner => !owner.isNoSymbol && owner != defn.RootClass)
+        .filter(owner => owner.isPackageDef || owner.flags.is(Flags.Module) && !owner.name.stripSuffix("$").endsWith("package"))
+        .map(_.name.stripSuffix("$")).toList.reverse.filterNot(_ == "<empty>")
     val name: String              = text(annotations, "SchemaName").headOption.getOrElse(scalaName)
     val namespace: Option[String] = text(annotations, "SchemaNamespace").headOption.orElse(Option.when(packages.nonEmpty)(packages.mkString(".")))
     val doc: Option[String]       = text(annotations, "SchemaDoc").headOption

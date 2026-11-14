@@ -30,6 +30,7 @@ import scala.quoted.*
 import scala.reflect.{ClassTag, TypeTest}
 import scala.util.Try
 
+import cats.data.State
 import cats.syntax.all.*
 import fs2.Chunk
 import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown}
@@ -42,11 +43,16 @@ import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown}
 trait AvroCodec[A]:
   self =>
 
-  /** The schema, where a record already defined in `seen`, the records it is inside, is named by its name alone. */
-  private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema
+  /** The schema, built with the named types defined so far, each defined where it is first met and named by its name alone after. */
+  private[avro] def building: AvroCodec.Building[AvroSchema]
+
+  private lazy val built: (AvroCodec.Defining, AvroSchema) = building.run(AvroCodec.Defining.empty).value
 
   /** The schema values are written with. */
-  final def schema: AvroSchema = schemaWithin(Set.empty)
+  final def schema: AvroSchema = built._2
+
+  /** Why no serde of this codec can be made: two of the types it writes given one name, or a schema it must match and does not. */
+  private[avro] final def refusal: Option[String] = built._1.clashes.headOption.orElse(mismatch)
 
   def encode(value: A): Either[String, AvroValue]
 
@@ -69,10 +75,10 @@ trait AvroCodec[A]:
         case Right(declared) if declared == own => None
         case Right(declared)                    => Some(s"the codec's schema is $own, not $declared")
     new AvroCodec[A]:
-      override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = self.schemaWithin(seen)
-      override private[avro] def mismatch: Option[String]                      = problem
-      override def encode(value: A): Either[String, AvroValue]                 = self.encode(value)
-      override def decode(value: AvroValue): Either[String, A]                 = self.decode(value)
+      override private[avro] def building: AvroCodec.Building[AvroSchema] = self.building
+      override private[avro] def mismatch: Option[String]                 = problem
+      override def encode(value: A): Either[String, AvroValue]            = self.encode(value)
+      override def decode(value: AvroValue): Either[String, A]            = self.decode(value)
 
   /** A codec for `B`, written as the `A` that `to` makes of it and read as `from` makes of an `A`. */
   final def imap[B](from: A => B)(to: B => A): AvroCodec[B] = emap(value => Right(from(value)))(to)
@@ -80,20 +86,63 @@ trait AvroCodec[A]:
   /** A codec for `B`, written as the `A` that `to` makes of it and read as `from` makes of an `A`, which may refuse it. */
   final def emap[B](from: A => Either[String, B])(to: B => A): AvroCodec[B] =
     new AvroCodec[B]:
-      override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = self.schemaWithin(seen)
-      override def encode(value: B): Either[String, AvroValue]                 = self.encode(to(value))
-      override def decode(value: AvroValue): Either[String, B]                 = self.decode(value).flatMap(from)
+      override private[avro] def building: AvroCodec.Building[AvroSchema] = self.building
+      override def encode(value: B): Either[String, AvroValue]            = self.encode(to(value))
+      override def decode(value: AvroValue): Either[String, B]            = self.decode(value).flatMap(from)
 
 object AvroCodec:
   def apply[A](using codec: AvroCodec[A]): AvroCodec[A] = codec
+
+  /** The named types a schema has defined so far as it is built, none for one still being defined, and the names two types were given. */
+  private[avro] final case class Defining(defined: Map[FullName, Option[AvroSchema]], clashes: Vector[String], comparing: Boolean = false):
+    /** The definitions complete so far, by which a default is placed in the branch of its union it is a value of. */
+    def complete: Map[FullName, AvroSchema] = defined.collect { case (name, Some(schema)) => name -> schema }
+
+  private[avro] object Defining:
+    val empty: Defining = Defining(Map.empty, Vector.empty)
+
+  private[avro] type Building[A] = State[Defining, A]
+
+  /** The named type `name`, defined by `define` where it is first met and named by its name alone after. Met again, a type is compared with the first
+    * one of its name: each refers to the named types inside it by their names, so the two are told apart at once, and two that differ are two types
+    * given one name, which no schema can say.
+    */
+  private[avro] def named(name: FullName, define: => Building[AvroSchema]): Building[AvroSchema] =
+    State.get[Defining].flatMap: sofar =>
+      sofar.defined.get(name) match
+        case None => State.modify[Defining](d => d.copy(defined = d.defined.updated(name, None))) *>
+            define.flatTap(made => State.modify[Defining](d => d.copy(defined = d.defined.updated(name, Some(made)))))
+        case Some(None)                       => State.pure(AvroSchema.Named(name))
+        case Some(Some(_)) if sofar.comparing => State.pure(AvroSchema.Named(name))
+        case Some(Some(defined))              =>
+          // Made again only to compare, the types inside it named by their names without comparing them too, so a comparison looks one level deep.
+          val again = define.runA(sofar.copy(comparing = true)).value
+          val same  = referring(defined) == referring(again)
+          State.modify[Defining](d => if same then d else d.copy(clashes = d.clashes :+ s"two types are named '${name.value}'"))
+            .as(AvroSchema.Named(name))
+
+  /** `schema` with the named types inside it named by their names alone. */
+  private def referring(schema: AvroSchema): AvroSchema =
+    def inside(schema: AvroSchema): AvroSchema =
+      schema match
+        case named @ (AvroSchema.Record(_, _, _, _) | AvroSchema.Enum(_, _, _, _, _) | AvroSchema.Fixed(_, _, _)) => named.fullName
+            .fold(named)(AvroSchema.Named(_))
+        case AvroSchema.Logical(LogicalType.FixedDecimal(name, _, _, _, _)) => AvroSchema.Named(name)
+        case AvroSchema.Union(branches)                                     => AvroSchema.Union(branches.map(inside))
+        case AvroSchema.Array(items)                                        => AvroSchema.Array(inside(items))
+        case AvroSchema.Map(values)                                         => AvroSchema.Map(inside(values))
+        case other                                                          => other
+    schema match
+      case record: AvroSchema.Record => record.copy(fields = record.fields.map(field => field.copy(schema = inside(field.schema))))
+      case other                     => other
 
   /** A codec of `schema`, writing with `encode` and reading with `decode`. */
   def instance[A](avro: AvroSchema, encode: A => Either[String, AvroValue], decode: AvroValue => Either[String, A]): AvroCodec[A] =
     val (write, read) = (encode, decode)
     new AvroCodec[A]:
-      override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = avro
-      override def encode(value: A): Either[String, AvroValue]                 = write(value)
-      override def decode(value: AvroValue): Either[String, A]                 = read(value)
+      override private[avro] def building: Building[AvroSchema] = State.pure(avro)
+      override def encode(value: A): Either[String, AvroValue]  = write(value)
+      override def decode(value: AvroValue): Either[String, A]  = read(value)
 
   /** Values of `schema` as they are, for schemas known only as the program runs. A value that does not fit the schema is refused when it is written.
     */
@@ -119,8 +168,8 @@ object AvroCodec:
 
   /** A value that may be absent, as a union of null and the value's schema, null first, so a field of it may default to null. */
   given [A](using inner: AvroCodec[A]): AvroCodec[Option[A]] with
-    override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema =
-      inner.schemaWithin(seen) match
+    override private[avro] def building: Building[AvroSchema] =
+      inner.building.map:
         case AvroSchema.Union(branches) => AvroSchema.Union(AvroSchema.Null :: branches.filterNot(_ == AvroSchema.Null))
         case other                      => AvroSchema.Union(List(AvroSchema.Null, other))
     override def encode(value: Option[A]): Either[String, AvroValue] = value.fold(Right(AvroValue.Null))(inner.encode)
@@ -131,9 +180,9 @@ object AvroCodec:
 
   private def array[A, C](inner: AvroCodec[A])(items: C => Iterable[A], make: Vector[A] => C): AvroCodec[C] =
     new AvroCodec[C]:
-      override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = AvroSchema.Array(inner.schemaWithin(seen))
-      override def encode(value: C): Either[String, AvroValue]                 = items(value).toVector.traverse(inner.encode).map(AvroValue.Array(_))
-      override def decode(value: AvroValue): Either[String, C]                 =
+      override private[avro] def building: Building[AvroSchema] = inner.building.map(AvroSchema.Array(_))
+      override def encode(value: C): Either[String, AvroValue]  = items(value).toVector.traverse(inner.encode).map(AvroValue.Array(_))
+      override def decode(value: AvroValue): Either[String, C]  =
         value match
           case AvroValue.Array(values) => values.traverse(inner.decode).map(make)
           case other                   => Left(s"expected an array, found ${Shown(other)}")
@@ -145,8 +194,8 @@ object AvroCodec:
 
   /** Values by text keys, as an Avro map. */
   given [A](using inner: AvroCodec[A]): AvroCodec[Map[String, A]] with
-    override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = AvroSchema.Map(inner.schemaWithin(seen))
-    override def encode(value: Map[String, A]): Either[String, AvroValue]    =
+    override private[avro] def building: Building[AvroSchema]             = inner.building.map(AvroSchema.Map(_))
+    override def encode(value: Map[String, A]): Either[String, AvroValue] =
       value.toVector.traverse((key, item) => inner.encode(item).map(key -> _)).map(AvroValue.Map(_))
     override def decode(value: AvroValue): Either[String, Map[String, A]] =
       value match
@@ -276,25 +325,29 @@ private[avro] final class RecordCodec[A, T <: Tuple](
     toTuple: A => T,
     fromTuple: T => A
 ) extends AvroCodec[A]:
-  override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema =
-    if seen.contains(name) then AvroSchema.Named(name)
-    else
-      val inside  = seen + name
-      val schemas = fields.schemas(inside)
-      // A default its field's codec cannot write, as an instant past the largest timestamp, is left out.
-      val avro =
-        infos.lazyZip(schemas).lazyZip(defaults).map: (info, schema, default) =>
-          val kept = default.filterNot(_ => info.noDefault).flatMap(_().toOption)
-          AvroField(info.name, kept.fold(schema)(first(schema, _)), kept, info.doc, info.aliases)
-      AvroSchema.Record(name, avro, named.doc, named.aliases.map(FullName.from(_, name.namespace)))
+  override private[avro] def building: AvroCodec.Building[AvroSchema] =
+    AvroCodec.named(
+      name,
+      (fields.building, State.get[AvroCodec.Defining]).mapN: (schemas, sofar) =>
+        // A default its field's codec cannot write, as an instant past the largest timestamp, is left out, and so is one no branch of its union is
+        // known to take yet, as one of the record it is in.
+        val avro =
+          infos.lazyZip(schemas).lazyZip(defaults).map: (info, schema, default) =>
+            val placed =
+              default.filterNot(_ => info.noDefault).flatMap(_().toOption).flatMap(kept => first(schema, kept, sofar.complete).map(_ -> kept))
+            AvroField(info.name, placed.fold(schema)(_._1), placed.map(_._2), info.doc, info.aliases)
+        AvroSchema.Record(name, avro, named.doc, named.aliases.map(FullName.from(_, name.namespace)))
+    )
 
-  /** The schema with the union branch `default` is a value of first, as Avro writes a union field's default in its first branch. */
-  private def first(schema: AvroSchema, default: AvroValue): AvroSchema =
+  /** The schema with the union branch `default` is a value of first, as Avro writes a union field's default in its first branch, if a branch is known
+    * to take it.
+    */
+  private def first(schema: AvroSchema, default: AvroValue, known: Map[FullName, AvroSchema]): Option[AvroSchema] =
     schema match
-      case AvroSchema.Union(branches) => branches.partition(AvroBinary.fits(_, default, AvroSchema.definitions(schema))) match
-          case (fitting :: others, rest) => AvroSchema.Union(fitting :: others ++ rest)
-          case _                         => schema
-      case other => other
+      case AvroSchema.Union(branches) => branches.partition(AvroBinary.fits(_, default, known ++ AvroSchema.definitions(schema))) match
+          case (fitting :: others, rest) => Some(AvroSchema.Union(fitting :: others ++ rest))
+          case _                         => None
+      case other => Some(other)
 
   override def encode(value: A): Either[String, AvroValue] =
     fields.encode(toTuple(value))
@@ -316,8 +369,8 @@ private[avro] final class FixedCodec[A, T <: Tuple](
     toTuple: A => T,
     fromTuple: T => A
 ) extends AvroCodec[A]:
-  override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema =
-    AvroSchema.Fixed(name, size, named.aliases.map(FullName.from(_, name.namespace)))
+  override private[avro] def building: AvroCodec.Building[AvroSchema] =
+    AvroCodec.named(name, State.pure(AvroSchema.Fixed(name, size, named.aliases.map(FullName.from(_, name.namespace)))))
 
   override def encode(value: A): Either[String, AvroValue] =
     field.encode(toTuple(value)).flatMap:
@@ -332,7 +385,14 @@ private[avro] final class FixedCodec[A, T <: Tuple](
 
 /** A union type's codec, as an Avro union of its branches. */
 private[avro] final class UnionCodec[U](branches: List[Branch[U]]) extends AvroCodec[U]:
-  override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema = AvroSchema.Union(branches.map(_.codec.schemaWithin(seen)))
+  // A branch that is a union itself, as a sealed trait of records is, gives its branches, since Avro has no union inside a union.
+  override private[avro] def building: AvroCodec.Building[AvroSchema] =
+    branches.traverse(_.codec.building).map: schemas =>
+      AvroSchema.Union(
+        schemas.flatMap:
+          case AvroSchema.Union(inner) => inner
+          case other                   => List(other)
+      )
 
   override def encode(value: U): Either[String, AvroValue] =
     branches.collectFirstSome(branch => branch.tag.unapply(value).map(branch.codec.encode))
@@ -443,29 +503,35 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
 
   private def symbol(known: Case[A]): String = known.codec.schema.fullName.fold("")(_.name)
 
-  override private[avro] def schemaWithin(seen: Set[FullName]): AvroSchema =
+  override private[avro] def building: AvroCodec.Building[AvroSchema] =
     singletons match
-      case Some(_) => AvroSchema.Enum(name, cases.map(symbol), default, named.doc, named.aliases.map(FullName.from(_, name.namespace)))
-      case None    => AvroSchema.Union(
-          cases.flatMap: known =>
-            known.codec.schemaWithin(seen) match
+      case Some(_) => AvroCodec
+          .named(name, State.pure(AvroSchema.Enum(name, cases.map(symbol), default, named.doc, named.aliases.map(FullName.from(_, name.namespace)))))
+      case None => cases.traverse(_.codec.building).map: schemas =>
+          AvroSchema.Union(
+            schemas.flatMap:
               case AvroSchema.Union(branches) => branches
               case other                      => List(other)
-        )
+          )
 
   override def encode(value: A): Either[String, AvroValue] =
     cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encode(narrowed)))) match
       case Some((known, encoded)) => if singletons.isDefined then Right(AvroValue.Enum(name, symbol(known))) else encoded
       case None                   => Left(s"${Shown(value)} is none of the cases of '${name.value}'")
 
+  private def byName(written: FullName, value: AvroValue): Either[String, A] =
+    names.collectFirst { case (known, owned) if owned.contains(written) => known.codec.decode(value).map(known.widen) }
+      .getOrElse(Left(s"'${written.value}' is not a case of '${name.value}'"))
+
   override def decode(value: AvroValue): Either[String, A] =
     value match
       case AvroValue.Enum(_, read) if singletons.isDefined =>
         cases.find(symbol(_) == read).flatMap(_.singleton).toRight(s"'$read' is not a case of '${name.value}'")
-      case AvroValue.Record(written, _) => names
-          .collectFirst { case (known, owned) if owned.contains(written) => known.codec.decode(value).map(known.widen) }
-          .getOrElse(Left(s"'${written.value}' is not a case of '${name.value}'"))
-      case other => Left(s"expected a case of '${name.value}', found ${Shown(other)}")
+      // A case that is a record, or an enum or fixed of its own, is found by the name its value is written under.
+      case AvroValue.Record(written, _) => byName(written, value)
+      case AvroValue.Enum(written, _)   => byName(written, value)
+      case AvroValue.Fixed(written, _)  => byName(written, value)
+      case other                        => Left(s"expected a case of '${name.value}', found ${Shown(other)}")
 
 /** A codec found for a type where one is given, and derived where none is, made once it is first needed so that a type can hold itself. */
 private[avro] final class Resolved[A](make: => AvroCodec[A]):
@@ -479,7 +545,7 @@ private[avro] trait DerivedResolved:
 
 /** The codecs of a case class's fields, whose types are `T`. */
 private[avro] trait Fields[T <: Tuple]:
-  def schemas(seen: Set[FullName]): List[AvroSchema]
+  def building: AvroCodec.Building[List[AvroSchema]]
   def encode(values: T): Either[String, List[AvroValue]]
   def decode(values: List[AvroValue]): Either[String, T]
 
@@ -503,12 +569,12 @@ private[avro] object Fields:
       case found: ImplicitSearchSuccess   => '{ ${ found.tree.asExpr }.asInstanceOf[Fields[T]] }
       case missing: ImplicitSearchFailure => report.errorAndAbort(missing.explanation)
   given Fields[EmptyTuple] with
-    override def schemas(seen: Set[FullName]): List[AvroSchema]              = Nil
+    override def building: AvroCodec.Building[List[AvroSchema]]              = State.pure(Nil)
     override def encode(values: EmptyTuple): Either[String, List[AvroValue]] = Right(Nil)
     override def decode(values: List[AvroValue]): Either[String, EmptyTuple] = Right(EmptyTuple)
 
   given [H, T <: Tuple](using head: Resolved[H], tail: Fields[T]): Fields[H *: T] with
-    override def schemas(seen: Set[FullName]): List[AvroSchema]          = head.codec.schemaWithin(seen) :: tail.schemas(seen)
+    override def building: AvroCodec.Building[List[AvroSchema]]          = (head.codec.building, tail.building).mapN(_ :: _)
     override def encode(values: H *: T): Either[String, List[AvroValue]] = (head.codec.encode(values.head), tail.encode(values.tail)).mapN(_ :: _)
     override def decode(values: List[AvroValue]): Either[String, H *: T] =
       values match

@@ -44,6 +44,9 @@ final case class Strict(
     quantity: Int = 1
 ) derives JsonSchemaCodec
 
+object Here:
+  final case class Spot(x: Int) derives JsonSchemaCodec
+
 enum Status derives JsonSchemaCodec:
   case Open, Paid
 
@@ -95,6 +98,9 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       1,
       Chunk[Byte](1, 2, 3)
     )
+
+  test("a type in an object has the object in its title's namespace"):
+    assertEquals(JsonSchemaCodec[Here.Spot].schema.hcursor.get[String]("title"), Right("xkafka.jsonschema.Here.Spot"))
 
   test("a field marked SchemaNoDefault is required when read, as its schema says, though its type has a default"):
     assertEquals(JsonSchemaCodec[Strict].decode(Json.obj("sku" -> Json.fromString("apple"))).left.map(_.contains("quantity")), Left(true))

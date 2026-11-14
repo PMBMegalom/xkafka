@@ -32,6 +32,87 @@ final case class Line(sku: String, quantity: Int = 1) derives AvroCodec
 
 final case class Tally(amount: Int) derives AvroCodec
 
+final case class Blob(data: Chunk[Byte]) derives AvroCodec
+
+sealed trait Figure derives AvroCodec
+sealed trait Flat                  extends Figure
+case object Dot                    extends Flat
+case object Dash                   extends Flat
+final case class Ring(radius: Int) extends Figure
+@AvroFixed(2)
+final case class Code(bytes: Chunk[Byte]) extends Figure
+
+final case class Drawn(figure: Figure) derives AvroCodec
+
+sealed trait Pet derives AvroCodec
+final case class Cat(lives: Int)   extends Pet
+final case class Dog(name: String) extends Pet
+
+object Here:
+  final case class Line(x: Int) derives AvroCodec
+
+object There:
+  final case class Line(y: Long) derives AvroCodec
+
+final case class Both(here: Here.Line, there: There.Line) derives AvroCodec
+
+/** Each level holds the one below twice, so its schema defines each once and names it after, not once for every way down to it. */
+final case class Pair[A](a: A, b: A)
+type P0  = Int
+type P1  = Pair[P0]
+type P2  = Pair[P1]
+type P3  = Pair[P2]
+type P4  = Pair[P3]
+type P5  = Pair[P4]
+type P6  = Pair[P5]
+type P7  = Pair[P6]
+type P8  = Pair[P7]
+type P9  = Pair[P8]
+type P10 = Pair[P9]
+type P11 = Pair[P10]
+type P12 = Pair[P11]
+type P13 = Pair[P12]
+type P14 = Pair[P13]
+type P15 = Pair[P14]
+type P16 = Pair[P15]
+
+/** Each level derived where it is named, with the level below given. */
+object Pairs:
+  given p1: AvroCodec[P1]   = AvroCodec.derived
+  given p2: AvroCodec[P2]   = AvroCodec.derived
+  given p3: AvroCodec[P3]   = AvroCodec.derived
+  given p4: AvroCodec[P4]   = AvroCodec.derived
+  given p5: AvroCodec[P5]   = AvroCodec.derived
+  given p6: AvroCodec[P6]   = AvroCodec.derived
+  given p7: AvroCodec[P7]   = AvroCodec.derived
+  given p8: AvroCodec[P8]   = AvroCodec.derived
+  given p9: AvroCodec[P9]   = AvroCodec.derived
+  given p10: AvroCodec[P10] = AvroCodec.derived
+  given p11: AvroCodec[P11] = AvroCodec.derived
+  given p12: AvroCodec[P12] = AvroCodec.derived
+  given p13: AvroCodec[P13] = AvroCodec.derived
+  given p14: AvroCodec[P14] = AvroCodec.derived
+  given p15: AvroCodec[P15] = AvroCodec.derived
+  given p16: AvroCodec[P16] = AvroCodec.derived
+
+// Derived for each type argument where a field uses it, so each is a record of its own name.
+final case class Crate[A](value: A)
+
+final case class Boxes(ints: Crate[List[Int]], texts: Crate[List[String]]) derives AvroCodec
+
+@SchemaName("Same")
+final case class One(x: Int) derives AvroCodec
+@SchemaName("Same")
+final case class Two(y: Long) derives AvroCodec
+
+final case class Clashing(one: One, two: Two) derives AvroCodec
+
+final case class Dock(street: String) derives AvroCodec
+
+final case class Shipment(billing: Dock, shipping: Option[Dock] = Some(Dock("dock"))) derives AvroCodec
+
+final case class Chain(v: Int, next: Option[Chain] = Some(Chain(0, None))) derives AvroCodec
+
 final case class Charged(
     @SchemaDecimal(10, 4)
     price: BigDecimal,
@@ -203,6 +284,67 @@ class AvroCodecSuite extends FunSuite:
       Right(AvroValue.Record(name, Vector("total" -> AvroValue.Int(7))))
     )
     assertEquals(written(schema("""{"name":"amount","type":"long"}""")), Right(AvroValue.Record(name, Vector("amount" -> AvroValue.Long(7L)))))
+
+  test("types of one simple name in two objects, and a generic type of two type arguments, are records of their own names"):
+    def roundTrip[A](value: A)(using codec: AvroCodec[A]) =
+      AvroFormat[A].writer(AvroFormat[A].schema).flatMap(_(value)).flatMap(bytes => AvroFormat[A].reader(AvroFormat[A].schema).flatMap(_(bytes)))
+    val both = AvroSchemaJson.render(AvroCodec[Both].schema)
+    assert(both.contains("\"xkafka.avro.Here\"") && both.contains("\"xkafka.avro.There\""), both)
+    assertEquals(roundTrip(Both(Here.Line(1), There.Line(2L))), Right(Both(Here.Line(1), There.Line(2L))))
+    val boxes = AvroSchemaJson.render(AvroCodec[Boxes].schema)
+    assert(boxes.contains("Crate__List__Int") && boxes.contains("Crate__List__String"), boxes)
+    assertEquals(roundTrip(Boxes(Crate(List(1)), Crate(List("a")))), Right(Boxes(Crate(List(1)), Crate(List("a")))))
+
+  test("two types given one name are refused, since one schema cannot say what each is"):
+    assert(AvroFormat[Clashing].writer(AvroFormat[Clashing].schema).left.exists(_.contains("Same")))
+    assert(AvroFormat[Clashing].reader(AvroFormat[Clashing].schema).left.exists(_.contains("Same")))
+
+  test("a type used twice is defined once and named after, so a codec's schema is the one its text reads back as"):
+    assertEquals(AvroSchemaJson.parse(AvroSchemaJson.render(AvroCodec[Shipment].schema)), Right(AvroCodec[Shipment].schema))
+
+  test("a type each level holds twice is defined once at each level, not once for every way down to it"):
+    def records(schema: AvroSchema): Int =
+      schema match
+        case AvroSchema.Record(_, fields, _, _) => 1 + fields.map(field => records(field.schema)).sum
+        case AvroSchema.Union(branches)         => branches.map(records).sum
+        case AvroSchema.Array(items)            => records(items)
+        case AvroSchema.Map(values)             => records(values)
+        case _                                  => 0
+    assertEquals(records(Pairs.p16.schema), 16)
+
+  test("a default of a type defined before it is kept in its union's branch, and one of the record it is in is left out, not written as null"):
+    val order = AvroSchemaJson.render(AvroCodec[Shipment].schema)
+    assert(order.contains("\"default\":{\"street\":\"dock\"}"), order)
+    val node = AvroSchemaJson.render(AvroCodec[Chain].schema)
+    assert(!node.contains("\"default\":null"), node)
+
+  test("a union of types one of which is a union itself is one union of all their branches, as Avro has no union inside a union"):
+    given AvroCodec[Pet | String] = AvroCodec.union[(Pet, String)]
+    val schema                    = AvroCodec[Pet | String].schema
+    assertEquals(
+      schema match
+        case AvroSchema.Union(branches) => branches.flatMap(_.fullName).map(_.name) ++ branches.filter(_ == AvroSchema.String).map(_ => "string");
+        case _                          => Nil
+      ,
+      List("Cat", "Dog", "string")
+    )
+    def roundTrip(value: Pet | String) =
+      AvroCodec[Pet | String].encode(value).flatMap(written => AvroBinary.encode(schema, written)).flatMap(AvroBinary.decode(schema, _))
+        .flatMap(AvroCodec[Pet | String].decode)
+    List[Pet | String](Cat(9), Dog("rex"), "plain").foreach(value => assertEquals(roundTrip(value), Right(value)))
+
+  test("a case of a sealed trait that is itself an enum, or a fixed, reads back as it was written"):
+    def roundTrip(value: Drawn) =
+      AvroFormat[Drawn].writer(AvroFormat[Drawn].schema).flatMap(_(value))
+        .flatMap(bytes => AvroFormat[Drawn].reader(AvroFormat[Drawn].schema).flatMap(_(bytes)))
+    List(Drawn(Dot), Drawn(Ring(2)), Drawn(Code(Chunk[Byte](1, 2)))).foreach(value => assertEquals(roundTrip(value), Right(value)))
+
+  test("a value is not written with another schema whose bytes are text, since bytes that are not UTF-8 would be changed"):
+    def target(kind: String) =
+      Schema(s"""{"type":"record","name":"Blob","namespace":"xkafka.avro","fields":[{"name":"data","type":$kind}]}""", SchemaType.Avro)
+    assert(AvroFormat[Blob].writer(target("\"bytes\"")).isRight)
+    assert(AvroFormat[Blob].writer(target("\"string\"")).left.exists(_.contains("string")))
+    assert(AvroFormat[Blob].writer(target("""["null","string"]""")).isLeft)
 
   test("a value is not written with another schema whose decimals have another scale or fewer digits, or whose times count another unit"):
     def target(price: String, at: String, tip: String) =
