@@ -1096,6 +1096,24 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(log.collect { case followed: Event.Followed => followed }.last, Event.Followed(Vector.empty))
         assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 0L)))
 
+  test("released, the engine closes every store though one fails to close, and fails with that failure"):
+    val boom = new RuntimeException("boom")
+    val run  =
+      (World(), IO.ref(0)).tupled.flatMap: (world, closes) =>
+        // The first store to close fails, and each counts its closes.
+        val failing: TaskStore.Open[IO] =
+          (name, time, held) =>
+            TaskStore.memory[IO].apply(name, time, held).map: store =>
+              new TaskStore[IO]:
+                export store.{clock, get, positions, range, timed}
+                def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
+                def close: IO[Unit] = closes.getAndUpdate(_ + 1).flatMap(before => IO.raiseWhen(before == 0)(boom))
+        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), failing)
+          .use(_ => world.tell(assign(TaskId("0", 0), TaskId("0", 1))) *> IO.sleep(500.millis)).attempt.product(closes.get)
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (released, closes) =>
+      assertEquals(released, Left(boom))
+      assertEquals(closes, 2)
+
   test("a store still closing when the close timeout runs out is not closed again as the engine is released"):
     val run =
       (World(), IO.ref(0)).tupled.flatMap: (world, closes) =>

@@ -29,7 +29,7 @@ import fs2.Chunk
 import fs2.concurrent.SignallingRef
 import munit.CatsEffectSuite
 import protocol.StreamsGroup
-import xkafka.Serde
+import xkafka.{Deserializer, Serde, Serializer}
 import xkafka.streams.{Endpoint, Forward, KTable, Named, QueryableStore, QueryProblem, QueryRequest, Store, StreamsPhase, Topology}
 
 /** Queries answered by two members in one process, each asking the other through its `answer`, over a table read from a topic of four partitions. */
@@ -63,7 +63,7 @@ final class QueryingSuite extends CatsEffectSuite:
     )
 
   /** One member holding a store for each partition of `active` and `standby`, each holding its keys valued by the member's name and the key. */
-  private final case class Holder(name: String, active: Set[Int], standby: Set[Int] = Set.empty)
+  private final case class Holder(name: String, active: Set[Int], standby: Set[Int] = Set.empty, closed: Boolean = false)
 
   private def member(holder: Holder, everyone: List[StreamsGroup.EndpointPartitions], phase: StreamsPhase, forward: Forward[IO], at: Endpoint) =
     val identity =
@@ -74,7 +74,8 @@ final class QueryingSuite extends CatsEffectSuite:
     for
       stores <- (holder.active ++ holder.standby).toList.traverse: partition =>
         val held = keys.getOrElse(partition, Nil).map(key => bytes(key) -> Stored(bytes(s"${holder.name}:$key"), 1L))
-        TaskStore.inMemory[IO](StoreContents.of(held)).map(store => TaskId("0", partition) -> Map("latest" -> store))
+        TaskStore.inMemory[IO](StoreContents.of(held)).flatMap(TaskStore.guarded(_)).flatTap(store => store.close.whenA(holder.closed))
+          .map(store => TaskId("0", partition) -> Map("latest" -> store))
       holding <- Ref.of[IO, Map[TaskId, Map[String, TaskStore[IO]]]](stores.toMap)
       signal  <- SignallingRef[IO].of(joined)
       phased  <- SignallingRef[IO].of(phase)
@@ -164,6 +165,40 @@ final class QueryingSuite extends CatsEffectSuite:
       (asking.query(latest.get(key), false), asking.query(latest.get(key), true)).tupled.map: (active, standby) =>
         assertEquals(active, Right(Some(s"b:$key")))
         assertEquals(standby, Right(Some(s"a:$key")))
+
+  test("a global table's key is written for the table's topic, as its store holds it, not for the store's name"):
+    // A key written as the topic it is written for names it, as a registry's serde names its subject.
+    val named =
+      Serde[IO, String](
+        Serializer.instance((topic, _, key) => IO.pure(Some(bytes(s"${topic.value}/$key")))),
+        Deserializer.instance((_, _, held) => IO.pure(held.fold("")(found => new String(found.toArray))))
+      )
+    val users = QueryableStore.keyValue(Store("users-store"), named, text)
+    for
+      store  <- TaskStore.inMemory[IO](StoreContents.of(List(bytes("users/k") -> Stored(bytes("v"), 1L))))
+      member <- SignallingRef[IO].of(Member(MemberIdentity("app", "a", "a", Declaration("app", topology), 300000, None, Nil, None)))
+      phase  <- SignallingRef[IO].of[StreamsPhase](StreamsPhase.Running)
+      held   <- Ref.of[IO, Map[TaskId, Map[String, TaskStore[IO]]]](Map.empty)
+      querying =
+        Querying[IO](
+          "app",
+          Map.empty,
+          Map("users-store" -> store),
+          held,
+          member,
+          phase,
+          _ => IO.pure(counted),
+          None,
+          Forward.none[IO],
+          Map("users-store" -> "users")
+        )
+      found <- querying.query(users.get("k"), false)
+    yield assertEquals(found, Right(Some("v")))
+
+  test("a store closed as its task is given up is rebalancing, not read"):
+    val key = keys(0).head
+    member(Holder("a", Set(0, 1), closed = true), Nil, StreamsPhase.Running, Forward.none[IO], here).flatMap: asking =>
+      asking.query(latest.get(key), false).map(found => assertEquals(found, Left(QueryProblem.Rebalancing)))
 
   test("a key only another member's standby holds is asked of it where standbys may answer, and is rebalancing where they may not"):
     val key = keys(3).head

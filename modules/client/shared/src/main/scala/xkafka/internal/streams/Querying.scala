@@ -126,7 +126,9 @@ private[xkafka] final class Querying[F[_]](
     phase: Signal[F, StreamsPhase],
     partitions: Topic => F[Int],
     own: Option[Endpoint],
-    forward: Forward[F]
+    forward: Forward[F],
+    // The topic each global table's store is read from, as its keys are written for it.
+    globalTopics: Map[String, String] = Map.empty
 )(using F: Concurrent[F]):
   /** The sub-topology keeping each store that can be queried, with the topic its partitions are numbered by and its kind. Join stores and suppression
     * buffers cannot be queried.
@@ -150,7 +152,7 @@ private[xkafka] final class Querying[F[_]](
 
   def query[A](query: Query[F, A], allowStandby: Boolean): F[Either[QueryProblem, A]] =
     val store = query.store.value
-    topicNamed(if globals.contains(store) then store else s"$application-$store-changelog").flatMap: topic =>
+    topicNamed(if globals.contains(store) then globalTopics.getOrElse(store, store) else s"$application-$store-changelog").flatMap: topic =>
       query.request(topic).flatMap: request =>
         val found =
           globalFor(request) match
@@ -208,8 +210,11 @@ private[xkafka] final class Querying[F[_]](
         wanted.traverse(partition =>
           Option.when(tasks(TaskId(subtopology, partition)))(()).flatMap(_ => held.get(TaskId(subtopology, partition)).flatMap(_.get(store)))
         )
+      // A store its task gives up meanwhile closes, which is rebalancing too.
       stores.filter(_ => now == StreamsPhase.Running)
-        .traverse(_.traverse(read(_, request)).map(_.flatten.toVector.sortBy(_._1)(using StoreContents.keys)))
+        .traverse(_.traverse(read(_, request)).map(_.flatten.toVector.sortBy(_._1)(using StoreContents.keys))).recover { case TaskStore.Closed =>
+          None
+        }
 
   /** Whether `asked` names a key the partitions it asks of do not hold. A member reckoning partitions from the group's metadata while a task moves
     * can miscount them (KAFKA-20887), and the partition it then asks of answers as if the key were not there.

@@ -301,18 +301,22 @@ final class GroupMemberSuite extends CatsEffectSuite:
       assertEquals(sent.last._2.memberEpoch, -1)
       assertEquals(sent.last._2.activeTasks, Some(Nil))
 
-  test("released without leaving, the member leaves, waiting no longer than its close timeout for its tasks to be given back"):
-    val run =
+  test("released, the member leaves at once, its engine gone and its tasks given back by none, whether or not the engine asked it to leave"):
+    def released(askToLeave: Boolean) =
       Coordinator((_, request) => IO.pure(answer(request, active = Some(Set(TaskId("0", 0)))))).flatMap: coordinator =>
         val engine =
           (member: GroupMember[IO]) =>
             member.changes.head.compile.lastOrError.flatMap:
-              case MemberAction.Assign(round, _, _) => member.assigned(round) *> IO.sleep(100.millis)
-              case other                            => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+              // The engine runs the assignment, then, where it asks to leave, never gives the tasks back, and is gone after its own close timeout.
+              case MemberAction.Assign(round, _, _) => member.assigned(round) *> IO.sleep(100.millis) *>
+                  (member.leave.start *> IO.sleep(CloseTimeout)).whenA(askToLeave)
+              case other => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
         member(coordinator).use(engine).timed.map(_._1).flatMap(took => coordinator.sent.map((took, _)))
-    TestControl.executeEmbed(run.timeout(1.minute)).map: (took, sent) =>
-      assertEquals(took, 100.millis + CloseTimeout)
-      assert(sent.forall(_._2.memberEpoch != -1), s"the member said it left while it still had tasks: $sent")
+    TestControl.executeEmbed((released(false), released(true)).tupled.timeout(1.minute)).map: (unasked, asked) =>
+      assertEquals(unasked._1, 100.millis)
+      assertEquals(unasked._2.last._2.memberEpoch, -1)
+      assertEquals(asked._1, 100.millis + CloseTimeout, "no second close timeout")
+      assertEquals(asked._2.last._2.memberEpoch, -1)
 
   test("released without tasks, the member tells the coordinator it leaves"):
     val run =

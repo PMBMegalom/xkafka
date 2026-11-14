@@ -123,6 +123,15 @@ final class MemberSuite extends FunSuite:
     val (moved, _) = run(kept, Due, Answered(answer(3, endpointEpoch = 2, endpoints = Some(List(there)))))
     assertEquals((first.endpoints, kept.endpoints, moved.endpoints), (List(here, there), List(here, there), List(there)))
 
+  test("a member given no tasks still tells the engine so once it has joined, and again after it joins anew, so that the engine runs"):
+    val (member, actions) = run(Member(identity), Start, Answered(answer(1, Some(Set.empty))))
+    // It changes no tasks, so it is told at the round the member is at, with no step to wait for.
+    assertEquals(actions(1).collect { case assign: Assign => assign }, List(Assign(0, Assignment.empty, 1)))
+    val (_, again) = run(member, Assigned(0), Due, Answered(answer(1, Some(Set.empty))))
+    assertEquals(again.flatten.collect { case assign: Assign => assign }, Nil, "told once while nothing changes")
+    val (_, rejoined) = run(member, Assigned(0), Due, Answered(answer(1, error = 110)), Answered(answer(2, Some(Set.empty))))
+    assertEquals(rejoined.flatten.collect { case assign: Assign => assign.epoch }, List(2), "told again after joining anew")
+
   test("a joined member runs what it is given, then reports it at once, then sends only the epochs until something changes"):
     val handed            = Set(task("0", 0), task("1", 2))
     val (member, actions) = run(Member(identity), Start, Answered(answer(3, Some(handed), standby = Set(task("0", 1)), endpointEpoch = 4)))

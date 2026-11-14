@@ -160,9 +160,10 @@ private[xkafka] object GroupMember:
   /** A failure the connection's contract does not name, which stops the member; with no code, it says nothing of retrying. */
   private def unexpected(error: Throwable): KafkaException = new KafkaException.BackendFailure(s"the heartbeat failed: $error", cause = error)
 
+  /** Released, the member leaves at once: the engine it serves is gone, so none of its tasks is given back or waited for. */
   private def leaving[F[_]](events: Queue[F, MemberEvent], ended: Deferred[F, Either[Throwable, Unit]], timeout: FiniteDuration)(using
       F: Temporal[F]
-  ): F[Unit] = events.offer(MemberEvent.Leave) *> F.timeoutTo(ended.get.void, timeout, F.unit)
+  ): F[Unit] = events.offer(MemberEvent.Abandoned) *> F.timeoutTo(ended.get.void, timeout, F.unit)
 
   /** The longest a heartbeat waits for the task offsets it carries. */
   private val OffsetsWait: FiniteDuration = 1.second

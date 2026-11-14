@@ -354,8 +354,10 @@ private[xkafka] object Engine:
         // The tasks still open once the loop has stopped close with the engine, and with them their processors' instances.
         Resource.make(loop.begin(Running(Map.empty, started, started), kept).start): fiber =>
           // A loop that stopped on a failure gives back no tasks, so the member leaves without waiting for it to.
-          F.race(member.leave, fiber.join *> member.abandon).timeout(closeTimeout).attempt *> fiber.cancel *> opened.getAndSet(Map.empty)
-            .flatMap(_.values.toList.traverse_(_.close)) *> stores.getAndSet(Map.empty).flatMap(_.values.toList.flatMap(_.values).traverse_(_.close))
+          // Every task and store is closed though one fails to close.
+          F.race(member.leave, fiber.join *> member.abandon).timeout(closeTimeout).attempt *> fiber.cancel *>
+            (opened.getAndSet(Map.empty), stores.getAndSet(Map.empty)).tupled.flatMap: (tasks, held) =>
+              Task.closingAll(tasks.values.toList.map(_.close) ++ held.values.toList.flatMap(_.values).map(_.close))
       querying =
         Querying(
           application,
@@ -366,7 +368,8 @@ private[xkafka] object Engine:
           phase,
           partitions,
           own,
-          forward.getOrElse(Forward.none[F])
+          forward.getOrElse(Forward.none[F]),
+          topology.globals.map((_, global) => global.store.value -> global.topic.value).toMap
         )
     yield new KafkaStreams[F]:
       def run: F[Unit] = globals.fold(running.joinWithNever)(held => F.race(running.joinWithNever, held.failure).void)
@@ -542,8 +545,11 @@ private[xkafka] object Engine:
               ))
             else F.unit
           settling *> changelogs.toList.traverse((partition, store) => stores(store).position.map(at => (partition, store, at))).flatMap: positions =>
-            // A release that cancels the loop meanwhile waits for the stores to close, so that it does not close them again.
-            F.uncancelable(_ => stores.values.toList.traverse_(_.close) *> holding.update(_ - id)) *> state.traverse: directory =>
+            // Queries stop finding the stores first, and closing them through the guards queries read them by waits for the reads under way. A
+            // release that cancels the loop meanwhile waits for the stores to close, so that it does not close them again.
+            F.uncancelable(_ =>
+              holding.modify(held => (held - id, held.get(id))).flatMap(guarded => guarded.getOrElse(stores).values.toList.traverse_(_.close))
+            ) *> state.traverse: directory =>
               directory.released(ownerOf(id), positions.flatMap((_, store, at) => at.map(store -> _)).toMap)
                 .as(Standby(Map.empty, changelogs, positions.map((partition, _, at) => partition -> at.getOrElse(0L)).toMap))
 
@@ -745,7 +751,10 @@ private[xkafka] object Engine:
         // Suppression buffers stay in memory, as Java keeps them.
         state.filterNot(_ => kept.store.keptInMemory || kept.buffer)
           .fold(open(name, times.get(name), StoreContents.empty))(_.open(ownerOf(id), name, times.get(name))).map(name -> _)
-      .map(_.toMap).flatTap(stores => holding.update(_.updated(id, stores)))
+      .map(_.toMap).flatTap: stores =>
+        // Queries read the stores through guards, which their close waits for.
+        stores.toList.traverse((name, store) => TaskStore.guarded(store).map(name -> _))
+          .flatMap(guarded => holding.update(_.updated(id, guarded.toMap)))
 
     /** The changelog partitions of a task's stores, with the store each backs. */
     private def changelogsOf(id: TaskId): F[Map[TopicPartition, String]] =

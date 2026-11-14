@@ -207,8 +207,8 @@ private[xkafka] final class Task[F[_]](
         synced  <- schedulesOf(node, ended._1, now)
       yield synced
 
-  /** Closes each hosted processor's instance. */
-  def close: F[Unit] = subtopology.hosted.traverse_(_.hosting.close(hostedTask))
+  /** Closes each hosted processor's instance, each though one before it fails to close, failing with the first failure. */
+  def close: F[Unit] = Task.closingAll(subtopology.hosted.map(_.hosting.close(hostedTask)))
 
   /** What a hosted processor's instance is given for a call, with the task's stream time, or -1 before it has one, as Java gives it. */
   private def hostedCall(access: Map[String, StoreAccess[F]], state: TaskState, now: Long): HostedCall[F] =
@@ -1441,7 +1441,9 @@ private[xkafka] final class Task[F[_]](
     if now < state.nextEmit.getOrElse(store, 0L) then F.pure((Vector.empty, state))
     else
       val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
-      range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
+      val last      = state.lastEmitted.getOrElse(store, WindowStore.NoTime)
+      // As Java's `shouldEmitFinal`, a close time not past the last emitted for emits nothing, as after a task starts again with a fresh stream time.
+      (if last != WindowStore.NoTime && last >= closeTime then None else range(last)) match
         case None                 => F.pure((Vector.empty, throttled))
         case Some((lower, upper)) => storedBetween(throttled, store, lower, upper).flatMap: entries =>
             val due =
@@ -1670,7 +1672,9 @@ private[xkafka] final class Task[F[_]](
     else
       // The next look waits an interval from now, so a clock that jumps ahead does not make every record look.
       val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
-      range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
+      val last      = state.lastEmitted.getOrElse(store, WindowStore.NoTime)
+      // As Java's `shouldEmitFinal`, a close time not past the last emitted for emits nothing, as after a task starts again with a fresh stream time.
+      (if last != WindowStore.NoTime && last >= closeTime then None else range(last)) match
         case None                 => F.pure((Vector.empty, throttled))
         case Some((lower, upper)) => storedBetween(throttled, store, lower, upper).flatMap: entries =>
             val due =
@@ -1765,6 +1769,13 @@ private[xkafka] final class Task[F[_]](
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
+  /** Runs each of `closes`, each though one before it fails, as Java closes what it can, failing with the first failure, the others suppressed. */
+  def closingAll[F[_]](closes: List[F[Unit]])(using F: MonadThrow[F]): F[Unit] =
+    closes.traverse(_.attempt).flatMap: outcomes =>
+      outcomes.collect { case Left(failure) => failure } match
+        case first :: rest => F.unit.map(_ => rest.foreach(first.addSuppressed)) *> F.raiseError(first)
+        case Nil           => F.unit
+
   /** A task over each store its sub-topology declares, opened with `open`, holding what `held` gives for it. */
   def over[F[_]](
       application: String,

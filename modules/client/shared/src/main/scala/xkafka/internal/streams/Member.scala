@@ -163,7 +163,9 @@ private[xkafka] final case class Member(
     statuses: List[StreamsGroup.Status],
     unauthorized: Option[String] = None,
     taskOffsetInterval: Option[FiniteDuration] = None,
-    endpoints: List[StreamsGroup.EndpointPartitions] = Nil
+    endpoints: List[StreamsGroup.EndpointPartitions] = Nil,
+    // Whether the engine has been told an assignment since the member last joined, which it runs only once told one, even one of no tasks.
+    announced: Boolean = false
 ):
   import Member.*
   import MemberAction.*
@@ -291,7 +293,9 @@ private[xkafka] final case class Member(
           val giveBack = owned.active -- wanted.active
           if giveBack.nonEmpty then (copy(step = Some(Step.Revoking(round + 1, giveBack)), round = round + 1), List(Revoke(round + 1, giveBack)))
           else if wanted != owned then
-            (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1), List(Assign(round + 1, wanted, epoch)))
+            (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1, announced = true), List(Assign(round + 1, wanted, epoch)))
+          // An assignment of no tasks changes none, so the engine is told it without a step to wait for, its answer to the round being one past.
+          else if !announced && phase == Phase.Joined then (copy(announced = true), List(Assign(round, wanted, epoch)))
           else (this, Nil)
 
   private def retry(rediscover: Boolean, backoff: Boolean): (Member, List[MemberAction]) =
@@ -310,7 +314,8 @@ private[xkafka] final case class Member(
     phase match
       case Phase.Leaving(_) => (copy(phase = Phase.Left, owned = Assignment.empty, step = None), List(LoseAll, Done))
       case _                =>
-        val (joining, send) = copy(phase = Phase.Joining, epoch = 0, owned = Assignment.empty, target = None, step = None, reported = None).heartbeat
+        val (joining, send) =
+          copy(phase = Phase.Joining, epoch = 0, owned = Assignment.empty, target = None, step = None, reported = None, announced = false).heartbeat
         (joining, LoseAll :: send)
 
   private def fail(error: KafkaException): (Member, List[MemberAction]) =
