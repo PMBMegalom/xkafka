@@ -143,6 +143,25 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _        <- reading.joinWithNever.timeout(5.seconds)
     yield assertEquals(observed, expected)
 
+  test("a partition paused for its reader is resumed when it is revoked, since librdkafka keeps the pause for when it is assigned again"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls      <- Ref[IO].of(Vector.empty[String])
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit]  = calls.update(_ :+ s"pause $topicPartitions")
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] = calls.update(_ :+ s"resume $topicPartitions")
+      // The partition's records are never read, so the first fills its queue.
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- IO.sleep(100.millis)
+      _       <- assignment.set(Set(secondPartition))
+      _       <- IO.sleep(100.millis)
+      made    <- calls.get
+      _       <- reading.cancel
+    yield assertEquals(made, Vector(s"pause ${Set(firstPartition)}", s"resume ${Set(firstPartition)}"))
+
   test("cancelling before a counted record is sent rolls the count back"):
     for
       assignment   <- Ref[IO].of(Set(firstPartition))

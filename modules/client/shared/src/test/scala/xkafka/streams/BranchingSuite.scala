@@ -77,6 +77,17 @@ final class BranchingSuite extends CatsEffectSuite:
         .mapValues(Named("j-this-join"))(identity).to(Named("write"), out, text, text)
     assertEquals(refused(joined), Some(List(TopologyError.DuplicateName("j-this-join"))))
 
+  test("a step named as a join of two streams is not refused, since Java names no node so, but two joins of one name are"):
+    val join =
+      (named: String) =>
+        (_: KStream.Ends[IO, String, String, Pipeline[IO]])
+          .join(Named(named), read("other"), JoinWindows.withNoGrace(1.second), Store(s"$named-store"), text, text, text)((a, b) => a + b)
+    assert(Topology.of(join("j")(read("in").filter(Named("j"))((_, _) => true)).to(Named("write"), out, text, text)).isRight)
+    assert(
+      refused(join("j")(read("in")).to(Named("write"), out, text, text), join("j")(read("more")).to(Named("write-2"), topic("b"), text, text))
+        .exists(_.contains(TopologyError.DuplicateName("j")))
+    )
+
   test("split branch names are checked as the steps they make"):
     val found =
       refused(

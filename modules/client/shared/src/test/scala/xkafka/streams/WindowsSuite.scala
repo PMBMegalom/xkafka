@@ -22,6 +22,8 @@
 package xkafka
 package streams
 
+import java.nio.ByteBuffer
+
 import scala.concurrent.duration.*
 
 import cats.effect.IO
@@ -155,6 +157,42 @@ final class WindowsSuite extends CatsEffectSuite:
         .count(Named("count-v"), Store("counts")).toStream(Named("again")).toTable(Named("table-v"), Store("table-v"), windowed, count)
         .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-v")).to(Named("write-v"), topic, windowed, count.option)
     assert(Topology.of(retabled).isRight)
+
+  test("a windowed key's window ends its size after its start, a start before 1970 included, and at the largest time where it would be past it"):
+    val serde             = Windowed.timeSerde(text, 5.millis)
+    def read(start: Long) =
+      serde.deserializer
+        .deserialize(topic, xkafka.Headers.empty, Some(Chunk.array("k".getBytes) ++ Chunk.array(ByteBuffer.allocate(8).putLong(start).array)))
+    read(-10L).product(read(Long.MaxValue - 2L)).map: (early, late) =>
+      assertEquals(early.window, Window(-10L, -5L))
+      assertEquals(late.window, Window(Long.MaxValue - 2L, Long.MaxValue))
+
+  test("a suppression until windows close waits the largest grace of the windowed aggregations sending into it, and none without one on every way"):
+    val windowed                                     = Windowed.timeSerde(text, 10.seconds)
+    def counted(name: String, grace: FiniteDuration) =
+      KStream(Named(s"read-$name"), Topic.from(name).orFail, text, text).groupByKey(text, text)
+        .windowedBy(TimeWindows.tumbling(10.seconds, grace = grace)).count(Named(s"count-$name"), Store(s"counts-$name"))
+        .toStream(Named(s"changes-$name"))
+    val first  = counted("a", Duration.Zero)
+    val shared =
+      first.flow.toTable(Named("table"), Store("table"), windowed, count).suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream"))
+        .to(Named("write"), topic, windowed, count.option)
+    def closes(pipelines: Pipeline[IO]*) = Topology.of(pipelines.head, pipelines.tail*).map(_.subtopologies.flatMap(_.closes))
+    assertEquals(closes(first.into(shared), counted("b", 1.hour).into(shared)), Right(List("final" -> 3600000L)))
+    assertEquals(
+      closes(first.into(shared), KStream(Named("read-c"), Topic.from("c").orFail, windowed, count).into(shared)).left.map(_.toList),
+      Left(List(TopologyError.InvalidSuppression("final", "no windowed aggregation reaches the table, so its windows have no close time")))
+    )
+
+  test("a stream joined with a table keeps the stream's grace alone, as Java's join has the stream alone before it"):
+    val windowed = Windowed.timeSerde(text, 10.seconds)
+    val table    = KTable(Named("read-t"), topic, windowed, count, Store("read-t"))
+    val joined   =
+      KStream(Named("read-j"), Topic.from("j").orFail, text, text).groupByKey(text, text)
+        .windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Named("count-j"), Store("counts-j")).toStream(Named("changes-j"))
+        .join(Named("join"), table)((counted, held) => counted + held).toTable(Named("table-j"), Store("table-j"), windowed, count)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-j")).to(Named("write-j"), topic, windowed, count.option)
+    assertEquals(Topology.of(joined).map(_.subtopologies.flatMap(_.closes)), Right(List("final" -> 5000L)))
 
   test("a suppression waiting a negative time or parts of a millisecond, or with a negative limit, is refused, and one waiting no time is not"):
     def refused(held: Suppressed.UntilTimeLimit) = Topology.of(suppressed(held)).left.toOption.map(_.toList)

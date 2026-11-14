@@ -147,7 +147,10 @@ object PartitionRecords:
         F.uncancelable: _ =>
           states.get.flatMap: current =>
             val revoked = current.removedAll(assignment)
-            states.set(current.removedAll(revoked.keySet)) >> revoked.values.toList.traverse_(_.channel.close.void)
+            // librdkafka keeps a partition paused through its revocation, so one paused for its reader is resumed, to be fetched once assigned again.
+            states.set(current.removedAll(revoked.keySet)) >> revoked.values.toList.traverse_ : state =>
+              state.channel.close.void >> state.paused.getAndSet(false)
+                .flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition))))
 
   private object Runtime:
     def create[F[_]: Async, K, V](

@@ -38,15 +38,17 @@ private[xkafka] object Wiring:
       problems: List[TopologyError],
       steps: List[String],
       inputs: List[Topic],
-      generated: List[String]
+      generated: List[String],
+      joinNames: List[String]
   ):
     def subtopologies: List[Subtopology[F]] = numbered.map(_._2)
 
   /** Where a node's records have come from, as far as the walk has followed them: a topic of its sub-topology; the node they came out of; the topics
     * a join copartitions for these records, which Java's streams and tables pass on from step to step, the sides' or parents' together after a join
     * or a merge, and none after a suppression, which Java takes for their source; every topic joined for them so far; whether sub-topologies are
-    * numbered before and after theirs; whether any of them may have a new key; the topics they read whose sources Java has not made yet; and whether
-    * they run beside what reads a table rather than as a program's own.
+    * numbered before and after theirs; whether any of them may have a new key; the topics they read whose sources Java has not made yet; whether they
+    * run beside what reads a table rather than as a program's own; and the grace of the windows they come out of, which Java finds for a suppression
+    * until windows close, if a windowed aggregation is before them on every way they came.
     */
   private final case class Path(
       home: Source,
@@ -57,13 +59,14 @@ private[xkafka] object Wiring:
       after: Boolean,
       rekeyed: Boolean,
       unwritten: List[Source],
-      pulled: Boolean
+      pulled: Boolean,
+      grace: Option[Long] = None
   ):
     /** It after `step`. */
     def through[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): Path =
       step match
         case Step.Suppress(_, _, _, _) => copy(sources = Nil, rekeyed = rekeyed || step.rekeys)
-        case _                         => copy(rekeyed = rekeyed || step.rekeys)
+        case _                         => copy(rekeyed = rekeyed || step.rekeys, grace = Path.graceOf(step).orElse(grace))
 
     /** The topics of it and `other` together. */
     def topics(other: Path): List[Source] = (sources ++ other.sources).distinct
@@ -80,7 +83,9 @@ private[xkafka] object Wiring:
         after || other.before || other.after,
         rekeyed || other.rekeyed,
         unwritten ++ other.unwritten,
-        pulled && other.pulled
+        pulled && other.pulled,
+        // Java takes the largest of the graces of what meets, and none unless each has one.
+        grace.zip(other.grace).map(_ max _)
       )
 
     /** Whether Java could number their sub-topologies otherwise, by building the other first. */
@@ -89,6 +94,15 @@ private[xkafka] object Wiring:
   private object Path:
     def of(sources: List[Source], node: String, pulled: Boolean): Path =
       Path(sources.head, List(node), sources, Nil, false, false, false, Nil, pulled)
+
+    /** The grace a windowed aggregation gives what comes out of it: the windows', and for sessions also their gap, as Java waits for. */
+    def graceOf[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): Option[Long] =
+      step match
+        case Step.WindowedAggregate(_, windows, _, _, _, _, _, _, _)   => Some(windows.graceMillis)
+        case Step.SlidingAggregate(_, windows, _, _, _, _, _, _, _)    => Some(windows.graceMillis)
+        case Step.SessionAggregate(_, windows, _, _, _, _, _, _, _, _) => Some(windows.graceMillis + windows.gapMillis)
+        case Step.Cogrouped(_, folded)                                 => graceOf(folded)
+        case _                                                         => None
 
   /** The stores and topics of the program's own pipelines. */
   private final case class Own(stores: Set[String], sources: Set[Source])
@@ -177,7 +191,11 @@ private[xkafka] object Wiring:
       problems: Vector[TopologyError],
       steps: Vector[String],
       // The names of the nodes the program makes that no step of its names, such as a repartition's and a join's own.
-      generated: Vector[String] = Vector.empty
+      generated: Vector[String] = Vector.empty,
+      // Each suppression until windows close by its name, with the grace it waits.
+      closes: Map[String, Long] = Map.empty,
+      // The names of the joins of two streams, which Java names no node of its own, only the nodes it makes after them.
+      joinNames: Vector[String] = Vector.empty
   ):
     def writing(sources: List[Source]): Walk[F] = copy(written = written ++ sources)
 
@@ -207,6 +225,16 @@ private[xkafka] object Wiring:
         same.fold(walk.copy(kept = walk.kept :+ (at.home -> store)))(walk.united(at.home, _))
 
     def refusing(found: List[TopologyError]): Walk[F] = copy(problems = problems ++ found)
+
+    /** For a suppression until windows close, the grace it waits, which the windowed aggregations before it on every way give, and Java refuses one
+      * with none on some way.
+      */
+    def closing[K, V, K2, V2](step: Step[F, K, V, K2, V2], at: Path): Walk[F] =
+      step match
+        case Step.Suppress(suppressed, _, _, Release.WindowCloses(_)) => at.grace.fold(refusing(
+            List(TopologyError.InvalidSuppression(suppressed.name, "no windowed aggregation reaches the table, so its windows have no close time"))
+          ))(grace => copy(closes = closes.updated(suppressed.name, grace)))
+        case _ => this
 
     /** `first` and `second` meeting in one node, noting where that decides which Java numbers first. */
     def meeting(first: Path, second: Path): (Path, Walk[F]) =
@@ -271,7 +299,8 @@ private[xkafka] object Wiring:
         walked.unstartable.toList.filter(inside),
         of(walked.kept, home),
         of(walked.repartitions, home),
-        of(walked.nodes, home)
+        of(walked.nodes, home),
+        walked.closes
       )
     val homes =
       walked.found.flatMap(_._1.origin.sources).map(walked.homeOf).distinct.map: home =>
@@ -285,7 +314,8 @@ private[xkafka] object Wiring:
       walked.problems.toList ++ unfed,
       walked.steps.toList,
       inputs,
-      walked.generated.toList
+      walked.generated.toList,
+      walked.joinNames.toList
     )
 
   /** The copartition groups each join's topics make, as Java makes them: a join's topics go in the group of the first it finds already in one, and
@@ -330,8 +360,8 @@ private[xkafka] object Wiring:
             walk.copy(globals = walk.globals :+ global, steps = walk.steps ++ List(s"${global.named.value}-source", global.named.value))
               .writing(List(Source.Input(global.topic)))
         val made =
-          tabled.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
-            .refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
+          tabled.closing(step, at).making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last))
+            .keeping(at, step.kept).refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
             .refusing(step.kept.flatMap(held => held.problems.map(TopologyError.InvalidStore(held.store.value, _))))
         arrive(next, after, made.coming(named.value, after))
       case Consumer.Output(named, topic, _, _, _) => walk
@@ -365,7 +395,8 @@ private[xkafka] object Wiring:
         val pulled = table.fold(walk)(_.entries.foldLeft(walk)((walking, entry) => entered(entry, true, walking)))
         def reading(rows: Path, reader: Walk[F]): Walk[F] =
           val (joined, met) = reader.joining(at, rows)
-          arrive(next, joined.copy(last = at.last), met)
+          // Java's join of a stream with a table has the stream alone before it, so it takes the stream's grace.
+          arrive(next, joined.copy(last = at.last, grace = at.grace), met)
         pulled.came.get(last) match
           case Some(rows) => reading(rows, pulled)
           case None       => pulled.copy(readers = pulled.readers.updated(last, pulled.readers.getOrElse(last, Vector.empty) :+ reading))
@@ -487,6 +518,6 @@ private[xkafka] object Wiring:
       Made(s"$named-${if leftOuter then "outer-" else ""}other-join", Kind.Processor(held.left :: held.shared.toList), List(otherWindowed.name))
     val merge = Made(s"$named-merge", Kind.Processor(Nil), List(thisJoin.name, otherJoin.name))
     val made  =
-      List(thisWindowed, otherWindowed, thisJoin, otherJoin, merge).foldLeft(met)(_.making(after, _, named = false)).copy(steps = met.steps :+ named)
-        .keeping(after, join.kept)
+      List(thisWindowed, otherWindowed, thisJoin, otherJoin, merge).foldLeft(met)(_.making(after, _, named = false))
+        .copy(joinNames = met.joinNames :+ named).keeping(after, join.kept)
     arrive(join.next, after, made.coming(s"$named-merge", after))

@@ -35,6 +35,10 @@ import fs2.Chunk
   */
 final case class Window(start: Long, end: Long)
 
+object Window:
+  /** The end of a window of `size` starting at `start`, which is the largest time where it would be past it, as Java truncates it. */
+  private[xkafka] def ending(start: Long, size: Long): Long = if start > Long.MaxValue - size then Long.MaxValue else start + size
+
 /** A key and the window its value covers. */
 final case class Windowed[K](key: K, window: Window)
 
@@ -53,10 +57,8 @@ object Windowed:
         bytes match
           case Some(read) if read.size >= 8 =>
             val start = ByteBuffer.wrap(read.drop(read.size - 8).toArray).getLong
-            val end   = start + size.toMillis
-            // Java truncates an end past the largest timestamp to it.
             key.deserializer.deserialize(topic, headers, Some(read.take(read.size - 8)))
-              .map(Windowed(_, Window(start, if end < 0 then Long.MaxValue else end)))
+              .map(Windowed(_, Window(start, Window.ending(start, size.toMillis))))
           case Some(read) => F.raiseError(new IllegalArgumentException(s"a windowed key is at least 8 bytes, but a record of topic '${topic
                 .value}' held ${read.size}"))
           case None => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' has no windowed key"))

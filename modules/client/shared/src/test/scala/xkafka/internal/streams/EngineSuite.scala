@@ -1053,6 +1053,18 @@ final class EngineSuite extends CatsEffectSuite:
           assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 4L)))
           assertEquals(from.map(_._1), List(Map(changelog(1) -> 4L)))
 
+  test("with a state directory, an active task the member loses with all its tasks is still reported in task offsets, as its stores stay on disk"):
+    val held = Map(("0_1", "counts") -> (StoreContents.of(Map(Chunk.array("k".getBytes) -> counted(3L))), Map(1 -> 4L)))
+    MemoryStateDirectory(held, Map("0_1" -> Map("counts" -> 4L))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _       <- world.tell(assign(TaskId("0", 1)))
+          _       <- IO.sleep(200.millis)
+          _       <- world.tell(MemberAction.LoseAll)
+          _       <- IO.sleep(200.millis)
+          offsets <- world.taskOffsets
+        yield assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 4L)))
+
   test("a store kept in memory, and a store with no position, are not taken from the state directory"):
     val inMemory =
       KStream(Named("read"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts").inMemory)

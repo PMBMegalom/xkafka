@@ -201,7 +201,7 @@ object WindowStore:
       private def many(found: F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]): Stream[F, (Windowed[K], V)] =
         Stream.eval(found).flatMap(Stream.emits).evalMap: (k, start, held) =>
           // As Java, a window ending past the largest time ends at the largest time.
-          val end = if start + size < 0 then Long.MaxValue else start + size
+          val end = Window.ending(start, size)
           (key.deserializer.deserialize(access.topic, Headers.empty, Some(k)), read(held))
             .mapN((keyRead, v) => Windowed(keyRead, Window(start, end)) -> v)
 

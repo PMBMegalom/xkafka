@@ -29,11 +29,13 @@ A window's result is sent on once a record arrives timestamped at or after the
 window's end plus its grace. For sessions, the inactivity gap is added too,
 and a session merged into another is not sent at all.
 
-`untilWindowCloses` needs a table with windowed keys that a windowed
-aggregation reaches, directly or through steps such as `toStream` and
-`toTable`, and uses that aggregation's grace. `Topology.of` refuses it on a
-table that no windowed aggregation reaches, such as one read from a topic of
-windowed keys.
+`untilWindowCloses` needs a table with windowed keys that windowed
+aggregations reach along every way into it, directly or through steps such as
+`toStream` and `toTable`. It uses their grace, the largest where several reach
+it; a stream joined with a table takes the stream's alone. `Topology.of`
+refuses it, with `TopologyError.InvalidSuppression`, on a table that some way
+reaches without a windowed aggregation, such as one read from a topic of
+windowed keys, or one that such a stream also sends into.
 
 To send each key's latest value at most once in a while, use
 `Suppressed.untilTimeLimit`, on any table:

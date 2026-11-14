@@ -1485,8 +1485,8 @@ private[xkafka] final class Task[F[_]](
     val values                   = bufferValue(step.value)
     val (until, wait, dropEmpty) =
       step.release match
-        case Release.WindowCloses(end, grace) => (end(record.key), grace, true)
-        case Release.TimeLimit(waited)        => (record.timestamp, waited, false)
+        case Release.WindowCloses(end) => (end(record.key), subtopology.closes.getOrElse(suppressed.name, 0L), true)
+        case Release.TimeLimit(waited) => (record.timestamp, waited, false)
     def unreadable = new IllegalStateException(s"the suppression '${suppressed.name}' buffer holds a change it cannot read")
     topicNamed(s"$application-$store-changelog").flatMap: changelog =>
       (

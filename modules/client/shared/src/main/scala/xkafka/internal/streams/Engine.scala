@@ -520,9 +520,12 @@ private[xkafka] object Engine:
   )(using F: Async[F]):
     import MemberAction.*
 
-    /** Closes the tasks given, which no longer run here, and with them their processors' instances, as Java closes a task it gives up. */
-    private def closed(tasks: Iterable[(TaskId, Live[F])]): F[Unit] =
-      tasks.toList.traverse_((id, live) => live.task.close *> released(id, live.stores, settled = false).void) *> opened.update(_ -- tasks.map(_._1))
+    /** Closes the tasks given, which no longer run here, and with them their processors' instances, as Java closes a task it gives up, answering
+      * those whose stores stay on disk, kept as given up.
+      */
+    private def closed(tasks: Iterable[(TaskId, Live[F])]): F[Map[TaskId, Standby[F]]] =
+      tasks.toList.traverse((id, live) => live.task.close *> released(id, live.stores, settled = false).map(_.map(id -> _))).map(_.flatten.toMap) <*
+        opened.update(_ -- tasks.map(_._1))
 
     /** Closes the stores of a task given up here. `settled`, where the task has just committed, so that its stores hold all it wrote to their
       * changelogs, each store records the end of its changelog partition first. Where stores are kept on disk, the task's are then recorded as given
@@ -654,7 +657,7 @@ private[xkafka] object Engine:
         case Assign(round, assignment, epoch) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
           val added = (assignment.active -- kept.keySet).toList
-          closed(running.tasks.view.filterKeys(id => !assignment.active(id)).toList) *> F.monotonic.flatMap: now =>
+          closed(running.tasks.view.filterKeys(id => !assignment.active(id)).toList).product(F.monotonic).flatMap: (closedHere, now) =>
             val stillKept = running.kept.filter((_, held) => now - held._2 < StateCleanupDelay)
             val available = running.standbys ++ stillKept.view.mapValues(_._1)
             phase.set(StreamsPhase.Restoring).whenA(added.exists(id => subtopologies(id.subtopology).stores.nonEmpty)) *>
@@ -662,15 +665,17 @@ private[xkafka] object Engine:
                 standby((assignment.standby ++ assignment.warmup) -- assignment.active, available).flatMap: standbys =>
                   val gone = running.standbys.view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toList
                   dropped(gone).flatMap: left =>
-                    val keeping = (stillKept ++ left.view.mapValues(_ -> now)).view.filterKeys(id => !standbys.contains(id) && !assignment.active(id))
-                      .toMap
+                    val keeping = (stillKept ++ (closedHere ++ left).view.mapValues(_ -> now)).view
+                      .filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toMap
                     val after = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping, epoch = epoch)
                     val owned = (after.tasks.keySet ++ after.standbys.keySet).map(ownerOf)
                     reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running) *>
                       state.traverse_(_.cleaned(owned, StateCleanupDelay)).as(after)
         // Standby tasks are kept as those no longer wanted are, their stores on disk closed, so that a later open of them finds them free.
-        case LoseAll => (closed(running.tasks.toList) *> dropped(running.standbys.toList), F.monotonic).tupled.flatMap: (left, now) =>
-            val lost = running.copy(tasks = Map.empty[TaskId, Live[F]], standbys = Map.empty, kept = running.kept ++ left.view.mapValues(_ -> now))
+        // Active tasks are kept too where their stores stay on disk, so that the coordinator hears of them when the member joins again.
+        case LoseAll => (closed(running.tasks.toList), dropped(running.standbys.toList), F.monotonic).tupled.flatMap: (gone, left, now) =>
+            val lost =
+              running.copy(tasks = Map.empty[TaskId, Live[F]], standbys = Map.empty, kept = running.kept ++ (gone ++ left).view.mapValues(_ -> now))
             phase.set(StreamsPhase.Lost) *> reassign(lost) *> refollow(running, lost).as(lost)
         case _ => F.pure(running)
 
