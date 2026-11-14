@@ -37,7 +37,7 @@ enum TopologyError derives CanEqual:
   /** A store, repartition or step name that the topic it names could not carry, or that Java refuses as a name. */
   case InvalidName(name: String, reason: String)
 
-  /** Two steps with one name, which Java refuses too. */
+  /** Two steps with one name, or a step named as a node the program makes of its own, such as a repartition's source, which Java refuses too. */
   case DuplicateName(name: String)
 
   /** Two stores with one name, whose changelogs would be one topic. */
@@ -84,7 +84,7 @@ enum TopologyError derives CanEqual:
   def message: String =
     this match
       case InvalidName(name, reason)  => s"'$name' cannot name a store, repartitioning or step: $reason"
-      case DuplicateName(name)        => s"two steps are named '$name'"
+      case DuplicateName(name)        => s"two steps, or a step and a node the program makes, are named '$name'"
       case DuplicateStore(name)       => s"two stores are named '$name'"
       case DuplicateRepartition(name) => s"two repartitionings are named '$name'"
       case DuplicateSource(topic)     =>

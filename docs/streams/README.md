@@ -92,7 +92,11 @@ and `Serde.bytes` write the same bytes as Java's `Serdes.String()`,
 Every step has a name, given as a `Named`: a pipeline's source, each step, and
 its `to`. Names label the program's steps in
 [its description](#describing-a-program). A step that keeps a store also takes the
-store's name, as a `Store`. Two steps cannot share a name.
+store's name, as a `Store`. Two steps cannot share a name, and no step can
+take a name the program gives a node of its own: the source of the repartition
+`orders` is `orders-repartition-source`, and a cogroup named `totals` merges in
+`totals-cogroup-merge`. A join of two streams names no node by its own name, so
+a step may take that name.
 
 Grouping records whose key may have changed, after `map`, `flatMap`, `selectKey`
 or `evalMap`, sends them through a repartition topic first. Name it with a

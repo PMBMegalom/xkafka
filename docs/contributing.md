@@ -140,15 +140,16 @@ starts, including both ways a Native application reaches librdkafka.
 
 ## Formatting and checks
 
-```sh
-sbt scalafmtAll scalafmtSbt
-```
-
-Before opening a pull request, run the checks continuous integration runs:
+Before opening a pull request, run:
 
 ```sh
-sbt scalafmtCheckAll scalafmtSbtCheck headerCheckAll test
+sbt prePR test mimaReportBinaryIssues doc
 ```
+
+`prePR` regenerates the CI workflow, adds missing license headers and formats
+the code, so commit what it changes; continuous integration checks all three.
+The rest runs the tests, the binary compatibility check and the API docs, as
+continuous integration does.
 
 ## Changes to the build
 

@@ -120,8 +120,9 @@ final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError
   *   the longest the broker holds a fetch of the application's consumers while fewer than `fetch.min.bytes` of records wait, as `ConsumerSettings`'
   *   `fetchWait` does for a consumer
   * @param taskTimeout
-  *   how long the application asks the group's coordinator again while it is not ready to read or commit the group's offsets, or a request to it
-  *   fails in a way worth retrying, before it stops with the last refusal, as Java Streams' `task.timeout.ms`; with zero, it stops at the first
+  *   how long the application asks the group's coordinator again while it is not ready to read or commit the group's offsets, while it does not know
+  *   the member yet as the member joins again, or while a request to it fails in a way worth retrying, before it stops with the last failure, as Java
+  *   Streams' `task.timeout.ms`; with zero, it stops at the first
   */
 sealed abstract case class StreamsSettings private (
     client: ClientSettings,
@@ -180,7 +181,9 @@ sealed abstract case class StreamsSettings private (
   def withFetchWait(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.fetchWaitOf(value).map(valid => copy(fetchWait = valid))
 
-  /** How long the application asks the group's coordinator again before it stops, from zero, which stops it at the first refusal. */
+  /** How long the application keeps asking the group's coordinator while it is not ready, does not know the member yet, or while asking fails in a
+    * way worth retrying, before it stops with the last failure; with zero, it stops at the first.
+    */
   def withTaskTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.taskTimeoutOf(value).map(valid => copy(taskTimeout = valid))
 

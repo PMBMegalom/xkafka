@@ -113,7 +113,9 @@ another. Those that can make the settings invalid return
 that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
 `withRebalanceSafeCommits`, `withStartingOffsets`, `withoutSessionTimeout`, and
-`withoutHeartbeatInterval`. The others, such as
+`withoutHeartbeatInterval`. `StreamsSettings` works the same way: its methods
+that set a duration, the concurrency or the state directory return
+`ValidatedNel[StreamsSettingsError, *]`. The others, such as
 `withCompression` or `withIsolationLevel`, return the settings directly.
 
 ```scala mdoc:compile-only
@@ -214,7 +216,7 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | `queryEndpoint` | unset, so other members cannot query this one | where this member answers other members' [queries](streams/queries.md) |
 | `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Keeping stores on disk](streams/running.md#keeping-stores-on-disk)) |
 | `fetchWait` | 500ms | how long the broker may hold a fetch of the application's consumers, from zero up to 5m |
-| `taskTimeout` | 5m | how long the application keeps asking the group's coordinator to read or commit offsets while it is not ready, or while asking fails in a way worth retrying, before it stops with the last failure; with zero, it stops at the first |
+| `taskTimeout` | 5m | how long the application keeps asking the group's coordinator to read or commit offsets while it is not ready, does not know the member yet, or while asking fails in a way worth retrying, before it stops with the last failure; with zero, it stops at the first |
 
 See [Streams](streams/running.md#guarantees) for each of them. `fetchWait` works
 as a [consumer's](#consumer-settings) does, and `fetch.min.bytes`, set in the
