@@ -455,6 +455,13 @@ final class EngineSuite extends CatsEffectSuite:
 
   private val purged = Map(partition("app-by-letter-repartition", 0) -> Offset.from(5L).orFail)
 
+  test("at least once, a commit dropped as the member no longer counts or no longer has the task purges nothing, since the group did not take it"):
+    List[Short](25, 110, 113).traverse_ : code =>
+      val refused =
+        (_: Int, topics: List[OffsetCommitRequest.Topic]) =>
+          IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, code))))
+      run(topology = byLetter, commit = refused)(world => purges(world, 5).map(made => assertEquals(made, Nil, s"code $code")))
+
   test("at least once, once the purge interval has passed, each repartition partition loses the records before where its task last committed"):
     run(topology = byLetter)(world => purges(world, 5).map(made => assertEquals(made, List(purged))))
 

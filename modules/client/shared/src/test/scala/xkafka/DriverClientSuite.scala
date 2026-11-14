@@ -564,10 +564,30 @@ final class DriverClientSuite extends CatsEffectSuite:
     twoTransactions(timedOut).map: (first, _, calls) =>
       assertEquals(first, Right(()))
       assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
-    *> twoTransactions(timedOut, timedOut).map: (first, _, calls) =>
+    *> twoTransactions(timedOut, timedOut).map: (first, second, calls) =>
       assertEquals(first, Left(timedOut))
-      assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
-      assert(!calls.contains("abortTransaction"), calls)
+      // The commit is left for the clients to finish, which refuse to begin another until it is asked for again.
+      assertEquals(second, Right(()))
+      assertEquals(
+        calls,
+        Vector("beginTransaction", "commitTransaction", "commitTransaction", "commitTransaction", "beginTransaction", "commitTransaction")
+      )
+
+  test("an abort that fails, after the transaction failed or was cancelled, is asked for again before the next transaction begins"):
+    val boom                                                                     = new RuntimeException("boom")
+    val timedOut                                                                 = failure(retriable = true, fatal = false, abortRequired = false)
+    def after(first: KafkaTransactionalProducer[IO, String, String] => IO[Unit]) =
+      FakeDriver(abortFailures = List(timedOut)).flatMap: fake =>
+        new DriverClient[IO](fake).transactionalProducer(transactionalSettings).use: producer =>
+          first(producer) *> producer.transactionally(_ => IO.unit).attempt
+        .flatMap(second => fake.calls.map(calls => (second, calls.filter(_.endsWith("Transaction")))))
+    val expected = Vector("beginTransaction", "abortTransaction", "abortTransaction", "beginTransaction", "commitTransaction")
+    after(producer => producer.transactionally(_ => IO.raiseError[Unit](boom)).attempt.void).map: (second, calls) =>
+      assertEquals(second, Right(()))
+      assertEquals(calls, expected)
+    *> after(producer => producer.transactionally(_ => IO.never[Unit]).timeoutTo(100.millis, IO.unit)).map: (second, calls) =>
+      assertEquals(second, Right(()))
+      assertEquals(calls, expected)
 
   test("a commit that fails fatally is neither tried again nor aborted, since the producer can do nothing more"):
     val fenced = failure(retriable = false, fatal = true, abortRequired = false)
@@ -641,7 +661,8 @@ final class DriverClientSuite extends CatsEffectSuite:
       holdCommits: Boolean,
       holdOffsets: Boolean,
       commitFailures: Ref[IO, List[Throwable]],
-      beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])]
+      beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])],
+      abortFailures: Ref[IO, List[Throwable]]
   ) extends KafkaDriver[IO]:
     type Client        = String
     type Batch         = Int
@@ -774,7 +795,8 @@ final class DriverClientSuite extends CatsEffectSuite:
     override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] =
       record("commitTransaction") *> commitFailures.modify(failures => (failures.drop(1), failures.headOption)).flatMap(_.traverse_(IO.raiseError))
 
-    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = record("abortTransaction")
+    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] =
+      record("abortTransaction") *> abortFailures.modify(failures => (failures.drop(1), failures.headOption)).flatMap(_.traverse_(IO.raiseError))
 
     override def sendOffsets(
         producer: Client,
@@ -927,7 +949,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         holdOffsets: Boolean = false,
         servingTakes: FiniteDuration = 5.millis,
         commitFailures: List[Throwable] = Nil,
-        beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])] = None
+        beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])] = None,
+        abortFailures: List[Throwable] = Nil
     ): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
@@ -939,8 +962,9 @@ final class DriverClientSuite extends CatsEffectSuite:
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
         Ref.of[IO, Option[Deferred[IO, Unit]]](None),
         Ref.of[IO, Int](0),
-        Ref.of[IO, List[Throwable]](commitFailures)
-      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, failures) =>
+        Ref.of[IO, List[Throwable]](commitFailures),
+        Ref.of[IO, List[Throwable]](abortFailures)
+      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, failures, aborts) =>
         new FakeDriver(
           batches,
           flushed,
@@ -955,6 +979,7 @@ final class DriverClientSuite extends CatsEffectSuite:
           holdCommits,
           holdOffsets,
           failures,
-          beginGate
+          beginGate,
+          aborts
         )
       )

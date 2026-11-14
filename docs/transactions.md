@@ -30,13 +30,18 @@ the body fails or is cancelled.
 
 If the commit itself fails, `transactionally` fails with that error:
 
-- A commit that timed out may still complete, so it is tried once more, and the
-  transaction is not aborted.
+- A commit that fails in a way worth retrying without an abort, such as one
+  that timed out and may still complete, is tried once more, and the
+  transaction is not aborted. If it fails again, the next `transactionally`
+  asks for the commit again before it begins.
 - After a fatal failure, such as another producer with the same
   `transactionalId` fencing this one, the producer can do nothing more. Release
   it and create a new one.
 - Any other failure aborts the transaction, and the producer is ready for the
   next one.
+
+An abort that fails is likewise asked for again before the next transaction
+begins.
 
 A transactional producer only writes inside transactions.
 

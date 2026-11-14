@@ -246,36 +246,61 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       _ <- Resource.eval(handle.client(driver.initTransactions(handle.client.handle, timeoutMillis)))
       // One transactional id carries one transaction at a time, so this keeps concurrent callers out of each other's.
       lock <- Resource.eval(Mutex[F])
-    yield new DriverTransactionalProducer(handle.client, new DriverProducer(handle, settings.producer), lock, timeoutMillis)
+      left <- Resource.eval(F.ref(Option.empty[Unfinished]))
+    yield new DriverTransactionalProducer(handle.client, new DriverProducer(handle, settings.producer), lock, left, timeoutMillis)
 
-  private final class DriverTransactionalProducer[K, V](client: NativeClient, records: KafkaProducer[F, K, V], lock: Mutex[F], timeoutMillis: Int)
-      extends KafkaTransactionalProducer[F, K, V]:
+  /** A commit or abort of a transaction that failed in a way that leaves it to finish, which both clients refuse to begin another before. */
+  private enum Unfinished:
+    case Commit(recorded: List[CommittableOffsetBatch[F]])
+    case Abort
 
-    /** Once the transaction commits, each consumer whose offsets it recorded is told they are committed. */
+  private final class DriverTransactionalProducer[K, V](
+      client: NativeClient,
+      records: KafkaProducer[F, K, V],
+      lock: Mutex[F],
+      left: Ref[F, Option[Unfinished]],
+      timeoutMillis: Int
+  ) extends KafkaTransactionalProducer[F, K, V]:
+
+    /** Once the transaction commits, each consumer whose offsets it recorded is told they are committed. A commit or abort left unfinished by the
+      * transaction before is asked for again first, as both clients require.
+      */
     override def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A] =
       lock.lock.surround(
         Ref.of[F, List[CommittableOffsetBatch[F]]](Nil).flatMap: recorded =>
           // The abort is in place from the moment the transaction has begun, so a cancellation while it begins aborts it too.
           F.uncancelable(poll =>
-            client(driver.beginTransaction(client.handle)) *> poll(use(transaction(recorded))).guaranteeCase:
-              case Outcome.Succeeded(_) => committed(again = true) *> recorded.get.flatMap(_.traverse_(GroupMembership.committed(_)))
-              case Outcome.Canceled()   => client(driver.abortTransaction(client.handle, timeoutMillis))
+            finished *> client(driver.beginTransaction(client.handle)) *> poll(use(transaction(recorded))).guaranteeCase:
+              case Outcome.Succeeded(_) => recorded.get
+                  .flatMap(batches => committed(again = true, batches) *> batches.traverse_(GroupMembership.committed(_)))
+              case Outcome.Canceled() => aborted.handleError(_ => ())
               // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
-              case Outcome.Errored(error) => client(driver.abortTransaction(client.handle, timeoutMillis))
-                  .handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
+              case Outcome.Errored(error) => aborted.handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
           )
       )
 
-    /** Commits the transaction, as both clients ask: a commit that timed out may still be completing, so it is tried once more and never aborted; a
-      * fatal failure leaves the producer to be released; any other is aborted, so that the producer can begin the next transaction.
+    /** Finishes what the transaction before left unfinished, as a commit or abort is made at first: one that fails is left to finish again, or, for a
+      * commit that cannot, aborted.
       */
-    private def committed(again: Boolean): F[Unit] =
+    private def finished: F[Unit] =
+      left.getAndSet(None).flatMap:
+        case None                             => F.unit
+        case Some(Unfinished.Abort)           => aborted
+        case Some(Unfinished.Commit(batches)) => committed(again = false, batches) *> batches.traverse_(GroupMembership.committed(_))
+
+    /** Aborts the transaction, leaving the abort to finish where it fails. */
+    private def aborted: F[Unit] = client(driver.abortTransaction(client.handle, timeoutMillis)).onError(_ => left.set(Some(Unfinished.Abort)))
+
+    /** Commits the transaction, as both clients ask: a commit that timed out may still be completing, so it is tried once more and never aborted, and
+      * is left to finish if it times out again; a fatal failure leaves the producer to be released; any other is aborted, so that the producer can
+      * begin the next transaction.
+      */
+    private def committed(again: Boolean, batches: List[CommittableOffsetBatch[F]]): F[Unit] =
       client(driver.commitTransaction(client.handle, timeoutMillis)).handleErrorWith:
         case failure: KafkaException.BackendFailure if failure.fatal.contains(true) => F.raiseError(failure)
         case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.transactionAbortRequired.contains(true) =>
-          if again then committed(again = false) else F.raiseError(failure)
-        case error => client(driver.abortTransaction(client.handle, timeoutMillis))
-            .handleErrorWith(failure => F.delay(error.addSuppressed(failure))) *> F.raiseError(error)
+          if again then committed(again = false, batches) else left.set(Some(Unfinished.Commit(batches))) *> F.raiseError(failure)
+        case error => aborted.handleErrorWith(failure => F.delay(error.addSuppressed(failure))) *> F.raiseError(error)
 
     private def transaction(recorded: Ref[F, List[CommittableOffsetBatch[F]]]): Transaction[F, K, V] =
       new Transaction[F, K, V]:

@@ -457,6 +457,9 @@ private[xkafka] object Engine:
     /** Committed where it read to. */
     def settled: Input = copy(read = None, committed = read.map(_._1).orElse(committed))
 
+    /** Where its commit was dropped: nothing to commit again, and still committed where the group last took it. */
+    def dropped: Input = copy(read = None)
+
   /** A task the engine runs: its program, what it holds, and each partition it reads, one of each topic its sub-topology reads. */
   private final case class Live[F[_]](
       task: Task[F],
@@ -466,6 +469,8 @@ private[xkafka] object Engine:
   ):
     /** Committed where it read to. */
     def settled: Live[F] = copy(inputs = inputs.view.mapValues(_.settled).toMap)
+
+    def dropped: Live[F] = copy(inputs = inputs.view.mapValues(_.dropped).toMap)
 
     /** With what it wrote since its last commit in its stores. */
     def stored(using F: Functor[F]): F[Live[F]] = task.stored(state).map(after => copy(state = after))
@@ -820,11 +825,13 @@ private[xkafka] object Engine:
         // STALE_MEMBER_EPOCH answers a commit at an older epoch for a task the member no longer has, which goes to another as Gone ones do.
         untilAnswered("committing", member.commit(topics, running.epoch)): answers =>
           answers.map(_.errorCode).find(code => code != 0 && (!Again(code) || code == StaleEpoch)) match
-            case Some(code) if Gone(code) || code == StaleEpoch => F.pure(Right(()))
+            case Some(code) if Gone(code) || code == StaleEpoch => F.pure(Right(false))
             case Some(code)                                     => F.raiseError(failure("committing", code))
-            case None                                           => F.pure(answers.map(_.errorCode).find(_ != 0).toLeft(()))
-      sent.whenA(topics.nonEmpty) *> wrote.traverse((id, live) => live.stored.map(id -> _.settled))
-        .map(done => running.copy(tasks = running.tasks ++ done))
+            case None                                           => F.pure(answers.map(_.errorCode).find(_ != 0).toLeft(true))
+      // A commit the group did not take leaves the inputs committed where it last took one, so that no purge passes what the task's next owner reads.
+      (if topics.nonEmpty then sent else F.pure(true)).flatMap: taken =>
+        wrote.traverse((id, live) => live.stored.map(stored => id -> (if taken then stored.settled else stored.dropped)))
+          .map(done => running.copy(tasks = running.tasks ++ done))
 
     /** The next records, or none after a wait while no task runs, since the Java consumer refuses to poll with nothing assigned. */
     private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
