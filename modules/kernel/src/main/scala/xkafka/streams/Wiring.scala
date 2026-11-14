@@ -386,10 +386,16 @@ private[xkafka] object Wiring:
             entered = walk.entered + identified(read),
             steps = written.steps ++ read.origin.names.map(_.value)
           )
-        val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil)
+        // Java's graph goes on through the repartition, so the grace of the windows before it carries across.
+        val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil, grace = at.grace)
         val refused =
           if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(repartition.value))
-        val placed = (if atJoin then refused else refused.writing(List(source))).copy(nodes = refused.nodes :+ (source, node)).refusing(counted)
+        // The source of a repartition that is not a grouped table's is a node the program makes, which no step may also be named; a grouped
+        // table's is named after its aggregate, a step's name already.
+        val placed =
+          (if atJoin then refused else refused.writing(List(source)))
+            .copy(nodes = refused.nodes :+ (source, node), generated = if aggregate.isEmpty then refused.generated :+ name else refused.generated)
+            .refusing(counted)
         arrive(next, after, placed.coming(name, after))
       case Consumer.Beside(table, last, next) =>
         val pulled = table.fold(walk)(_.entries.foldLeft(walk)((walking, entry) => entered(entry, true, walking)))
@@ -475,15 +481,23 @@ private[xkafka] object Wiring:
     val subscribed   = Entry(Origin.Exchanged[F](join.subscriptions, s"$named-subscription-registration-source"), Consumer.ForeignSubscribed(join))
     val answered     = Entry(Origin.Exchanged[F](join.responses, s"$named-subscription-response-source"), Consumer.ForeignAnswered(join))
     val store        = join.subscribed.value
-    val after        = left.copy(last = List(s"$named-result"), sources = left.sources :+ response, unwritten = Nil, rekeyed = false)
-    val send         = Made(s"$named-subscription-registration-processor", Kind.Processor(Nil), left.last)
-    val sink         = Made(s"$named-subscription-registration-sink", Kind.Writes(subscription), List(send.name))
-    val readRequest  = Made(s"$named-subscription-registration-source", Kind.Reads(List(subscription)), Nil)
-    val receive      = Made(s"$named-subscription-receive", Kind.Processor(List(store)), List(readRequest.name))
-    val lookup       = Made(s"$named-subscription-join-foreign", Kind.Processor(join.right.view.fold(Nil)(Describing.stores)), List(receive.name))
-    val changed      = Made(s"$named-foreign-join-subscription", Kind.Processor(List(store)), right.last)
-    val answer       = Made(s"$named-subscription-response-sink", Kind.Writes(response), List(lookup.name, changed.name))
-    val readAnswer   = Made(s"$named-subscription-response-source", Kind.Reads(List(response)), Nil)
+    // Java's response has both tables before it, so the result has a grace only where both do, the larger.
+    val after =
+      left.copy(
+        last = List(s"$named-result"),
+        sources = left.sources :+ response,
+        unwritten = Nil,
+        rekeyed = false,
+        grace = left.grace.zip(right.grace).map(_ max _)
+      )
+    val send        = Made(s"$named-subscription-registration-processor", Kind.Processor(Nil), left.last)
+    val sink        = Made(s"$named-subscription-registration-sink", Kind.Writes(subscription), List(send.name))
+    val readRequest = Made(s"$named-subscription-registration-source", Kind.Reads(List(subscription)), Nil)
+    val receive     = Made(s"$named-subscription-receive", Kind.Processor(List(store)), List(readRequest.name))
+    val lookup      = Made(s"$named-subscription-join-foreign", Kind.Processor(join.right.view.fold(Nil)(Describing.stores)), List(receive.name))
+    val changed     = Made(s"$named-foreign-join-subscription", Kind.Processor(List(store)), right.last)
+    val answer      = Made(s"$named-subscription-response-sink", Kind.Writes(response), List(lookup.name, changed.name))
+    val readAnswer  = Made(s"$named-subscription-response-source", Kind.Reads(List(response)), Nil)
     val resolve = Made(s"$named-subscription-response-resolver", Kind.Processor(join.left.view.fold(Nil)(Describing.stores)), List(readAnswer.name))
     val result  = Made(s"$named-result", Kind.Processor(join.store.toList.map(_._1.value)), List(resolve.name))
     val unkept  = Option.when(join.store.isEmpty && join.next.requests)(TopologyError.UnkeptForeignKeyJoin(named)).toList

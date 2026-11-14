@@ -77,6 +77,12 @@ final class BranchingSuite extends CatsEffectSuite:
         .mapValues(Named("j-this-join"))(identity).to(Named("write"), out, text, text)
     assertEquals(refused(joined), Some(List(TopologyError.DuplicateName("j-this-join"))))
 
+  test("a step named as a repartition topic's source is refused, as Java refuses a second node of one name"):
+    val repartitioned =
+      read("in").selectKey(Named("key"))((_, v) => v).repartition(Repartition("x"), text, text).filter(Named("x-repartition-source"))((_, _) => true)
+        .to(Named("write"), out, text, text)
+    assertEquals(refused(repartitioned), Some(List(TopologyError.DuplicateName("x-repartition-source"))))
+
   test("a step named as a join of two streams is not refused, since Java names no node so, but two joins of one name are"):
     val join =
       (named: String) =>

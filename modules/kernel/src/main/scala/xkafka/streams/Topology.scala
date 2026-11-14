@@ -369,6 +369,7 @@ private[xkafka] object TableChange:
         def read(side: Chunk[Byte])       = value.deserializer.deserialize(topic, headers, Some(side))
         def leaving(old: Chunk[Byte])     = read(old).map(left => TableChange[V](None, Some(left)))
         def joining(current: Chunk[Byte]) = read(current).map(joined => TableChange[V](Some(joined), None))
+        def latest(values: Chunk[Byte])   = values(values.size - 2) == 0 || values(values.size - 2) == 1
         def both(values: Chunk[Byte])     =
           unzigzag(values).filter((length, used) => length >= 0 && length <= values.size - used) match
             case Some((length, used)) =>
@@ -380,12 +381,13 @@ private[xkafka] object TableChange:
           case None       => F.raiseError(new Deserializer.NullValueException(topic))
           case Some(read) => read.last.fold(F.raiseError[TableChange[V]](new IllegalArgumentException(s"a record of topic '${topic
                 .value}' is empty, which no table change is"))):
-              case 0                   => leaving(read.dropRight(1))
-              case 1                   => joining(read.dropRight(1))
-              case 2                   => both(read.dropRight(1))
-              case 3 if read.size >= 2 => leaving(read.dropRight(2))
-              case 4 if read.size >= 2 => joining(read.dropRight(2))
-              case 5 if read.size >= 2 => both(read.dropRight(2))
+              case 0 => leaving(read.dropRight(1))
+              case 1 => joining(read.dropRight(1))
+              case 2 => both(read.dropRight(1))
+              // The byte before 3, 4 and 5 says if the change is the latest, which Java reads only as 0 or 1.
+              case 3 if read.size >= 2 && latest(read) => leaving(read.dropRight(2))
+              case 4 if read.size >= 2 && latest(read) => joining(read.dropRight(2))
+              case 5 if read.size >= 2 && latest(read) => both(read.dropRight(2))
               case flag => F.raiseError(new IllegalArgumentException(s"a record of topic '${topic.value}' ends in $flag, which ends no table change"))
     Serde(serializer, deserializer)
 
@@ -801,12 +803,6 @@ private[xkafka] object Entry:
     type K = K0
     type V = V0
 
-/** The topics and steps that make one sub-topology: the topics it reads, its own first, each going into what reads it; the groups of topics its joins
-  * copartition, as Java groups their sources; the joins and merges it holds, by the topics they read, whose sub-topologies Java numbers by which of
-  * their inputs its program builds first; the cogroups it holds, by the topics they read, that Java cannot start, since it copartitions what they
-  * read from before a repartition topic, in other sub-topologies; the stores it keeps and the repartition topics it writes; and its nodes as Java's
-  * builder makes them.
-  */
 /** A processor whose logic lives in an instance each task starts and closes, named as its node is, and what reads the records it returns. */
 private[xkafka] trait HostedNode[F[_]]:
   type Key
@@ -858,6 +854,12 @@ private[xkafka] object Punctuating:
       def punctuators(access: Map[String, StoreAccess[F]]): List[Punctuator[F, K2, V2]] = processor.handling(access).punctuators
       val next: Consumer[F, K2, V2]                                                     = reader
 
+/** The topics and steps that make one sub-topology: the topics it reads, its own first, each going into what reads it; the groups of topics its joins
+  * copartition, as Java groups their sources; the joins and merges it holds, by the topics they read, whose sub-topologies Java numbers by which of
+  * their inputs its program builds first; the cogroups it holds, by the topics they read, that Java cannot start, since it copartitions what they
+  * read from before a repartition topic, in other sub-topologies; the stores it keeps and the repartition topics it writes; and its nodes as Java's
+  * builder makes them.
+  */
 private[xkafka] final case class Subtopology[F[_]](
     entries: List[Entry[F]],
     copartitioned: List[List[Source]],

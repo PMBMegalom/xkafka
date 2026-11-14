@@ -184,6 +184,30 @@ final class WindowsSuite extends CatsEffectSuite:
       Left(List(TopologyError.InvalidSuppression("final", "no windowed aggregation reaches the table, so its windows have no close time")))
     )
 
+  test("a windowed aggregation's grace is found across a repartition topic, as Java's walks through it"):
+    val windowed = Windowed.timeSerde(text, 10.seconds)
+    val rekeyed  =
+      KStream(Named("read-r"), Topic.from("r").orFail, text, text).groupByKey(text, text)
+        .windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Named("count-r"), Store("counts-r")).toStream(Named("changes-r"))
+        .map(Named("m"))((key, value) => (key, value)).toTable(Named("table-r"), Store("table-r"), windowed, count)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-r")).to(Named("write-r"), topic, windowed, count.option)
+    assertEquals(Topology.of(rekeyed).map(_.subtopologies.flatMap(_.closes).distinct), Right(List("final" -> 5000L)))
+
+  test("a foreign-key join's result needs a windowed aggregation on both sides, as Java's response has both before it"):
+    val windowed             = Windowed.timeSerde(text, 10.seconds)
+    def counts(name: String) =
+      KStream(Named(s"read-$name"), Topic.from(name).orFail, text, text).groupByKey(text, text)
+        .windowedBy(TimeWindows.tumbling(10.seconds, grace = 5.seconds)).count(Named(s"count-$name"), Store(s"counts-$name"))
+        .toStream(Named(s"changes-$name")).toTable(Named(s"table-$name"), Store(s"table-$name"), windowed, count)
+    val right   = KTable(Named("read-o"), Topic.from("o").orFail, windowed, count, Store("read-o"))
+    val program =
+      counts("f").joinOnForeignKey(Named("fk"), right, count, windowed, count, Store("fk"), count)((key, _) => Some(key))((own, other) => own + other)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-f")).to(Named("write-f"), topic, windowed, count.option)
+    assertEquals(
+      Topology.of(program).left.map(_.toList),
+      Left(List(TopologyError.InvalidSuppression("final", "no windowed aggregation reaches the table, so its windows have no close time")))
+    )
+
   test("a stream joined with a table keeps the stream's grace alone, as Java's join has the stream alone before it"):
     val windowed = Windowed.timeSerde(text, 10.seconds)
     val table    = KTable(Named("read-t"), topic, windowed, count, Store("read-t"))
