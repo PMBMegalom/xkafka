@@ -751,8 +751,10 @@ the registry read another path.
   with `RegistryException.Unserializable` if the schema is not registered.
 - `Latest`: writes with the subject's latest version, as Confluent's
   `use.latest.version` does. Use it when another team owns the schema. With
-  Avro, fields the latest version lacks are left out, and those it adds take
-  their defaults; JSON is written as your codec writes it. A Protobuf message
+  Avro, the value is read into the latest version as Avro resolves your
+  codec's schema into it: fields it lacks are left out, those it adds take
+  their defaults, a field it renames is found through its alias, and an `int`
+  is written as its `long`. JSON is written as your codec writes it. A Protobuf message
   is written as your codec writes it, using the message in the latest
   version's file that has your type's name. If the file has no such message,
   writing fails. Writing also fails with `RegistryException.Unserializable` if

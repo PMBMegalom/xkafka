@@ -42,10 +42,14 @@ object AvroFormat:
       override val recordName: Option[String] = own.fullName.map(_.value)
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        codec.mismatch.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).map: written =>
-          // A value is written as its codec gives it; where the schema is another, the fields it lacks are left out and those it adds take their
-          // defaults.
-          value => codec.encode(value).flatMap(AvroBinary.encode(written, _))
+        codec.mismatch.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).flatMap: written =>
+          // A value is written as its codec gives it. Where the schema is another, it is read into that schema as Avro resolves the codec's into it,
+          // as Java's serializer and the vulcan and avro4s serdes do: through aliases, widening numbers, leaving out the fields it lacks and taking
+          // the defaults of those it adds.
+          if written == own then Right(value => codec.encode(value).flatMap(AvroBinary.encode(own, _)))
+          else
+            AvroBinary.decoder(own, written).map: resolved =>
+              value => codec.encode(value).flatMap(AvroBinary.encode(own, _)).flatMap(resolved).flatMap(AvroBinary.encode(written, _))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
         codec.mismatch.toLeft(()) *> avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))

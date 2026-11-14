@@ -55,7 +55,7 @@ object AvroBinary:
     * scale or fewer digits, or a time of another unit, since the value is written as its own logical type gives it.
     */
   def writable(writer: AvroSchema, reader: AvroSchema): Either[String, Unit] =
-    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).clash(writer, reader, Set.empty).toLeft(())
+    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).clash(writer, reader).toLeft(())
 
   /** `writable` for schemas given as text, checked where xkafka reads both. */
   private[avro] def writableText(writer: String, reader: String): Either[String, Unit] =
@@ -262,28 +262,41 @@ object AvroBinary:
     private def found[A](result: Either[String, A]): Planning[A] = EitherT.fromEither(result)
 
     /** The first place a value of `writer` would mean something else written as `reader`, for `writable`; `seen` holds the record pairs met. */
-    def clash(writer: AvroSchema, reader: AvroSchema, seen: Set[(FullName, FullName)]): Option[String] =
+    def clash(writer: AvroSchema, reader: AvroSchema): Option[String] = clashing(writer, reader).runA(Set.empty).value
+
+    /** The first place a value of `writer` would mean something else written as `reader`, each pair of records checked once, since what it finds
+      * there does not depend on how it was reached.
+      */
+    private def clashing(writer: AvroSchema, reader: AvroSchema): State[Set[(FullName, FullName)], Option[String]] =
+      def first[A](values: Iterable[A])(check: A => State[Set[(FullName, FullName)], Option[String]]) =
+        values.foldLeft(State.pure[Set[(FullName, FullName)], Option[String]](None))((sofar, value) =>
+          sofar.flatMap(_.fold(check(value))(found => State.pure(Some(found))))
+        )
       (writer, reader) match
-        case (AvroSchema.Named(name), _) => writers.get(name).flatMap(clash(_, reader, seen))
-        case (_, AvroSchema.Named(name)) => readers.get(name).flatMap(clash(writer, _, seen))
-        case (AvroSchema.Logical(Digits(precision, scale)), AvroSchema.Logical(Digits(readPrecision, readScale))) => Option.when(
-            scale != readScale || precision > readPrecision
-          )(s"a decimal of precision $precision and scale $scale is not written as one of precision $readPrecision and scale $readScale")
-        case (AvroSchema.Logical(written), AvroSchema.Logical(read)) => Option
-            .when(written != read)(s"${render(writer)} is not written as ${render(reader)}")
-        case (AvroSchema.Union(branches), _) => branches.view.flatMap(clash(_, reader, seen)).headOption
+        case (AvroSchema.Named(name), _) => writers.get(name).fold(State.pure(None))(clashing(_, reader))
+        case (_, AvroSchema.Named(name)) => readers.get(name).fold(State.pure(None))(clashing(writer, _))
+        case (AvroSchema.Logical(Digits(precision, scale)), AvroSchema.Logical(Digits(readPrecision, readScale))) => State
+            .pure(Option.when(scale != readScale || precision > readPrecision)(
+              s"a decimal of precision $precision and scale $scale is not written as one of precision $readPrecision and scale $readScale"
+            ))
+        case (AvroSchema.Logical(written), AvroSchema.Logical(read)) => State
+            .pure(Option.when(written != read)(s"${render(writer)} is not written as ${render(reader)}"))
+        case (AvroSchema.Union(branches), _) => first(branches)(clashing(_, reader))
         case (_, AvroSchema.Union(branches)) => branches.find(exact(writer, _)).orElse(branches.find(same(writer, _)))
-            .orElse(branches.find(promotes(writer, _))).flatMap(clash(writer, _, seen))
-        case (AvroSchema.Logical(logicalType), _)                                                      => clash(logicalType.underlying, reader, seen)
-        case (_, AvroSchema.Logical(logicalType))                                                      => clash(writer, logicalType.underlying, seen)
-        case (written: AvroSchema.Record, read: AvroSchema.Record) if !seen((written.name, read.name)) =>
-          written.fields.view.flatMap: field =>
-            read.fields.find(candidate => candidate.name == field.name || candidate.aliases.contains(field.name))
-              .flatMap(target => clash(field.schema, target.schema, seen + ((written.name, read.name))))
-          .headOption
-        case (AvroSchema.Array(written), AvroSchema.Array(read)) => clash(written, read, seen)
-        case (AvroSchema.Map(written), AvroSchema.Map(read))     => clash(written, read, seen)
-        case _                                                   => None
+            .orElse(branches.find(promotes(writer, _))).fold(State.pure(None))(clashing(writer, _))
+        case (AvroSchema.Logical(logicalType), _)                  => clashing(logicalType.underlying, reader)
+        case (_, AvroSchema.Logical(logicalType))                  => clashing(writer, logicalType.underlying)
+        case (written: AvroSchema.Record, read: AvroSchema.Record) =>
+          val pair = (written.name, read.name)
+          State.get[Set[(FullName, FullName)]].flatMap: checked =>
+            if checked(pair) then State.pure(None)
+            else
+              State.modify[Set[(FullName, FullName)]](_ + pair) *> first(written.fields): field =>
+                read.fields.find(candidate => candidate.name == field.name || candidate.aliases.contains(field.name))
+                  .fold(State.pure(None))(target => clashing(field.schema, target.schema))
+        case (AvroSchema.Array(written), AvroSchema.Array(read)) => clashing(written, read)
+        case (AvroSchema.Map(written), AvroSchema.Map(read))     => clashing(written, read)
+        case _                                                   => State.pure(None)
 
     /** The plan of a pair of records: the one made before, or, for a pair being planned, one reading through it, or else a new one. */
     private def recordOnce(written: AvroSchema.Record, read: AvroSchema.Record): Planning[Step] =
@@ -413,14 +426,15 @@ object AvroBinary:
         case (AvroSchema.Array(_), AvroSchema.Array(_)) | (AvroSchema.Map(_), AvroSchema.Map(_)) => true
         case (left, right)                                                                       => left == right
 
-    /** Whether `reader` is a named type of the same full name as `writer`, the branch Java's resolution takes before one sharing only a simple name.
+    /** Whether `reader` is a named type of the same full name as `writer`, or one with it as an alias, the branch Java's resolution takes before one
+      * sharing only a simple name.
       */
     private def exact(writer: AvroSchema, reader: AvroSchema): Boolean =
       (base(writer, writers), base(reader, readers)) match
-        case (AvroSchema.Record(written, _, _, _), AvroSchema.Record(read, _, _, _))   => written == read
-        case (AvroSchema.Enum(written, _, _, _, _), AvroSchema.Enum(read, _, _, _, _)) => written == read
-        case (AvroSchema.Fixed(written, _, _), AvroSchema.Fixed(read, _, _))           => written == read
-        case _                                                                         => false
+        case (AvroSchema.Record(written, _, _, _), AvroSchema.Record(read, _, _, aliases))   => written == read || aliases.contains(written)
+        case (AvroSchema.Enum(written, _, _, _, _), AvroSchema.Enum(read, _, _, _, aliases)) => written == read || aliases.contains(written)
+        case (AvroSchema.Fixed(written, _, _), AvroSchema.Fixed(read, _, aliases))           => written == read || aliases.contains(written)
+        case _                                                                               => false
 
     private def promotes(writer: AvroSchema, reader: AvroSchema): Boolean =
       (base(writer, writers), base(reader, readers)) match

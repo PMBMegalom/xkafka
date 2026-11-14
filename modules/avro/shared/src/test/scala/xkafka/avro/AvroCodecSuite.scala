@@ -30,6 +30,8 @@ import xkafka.schemaregistry.{Schema, SchemaAlias, SchemaDecimal, SchemaDoc, Sch
 
 final case class Line(sku: String, quantity: Int = 1) derives AvroCodec
 
+final case class Tally(amount: Int) derives AvroCodec
+
 final case class Charged(
     @SchemaDecimal(10, 4)
     price: BigDecimal,
@@ -190,6 +192,17 @@ class AvroCodecSuite extends FunSuite:
     val format = AvroFormat[Reading]
     val value  = Reading(1.5, 2.5f, -3.5)
     assertEquals(format.writer(format.schema).flatMap(_(value)).flatMap(bytes => format.reader(format.schema).flatMap(_(bytes))), Right(value))
+
+  test("a value written with another schema of its record is read into it as the schema says: through a field's alias, and an int as a long"):
+    def schema(fields: String)  = Schema(s"""{"type":"record","name":"Tally","namespace":"xkafka.avro","fields":[$fields]}""", SchemaType.Avro)
+    def written(target: Schema) =
+      AvroFormat[Tally].writer(target).flatMap(_(Tally(7))).flatMap(AvroBinary.decode(AvroSchemaJson.parse(target.text).toOption.get, _))
+    val name = FullName(Some("xkafka.avro"), "Tally")
+    assertEquals(
+      written(schema("""{"name":"total","type":"int","default":0,"aliases":["amount"]}""")),
+      Right(AvroValue.Record(name, Vector("total" -> AvroValue.Int(7))))
+    )
+    assertEquals(written(schema("""{"name":"amount","type":"long"}""")), Right(AvroValue.Record(name, Vector("amount" -> AvroValue.Long(7L)))))
 
   test("a value is not written with another schema whose decimals have another scale or fewer digits, or whose times count another unit"):
     def target(price: String, at: String, tip: String) =

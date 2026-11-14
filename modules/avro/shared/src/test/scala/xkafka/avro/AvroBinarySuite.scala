@@ -196,6 +196,24 @@ class AvroBinarySuite extends ScalaCheckSuite:
       Left("record 'A' has no default for field 'y', which 'A' does not write")
     )
 
+  test("checking that a schema whose records are each used twice by the one before can be written as itself checks each pair of records once"):
+    // R0 holds two R1, which hold two R2, and so on: walked once for each use, R39 would be walked 2^39 times.
+    val records = (0 until 40).foldRight("""{"type":"record","name":"R40","fields":[{"name":"n","type":"null"}]}"""): (level, inner) =>
+      s"""{"type":"record","name":"R$level","fields":[{"name":"a","type":$inner},{"name":"b","type":"R${level + 1}"}]}"""
+    val schema = parsed(records)
+    assertEquals(AvroBinary.writable(schema, schema), Right(()))
+
+  test("a writer's record in a union is read as the reader's branch whose alias is its full name, before one sharing only its simple name"):
+    val writer = parsed("""{"type":"record","name":"R","namespace":"a","fields":[{"name":"x","type":"int"}]}""")
+    val reader =
+      parsed(
+        """[{"type":"record","name":"R","namespace":"x","fields":[{"name":"x","type":"int"}]},""" +
+          """{"type":"record","name":"Q","namespace":"b","aliases":["a.R"],"fields":[{"name":"x","type":"int"}]}]"""
+      )
+    val value = AvroValue.Record(FullName(Some("a"), "R"), Vector("x" -> AvroValue.Int(1)))
+    val read  = AvroBinary.encode(writer, value).flatMap(bytes => AvroBinary.decoder(writer, reader).flatMap(_(bytes)))
+    assertEquals(read.map { case AvroValue.Record(name, _) => Some(name); case _ => None }, Right(Some(FullName(Some("b"), "Q"))))
+
   test("a number whose tenth byte holds bits past 64 is refused, not read without them"):
     val overlong = bytes(0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f)
     assertEquals(AvroBinary.decode(AvroSchema.Long, overlong), Left("a number does not fit 64 bits"))
