@@ -355,8 +355,10 @@ private[avro] final class RecordCodec[A, T <: Tuple](
 
   override def decode(value: AvroValue): Either[String, A] =
     value match
-      case AvroValue.Record(_, values) => infos
-          .traverse(info => values.collectFirst { case (info.name, read) => read }.toRight(s"no field '${info.name}'")).flatMap(fields.decode)
+      case AvroValue.Record(_, values) =>
+        // Each field's value found once by its name, the first of a name as before.
+        val byName = values.reverseIterator.toMap
+        infos.traverse(info => byName.get(info.name).toRight(s"no field '${info.name}'")).flatMap(fields.decode)
           .bimap(reason => s"record '${name.value}': $reason", fromTuple)
       case other => Left(s"expected a record '${name.value}', found ${Shown(other)}")
 

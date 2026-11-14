@@ -80,9 +80,12 @@ object AvroBinary:
       case (AvroSchema.String, AvroValue.String(text))    =>
         val bytes = text.getBytes(StandardCharsets.UTF_8)
         Right(Vector(varLong(bytes.length.toLong), Chunk.array(bytes)))
-      case (AvroSchema.Record(name, fields, _, _), AvroValue.Record(_, values)) => fields.traverse(field =>
-          values.collectFirst { case (field.name, value) => value }.orElse(field.default)
-            .toRight(s"record '${name.value}' has no field '${field.name}'").flatMap(write(field.schema, _, defined))
+      case (AvroSchema.Record(name, fields, _, _), AvroValue.Record(_, values)) =>
+        // Each field's value found once by its name, the first of a name as before.
+        val byName = values.reverseIterator.toMap
+        fields.traverse(field =>
+          byName.get(field.name).orElse(field.default).toRight(s"record '${name.value}' has no field '${field.name}'")
+            .flatMap(write(field.schema, _, defined))
         ).map(_.toVector.flatten)
       case (AvroSchema.Enum(name, symbols, _, _, _), AvroValue.Enum(_, symbol)) => symbols.indexOf(symbol) match
           case -1    => Left(s"'$symbol' is not a symbol of '${name.value}'")
@@ -368,11 +371,18 @@ object AvroBinary:
         case _ => Left(s"${render(reader)} cannot read what ${render(writer)} wrote")
 
     private def record(written: AvroSchema.Record, read: AvroSchema.Record): Planning[Step] =
-      def readerField(field: AvroField) = read.fields.find(candidate => candidate.name == field.name || candidate.aliases.contains(field.name))
+      // Each reader field by its name and its aliases, found once; a field's name comes before another's alias, as Java finds a field by its name
+      // first.
+      val readers =
+        read.fields.reverseIterator.flatMap(candidate => candidate.aliases.map(_ -> candidate)).toMap ++
+          read.fields.reverseIterator.map(candidate => candidate.name -> candidate).toMap
+      def readerField(field: AvroField) = readers.get(field.name)
       // A field the reader lacks is read only to be skipped, as the writer's own schema reads it, whatever the reader names the same.
       def skipped(field: AvroField) = found(Resolution(writers, writers).plan(field.schema, field.schema))
       val planned                   =
-        written.fields.traverse(field => readerField(field).fold(skipped(field))(target => planning(field.schema, target.schema)).map(field -> _))
+        written.fields.traverse(field =>
+          readerField(field).fold(skipped(field))(target => planning(field.schema, target.schema)).map(step => (readerField(field).map(_.name), step))
+        )
       planned.flatMap: steps =>
         val taken    = written.fields.flatMap(readerField).map(_.name).toSet
         val defaults =
@@ -384,9 +394,8 @@ object AvroBinary:
           (bytes, at, depth) =>
             if depth >= MaxDepth then Left(s"the value is nested more than $MaxDepth deep")
             else
-              steps.foldM((Map.empty[String, AvroValue], at)) { case ((values, position), (field, step)) =>
-                step(bytes, position, depth + 1)
-                  .map((value, next) => (readerField(field).fold(values)(target => values.updated(target.name, value)), next))
+              steps.foldM((Map.empty[String, AvroValue], at)) { case ((values, position), (target, step)) =>
+                step(bytes, position, depth + 1).map((value, next) => (target.fold(values)(values.updated(_, value)), next))
               }.map: (values, end) =>
                 val all = values ++ filled
                 (AvroValue.Record(read.name, read.fields.map(field => field.name -> all(field.name)).toVector), end)

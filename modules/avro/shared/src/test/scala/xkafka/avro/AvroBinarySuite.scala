@@ -221,6 +221,18 @@ class AvroBinarySuite extends ScalaCheckSuite:
     val read  = AvroBinary.encode(writer, value).flatMap(bytes => AvroBinary.decoder(writer, reader).flatMap(_(bytes)))
     assertEquals(read.map { case AvroValue.Record(name, _) => Some(name); case _ => None }, Right(Some(FullName(Some("b"), "Q"))))
 
+  test("a record of many fields is written and read back, each field found once, not by searching the others"):
+    val count  = 20000
+    val schema =
+      parsed((0 until count).map(n => s"""{"name":"f$n","type":"int"}""").mkString("""{"type":"record","name":"Wide","fields":[""", ",", "]}"))
+    val reader =
+      parsed(
+        (0 until count).reverse.map(n => s"""{"name":"f$n","type":"int"}""").mkString("""{"type":"record","name":"Wide","fields":[""", ",", "]}")
+      )
+    val value = AvroValue.Record(FullName(None, "Wide"), (0 until count).toVector.map(n => s"f$n" -> AvroValue.Int(n)))
+    val read  = AvroBinary.encode(schema, value).flatMap(bytes => AvroBinary.decoder(schema, reader).flatMap(_(bytes)))
+    assertEquals(read.map { case AvroValue.Record(_, fields) => fields.headOption; case _ => None }, Right(Some("f19999" -> AvroValue.Int(19999))))
+
   test("a number whose tenth byte holds bits past 64 is refused, not read without them"):
     val overlong = bytes(0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f)
     assertEquals(AvroBinary.decode(AvroSchema.Long, overlong), Left("a number does not fit 64 bits"))
