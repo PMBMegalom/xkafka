@@ -178,8 +178,10 @@ refuse is a `SettingsError`:
 - `maxPollInterval` is how long the consumer can go without fetching records.
   It stops fetching while too many records wait unread, so if your code reads no
   records for longer than this, the consumer leaves its group. It must be at
-  least the session timeout.
-- `groupInstanceId` makes the consumer a static member of its group.
+  least the session timeout, unless `group.protocol` is `consumer`.
+- `groupInstanceId` makes the consumer a static member of its group. It follows
+  the rules for topic names: at most 249 letters, digits, `.`, `_` or `-`, and
+  not `.` or `..`.
 
 Unless they are set, the session timeout and heartbeat interval are 45 seconds
 and 3 seconds on every platform. If you set the property `group.protocol` to

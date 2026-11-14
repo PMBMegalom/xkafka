@@ -187,6 +187,13 @@ final class DriverClientSuite extends CatsEffectSuite:
           assert(rounds > 0, rounds)
           assertEquals(later, rounds)
 
+  test("waiting on a delivery after the producer is released fails, as the client is closed, and does not wait for ever"):
+    FakeDriver().flatMap: fake =>
+      val settings = producerSettings.withCloseTimeout(100.millis).toOption.get
+      new DriverClient[IO](fake).producer(settings).use(_.produce(values("stuck"))).flatMap(_.timeout(5.seconds).attempt)
+    .map: outcome =>
+      assert(outcome.left.exists(error => error.isInstanceOf[IllegalStateException] && error.getMessage == "the client is closed"), outcome)
+
   private def values(first: String, rest: String*): NonEmptyList[ProducerRecord[String, String]] =
     NonEmptyList(first, rest.toList).map(ProducerRecord(events, "k", _))
 
@@ -573,6 +580,14 @@ final class DriverClientSuite extends CatsEffectSuite:
         Vector("beginTransaction", "commitTransaction", "commitTransaction", "commitTransaction", "beginTransaction", "commitTransaction")
       )
 
+  test("a commit the client says to ask for again is tried once more and never aborted, whatever its code says"):
+    val refused = failure(retriable = false, fatal = false, abortRequired = false)
+    twoTransactions(CommitToRetry(refused), CommitToRetry(refused)).map: (first, second, calls) =>
+      assertEquals(first, Left(refused))
+      assertEquals(second, Right(()))
+      assert(!calls.contains("abortTransaction"), calls)
+      assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
+
   test("an abort that fails, after the transaction failed or was cancelled, is asked for again before the next transaction begins"):
     val boom                                                                     = new RuntimeException("boom")
     val timedOut                                                                 = failure(retriable = true, fatal = false, abortRequired = false)
@@ -603,6 +618,19 @@ final class DriverClientSuite extends CatsEffectSuite:
     .map: (partitions, lookups) =>
       assertEquals(partitions, NonEmptySet.one(Partition.from(0).toOption.get))
       assertEquals(lookups, 3)
+
+  test("a producer waits for a topic being created no longer than its client's metadata refresh interval"):
+    val quick = client.withMetadataRefreshInterval(1.milli).toOption.get
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings.withClient(quick)).use(_.partitionsFor(Topic.from("creating").toOption.get)).attempt
+        .timeout(10.seconds).product(fake.count("metadata"))
+    .map: (outcome, lookups) =>
+      assert(
+        outcome.left
+          .exists { case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.UnknownTopicOrPartition); case _ => false },
+        outcome
+      )
+      assert(lookups < 3, lookups)
 
   private val group = ConsumerGroup.from("fake").toOption.get
 

@@ -55,6 +55,28 @@ final class LibrdkafkaFailuresSuite extends CatsEffectSuite:
             IO.sleep(3.seconds) *> producer.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "v" * (2 * 1024 * 1024)))).attempt
       yield assertEquals(code(outcome), Some(ErrorCode.MessageTooLarge), outcome)
 
+  test("a failure librdkafka holds fatal is reported by its cause, on the call that met it and on the calls after"):
+    LibrdkafkaPlatform.mockCluster[IO](Map(MockCluster.Brokers)).use: cluster =>
+      for
+        _         <- cluster.createTopic(topic.value, 1)
+        client    <- ClientSettings.from(NonEmptyList.one(cluster.bootstrapServers)).liftTo[IO]
+        producing <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+        _         <- KafkaClient[IO].producer(producing).use(_.produceAndAwait(NonEmptyList.of("a", "b").map(ProducerRecord(topic, "key", _))))
+        group     <- ConsumerGroup.from("fatal").liftTo[IO]
+        consuming <- ConsumerSettings.from(client, group, text, text, AutoOffsetReset.Earliest, groupInstanceId = Some("member")).liftTo[IO]
+        outcomes  <-
+          KafkaClient[IO].consumer(consuming, Selection.Topics(NonEmptySet.of(topic))).use: consumer =>
+            for
+              first <- consumer.records.head.compile.lastOrError.timeout(30.seconds)
+              // The group's coordinator answers that another member holds this one's instance id, which fences it for good.
+              _      <- cluster.failRequests(MockCluster.OffsetCommit, List(MockCluster.FencedInstanceId))
+              commit <- first.offset.commit.attempt
+              after  <- first.offset.commit.attempt
+            yield (commit, after)
+      yield
+        assertEquals(code(outcomes._1), Some(ErrorCode.Fenced), outcomes._1)
+        assertEquals(code(outcomes._2), Some(ErrorCode.Fenced), outcomes._2)
+
   test("a committed offset the broker refuses for one partition fails with the error it gave that partition"):
     LibrdkafkaPlatform.mockCluster[IO](Map(MockCluster.Brokers)).use: cluster =>
       for

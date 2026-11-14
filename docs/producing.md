@@ -211,8 +211,8 @@ def batched[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSetting
   settings.withCompression(Compression.Zstd).withLinger(20.millis).liftTo[IO]
 ```
 
-`withLinger` returns a `ValidatedNel`, because a negative linger, or one longer
-than `ProducerSettings.LingerLimit`, is rejected.
+`withLinger` returns a `ValidatedNel`, because a negative linger, or one of
+`ProducerSettings.LingerLimit` or longer, is rejected.
 
 A batch is sent as soon as it is full or its linger has passed, whichever comes
 first. `batchSize` sets how many bytes of records make a batch full. Unless it is

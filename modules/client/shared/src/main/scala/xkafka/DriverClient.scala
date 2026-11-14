@@ -32,7 +32,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
 import internal.{ClientProperties, PollQueue}
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import internal.driver.{CommitToRetry, Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 import streams.{Forward, KafkaStreams, StreamsSettings, Topology}
 
 private def isolationLevel(value: IsolationLevel): String =
@@ -297,6 +297,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       */
     private def committed(again: Boolean, batches: List[CommittableOffsetBatch[F]]): F[Unit] =
       client(driver.commitTransaction(client.handle, timeoutMillis)).handleErrorWith:
+        case CommitToRetry(failure) =>
+          if again then committed(again = false, batches) else left.set(Some(Unfinished.Commit(batches))) *> F.raiseError(failure)
         case failure: KafkaException.BackendFailure if failure.fatal.contains(true) => F.raiseError(failure)
         case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.transactionAbortRequired.contains(true) =>
           if again then committed(again = false, batches) else left.set(Some(Unfinished.Commit(batches))) *> F.raiseError(failure)
@@ -630,7 +632,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       )
 
     private def superviseBatch[A](batch: driver.Batch, result: F[A]): F[F[A]] =
-      supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch))).map(_.joinWithNever)
+      // Releasing the producer cancels what it supervises, so a delivery waited on after that fails, as the client is closed.
+      supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch)))
+        .map(_.joinWith(F.raiseError(new IllegalStateException("the client is closed"))))
 
     private def releaseBatchWhenComplete(batch: driver.Batch): F[Unit] =
       driver.pending(batch).flatMap: pending =>
@@ -779,7 +783,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
           taken.kind match
             case 1 => assigned(taken.partitions) *> starting(taken.partitions).flatMap(starts.set)
             case 0 => handOver(taken.partitions) *> leases.revoke(taken.partitions)
-            // Partitions the group has already given away can commit nothing more, so nothing is waited for.
+            // Partitions the group has already given away can commit nothing more, so no commit is waited for, only a transaction already sending
+            // offsets for them, which its timeout bounds.
             case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
             // Anything else clears the assignment to resynchronise, which ends every lease with it.
             case _ => leases.assign(Nil, replacing = true)

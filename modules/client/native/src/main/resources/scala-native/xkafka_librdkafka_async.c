@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Each job thread's stack, glibc's default, set so a thread has it on musl too, whose default is 128 KiB. */
+#define XKAFKA_JOB_STACK_SIZE ((size_t)8 * 1024 * 1024)
+
 typedef void (*xkafka_done_t)(int64_t token);
 
 /* The shim functions run here, as the shim defines them. */
@@ -153,6 +156,7 @@ static int xkafka_job_start(xkafka_job_t *job, xkafka_done_t done, int64_t token
                 return -1;
         }
         pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+        pthread_attr_setstacksize(&attributes, XKAFKA_JOB_STACK_SIZE);
         started = pthread_create(&thread, &attributes, xkafka_job_thread, job) == 0;
         pthread_attr_destroy(&attributes);
         if (!started) {

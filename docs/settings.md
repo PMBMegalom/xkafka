@@ -55,7 +55,13 @@ count no finer. It must also be positive. In these settings it must be at most
 `Int.MaxValue` milliseconds (about 24.9 days); `StreamsSettings` sets no such
 limit. The exceptions are:
 
-- `linger` may be zero, and at most `ProducerSettings.LingerLimit` (15 minutes).
+- `linger` may be zero, and must be less than `ProducerSettings.LingerLimit`
+  (5 minutes). A transactional producer's linger must also be less than its
+  `transactionTimeout`.
+- `transactionTimeout` is at least
+  `TransactionalProducerSettings.TransactionTimeoutMinimum` (1 second).
+- `metadataRefreshInterval` is at most
+  `ClientSettings.MetadataRefreshIntervalLimit` (1 hour).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
 - The streams `taskTimeout` may be zero.
 - The group membership intervals are at most
@@ -151,7 +157,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for an answer |
 | `commitTimeout` | 15s | how long a commit waits before failing as a timed out request |
 | `assignmentFencing` | `true` | whether offsets from a partition this consumer no longer owns are refused |
-| `groupInstanceId` | none | an identity that makes the consumer a static member of its group |
+| `groupInstanceId` | none | an identity that makes the consumer a static member of its group, named as a topic is |
 | `sessionTimeout` | unset, which is 45s on every platform | how long the group waits to hear from the consumer before handing its partitions on |
 | `heartbeatInterval` | unset, which is 3s on every platform | how often the consumer tells the group it is alive |
 | `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
@@ -188,7 +194,7 @@ Beyond the serializers, `ProducerSettings` carries:
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered yet |
 | `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
-| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to under 5 minutes |
 | `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
 | `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 

@@ -116,10 +116,10 @@ properties, along with these values:
 | setting | default | meaning |
 | --- | --- | --- |
 | `transactionalId` | required | Kafka's `transactional.id` |
-| `transactionTimeout` | 60s | how long the broker lets a transaction stay open before it aborts it (Kafka's `transaction.timeout.ms`), and how long creating the producer waits to be ready for transactions |
+| `transactionTimeout` | 60s | how long the broker lets a transaction stay open before it aborts it (Kafka's `transaction.timeout.ms`), and how long creating the producer waits to be ready for transactions; at least 1 second |
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
-| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to under 5 minutes, and under `transactionTimeout` |
 | `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
 | `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 

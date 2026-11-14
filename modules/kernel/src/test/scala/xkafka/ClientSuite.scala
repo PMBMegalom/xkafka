@@ -178,7 +178,7 @@ final class ClientSuite extends FunSuite:
     val id           = TransactionalId.from("writer").toOption.get
     val maximum      = SettingsError.MaxDuration
 
-    assert(ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = maximum).isValid)
+    assert(ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = ClientSettings.MetadataRefreshIntervalLimit).isValid)
     assert(ProducerSettings.from(clientSettings, serializer, serializer, closeTimeout = maximum).isValid)
     assert(TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = maximum).isValid)
     assert(
@@ -739,19 +739,49 @@ final class ClientSuite extends FunSuite:
     // The names both backends read from the same property.
     assertEquals(Compression.values.toList.map(_.property), List("none", "gzip", "snappy", "lz4", "zstd"))
 
-  test("linger runs from zero to the longest librdkafka accepts"):
+  test("linger runs from zero to below librdkafka's message timeout, and a transaction's linger below its timeout"):
     val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
     val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
-    val tooLong    = ProducerSettings.LingerLimit + 1.milli
+    val limit      = ProducerSettings.LingerLimit
 
-    assert(settings.withLinger(ProducerSettings.LingerLimit).isValid)
+    assertEquals(limit, 5.minutes)
+    assert(settings.withLinger(limit - 1.milli).isValid)
     assertEquals(
       settings.withLinger((-1).milli).toEither,
       Left(NonEmptyList.one(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, (-1).milli)))
     )
     assertEquals(
-      ProducerSettings.from(clientSettings, serializer, serializer, linger = tooLong).toEither,
-      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.LingerLimit)))
+      ProducerSettings.from(clientSettings, serializer, serializer, linger = limit).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, limit, limit)))
+    )
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = 10.seconds).toOption.get
+    assertEquals(
+      transactional.withLinger(10.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(10.seconds, 10.seconds)))
+    )
+    assertEquals(
+      transactional.withLinger(9.seconds).andThen(_.withTransactionTimeout(9.seconds)).toEither,
+      Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(9.seconds, 9.seconds)))
+    )
+    assertEquals(
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, linger = 2.seconds, transactionTimeout = 2.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(2.seconds, 2.seconds)))
+    )
+
+  test("a transaction timeout is at least a second, and the metadata refresh interval at most an hour, as librdkafka accepts"):
+    val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
+    val field      = SettingsError.DurationField
+    assertEquals(
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = 999.millis).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationBelowMinimum(field.TransactionTimeout, 999.millis, 1.second)))
+    )
+    assert(TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = 1.second).isValid)
+    assertEquals(ClientSettings.MetadataRefreshIntervalLimit, 1.hour)
+    assertEquals(
+      clientSettings.withMetadataRefreshInterval(1.hour + 1.milli).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(field.MetadataRefreshInterval, 1.hour + 1.milli, 1.hour)))
     )
 
   test("the enqueue timeout is a minute unless set, must be positive, and owns max.block.ms"):
@@ -859,6 +889,17 @@ final class ClientSuite extends FunSuite:
     val field        = SettingsError.DurationField
 
     assertEquals(settings.withGroupInstanceId(" ").toEither, Left(NonEmptyList.one(SettingsError.BlankGroupInstanceId)))
+    // The Java client holds a static member's id to the rules of topic names.
+    List("a b", ".", "..", "x" * 250, "é").foreach: id =>
+      assertEquals(settings.withGroupInstanceId(id).toEither, Left(NonEmptyList.one(SettingsError.InvalidGroupInstanceId(id))), id)
+    assert(settings.withGroupInstanceId("member-1.a_b").isValid)
+    // Under the consumer protocol the broker decides the session, so the poll interval is not held to the default one there.
+    val consumerProtocol = settings.withProperty("group.protocol", "CONSUMER").toOption.get
+    assert(consumerProtocol.withMaxPollInterval(10.seconds).isValid)
+    assertEquals(
+      settings.withMaxPollInterval(10.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(10.seconds, ConsumerSettings.DefaultSessionTimeout)))
+    )
     assertEquals(
       settings.withSessionTimeout(Duration.Zero).toEither,
       Left(NonEmptyList.one(SettingsError.NonPositiveDuration(field.SessionTimeout, Duration.Zero)))

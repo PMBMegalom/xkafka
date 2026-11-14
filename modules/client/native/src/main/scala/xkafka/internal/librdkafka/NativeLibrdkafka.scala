@@ -242,8 +242,10 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     )
 
   override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
-    transactional((error, code, fatal, retriable, abort) =>
-      Bindings.xkafka_producer_commit_transaction(producer, timeoutMillis, error, ErrorBufferSize.toUSize, code, fatal, retriable, abort)
+    transactional(
+      (error, code, fatal, retriable, abort) =>
+        Bindings.xkafka_producer_commit_transaction(producer, timeoutMillis, error, ErrorBufferSize.toUSize, code, fatal, retriable, abort),
+      committing = true
     )
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
@@ -1086,10 +1088,10 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         val (error, errorCode) = errorSlots
         if call(topics, values, partitions.size.toUSize, error, errorCode) != 0 then throw nativeError(error, errorCode)
 
-  private def transactional(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt): F[Unit] =
-    F.blocking(Zone.acquire(zone => failOnClassified(call)(using zone)))
+  private def transactional(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt, committing: Boolean = false): F[Unit] =
+    F.blocking(Zone.acquire(zone => failOnClassified(call, committing)(using zone)))
 
-  private def failOnClassified(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt)(using Zone): Unit =
+  private def failOnClassified(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt, committing: Boolean = false)(using Zone): Unit =
     val (error, code) = errorSlots
     val fatal         = alloc[CInt](1)
     val retriable     = alloc[CInt](1)
@@ -1097,7 +1099,9 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     !fatal = -1
     !retriable = -1
     !abort = -1
-    if call(error, code, fatal, retriable, abort) != 0 then throw Failures.classified(fromCString(error), !code, !fatal, !abort)
+    if call(error, code, fatal, retriable, abort) != 0 then
+      throw if committing then Failures.committing(fromCString(error), !code, !fatal, !retriable, !abort)
+      else Failures.classified(fromCString(error), !code, !fatal, !abort)
 
   /** Builds a failure from the message and code the call wrote into its own out-parameters. */
   private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure = Failures.coded(fromCString(error), !code)

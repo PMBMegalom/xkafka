@@ -42,6 +42,19 @@ final class LibrdkafkaAnswersSuite extends munit.FunSuite:
       (Some(ErrorCode.Fenced), Some(false), Some(true), None)
     )
 
+  test("a failed commit librdkafka says to ask for again is marked to be, whatever its code, unless it is fatal or must be aborted"):
+    val again = Failures.committing("in progress", -153, fatal = 0, retriable = 1, transactionAbortRequired = 0)
+    assert(
+      again match
+        case driver.CommitToRetry(failure) => failure.retriable.contains(false);
+        case _                             => false
+      ,
+      again
+    )
+    List((1, 1, 0), (0, 1, 1), (0, 0, 0), (-1, -1, -1)).foreach: (fatal, retriable, abort) =>
+      val failure = Failures.committing("failed", -153, fatal, retriable, abort)
+      assert(failure.isInstanceOf[KafkaException.BackendFailure], (fatal, retriable, abort))
+
   test("a topic id reads as Kafka prints it, in URL-safe base64 without padding, where librdkafka prints + and /"):
     assertEquals(LibrdkafkaAnswers.topicId((0x0123456789abcdefL, 0xfedcba9876543210L)).value, "ASNFZ4mrze_-3LqYdlQyEA")
     assertEquals(LibrdkafkaAnswers.topicId((0xfbffbffbffbffbffL, 0xfeffeffeffeffeffL)).value, "-_-_-_-_-__-_-_-_-_-_w")

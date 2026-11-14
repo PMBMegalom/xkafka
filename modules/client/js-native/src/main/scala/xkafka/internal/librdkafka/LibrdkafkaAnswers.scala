@@ -103,6 +103,11 @@ private[xkafka] object Failures:
     val classified = ErrorCode.fromLibrdkafka(code)
     new KafkaException.BackendFailure(message, Some(classified), Some(classified.retriable), flag(fatal), flag(transactionAbortRequired))
 
+  /** A failed transaction commit, which librdkafka's own flag, 1 where it says so, says to ask for again whatever its code says. */
+  def committing(message: String, code: Int, fatal: Int, retriable: Int, transactionAbortRequired: Int): Throwable =
+    val failure = classified(message, code, fatal, transactionAbortRequired)
+    if retriable == 1 && fatal != 1 && transactionAbortRequired != 1 then driver.CommitToRetry(failure) else failure
+
   def plain(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
 
   private def flag(value: Int): Option[Boolean] = Option.when(value >= 0)(value != 0)

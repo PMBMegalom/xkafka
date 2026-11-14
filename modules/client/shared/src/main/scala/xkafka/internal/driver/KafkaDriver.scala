@@ -106,6 +106,7 @@ private[xkafka] trait KafkaDriver[F[_]]:
 
   def beginTransaction(producer: Client): F[Unit]
 
+  /** Commits the open transaction. A failure the client says to commit again after, whatever its code says, is raised as a [[CommitToRetry]]. */
   def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit]
 
   def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit]
@@ -293,3 +294,8 @@ private[xkafka] final case class StartAt(partition: TopicPartition, offset: Long
   * given away, and anything else for a failure to resynchronise.
   */
 private[xkafka] final case class Rebalance[E](event: E, kind: Int, partitions: List[LeaseKey])
+
+/** A transaction commit that failed, which the client says to ask for again, not abort, though `failure`'s code is not retriable: librdkafka's answer
+  * for a commit that may still be completing.
+  */
+private[xkafka] final case class CommitToRetry(failure: KafkaException.BackendFailure) extends RuntimeException(failure.getMessage, failure)

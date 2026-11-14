@@ -162,6 +162,50 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _       <- reading.cancel
     yield assertEquals(made, Vector(s"pause ${Set(firstPartition)}", s"resume ${Set(firstPartition)}"))
 
+  test("a partition revoked while its pause is being made is resumed after the pause, so it is not left paused"):
+    for
+      assignment   <- Ref[IO].of(Set(firstPartition))
+      input        <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls        <- Ref[IO].of(Vector.empty[String])
+      pauseStarted <- Deferred[IO, Unit]
+      allowPause   <- Deferred[IO, Unit]
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit] =
+            pauseStarted.complete(()) >> allowPause.get >> calls.update(_ :+ "pause")
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] = calls.update(_ :+ "resume")
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- pauseStarted.get.timeout(5.seconds)
+      _       <- assignment.set(Set(secondPartition))
+      _       <- IO.sleep(100.millis)
+      _       <- allowPause.complete(())
+      _       <- IO.sleep(100.millis)
+      made    <- calls.get
+      _       <- reading.cancel
+    yield assertEquals(made, Vector("pause", "resume"))
+
+  test("a resume that fails on revocation leaves the other revoked partitions resumed, and fails the stream after"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition, secondPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls      <- Ref[IO].of(Vector.empty[TopicPartition])
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit]  = IO.unit
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] =
+            calls.update(_ ++ topicPartitions) >> IO.raiseWhen(topicPartitions.contains(firstPartition))(new RuntimeException("resume failed"))
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.attempt.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- input.send(record(secondPartition, 0L, "second")).void
+      _       <- IO.sleep(100.millis)
+      _       <- assignment.set(Set.empty)
+      ended   <- reading.joinWithNever.timeout(5.seconds)
+      made    <- calls.get
+    yield
+      assertEquals(made.toSet, Set(firstPartition, secondPartition))
+      assertEquals(ended.left.map(_.getMessage), Left("resume failed"))
+
   test("cancelling before a counted record is sent rolls the count back"):
     for
       assignment   <- Ref[IO].of(Set(firstPartition))

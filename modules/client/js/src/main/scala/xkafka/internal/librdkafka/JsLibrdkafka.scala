@@ -218,8 +218,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         if result.asInstanceOf[Int] != 0 then F.raiseError(error.classifiedFailure) else F.unit
 
   override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
-    transactional((error, result) =>
-      background(_.commitTransaction)((Seq[js.Any](producer, timeoutMillis) ++ error.classifiedArguments :+ result.value)*)
+    transactional(
+      (error, result) => background(_.commitTransaction)((Seq[js.Any](producer, timeoutMillis) ++ error.classifiedArguments :+ result.value)*),
+      committing = true
     )
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
@@ -858,10 +859,11 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     val error            = ErrorSlot()
     direct(function(_)(consumer, topics, values, partitions.size, error.message, ErrorBufferSize, error.code)).flatMap(error.check)
 
-  private def transactional(call: (ErrorSlot, Result) => F[Unit]): F[Unit] =
+  private def transactional(call: (ErrorSlot, Result) => F[Unit], committing: Boolean = false): F[Unit] =
     val error  = ErrorSlot()
     val result = Result()
-    call(error, result) *> F.defer(if result.int != 0 then F.raiseError(error.classifiedFailure) else F.unit)
+    call(error, result) *> F.defer:
+      if result.int == 0 then F.unit else F.raiseError(if committing then error.committingFailure else error.classifiedFailure)
 
   /** What a call that ran on its own thread returned: an `int` or a pointer. */
   private final class Result:
@@ -897,6 +899,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     def failure: KafkaException.BackendFailure = Failures.coded(text, codeValue)
 
     def classifiedFailure: KafkaException.BackendFailure = Failures.classified(text, codeValue, fatal.readInt32LE(0), abort.readInt32LE(0))
+
+    def committingFailure: Throwable = Failures.committing(text, codeValue, fatal.readInt32LE(0), retriable.readInt32LE(0), abort.readInt32LE(0))
 
     /** A handle, or the failure the call reported in place of one. */
     def orFail(handle: js.Any): js.Any = if handle == null then throw failure else handle

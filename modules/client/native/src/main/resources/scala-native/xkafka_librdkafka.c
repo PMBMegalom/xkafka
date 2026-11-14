@@ -114,6 +114,23 @@ static void xkafka_set_error(char *error, size_t error_size, int32_t *error_code
         xkafka_set_error_at(error, error_size, error_code, value, -1);
 }
 
+/* A failure as librdkafka reports it, where _FATAL, which only says the client is done, is reported as the failure that made it so,
+ * so it is classified by its cause, as the Java client classifies it. */
+static void xkafka_set_failure(rd_kafka_t *client, char *error, size_t error_size, int32_t *error_code, const char *value,
+                               rd_kafka_resp_err_t code) {
+        char reason[512];
+        rd_kafka_resp_err_t cause;
+
+        if (code == RD_KAFKA_RESP_ERR__FATAL && client != NULL) {
+                cause = rd_kafka_fatal_error(client, reason, sizeof(reason));
+                if (cause != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error_at(error, error_size, error_code, reason, cause);
+                        return;
+                }
+        }
+        xkafka_set_error_at(error, error_size, error_code, value, code);
+}
+
 /* Only the two failures that a waiting call cannot otherwise explain are kept. */
 static void xkafka_error_callback(rd_kafka_t *client,
                                   int err,
@@ -423,7 +440,7 @@ int xkafka_batch_add(rd_kafka_t *producer,
                 slot->complete = 1;
                 break;
         default:
-                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
+                xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(result), result);
                 return -1;
         }
 
@@ -467,7 +484,7 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
 
         /* Any failure but the client giving up on the brokers is the delivery's own. */
         if (!xkafka_unreached(err)) {
-                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);
+                xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(err), err);
                 return -1;
         }
         /* A delivery report that never reached a broker reports the retries
@@ -809,8 +826,8 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
         }
         if (message->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
                 if (!xkafka_unreached(message->err) || !xkafka_take_security_error(consumer, error, error_size, error_code))
-                        xkafka_set_error_at(error, error_size, error_code,
-                                            rd_kafka_message_errstr(message), message->err);
+                        xkafka_set_failure(consumer, error, error_size, error_code,
+                                           rd_kafka_message_errstr(message), message->err);
                 rd_kafka_message_destroy(message);
                 *status = -1;
                 return NULL;
@@ -2720,8 +2737,8 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
         rd_kafka_topic_partition_list_destroy(native_offsets);
 
         if (enqueued != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error_at(error, error_size, error_code,
-                                    rd_kafka_err2str(enqueued), enqueued);
+                xkafka_set_failure(consumer, error, error_size, error_code,
+                                   rd_kafka_err2str(enqueued), enqueued);
                 rd_kafka_queue_destroy(queue);
                 return -1;
         }
@@ -2737,8 +2754,8 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
         } else {
                 rd_kafka_resp_err_t failure = rd_kafka_event_error(event);
                 if (failure != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error_at(error, error_size, error_code,
-                                            rd_kafka_err2str(failure), failure);
+                        xkafka_set_failure(consumer, error, error_size, error_code,
+                                           rd_kafka_err2str(failure), failure);
                         outcome = -1;
                 }
                 rd_kafka_event_destroy(event);

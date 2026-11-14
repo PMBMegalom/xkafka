@@ -49,3 +49,9 @@ private[xkafka] object MockCluster:
 
   /** Kafka's `NOT_COORDINATOR` error. */
   val NotCoordinator = 16
+
+  /** Kafka's `OffsetCommit` API, which commits a group's offsets. */
+  val OffsetCommit = 8
+
+  /** Kafka's `FENCED_INSTANCE_ID` error, which librdkafka takes as fatal to a static member. */
+  val FencedInstanceId = 82

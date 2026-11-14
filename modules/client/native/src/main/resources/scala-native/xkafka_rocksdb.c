@@ -129,6 +129,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* Each job thread's stack, glibc's default, set so a thread has it on musl too, whose default is 128 KiB. */
+#define XKAFKA_ROCKSDB_JOB_STACK_SIZE ((size_t)8 * 1024 * 1024)
+
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
@@ -874,6 +877,7 @@ static int xkafka_rocksdb_job_start(xkafka_rocksdb_job_t *job, xkafka_rocksdb_do
         job->token = token;
         if (pthread_attr_init(&attributes) == 0) {
                 pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+                pthread_attr_setstacksize(&attributes, XKAFKA_ROCKSDB_JOB_STACK_SIZE);
                 started = pthread_create(&thread, &attributes, xkafka_rocksdb_job_thread, job) == 0;
                 pthread_attr_destroy(&attributes);
         }
