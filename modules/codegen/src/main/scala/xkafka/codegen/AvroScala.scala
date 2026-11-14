@@ -285,4 +285,5 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
   /** How code in this type's package names the type `name`. */
   private def qualified(name: FullName): String =
     if name.namespace.contains(namespace) then Names.typeName(name.name)
-    else (name.namespace.toList.flatMap(_.split('.')).map(Names.term) :+ Names.typeName(name.name)).mkString(".")
+    // From the root, since a package inside this one, as example.audit in example, would hide the package audit.
+    else ("_root_" :: name.namespace.toList.flatMap(_.split('.')).map(Names.term) ++ List(Names.typeName(name.name))).mkString(".")

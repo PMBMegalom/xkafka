@@ -404,7 +404,7 @@ Records match what Confluent's `KafkaJsonSchemaSerializer` writes.
 | `java.util.UUID` | `string` with `format` `uuid` | text |
 | `java.time.Instant` | `string` with `format` `date-time` | ISO-8601 text, such as `2026-11-10T07:00:00Z` |
 | `java.time.LocalDate` | `string` with `format` `date` | ISO-8601 text, such as `2026-11-10` |
-| `java.time.LocalTime`, `LocalDateTime` | `string` | ISO-8601 text, such as `07:00:00` |
+| `java.time.LocalTime`, `LocalDateTime` | `string` | ISO-8601 text, such as `07:00`, with seconds where they are not zero |
 | a case class | `object` of its fields, closed to others | objects |
 | an enum or sealed trait whose cases are all objects | `string` with `enum` of the cases' names | the case's name |
 | any other sealed trait or enum | `oneOf` its cases' objects | the case's object, with its name in the property `type` |

@@ -127,6 +127,18 @@ class ProtobufGenericSuite extends CatsEffectSuite:
   test("a proto3 file is read with its messages, nested types, oneofs, maps and enums, past comments, options, reservations and services"):
     assertEquals(parsed(shop), shopFile)
 
+  test("quoted text is read with protobuf's escapes, and a default is kept exactly as written"):
+    val file =
+      parsed("""syntax = "proto\x32";
+        |import "dir\057a\x2Fb\U000000e9\u00e9.proto";
+        |message Raw { optional bytes data = 1 [default = '\xFF\101"']; }
+        |""".stripMargin)
+    assertEquals(file.syntax, Syntax.Proto2)
+    assertEquals(file.imports, List("dir/a/b\u00e9\u00e9.proto"))
+    assertEquals(file.messages.flatMap(_.fields.flatMap(_.default)), List("""'\xFF\101"'"""))
+    assert(ProtobufSchemaText.render(file).contains("""[default = '\xFF\101"']"""), ProtobufSchemaText.render(file))
+    assert(ProtobufSchemaText.parse("""syntax = "proto3"; import "a\q";""").isLeft)
+
   test("a proto2 file is read with its labels, defaults as written, and packing"):
     assertEquals(
       parsed(legacy),

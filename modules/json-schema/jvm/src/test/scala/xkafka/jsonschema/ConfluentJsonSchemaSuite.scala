@@ -71,6 +71,8 @@ class ConfluentJsonSchemaSuite extends CatsEffectSuite:
     valid(JsonSchemaCodec[Payment], Card("1"), Cash, Transfer("x"))
     valid(JsonSchemaCodec[Status], Status.Open)
     valid(JsonSchemaCodec[Node], Node(1, Some(Node(2, Some(Node(3))))))
+    valid(JsonSchemaCodec[Vehicle], Car(4), Stop, Go)
+    valid(JsonSchemaCodec[Holder], Holder(Some(Holder(Some(Holder(None))))))
 
   test("Confluent finds a value that breaks a derived schema invalid, so its validation reads the schema as xkafka means it"):
     val schema = confluent(JsonSchemaCodec[Line])

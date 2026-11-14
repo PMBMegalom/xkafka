@@ -45,7 +45,7 @@ class AvroGeneratorSuite extends FunSuite:
         "b.avsc" -> """{"type": "enum", "name": "Kind", "namespace": "example.more", "symbols": ["A", "B"]}"""
       ))
     assertEquals(generated.map(_.map(_.path.toString).sorted), Right(List("example/R.scala", "example/more/Kind.scala")))
-    assert(generated.exists(_.exists(_.text.contains("kind: example.more.Kind = example.more.Kind.B"))), generated.toString)
+    assert(generated.exists(_.exists(_.text.contains("kind: _root_.example.more.Kind = _root_.example.more.Kind.B"))), generated.toString)
 
   directory.test("a time's default that is no time of day is refused, since the class could not hold it"): in =>
     def time(logical: String, base: String, default: Long) =

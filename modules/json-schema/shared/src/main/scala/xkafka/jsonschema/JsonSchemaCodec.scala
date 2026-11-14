@@ -55,6 +55,9 @@ trait JsonSchemaCodec[A]:
   /** The discriminator values of a sealed trait's cases, which a sealed trait it is a case of takes as its own. */
   private[jsonschema] def tags: Option[Set[String]] = None
 
+  /** Each case's name and object, where this is a sealed trait or enum whose cases are all objects, written as its cases' names on its own. */
+  private[jsonschema] def objects: Option[List[(String, Json)]] = None
+
   /** The full name of the type, which naming subjects by record takes, where it is a case class, sealed trait or enum. */
   def name: Option[String] = None
 
@@ -296,6 +299,9 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
   override def name: Option[String]                          = Some(full)
   override private[jsonschema] def tags: Option[Set[String]] = Some(tagged.flatMap(_._2).toSet)
 
+  override private[jsonschema] def objects: Option[List[(String, Json)]] =
+    singletons.map(_ => cases.map(known => known.tag -> known.codec.describe(Set.empty).json))
+
   override private[jsonschema] def describe(seen: Set[String]): Described =
     singletons match
       case Some(_) => Described(
@@ -309,13 +315,16 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
       case None                        => body(seen + full)
 
   private def body(inside: Set[String]): Described =
-    val described = cases.map(known => known -> known.codec.describe(inside))
+    // A case is described here in full, even inside itself, since a reference to it could not take the property `type` its object refuses.
+    val described = cases.map(known => known -> known.codec.describe(inside -- known.codec.name))
     // A case that is a sealed trait of its own adds its cases, already told apart by their own names.
     val branches =
       described.flatMap: (known, of) =>
-        known.codec.tags match
-          case Some(_) => of.json.hcursor.downField("oneOf").focus.flatMap(_.asArray).fold(List(of.json))(_.toList)
-          case None    => List(withTag(of.json, known.tag))
+        // One whose cases are all objects is text on its own, and in this trait each of its cases is an object that tells its case, as others are.
+        (known.codec.objects, known.codec.tags) match
+          case (Some(objects), _) => objects.map((tag, json) => withTag(json, tag))
+          case (None, Some(_))    => of.json.hcursor.downField("oneOf").focus.flatMap(_.asArray).fold(List(of.json))(_.toList)
+          case (None, None)       => List(withTag(of.json, known.tag))
     Described(
       Json.fromFields(
         List("title" -> Json.fromString(full)) ++ named.doc.map("description" -> Json.fromString(_)) ++ List("oneOf" -> Json.fromValues(branches))
@@ -341,6 +350,7 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
       case None                   => Left(s"${Shown(value)} is none of the cases of $full")
       case Some((known, encoded)) =>
         if singletons.isDefined then Right(Json.fromString(known.tag))
+        else if known.codec.objects.isDefined then encoded.map(tag => Json.obj("type" -> tag))
         else if known.codec.tags.isDefined then encoded
         else
           encoded.flatMap: json =>
@@ -355,8 +365,10 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
     else
       json.hcursor.get[String]("type").leftMap(_ => s"expected an object of a case of $full, with its case in 'type', found ${Shown(json.noSpaces)}")
         .flatMap: tag =>
-          tagged.collectFirst { case (known, owned) if owned.contains(tag) => known.codec.decode(json).map(known.widen) }
-            .getOrElse(Left(s"'$tag' is not a case of $full"))
+          tagged.collectFirst {
+            case (known, owned) if owned.contains(tag) =>
+              known.codec.decode(if known.codec.objects.isDefined then Json.fromString(tag) else json).map(known.widen)
+          }.getOrElse(Left(s"'$tag' is not a case of $full"))
 
 /** A codec found for a type where one is given, and derived where none is, made once it is first needed so that a type can hold itself. */
 private[jsonschema] final class Resolved[A](make: => JsonSchemaCodec[A]):

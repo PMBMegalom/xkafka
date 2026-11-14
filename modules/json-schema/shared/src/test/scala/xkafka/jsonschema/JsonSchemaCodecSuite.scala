@@ -82,6 +82,16 @@ final case class Maybe(note: Option[String]) derives JsonSchemaCodec
 final case class Clash(`type`: String) extends Shape
 sealed trait Shape derives JsonSchemaCodec
 
+sealed trait Vehicle derives JsonSchemaCodec
+final case class Car(seats: Int) extends Vehicle
+sealed trait Signal              extends Vehicle
+case object Stop                 extends Signal
+case object Go                   extends Signal
+
+/** A case met again inside itself, through the trait it is a case of. */
+sealed trait Link derives JsonSchemaCodec
+final case class Holder(next: Option[Link]) extends Link derives JsonSchemaCodec
+
 class JsonSchemaCodecSuite extends CatsEffectSuite:
   private def json(text: String): Json = parse(text).fold(error => fail(error.message), identity)
 
@@ -98,6 +108,10 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       1,
       Chunk[Byte](1, 2, 3)
     )
+
+  test("a time of day is ISO-8601 text that leaves out seconds that are zero"):
+    assertEquals(JsonSchemaCodec[java.time.LocalTime].encode(java.time.LocalTime.of(7, 0)), Right(Json.fromString("07:00")))
+    assertEquals(JsonSchemaCodec[java.time.LocalTime].encode(java.time.LocalTime.of(7, 0, 5)), Right(Json.fromString("07:00:05")))
 
   test("a type in an object has the object in its title's namespace"):
     assertEquals(JsonSchemaCodec[Here.Spot].schema.hcursor.get[String]("title"), Right("xkafka.jsonschema.Here.Spot"))
@@ -172,6 +186,11 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       json("""{"$schema":"http://json-schema.org/draft-07/schema#","type":"string","title":"xkafka.jsonschema.Status","enum":["Open","Paid"]}""")
     )
     assertEquals(JsonSchemaCodec[Status].encode(Status.Paid), Right(Json.fromString("Paid")))
+
+  test("a case that is a sealed trait of objects only is written as objects that tell their case, as the trait it is in reads them"):
+    List[Vehicle](Car(4), Stop, Go).foreach: value =>
+      assertEquals(JsonSchemaCodec[Vehicle].encode(value).flatMap(JsonSchemaCodec[Vehicle].decode), Right(value))
+    assertEquals(JsonSchemaCodec[Vehicle].encode(Stop), Right(Json.obj("type" -> Json.fromString("Stop"))))
 
   test("a sealed trait is oneOf its cases' objects, each telling its case in the property type"):
     val schema = JsonSchemaCodec[Payment].schema

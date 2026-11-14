@@ -21,6 +21,8 @@
 
 package xkafka.protobuf
 
+import java.nio.charset.StandardCharsets
+
 import scala.annotation.tailrec
 
 import cats.syntax.all.*
@@ -30,7 +32,9 @@ import xkafka.protobuf.ProtobufSchema.{Enum, Field, FieldType, File, Label, Mess
 private enum Token derives CanEqual:
   case Word(text: String)
   case Number(text: String)
-  case Text(value: String)
+
+  /** Quoted text, read, and as it is written, quotes and escapes and all. */
+  case Text(value: String, written: String)
   case Symbol(char: Char)
 
 /** A step of reading tokens from a position, giving a value and the position after it. */
@@ -98,6 +102,8 @@ object ProtobufSchemaText:
 
   private def tokens(text: String): Either[String, Vector[Token]] =
     def wordChar(char: Char): Boolean = char.isLetterOrDigit || char == '_' || char == '.'
+    // The escapes of control characters, by the letter after the backslash.
+    val controls = Map('a' -> 7, 'b' -> 8, 'f' -> 12, 'n' -> 10, 'r' -> 13, 't' -> 9, 'v' -> 11).view.mapValues(_.toByte).toMap
     @tailrec
     def go(at: Int, read: Vector[Token]): Either[String, Vector[Token]] =
       if at >= text.length then Right(read)
@@ -126,25 +132,44 @@ object ProtobufSchemaText:
           .getOrElse(text.length)
           go(end, read :+ Token.Number(text.substring(at, end)))
         else if char == '"' || char == '\'' then
-          quoted(at + 1, char, new StringBuilder) match
-            case Right((value, end)) => go(end, read :+ Token.Text(value))
+          quoted(at + 1, char, Vector.empty) match
+            case Right((value, end)) => go(end, read :+ Token.Text(value, text.substring(at, end)))
             case Left(reason)        => Left(reason)
         else go(at + 1, read :+ Token.Symbol(char))
+    // The digits of `radix` at `at`, at most `most` of them.
+    def digits(at: Int, radix: Int, most: Int): String = text.slice(at, at + most).takeWhile(char => Character.digit(char, radix) >= 0)
+    def utf8(codePoint: Int): Vector[Byte]             = new String(Character.toChars(codePoint)).getBytes(StandardCharsets.UTF_8).toVector
+    // Quoted text is bytes, as protobuf reads it: a character is its UTF-8, and an octal or hex escape one byte.
     @tailrec
-    def quoted(at: Int, quote: Char, value: StringBuilder): Either[String, (String, Int)] =
+    def quoted(at: Int, quote: Char, bytes: Vector[Byte]): Either[String, (String, Int)] =
       if at >= text.length then Left("quoted text is not closed")
       else
         text(at) match
-          case `quote`                      => Right((value.result(), at + 1))
+          case `quote`                      => Right((new String(bytes.toArray, StandardCharsets.UTF_8), at + 1))
           case '\\' if at + 1 < text.length =>
-            val escaped =
+            val escaped: Either[String, (Vector[Byte], Int)] =
               text(at + 1) match
-                case 'n'   => '\n'
-                case 't'   => '\t'
-                case 'r'   => '\r'
-                case other => other
-            quoted(at + 2, quote, value.append(escaped))
-          case char => quoted(at + 1, quote, value.append(char))
+                case char if controls.contains(char)       => Right((Vector(controls(char)), at + 2))
+                case char if "\\'\"?".contains(char)       => Right((Vector(char.toByte), at + 2))
+                case char if Character.digit(char, 8) >= 0 =>
+                  val octal = digits(at + 1, 8, 3)
+                  Right((Vector(Integer.parseInt(octal, 8).toByte), at + 1 + octal.length))
+                case 'x' | 'X' => digits(at + 2, 16, 2) match
+                    case ""  => Left("\\x is not followed by a hex digit")
+                    case hex => Right((Vector(Integer.parseInt(hex, 16).toByte), at + 2 + hex.length))
+                case 'u' | 'U' =>
+                  val size = if text(at + 1) == 'u' then 4 else 8
+                  digits(at + 2, 16, size) match
+                    case hex if hex.length == size && java.lang.Long.parseLong(hex, 16) <= Character.MAX_CODE_POINT =>
+                      Right((utf8(java.lang.Long.parseLong(hex, 16).toInt), at + 2 + size))
+                    case _ => Left(s"\\${text(at + 1)} is not followed by $size hex digits of a character")
+                case other => Left(s"'\\$other' is no escape")
+            escaped match
+              case Right((more, next)) => quoted(next, quote, bytes ++ more)
+              case Left(reason)        => Left(reason)
+          case _ =>
+            val codePoint = text.codePointAt(at)
+            quoted(at + Character.charCount(codePoint), quote, bytes ++ utf8(codePoint))
     go(0, Vector.empty)
 
   /** Reads a file's tokens, by recursive descent. */
@@ -153,11 +178,11 @@ object ProtobufSchemaText:
 
     private def describe(at: Int): String =
       peek(at) match
-        case Some(Token.Word(text))   => s"'$text'"
-        case Some(Token.Number(text)) => s"'$text'"
-        case Some(Token.Text(value))  => s"\"$value\""
-        case Some(Token.Symbol(char)) => s"'$char'"
-        case None                     => "the end of the file"
+        case Some(Token.Word(text))       => s"'$text'"
+        case Some(Token.Number(text))     => s"'$text'"
+        case Some(Token.Text(_, written)) => written
+        case Some(Token.Symbol(char))     => s"'$char'"
+        case None                         => "the end of the file"
 
     private def fail[A](at: Int, expected: String): Either[String, A] = Left(s"expected $expected at token ${at + 1}, found ${describe(at)}")
 
@@ -173,8 +198,8 @@ object ProtobufSchemaText:
     private val text: Step[String] =
       Step: at =>
         peek(at) match
-          case Some(Token.Text(value)) => Right((value, at + 1))
-          case _                       => fail(at, "quoted text")
+          case Some(Token.Text(value, _)) => Right((value, at + 1))
+          case _                          => fail(at, "quoted text")
 
     private val integer: Step[Int] =
       Step: at =>
@@ -194,10 +219,10 @@ object ProtobufSchemaText:
     private val constant: Step[String] =
       Step: at =>
         peek(at) match
-          case Some(Token.Word(text))   => Right((text, at + 1))
-          case Some(Token.Number(text)) => Right((text, at + 1))
-          case Some(Token.Text(value))  => Right((s"\"${escape(value)}\"", at + 1))
-          case Some(Token.Symbol('-'))  => peek(at + 1) match
+          case Some(Token.Word(text))       => Right((text, at + 1))
+          case Some(Token.Number(text))     => Right((text, at + 1))
+          case Some(Token.Text(_, written)) => Right((written, at + 1))
+          case Some(Token.Symbol('-'))      => peek(at + 1) match
               case Some(Token.Number(text)) => Right((s"-$text", at + 2))
               case Some(Token.Word(text))   => Right((s"-$text", at + 2))
               case _                        => fail(at + 1, "a number")
