@@ -535,6 +535,17 @@ final class DriverClientSuite extends CatsEffectSuite:
         (producer.transactionally(_ => IO.unit).attempt, producer.transactionally(_ => IO.unit).attempt).tupled
       .flatMap((first, second) => fake.calls.map(calls => (first, second, calls.filter(_.endsWith("Transaction")))))
 
+  test("a transaction cancelled while it begins is aborted once it has begun"):
+    (Deferred[IO, Unit], Deferred[IO, Unit]).tupled.flatMap: (began, release) =>
+      FakeDriver(beginGate = Some((began, release))).flatMap: fake =>
+        new DriverClient[IO](fake).transactionalProducer(transactionalSettings).use: producer =>
+          producer.transactionally(_ => IO.unit).start.flatMap: fiber =>
+            began.get *> fiber.cancel.start.flatMap(cancelling => IO.sleep(50.millis) *> release.complete(()) *> cancelling.join) *> fiber.join
+        .flatMap(outcome => fake.calls.map(calls => (outcome, calls.filter(_.endsWith("Transaction")))))
+      .map: (outcome, calls) =>
+        assert(outcome.isCanceled, outcome)
+        assertEquals(calls, Vector("beginTransaction", "abortTransaction"))
+
   test("a commit that fails as the transaction must be aborted is aborted, so the producer begins the next transaction"):
     val abortable = failure(retriable = false, fatal = false, abortRequired = true)
     twoTransactions(abortable).map: (first, second, calls) =>
@@ -629,7 +640,8 @@ final class DriverClientSuite extends CatsEffectSuite:
       servingTakes: FiniteDuration,
       holdCommits: Boolean,
       holdOffsets: Boolean,
-      commitFailures: Ref[IO, List[Throwable]]
+      commitFailures: Ref[IO, List[Throwable]],
+      beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])]
   ) extends KafkaDriver[IO]:
     type Client        = String
     type Batch         = Int
@@ -755,7 +767,9 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
 
-    override def beginTransaction(producer: Client): IO[Unit] = record("beginTransaction")
+    /** Begins, as the backends do, without heeding a cancellation; where gated, it says it began and waits to be let go. */
+    override def beginTransaction(producer: Client): IO[Unit] =
+      IO.uncancelable(_ => record("beginTransaction") *> beginGate.traverse_((began, release) => began.complete(()) *> release.get))
 
     override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] =
       record("commitTransaction") *> commitFailures.modify(failures => (failures.drop(1), failures.headOption)).flatMap(_.traverse_(IO.raiseError))
@@ -912,7 +926,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         holdCommits: Boolean = false,
         holdOffsets: Boolean = false,
         servingTakes: FiniteDuration = 5.millis,
-        commitFailures: List[Throwable] = Nil
+        commitFailures: List[Throwable] = Nil,
+        beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])] = None
     ): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
@@ -939,6 +954,7 @@ final class DriverClientSuite extends CatsEffectSuite:
           servingTakes,
           holdCommits,
           holdOffsets,
-          failures
+          failures,
+          beginGate
         )
       )

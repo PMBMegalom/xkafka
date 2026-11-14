@@ -320,11 +320,18 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     onConsumer(consumer)(_.commitSync(committedOffsets(offsets), Duration.ofMillis(timeoutMillis.toLong)))
 
+  /** The Java consumer refuses a partition it is not assigned with an `IllegalStateException`, where librdkafka leaves it be, so only those it is
+    * assigned are paused, and resumed below.
+    */
   override def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    onConsumer(consumer)(_.pause(partitions.map(javaTopicPartition).asJava))
+    onConsumer(consumer)(value => value.pause(assigned(value, partitions).asJava))
 
   override def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    onConsumer(consumer)(_.resume(partitions.map(javaTopicPartition).asJava))
+    onConsumer(consumer)(value => value.resume(assigned(value, partitions).asJava))
+
+  private def assigned(consumer: JavaConsumer[Array[Byte], Array[Byte]], partitions: Vector[TopicPartition]): Vector[JavaTopicPartition] =
+    val held = consumer.assignment
+    partitions.map(javaTopicPartition).filter(held.contains)
 
   override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]] =
     onConsumer(consumer): value =>
@@ -348,9 +355,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       val answers   = value.offsetsForTimes(requested.asJava, Duration.ofMillis(timeoutMillis.toLong))
       searches.map((partition, _) => Option(answers.get(javaTopicPartition(partition))).fold(-1L)(_.offset))
 
-  /** The Java client settles on a position before answering, so it has one whenever the partition is assigned. */
+  /** The Java client settles on a position before answering, so it has one whenever the partition is assigned; one it is not assigned, which it
+    * refuses, has none, as librdkafka answers.
+    */
   override def positions(consumer: Client, partitions: Vector[TopicPartition]): F[Vector[Long]] =
-    onConsumer(consumer)(value => partitions.map(partition => value.position(javaTopicPartition(partition))))
+    onConsumer(consumer): value =>
+      val held = value.assignment
+      partitions.map(javaTopicPartition).map(partition => if held.contains(partition) then value.position(partition) else -1L)
 
   /** The Java consumer refuses a partition it is not fetching with an `IllegalStateException`, where librdkafka answers that the partition is
     * unknown, so the same answer is given here.

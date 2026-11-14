@@ -206,8 +206,8 @@ private[xkafka] object GroupMember:
         case Retry(attempt, rediscover, delayed) => drop.whenA(rediscover) *>
             (if delayed then backoff(attempt, random).flatMap(due) else due(Duration.Zero))
         case change @ (Revoke(_, _) | Assign(_, _, _) | LoseAll) => out.offer(Some(Right(change)))
-        case Fail(error)                                      => out.offer(Some(Left(error))) *> ended.complete(Left(error)).void
-        case Done                                             => out.offer(None) *> ended.complete(Right(())).void
+        case Fail(error)                                         => out.offer(Some(Left(error))) *> ended.complete(Left(error)).void
+        case Done                                                => out.offer(None) *> ended.complete(Right(())).void
 
     /** The heartbeat with the task offsets, as Java's member adds them: always when joining; otherwise, when it reports tasks or once the
       * coordinator's interval for them has passed, each of the two lists that changed since it was last sent. A member leaving sends none.

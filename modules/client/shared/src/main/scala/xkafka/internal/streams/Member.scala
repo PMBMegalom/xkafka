@@ -290,7 +290,8 @@ private[xkafka] final case class Member(
         case Some(wanted) =>
           val giveBack = owned.active -- wanted.active
           if giveBack.nonEmpty then (copy(step = Some(Step.Revoking(round + 1, giveBack)), round = round + 1), List(Revoke(round + 1, giveBack)))
-          else if wanted != owned then (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1), List(Assign(round + 1, wanted, epoch)))
+          else if wanted != owned then
+            (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1), List(Assign(round + 1, wanted, epoch)))
           else (this, Nil)
 
   private def retry(rediscover: Boolean, backoff: Boolean): (Member, List[MemberAction]) =

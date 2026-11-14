@@ -261,6 +261,9 @@ final class ClientSuite extends FunSuite:
       ))
     )
     assert(ClientSettings.from(NonEmptyList.of("localhost:9092", "[::1]:9092", "10.0.0.1:1")).isValid)
+    // Neither a character other than a colon after an IPv6 literal's bracket, nor a digit outside ASCII, makes an endpoint the clients can reach.
+    List("[::1]x9092", "[::1]]9092", "localhost:\u0669\u0660\u0669\u0662").foreach: server =>
+      assertEquals(ClientSettings.from(NonEmptyList.one(server)).toEither, Left(NonEmptyList.one(SettingsError.InvalidBootstrapServer(0, server))))
 
   test("TLS settings reject a blank certificate authority"):
     assertEquals(TlsSettings.from(CertificateAuthority.PemFile("  ")).toEither, Left(NonEmptyList.one(SettingsError.BlankCertificateAuthority)))

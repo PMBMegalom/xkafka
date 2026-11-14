@@ -219,7 +219,7 @@ private[xkafka] object Engine:
     (name, time, held) =>
       state.filterNot(_ => inMemory(name)).fold(TaskStore.memory[F].apply(name, time, held))(_.open(StateDirectory.Global, name, time))
 
-  /** Transactions of `producer` that record offsets for `group` under the member's id and the epoch each is given, the one its tasks were given at. */
+  /** Transactions of `producer` that record offsets for `group` under the member's id and the epoch each is given, its tasks' epoch. */
   private def transactional[F[_]](
       driver: KafkaDriver[F],
       producer: KafkaTransactionalProducer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]],
@@ -821,8 +821,8 @@ private[xkafka] object Engine:
         untilAnswered("committing", member.commit(topics, running.epoch)): answers =>
           answers.map(_.errorCode).find(code => code != 0 && (!Again(code) || code == StaleEpoch)) match
             case Some(code) if Gone(code) || code == StaleEpoch => F.pure(Right(()))
-            case Some(code)               => F.raiseError(failure("committing", code))
-            case None                     => F.pure(answers.map(_.errorCode).find(_ != 0).toLeft(()))
+            case Some(code)                                     => F.raiseError(failure("committing", code))
+            case None                                           => F.pure(answers.map(_.errorCode).find(_ != 0).toLeft(()))
       sent.whenA(topics.nonEmpty) *> wrote.traverse((id, live) => live.stored.map(id -> _.settled))
         .map(done => running.copy(tasks = running.tasks ++ done))
 

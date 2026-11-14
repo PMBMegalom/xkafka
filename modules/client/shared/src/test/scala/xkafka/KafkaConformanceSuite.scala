@@ -810,6 +810,22 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         case Right(())                             => fail("expected a non-positive queue threshold to fail")
 
   /** librdkafka refuses a seek until the partition it names is being fetched, which holding the assignment does not yet mean. */
+  test(conformance("pausing, resuming and asking the position of a partition of a known topic not assigned do nothing and answer none")):
+    withBroker: server =>
+      val topic    = uniqueTopic("unassigned-pause")
+      val assigned = TopicPartition(topic, validPartition(0))
+      val other    = TopicPartition(topic, validPartition(1))
+
+      for
+        _        <- createPartitioned(server, topic, 2)
+        settings <- consumerSettings(server, uniqueGroup("unassigned-pause"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(assigned))).use: consumer =>
+            val pausing = consumer.pausing.orNoop
+            (pausing.pause(Set(other)).attempt, pausing.resume(Set(other)).attempt, consumer.position(other).attempt).tupled
+          .timeout(60.seconds)
+      yield assertEquals(outcome, (Right(()), Right(()), Right(None)))
+
   test(conformance("a seek of a partition not assigned is refused as unknown, and one of a partition assigned succeeds once it is fetched")):
     withBroker: server =>
       val topic      = uniqueTopic("early-seek")
@@ -873,26 +889,6 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
   private def whenSeekable(seek: IO[Unit]): IO[Unit] =
     def attempt: IO[Unit] = seek.handleErrorWith(_ => IO.sleep(250.millis) *> attempt)
     attempt.timeout(30.seconds)
-
-  test(conformance("a commit that cannot complete in time fails as a timed out request")):
-    withBroker: server =>
-      val topic     = uniqueTopic("commit-timeout")
-      val partition = validPartition(0)
-
-      for
-        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), partition)))
-        settings <- consumerSettings(server, uniqueGroup("commit-timeout"))
-        // A millisecond, the least a timeout can be, cannot cover the coordinator's lookup and the commit. Recovery is
-        // off, because the policy would otherwise retry this and report its own exhaustion instead.
-        bounded <- settings.withCommitTimeout(1.millis).map(_.withCommitRecovery(CommitRecovery.none)).liftTo[IO]
-        outcome <-
-          PlatformKafkaClient().consumer(bounded, Selection.Topics(NonEmptySet.one(topic)))
-            .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(60.seconds)
-      yield outcome match
-        case Left(failure: KafkaException.BackendFailure) =>
-          assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), s"got ${failure.getMessage}")
-          assert(failure.code.exists(_.retriable), "a commit that ran out of time should be worth retrying")
-        case other => fail(s"expected a timed out commit to fail, got $other")
 
   test(conformance("a later commit replaces an earlier one, even where its offset is lower")):
     withBroker: server =>

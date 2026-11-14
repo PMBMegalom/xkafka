@@ -81,15 +81,20 @@ private[kafkaclients] object JavaFailures:
   private def tabled(error: JavaKafkaException): Option[ErrorCode] =
     Option(Errors.forException(error)).filterNot(_ == Errors.NONE).map(value => ErrorCode.fromProtocol(value.code.toInt))
 
-  /** The three answers the Java client folds into a `CommitFailedException` when a transaction records offsets, and its refusal to commit outside a
-    * group.
+  /** The three answers the Java client folds into a `CommitFailedException` when a transaction records offsets, its refusal to commit outside a
+    * group, and its own wording for a plain commit the group refuses as ILLEGAL_GENERATION or UNKNOWN_MEMBER_ID, which does not say which, taken as
+    * ILLEGAL_GENERATION.
     */
   private def rejectedMembership(failed: CommitFailedException): Option[ErrorCode] =
     Option(failed.getMessage).flatMap: message =>
       if message.contains(NotInGroup) then Some(ErrorCode.UnknownMemberId)
+      else if message == Rebalanced then Some(ErrorCode.IllegalGeneration)
       else
         List(Errors.ILLEGAL_GENERATION, Errors.UNKNOWN_MEMBER_ID, Errors.STALE_MEMBER_EPOCH)
           .find(value => message.endsWith(value.exception.getMessage)).map(value => ErrorCode.fromProtocol(value.code.toInt))
+
+  /** How the Java client words a plain commit the group refused. */
+  private val Rebalanced = new CommitFailedException().getMessage
 
   /** How the Java client words a commit it refuses because the consumer is no longer a member of its group. */
   private val NotInGroup = "since the consumer is not part of an active group"

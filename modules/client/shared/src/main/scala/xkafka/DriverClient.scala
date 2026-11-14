@@ -255,12 +255,15 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A] =
       lock.lock.surround(
         Ref.of[F, List[CommittableOffsetBatch[F]]](Nil).flatMap: recorded =>
-          client(driver.beginTransaction(client.handle)) *> use(transaction(recorded)).guaranteeCase:
-            case Outcome.Succeeded(_) => committed(again = true) *> recorded.get.flatMap(_.traverse_(GroupMembership.committed(_)))
-            case Outcome.Canceled()   => client(driver.abortTransaction(client.handle, timeoutMillis))
-            // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
-            case Outcome.Errored(error) => client(driver.abortTransaction(client.handle, timeoutMillis))
-                .handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
+          // The abort is in place from the moment the transaction has begun, so a cancellation while it begins aborts it too.
+          F.uncancelable(poll =>
+            client(driver.beginTransaction(client.handle)) *> poll(use(transaction(recorded))).guaranteeCase:
+              case Outcome.Succeeded(_) => committed(again = true) *> recorded.get.flatMap(_.traverse_(GroupMembership.committed(_)))
+              case Outcome.Canceled()   => client(driver.abortTransaction(client.handle, timeoutMillis))
+              // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
+              case Outcome.Errored(error) => client(driver.abortTransaction(client.handle, timeoutMillis))
+                  .handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
+          )
       )
 
     /** Commits the transaction, as both clients ask: a commit that timed out may still be completing, so it is tried once more and never aborted; a

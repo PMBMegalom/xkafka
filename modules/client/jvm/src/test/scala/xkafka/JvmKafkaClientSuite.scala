@@ -296,6 +296,38 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         )
     .timeout(5.seconds)
 
+  test("pausing, resuming and asking the position of a partition not assigned do nothing and answer none, as librdkafka does"):
+    val (mock, _) = subscribedMock()
+    val other     = TopicPartition(topic, Partition.from(1).toOption.get)
+    consuming(mock): consumer =>
+      val pausing = consumer.pausing.orNoop
+      (pausing.pause(Set(other)).attempt, pausing.resume(Set(other)).attempt, consumer.position(other).attempt).tupled
+    .map: (paused, resumed, position) =>
+      assertEquals(paused, Right(()))
+      assertEquals(resumed, Right(()))
+      assertEquals(position, Right(None))
+
+  test("a commit the Java client runs out of time for fails as a timed out request, worth retrying"):
+    val (_, partition) = subscribedMock()
+    val slow           =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        override def commitSync(offsets: JavaMap[JavaTopicPartition, OffsetAndMetadata], timeout: java.time.Duration): Unit =
+          throw new org.apache.kafka.common.errors.TimeoutException("Timeout of 1ms expired before successfully committing offsets")
+    slow.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
+    slow.schedulePollTask(() =>
+      slow.rebalance(JavaList.of(partition))
+      slow.updateBeginningOffsets(JavaMap.of(partition, Long.box(0L)))
+      addRecord(slow, 0L)
+    )
+    val client  = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val utf8    = Deserializer.utf8[IO]
+    val reading = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).toOption.get.withCommitRecovery(CommitRecovery.none)
+    mocked(consumer = _ => slow).consumer(reading, Selection.Topics(NonEmptySet.one(topic)))
+      .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(10.seconds).map:
+        case Left(failure: KafkaException.BackendFailure) =>
+          assertEquals((failure.code, failure.retriable), (Some(ErrorCode.RequestTimedOut), Some(true)), failure.getMessage)
+        case other => fail(s"expected a timed out commit, got $other")
+
   test("a failed poll fails the record stream and the partitioned one on every run"):
     // fs2-kafka, which this backend used to delegate to, lost the failure about once in two thousand runs.
     def outcomes(read: KafkaConsumer[IO, String, String] => Stream[IO, Any]): IO[List[Either[Throwable, Unit]]] =
@@ -445,8 +477,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         new CommitFailedException(
           "Offset commit cannot be completed since the consumer is not part of an active group for auto partition assignment; it is likely that the consumer was kicked out of the group."
         ) -> Some(ErrorCode.UnknownMemberId),
+        // The Java client's own wording, for a plain commit the group refuses as ILLEGAL_GENERATION or UNKNOWN_MEMBER_ID, which it does not tell apart.
+        new CommitFailedException() -> Some(ErrorCode.IllegalGeneration),
         // Any other wording is left as before: Kafka's table has no entry for the exception, so it stays an unknown error.
-        new CommitFailedException("the group has already rebalanced") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
+        new CommitFailedException("refused for some other reason") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
       )
     val transactionalId = TransactionalId.from("writer").toOption.get
     val serializer      = Serializer.const[IO, String](None)

@@ -202,8 +202,9 @@ private def bootstrapServerError(value: String, index: Int): Option[SettingsErro
   val trimmed   = value.trim
   val separator = if trimmed.startsWith("[") then trimmed.indexOf(']') + 1 else trimmed.lastIndexOf(':')
   val host      = if separator > 0 then trimmed.substring(0, separator).stripPrefix("[").stripSuffix("]") else ""
-  val port      = if separator > 0 && separator < trimmed.length then trimmed.substring(separator + 1) else ""
-  val validPort = port.nonEmpty && port.forall(_.isDigit) && port.toIntOption.exists(value => value >= 1 && value <= 65535)
+  val port      = if separator > 0 && separator < trimmed.length && trimmed(separator) == ':' then trimmed.substring(separator + 1) else ""
+  val validPort =
+    port.nonEmpty && port.forall(digit => digit >= '0' && digit <= '9') && port.toIntOption.exists(value => value >= 1 && value <= 65535)
   if trimmed.isEmpty then Some(SettingsError.BlankBootstrapServer(index))
   else if host.isEmpty || !validPort then Some(SettingsError.InvalidBootstrapServer(index, value))
   else None
@@ -1740,7 +1741,8 @@ trait KafkaConsumer[F[_], K, V]:
   /** Returns where the client fetches the partition next.
     *
     * The client reads ahead of the records handed out, so after consuming it is at or past the offset after the last record consumed, by an amount
-    * that differs between platforms. Before the consumer has consumed from the partition, it can be `None`.
+    * that differs between platforms. Before the consumer has consumed from the partition, it can be `None`, and it is `None` for a partition of a
+    * known topic that the consumer is not assigned.
     */
   def position(topicPartition: TopicPartition): F[Option[Offset]]
 

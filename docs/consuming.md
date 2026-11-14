@@ -248,7 +248,8 @@ Within the consumer resource:
 ahead of the records the stream has handed out, so after consuming, `position`
 is at or past the offset after the last record consumed, by an amount that
 differs between platforms. Before the consumer has consumed from the partition,
-it can be `None`.
+it can be `None`, and it is `None` for a partition of a known topic that the
+consumer is not assigned.
 @:@
 
 @:callout(info)
