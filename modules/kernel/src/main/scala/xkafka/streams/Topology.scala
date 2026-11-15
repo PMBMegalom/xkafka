@@ -2465,8 +2465,8 @@ object Topology:
       wired.problems ++ (stores ++ wired.steps ++ wired.joinNames).flatMap(invalid) ++
         (twice(wired.steps) ++ twice(wired.joinNames) ++ wired.steps.filter(wired.generated.contains)).distinct.sorted
           .map(TopologyError.DuplicateName(_)) ++ twice(stores).sorted.map(TopologyError.DuplicateStore(_)) ++
-        twice(repartitions).sorted.map(TopologyError.DuplicateRepartition(_)) ++ twice(wired.inputs).sortBy(_.value)
-          .map(TopologyError.DuplicateSource(_))
+        twice(repartitions).sorted.map(name => TopologyError.DuplicateRepartition(wired.asked.getOrElse(name, name))) ++ twice(wired.inputs)
+          .sortBy(_.value).map(TopologyError.DuplicateSource(_))
     NonEmptyList.fromList(problems.distinct).toLeft(new Topology(wired.numbered, wired.globals))
 
   private[streams] def invalid(name: String): Option[TopologyError] =

@@ -299,6 +299,12 @@ final class BranchingSuite extends CatsEffectSuite:
       internal.streams.Declaration("app", Topology.of(counted("-repartition")).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name)),
       List("app--repartition")
     )
+    val twice =
+      List("a", "b").map(in =>
+        read(in).selectKey(Named(s"$in-key"))((_, v) => v).groupByKey(Repartition("orders-repartition"), text, text)
+          .count(Named(s"$in-c"), Store(s"$in-s")).toStream(Named(s"$in-t")).to(Named(s"$in-w"), topic(s"$in-out"), text, Serde.long[IO])
+      )
+    assert(refused(twice.head, twice(1)).exists(_.contains(TopologyError.DuplicateRepartition("orders-repartition"))), refused(twice.head, twice(1)))
     val unused = Flow[IO, String, String].groupByKey(Repartition("r-repartition"), text, text).count(Named("counted"), Store("counts")).consumer
     assertEquals(refused(read("in").into(unused)), Some(List(TopologyError.UnusedRepartition("r-repartition"))))
     val long = "x" * (Topology.MaxNameLength - 5) + "-repartition"

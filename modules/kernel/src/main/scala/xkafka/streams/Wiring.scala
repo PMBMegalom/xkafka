@@ -39,7 +39,9 @@ private[xkafka] object Wiring:
       steps: List[String],
       inputs: List[Topic],
       generated: List[String],
-      joinNames: List[String]
+      joinNames: List[String],
+      // Each repartitioning's name as the program gave it, by the name its topic takes, the first given.
+      asked: Map[String, String] = Map.empty
   ):
     def subtopologies: List[Subtopology[F]] = numbered.map(_._2)
 
@@ -195,7 +197,9 @@ private[xkafka] object Wiring:
       // Each suppression until windows close by its name, with the grace it waits.
       closes: Map[String, Long] = Map.empty,
       // The names of the joins of two streams, which Java names no node of its own, only the nodes it makes after them.
-      joinNames: Vector[String] = Vector.empty
+      joinNames: Vector[String] = Vector.empty,
+      // Each repartitioning's name, as its topic takes it and as the program gave it.
+      asked: Vector[(String, String)] = Vector.empty
   ):
     def writing(sources: List[Source]): Walk[F] = copy(written = written ++ sources)
 
@@ -315,7 +319,8 @@ private[xkafka] object Wiring:
       walked.steps.toList,
       inputs,
       walked.generated.toList,
-      walked.joinNames.toList
+      walked.joinNames.toList,
+      walked.asked.reverse.toMap
     )
 
   /** The copartition groups each join's topics make, as Java makes them: a join's topics go in the group of the first it finds already in one, and
@@ -394,9 +399,11 @@ private[xkafka] object Wiring:
         // The source of a repartition that is not a grouped table's is a node the program makes, which no step may also be named; a grouped
         // table's is named after its aggregate, a step's name already.
         val placed =
-          (if atJoin then refused else refused.writing(List(source)))
-            .copy(nodes = refused.nodes :+ (source, node), generated = if aggregate.isEmpty then refused.generated :+ name else refused.generated)
-            .refusing(counted)
+          (if atJoin then refused else refused.writing(List(source))).copy(
+            nodes = refused.nodes :+ (source, node),
+            generated = if aggregate.isEmpty then refused.generated :+ name else refused.generated,
+            asked = refused.asked :+ (repartition.value -> shown)
+          ).refusing(counted)
         arrive(next, after, placed.coming(name, after))
       case Consumer.Beside(table, last, next) =>
         val pulled = table.fold(walk)(_.entries.foldLeft(walk)((walking, entry) => entered(entry, true, walking)))
