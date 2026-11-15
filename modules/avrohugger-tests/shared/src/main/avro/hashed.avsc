@@ -1,0 +1,1 @@
+{"type": "record", "name": "Hashed", "namespace": "com.example.shop", "fields": [{"name": "digest", "type": {"type": "fixed", "name": "Digest", "size": 4}}]}

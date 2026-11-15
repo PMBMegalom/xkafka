@@ -268,7 +268,7 @@ jobs:
       - name: Submit Dependencies
         uses: scalacenter/sbt-dependency-submission@v2
         with:
-          modules-ignore: xkafka_3 docs_3 codegentests_native0.5_3 xkafka_3 xkafka_3 codegentests_3 streamsfixture_3 codegentests_sjs1_3
+          modules-ignore: avrohuggertests_sjs1_3 xkafka_3 docs_3 avrohuggertests_3 codegentests_native0.5_3 avrohuggertests_native0.5_3 xkafka_3 xkafka_3 codegentests_3 streamsfixture_3 codegentests_sjs1_3
           configs-ignore: test scala-tool scala-doc-tool test-internal
 
   validate-steward:

@@ -1,0 +1,1 @@
+{"type": "record", "name": "Blob", "namespace": "com.example.shop", "fields": [{"name": "small", "type": "bytes", "default": "\u0001"}, {"name": "large", "type": "bytes", "default": "ÿ"}]}

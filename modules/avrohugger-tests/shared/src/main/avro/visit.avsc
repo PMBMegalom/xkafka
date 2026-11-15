@@ -1,0 +1,31 @@
+{
+  "type": "record",
+  "name": "Visit",
+  "namespace": "com.example.web",
+  "doc": "A visit to a page.",
+  "fields": [
+    {"name": "id", "type": {"type": "string", "logicalType": "uuid"}, "doc": "Who knows the visit by it."},
+    {"name": "at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "day", "type": {"type": "int", "logicalType": "date"}},
+    {"name": "page", "type": "string"},
+    {"name": "secure", "type": "boolean", "default": true},
+    {"name": "seconds", "type": "int", "default": 0},
+    {"name": "bytesRead", "type": "long"},
+    {"name": "ratio", "type": "float"},
+    {"name": "score", "type": "double", "default": 1.5},
+    {"name": "payload", "type": "bytes"},
+    {"name": "referrer", "type": ["null", "string"], "default": null},
+    {"name": "note", "type": ["string", "null"], "default": "none"},
+    {"name": "tags", "type": {"type": "array", "items": "string"}, "default": []},
+    {"name": "counts", "type": {"type": "map", "values": "long"}},
+    {"name": "kind", "type": {"type": "enum", "name": "Kind", "symbols": ["AD", "LINK"]}},
+    {"name": "agent", "type": {"type": "record", "name": "Agent", "fields": [{"name": "name", "type": "string"}]}},
+    {
+      "name": "source",
+      "type": [
+        {"type": "record", "name": "Ad", "fields": [{"name": "campaign", "type": "string"}]},
+        {"type": "record", "name": "Link", "fields": [{"name": "from", "type": "string"}]}
+      ]
+    }
+  ]
+}

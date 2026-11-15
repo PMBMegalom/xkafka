@@ -1326,6 +1326,34 @@ lazy val codegenTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     "org.apache.avro" % "avro-idl" % apacheAvroVersion % Test
   ))
 
+// Classes avrohugger generates from the test schemas, set up as other-libraries.md says, whose derived schemas are checked against the files, on every
+// platform. The tests read each .avsc file's text from an object generated beside them.
+lazy val avrohuggerTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .crossType(CrossType.Full)
+  .in(file("modules/avrohugger-tests"))
+  .enablePlugins(NoPublishPlugin)
+  .dependsOn(avro)
+  .settings(commonSettings)
+  .settings(
+    Compile / avroSourceDirectories := Seq((baseDirectory.value / ".." / "shared" / "src" / "main" / "avro").getCanonicalFile),
+    Compile / avroScalaCustomTypes  := avrohugger.format.Standard.defaultTypes.copy(
+      `enum` = avrohugger.types.ScalaCaseObjectEnum,
+      union = avrohugger.types.OptionScala3UnionType
+    ),
+    Compile / sourceGenerators += (Compile / avroScalaGenerate).taskValue,
+    Test / sourceGenerators += Def.task {
+      val files  = ((ThisBuild / baseDirectory).value / "modules/avrohugger-tests/shared/src/main/avro" * "*.avsc").get.sortBy(_.getName)
+      val output = (Test / sourceManaged).value / "AvroFiles.scala"
+      val quote  = "\""
+      val texts  = files.map(file => s"    $quote${file.getName}$quote -> ${quote * 3}${IO.read(file)}${quote * 3}").mkString(",\n")
+      IO.write(
+        output,
+        s"package example.avrohugger\n\n/** The test .avsc files' texts, by file name. */\nobject AvroFiles:\n  val texts: Map[String, String] = Map(\n$texts\n  )\n"
+      )
+      Seq(output)
+    }.taskValue
+  )
+
 // The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it.
 lazy val streamsJava = project
   .in(file("modules/streams-java"))
@@ -1379,6 +1407,7 @@ lazy val root =
     xkafkaSmithy4s,
     codegen,
     codegenTests,
+    avrohuggerTests,
     sbtCodegen,
     streamsHttp4s,
     streamsJava

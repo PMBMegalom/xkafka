@@ -13,3 +13,6 @@ libraryDependencies += "com.thesamet.scalapb" %% "compilerplugin" % "0.11.21"
 
 // smithy4s generates the Scala types the smithy4s bridge's tests read and write, from Smithy files.
 addSbtPlugin("com.disneystreaming.smithy4s" % "smithy4s-sbt-codegen" % "0.19.13")
+
+// avrohugger generates the case classes the avrohugger tests derive codecs for, from Avro files, as an application's build would.
+addSbtPlugin("com.julianpeeters" % "sbt-avrohugger" % "2.18.0")

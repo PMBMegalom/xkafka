@@ -1,0 +1,7 @@
+@namespace("com.example.clicks")
+protocol Clicks {
+  record Click {
+    string page;
+    int count = 0;
+  }
+}
