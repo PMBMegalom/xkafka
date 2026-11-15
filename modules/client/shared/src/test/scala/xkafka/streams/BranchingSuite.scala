@@ -291,6 +291,19 @@ final class BranchingSuite extends CatsEffectSuite:
       List("app-by-repartition-repartition")
     )
 
+  test("a stream's repartition named only '-repartition' has that as its topic, as Java's, and refusals name a repartition as the program did"):
+    def counted(name: String) =
+      read("in").selectKey(Named("key"))((_, v) => v).groupByKey(Repartition(name), text, text).count(Named("c"), Store("s")).toStream(Named("t"))
+        .to(Named("w"), topic("out"), text, Serde.long[IO])
+    assertEquals(
+      internal.streams.Declaration("app", Topology.of(counted("-repartition")).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name)),
+      List("app--repartition")
+    )
+    val unused = Flow[IO, String, String].groupByKey(Repartition("r-repartition"), text, text).count(Named("counted"), Store("counts")).consumer
+    assertEquals(refused(read("in").into(unused)), Some(List(TopologyError.UnusedRepartition("r-repartition"))))
+    val long = "x" * (Topology.MaxNameLength - 5) + "-repartition"
+    assert(refused(counted(long)).exists(_.exists(_ == TopologyError.InvalidName(long, s"it is longer than ${Topology.MaxNameLength} characters"))))
+
   test("a program a flow prints in, labelled by its own name with no step before it, and by the step before where there is one"):
     given Console[IO] = Console.make[IO]
     val named         = Flow.asRead[IO, String, String].print(Named("shown"))

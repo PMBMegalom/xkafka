@@ -208,7 +208,9 @@ object AvroSchemaJson:
   def defaultJson(value: AvroValue, schema: AvroSchema, defined: Map[FullName, AvroSchema]): Json =
     def chars(bytes: Chunk[Byte]) = Json.fromString(bytes.toArray.map(byte => (byte & 0xff).toChar).mkString)
     (value, schema) match
-      case (_, AvroSchema.Union(first :: _))                                  => defaultJson(value, first, defined)
+      // A default is written as the branch it was read as, the first it fits, as Avro 1.12 reads it.
+      case (_, AvroSchema.Union(branches @ (first :: _))) =>
+        defaultJson(value, branches.find(AvroBinary.fits(_, value, defined)).getOrElse(first), defined)
       case (_, AvroSchema.Logical(logicalType))                               => defaultJson(value, logicalType.underlying, defined)
       case (_, AvroSchema.Named(name)) if defined.contains(name)              => defaultJson(value, defined(name), defined)
       case (AvroValue.Null, _)                                                => Json.Null

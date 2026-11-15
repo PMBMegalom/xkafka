@@ -139,6 +139,11 @@ class ProtobufGenericSuite extends CatsEffectSuite:
     assert(ProtobufSchemaText.render(file).contains("""[default = '\xFF\101"']"""), ProtobufSchemaText.render(file))
     assert(ProtobufSchemaText.parse("""syntax = "proto3"; import "a\q";""").isLeft)
 
+  test("a map whose values are maps is refused before they are read, however deep they go"):
+    val depth = 3000
+    val text  = s"""syntax = "proto3"; message M { ${"map<string, " * depth}int32${">" * depth} m = 1; }"""
+    assertEquals(ProtobufSchemaText.parse(text), Left("a map's values are a map, which Protobuf does not allow"))
+
   test("a proto2 file is read with its labels, defaults as written, and packing"):
     assertEquals(
       parsed(legacy),

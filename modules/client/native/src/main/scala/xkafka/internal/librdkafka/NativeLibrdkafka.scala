@@ -187,9 +187,9 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
               errorCode
             )
           result match
-            case 0 => true
-            case 1 => false
-            case _ => throw nativeError(error, errorCode)
+            case 0      => true
+            case 1      => false
+            case answer => throw Failures.delivery(fromCString(error), !errorCode, answer)
         Enqueued(records.iterator.takeWhile(taken).size, gaveUp = false)
 
   private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
@@ -222,8 +222,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         given Zone             = zone
         val (error, errorCode) = errorSlots
         Vector.tabulate(Bindings.xkafka_batch_count(batch).toInt): index =>
-          if Bindings.xkafka_batch_error_at(producer, batch, index.toUSize, error, ErrorBufferSize.toUSize, errorCode) != 0 then
-            Left(nativeError(error, errorCode))
+          val answer = Bindings.xkafka_batch_error_at(producer, batch, index.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+          if answer != 0 then Left(Failures.delivery(fromCString(error), !errorCode, answer))
           else
             Right(Delivery(
               Bindings.xkafka_batch_partition_at(batch, index.toUSize),

@@ -96,6 +96,13 @@ private[xkafka] object Failures:
     val classified = ErrorCode.fromLibrdkafka(code)
     new KafkaException.BackendFailure(message, Some(classified), retriable = Some(classified.retriable))
 
+  /** A record's failure, which the shim answers -2 for where its enqueue or delivery failed once the producer met a fatal failure: retrying it does
+    * nothing.
+    */
+  def delivery(message: String, code: Int, answer: Int): KafkaException.BackendFailure =
+    if answer != -2 then coded(message, code)
+    else new KafkaException.BackendFailure(message, Some(ErrorCode.fromLibrdkafka(code)), retriable = Some(false), fatal = Some(true))
+
   /** A transactional failure, whose flags are -1 when librdkafka did not say. Whether it is retriable comes from its code, as on the JVM, so the same
     * failure is retriable on every platform.
     */

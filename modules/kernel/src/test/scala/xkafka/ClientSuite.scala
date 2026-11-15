@@ -769,6 +769,19 @@ final class ClientSuite extends FunSuite:
       Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(2.seconds, 2.seconds)))
     )
 
+  test("linger is below a message or delivery timeout the properties set, as both clients refuse it otherwise"):
+    val serializer = Serializer.const[IO, String](None)
+    val field      = SettingsError.DurationField
+    List("message.timeout.ms", "delivery.timeout.ms").foreach: name =>
+      assertEquals(
+        ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "10000"), linger = 30.seconds).toEither,
+        Left(NonEmptyList.one(SettingsError.DurationNotBelowLimit(field.Linger, 30.seconds, 10.seconds))),
+        name
+      )
+      assert(ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "10000"), linger = 1.second).isValid, name)
+    val viaClient = clientSettings.withProperty("message.timeout.ms", "10000").toOption.get
+    assert(ProducerSettings.from(viaClient, serializer, serializer, linger = 30.seconds).isInvalid)
+
   test("a transaction timeout is at least a second, and the metadata refresh interval at most an hour, as librdkafka accepts"):
     val serializer = Serializer.const[IO, String](None)
     val id         = TransactionalId.from("writer").toOption.get

@@ -241,6 +241,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   /** The Java client bounds a transaction call by its `max.block.ms`, the enqueue timeout, and a call that timed out or was interrupted is safe to
     * make again. So it is made again until `timeoutMillis` has passed, when the one still waiting is interrupted, as librdkafka's call gives up then.
     */
+  private def notFound(topic: String): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(
+      s"the topic '$topic' was not found within the time given",
+      Some(ErrorCode.UnknownTopicOrPartition),
+      Some(ErrorCode.UnknownTopicOrPartition.retriable)
+    )
+
   private def withinTimeout(timeoutMillis: Int)(call: => Unit): F[Unit] =
     F.monotonic.flatMap: started =>
       val deadline         = started + timeoutMillis.millis
@@ -387,8 +394,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             Vector(name -> partitions(value.partitionsFor(name, timeout)))
           )
       case JavaClient.Producer(value) => topic match
-          case Some(name) => javaCall(F.blocking(Vector(name -> partitions(value.partitionsFor(name)))))
-          case None       => F.raiseError(new IllegalArgumentException("a producer looks up one topic at a time"))
+          // The Java producer waits for the topic up to max.block.ms; the look-up is bounded by the time given, as librdkafka's is, and a topic not
+          // found by then is unknown, as librdkafka answers.
+          case Some(name) => javaCall(F.interruptible(Vector(name -> partitions(value.partitionsFor(name)))))
+              .timeoutTo(timeoutMillis.millis, F.raiseError(notFound(name)))
+          case None => F.raiseError(new IllegalArgumentException("a producer looks up one topic at a time"))
       case JavaClient.Administration(value) =>
         val names =
           topic.fold(answered(value.listTopics(new ListTopicsOptions().timeoutMs(timeoutMillis)).names).map(_.asScala.toList))(name =>

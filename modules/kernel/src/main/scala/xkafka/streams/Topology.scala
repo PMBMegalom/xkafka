@@ -343,13 +343,15 @@ private[xkafka] enum Step[F[_], K, V, K2, V2]:
       case TableMapValues(_, _, _, None) => after
       case _                             => false
 
-  /** Whether it cannot do without the old values it asks for: a filter asks for them where the table before it has them, as Java's does, and without
-    * them makes a delete of each value it drops, or reads them from its own store where it keeps one, so it needs them only for what reads it.
+  /** Whether it cannot do without the old values it asks for: a filter asks for them where the table before it has them, as Java's does. One that
+    * keeps a store of its own reads them there, and hands them on to what reads it, so it needs none; one that keeps none makes a delete of each
+    * value it drops without them, so it needs them only for what reads it.
     */
   def needs(after: Boolean): Boolean =
     this match
-      case TableFilter(_, _, _, _) => after
-      case _                       => asks(after)
+      case TableFilter(_, _, Some(_), _) => false
+      case TableFilter(_, _, None, _)    => after
+      case _                             => asks(after)
 
 /** A change to a group of a table's values: the value joining it and the value leaving it, as Java writes a `Change` to the repartition topic of a
   * table's `groupBy`.
@@ -663,7 +665,8 @@ private[xkafka] enum Consumer[F[_], K, V]:
   /** Writes each record to the repartition topic `repartition` names, whose records `next` reads, in another sub-topology. A join that repartitions a
     * side says so with `atJoin`, since Java makes that topic's source only when it makes the join, which decides how sub-topologies are numbered. It
     * is refused where no record reaching it has a new key, unless `always` says the program asked for the topic itself. A grouped table's `aggregate`
-    * names the topic's sink and source after itself, as Java does, and writes no record without a value.
+    * names the topic's sink and source after itself, as Java does, and writes no record without a value. A stream's repartitioning is `asked` the
+    * name the program gave it, by which it is checked and refused, where Java's naming took `-repartition` off it.
     */
   case Repartitioning(
       repartition: Repartition,
@@ -674,7 +677,8 @@ private[xkafka] enum Consumer[F[_], K, V]:
       next: Consumer[F, K, V],
       aggregate: Option[Named] = None,
       partitions: Option[Int] = None,
-      partitioner: Option[Partitioner[K, V]] = None
+      partitioner: Option[Partitioner[K, V]] = None,
+      asked: Option[Repartition] = None
   )
 
   /** `next`, in the sub-topology of the table made in the node named `last`, as the table a stream-table join reads runs beside the stream. A table
@@ -759,8 +763,8 @@ private[xkafka] enum Consumer[F[_], K, V]:
     expanded match
       case Then(named, step, next)                       => Then(named, step.imapK(fk)(gk), next.imapK(fk)(gk))
       case Output(named, topic, key, value, partitioner) => Output(named, topic, key.mapK(fk), value.mapK(fk), partitioner)
-      case Repartitioning(repartition, key, value, at, always, next, aggregate, partitions, partitioner) =>
-        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.imapK(fk)(gk), aggregate, partitions, partitioner)
+      case Repartitioning(repartition, key, value, at, always, next, aggregate, partitions, partitioner, asked) =>
+        Repartitioning(repartition, key.mapK(fk), value.mapK(fk), at, always, next.imapK(fk)(gk), aggregate, partitions, partitioner, asked)
       case Beside(table, last, next)      => Beside(table.map(_.imapK(fk)(gk)), last, next.imapK(fk)(gk))
       case Fan(children)                  => Fan(children.map(_.imapK(fk)(gk)))
       case Merged(named, next)            => Merged(named, next.imapK(fk)(gk))
@@ -1211,7 +1215,16 @@ sealed trait KStream[F[_], K, V]:
         case Some((key, value)) =>
           // Records go to the partition that holds their key in the table's topic, however that topic is partitioned.
           next =>
-            feed(Consumer.Repartitioning(Repartition(named.value).ofStream, key, value, true, false, reading(next), partitioner = table.partitioner))
+            feed(Consumer.Repartitioning(
+              Repartition(named.value).ofStream,
+              key,
+              value,
+              true,
+              false,
+              reading(next),
+              partitioner = table.partitioner,
+              asked = Some(Repartition(named.value))
+            ))
     KStream.of(feeding, named.value, false, ending)
 
   /** Each record joined with its key's value in `table`, as Java's `join` of a stream with a table: a record whose key the table holds no value for
@@ -1240,7 +1253,7 @@ sealed trait KStream[F[_], K, V]:
     * names, which the stream is written to with `key` and `value`, as Java repartitions each side of the join.
     */
   private def joinSide(repartition: Repartition, key: Serde[F, K], value: Serde[F, V], side: Consumer[F, K, V]): Out =
-    if keyChanged then feed(Consumer.Repartitioning(repartition.ofStream, key, value, true, false, side)) else feed(side)
+    if keyChanged then feed(Consumer.Repartitioning(repartition.ofStream, key, value, true, false, side, asked = Some(repartition))) else feed(side)
 
   /** The stream joined with `other` by `joiner` within `windows`, as Java's stream-stream joins join them: in one sub-topology, their topics
     * copartitioned, each side repartitioned through `<store>-left` or `<store>-right` where its key has changed.
@@ -1330,7 +1343,7 @@ sealed trait KStream[F[_], K, V]:
       partitioner: Option[Partitioner[K, V]] = None
   ): Settled[K, V] =
     KStream.of(
-      next => feed(Consumer.Repartitioning(repartition.ofStream, key, value, false, always, next, None, partitions, partitioner)),
+      next => feed(Consumer.Repartitioning(repartition.ofStream, key, value, false, always, next, None, partitions, partitioner, Some(repartition))),
       s"${repartition.ofStream.value}-repartition-source",
       false,
       ending
@@ -1498,9 +1511,15 @@ final class KGroupedStream[F[_], K, V, O] private[xkafka] (
         case None => next => stream.feed(Consumer.refusing(found, Consumer.Then(named, fold, next)))
         // The records go through a repartition topic first, so the store is in the sub-topology that reads it.
         case Some(repartition) => next =>
-            stream.feed(
-              Consumer.Repartitioning(repartition.ofStream, key, value, false, false, Consumer.refusing(found, Consumer.Then(named, fold, next)))
-            )
+            stream.feed(Consumer.Repartitioning(
+              repartition.ofStream,
+              key,
+              value,
+              false,
+              false,
+              Consumer.refusing(found, Consumer.Then(named, fold, next)),
+              asked = Some(repartition)
+            ))
     KStream.of[F, K2, A, KeyState.AsRead, O](feeding, named.value, false, stream.ending)
 
   /** This group as a side of a cogroup, whose values `add` folds in. Java makes a repartition topic's source only when it makes the aggregate. */
@@ -1509,7 +1528,9 @@ final class KGroupedStream[F[_], K, V, O] private[xkafka] (
       def fed[K2, R](named: Named, number: Int, alone: Boolean, fold: CogroupFold[F, K, A, K2, R], merge: Consumer[F, K2, R]): O =
         val folding = Consumer.Then(named, Step.Cogrouped(number, fold[V](add)), merge)
         val read    =
-          through.fold[Consumer[F, K, V]](folding)(repartition => Consumer.Repartitioning(repartition.ofStream, key, value, true, false, folding))
+          through.fold[Consumer[F, K, V]](folding)(repartition =>
+            Consumer.Repartitioning(repartition.ofStream, key, value, true, false, folding, asked = Some(repartition))
+          )
         stream.feed(if alone then Consumer.Copartitioned(read) else read)
 
   /** These records folded along with those of other groups, as Java's `cogroup` does: `add` folds this group's values, and each further group's
@@ -2441,14 +2462,14 @@ object Topology:
     // A step named as a node the program makes of its own, such as a repartition's or a join's, is refused as Java refuses two nodes of one name;
     // those nodes share names with each other only when a repartition or join is named twice, which is refused as such.
     val problems =
-      wired.problems ++ (stores ++ repartitions ++ wired.steps ++ wired.joinNames).flatMap(invalid) ++
+      wired.problems ++ (stores ++ wired.steps ++ wired.joinNames).flatMap(invalid) ++
         (twice(wired.steps) ++ twice(wired.joinNames) ++ wired.steps.filter(wired.generated.contains)).distinct.sorted
           .map(TopologyError.DuplicateName(_)) ++ twice(stores).sorted.map(TopologyError.DuplicateStore(_)) ++
         twice(repartitions).sorted.map(TopologyError.DuplicateRepartition(_)) ++ twice(wired.inputs).sortBy(_.value)
           .map(TopologyError.DuplicateSource(_))
     NonEmptyList.fromList(problems.distinct).toLeft(new Topology(wired.numbered, wired.globals))
 
-  private def invalid(name: String): Option[TopologyError] =
+  private[streams] def invalid(name: String): Option[TopologyError] =
     def legal(c: Char) =
       (c >= 'a' && c <= 'z') ||
         (c >= 'A' && c <= 'Z') ||

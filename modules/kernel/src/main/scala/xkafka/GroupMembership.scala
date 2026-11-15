@@ -100,8 +100,16 @@ private[xkafka] object GroupMembership:
     /** The handle, taken with `poll` cancelling what may wait. */
     private[xkafka] def acquireWith(poll: Poll[F]): F[GroupHandle] = acquiring.fold(poll(acquire))(_(poll))
 
+    // A Poll of the effect mapped to cannot be one of this, so a membership that holds something as it takes its handle takes it whole there,
+    // inside the region where its release is registered, so a cancel cannot land between the two.
     override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] =
-      new Backend(key, fk(acquire), handle => fk(release(handle)), onCommitted.map(notify => offsets => fk(notify(offsets))))
+      new Backend(
+        key,
+        fk(acquire),
+        handle => fk(release(handle)),
+        onCommitted.map(notify => offsets => fk(notify(offsets))),
+        acquiring.map(_ => (_: Poll[G]) => fk(acquire))
+      )
 
     override def equals(other: Any): Boolean =
       other match

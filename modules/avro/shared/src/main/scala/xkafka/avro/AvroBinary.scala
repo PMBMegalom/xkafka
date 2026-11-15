@@ -126,7 +126,7 @@ object AvroBinary:
     if unframed(schema) then encode(AvroSchema.Bytes, AvroValue.Bytes(payload)) else Right(payload)
 
   /** Whether `value` is a default Avro can read as `schema` says, taking each union's default from its first branch, at every depth. */
-  private[avro] def placeable(schema: AvroSchema, value: AvroValue, defined: Map[FullName, AvroSchema]): Boolean =
+  private[xkafka] def placeable(schema: AvroSchema, value: AvroValue, defined: Map[FullName, AvroSchema]): Boolean =
     (schema, value) match
       case (AvroSchema.Named(name), _)                                              => defined.get(name).exists(placeable(_, value, defined))
       case (AvroSchema.Logical(logicalType), _)                                     => placeable(logicalType.underlying, value, defined)

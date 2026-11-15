@@ -89,6 +89,23 @@ final class RestoreSuite extends CatsEffectSuite:
           GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
             held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, keys.toSet))
 
+  for broker <- server.toList do
+    test("a store whose position is past its changelog's end, as after the topic was made anew, is emptied and restored from the start"):
+      Names.fresh:
+        val changelog = topic("anew")
+        val consumer  =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
+          )(driver.destroyConsumer)
+        for
+          _     <- create(broker, changelog)
+          _     <- transactionally(broker)(_.produce(NonEmptyList.of("k1", "k2").map(key => record(changelog, 0, key, Some("v"), 1000L))).void)
+          store <- TaskStore.memory[IO].apply("s", None, StoreContents.empty)
+          _     <- store.write(StoreContents.unchanged.updated(text("gone"), Some(Stored(text("v"), 1L))), Map(0 -> 50L))
+          _     <- consumer.use(Restore(driver, _, Map(partition(changelog, 0) -> "s"), Map(partition(changelog, 0) -> 50L), Map("s" -> store)))
+          held  <- store.all
+        yield assertEquals(held.map(entry => new String(entry._1.toArray)).toSet, Set("k1", "k2"))
+
   test(
     "each store's changes from a batch of its changelog keep each key's latest value with its record's time, and a record without a value removes it"
   ):

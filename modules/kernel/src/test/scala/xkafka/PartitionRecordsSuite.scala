@@ -221,6 +221,34 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       read <- reading.joinWithNever.timeout(5.seconds)
     yield assertEquals(read, Nil)
 
+  test("a record whose lease has ended by the time it is routed opens no stream for its partition, and is not handed out"):
+    def ended(offsetValue: Long, held: IO[Boolean]): CommittableConsumerRecord[IO, String, String] =
+      val offset      = Offset.from(offsetValue).toOption.get
+      val committable =
+        new CommittableOffset[IO]:
+          override val topicPartition: TopicPartition = firstPartition
+          override val nextOffset: Offset             = offset.next.toOption.get
+          override val committer: OffsetCommitter[IO] =
+            new OffsetCommitter[IO]:
+              override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
+          override private[xkafka] def stillHeld: Option[IO[Boolean]] = Some(held)
+      CommittableConsumerRecord(ConsumerRecord(firstPartition, offset, None, "key", "v", Headers.empty), committable)
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened     <- Ref[IO].of(0)
+      read       <- Ref[IO].of(Vector.empty[Long])
+      reading    <-
+        testConsumer(assignment, input).partitionedRecords(10).evalTap(_ => opened.update(_ + 1))
+          .map(_.records.evalMap(record => read.update(_ :+ record.record.offset.value))).parJoinUnbounded.compile.drain.start
+      _ <- IO.sleep(100.millis)
+      _ <- assignment.set(Set.empty) *> IO.sleep(100.millis)
+      // Decoded only once the partition was revoked, under the lease the revocation ended.
+      _      <- input.send(ended(0L, IO.pure(false))) *> IO.sleep(100.millis)
+      counts <- (opened.get, read.get).tupled
+      _      <- reading.cancel
+    yield assertEquals(counts, (1, Vector.empty[Long]))
+
   test("cancelling before a counted record is sent rolls the count back"):
     for
       assignment   <- Ref[IO].of(Set(firstPartition))
@@ -263,6 +291,18 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
         testConsumer(assignment, input).consumeChunk(chunk => processed.update(_ ++ chunk.toList.map(_.value)).as(CommitNow)).attempt
           .race(processed.waitUntil(_.contains("b"))).timeout(10.seconds)
     yield assert(outcome.isRight, s"consumeChunk stopped: $outcome")
+
+  test("consumeChunk hands over the records waiting for a partition together, not one at a time"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      sizes      <- SignallingRef[IO].of(Vector.empty[Int])
+      _          <- (0 until 50).toList.traverse_(n => input.send(record(firstPartition, n.toLong, s"v$n")).void)
+      _          <-
+        testConsumer(assignment, input).consumeChunk(chunk => sizes.update(_ :+ chunk.size).as(CommitNow), maxQueuedRecords = 100)
+          .race(sizes.waitUntil(_.sum == 50)).timeout(10.seconds)
+      seen <- sizes.get
+    yield assert(seen.max > 1, s"chunks of sizes $seen")
 
   test("consumeChunk hands over every record and commits what it processed"):
     val expected = List(firstPartition -> "a", firstPartition -> "b", secondPartition -> "c")

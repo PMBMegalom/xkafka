@@ -26,7 +26,7 @@ import cats.effect.{Async, Outcome, Ref}
 import cats.effect.std.Mutex
 import cats.syntax.all.*
 import cats.tagless.FunctorK
-import fs2.Stream
+import fs2.{Chunk, Stream}
 import fs2.concurrent.Channel
 
 /** The records of one partition for as long as this consumer holds it. `records` ends once the partition is revoked. */
@@ -84,17 +84,23 @@ object PartitionRecords:
 
     /** Opens a stream for each assigned partition, so one appears as soon as the partition is owned, and ends the streams of revoked ones. */
     private def reconcile(assignment: Set[TopicPartition]): F[Unit] =
-      assignment.toList.traverse_(stateFor.andThen(_.void)) >> revokeMissing(assignment)
+      assignment.toList.traverse_(partition => stateFor(partition, F.pure(true)).void) >> revokeMissing(assignment)
 
     /** Routes a record, opening the partition's stream first if the assignment has not reported it yet.
       *
-      * A record is itself proof that its partition is assigned, so routing never waits for confirmation and never discards one for want of it.
+      * A record read under its partition's current lease is proof that the partition is assigned, so routing never waits for confirmation. One whose
+      * lease has ended, decoded after its partition was revoked, opens no stream, as the group has given it to another member: the lease is asked
+      * under the lock the revocation takes, which it takes once the lease has ended.
       */
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
-      stateFor(record.record.topicPartition).flatMap: state =>
-        state.mutex.lock.surround:
-          // One revoked while the record waited for the lock is not paused for it, which librdkafka would keep through the revocation.
-          state.revoked.get.ifM(F.unit, delivered(state, record))
+      stateFor(record.record.topicPartition, held(record)).flatMap(_.traverse_(routedTo(_, record)))
+
+    private def held(record: CommittableConsumerRecord[F, K, V]): F[Boolean] = record.offset.stillHeld.getOrElse(F.pure(true))
+
+    private def routedTo(state: PartitionState[F, K, V], record: CommittableConsumerRecord[F, K, V]): F[Unit] =
+      state.mutex.lock.surround:
+        // One revoked while the record waited for the lock is not paused for it, which librdkafka would keep through the revocation.
+        state.revoked.get.ifM(F.unit, delivered(state, record))
 
     private def delivered(state: PartitionState[F, K, V], record: CommittableConsumerRecord[F, K, V]): F[Unit] =
       F.uncancelable: poll =>
@@ -126,29 +132,35 @@ object PartitionRecords:
     private def readable(state: PartitionState[F, K, V]): PartitionRecords[F, K, V] =
       PartitionRecords(
         state.topicPartition,
-        // A record queued when the partition was revoked is not handed out: the group gave it to another member, and a commit of it is refused.
-        state.channel.stream.evalFilter: _ =>
+        // The records waiting are handed out together, as a chunk. Those queued when the partition was revoked are not: the group gave them to another
+        // member, and a commit of them is refused.
+        state.channel.stream.chunks.evalMap: chunk =>
           state.mutex.lock.surround:
-            state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued)) *> state.revoked.get.map(!_)
+            state.queued.updateAndGet(_ - chunk.size).flatMap(queued => resumeWhenDrained(state, queued)) *>
+              state.revoked.get.ifM(F.pure(Chunk.empty), chunk.filterA(held))
+        .unchunks
       )
 
-    private def stateFor(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
+    private def stateFor(topicPartition: TopicPartition, held: F[Boolean]): F[Option[PartitionState[F, K, V]]] =
       mutex.lock.surround:
-        states.get.flatMap: current =>
-          current.get(topicPartition) match
-            case Some(state) => F.pure(state)
-            case None        =>
-              for
-                // Pausing is what bounds this, so a record already in flight when the pause was issued still lands.
-                channel <- Channel.unbounded[F, CommittableConsumerRecord[F, K, V]]
-                queued  <- Ref.of[F, Int](0)
-                paused  <- Ref.of[F, Boolean](false)
-                mutex   <- Mutex[F]
-                revoked <- Ref.of[F, Boolean](false)
-                state = PartitionState(topicPartition, channel, queued, paused, mutex, revoked)
-                _ <- states.set(current.updated(topicPartition, state))
-                _ <- output.send(readable(state)).void
-              yield state
+        held.ifM(stateOf(topicPartition).map(Some(_)), F.pure(None))
+
+    private def stateOf(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
+      states.get.flatMap: current =>
+        current.get(topicPartition) match
+          case Some(state) => F.pure(state)
+          case None        =>
+            for
+              // Pausing is what bounds this, so a record already in flight when the pause was issued still lands.
+              channel <- Channel.unbounded[F, CommittableConsumerRecord[F, K, V]]
+              queued  <- Ref.of[F, Int](0)
+              paused  <- Ref.of[F, Boolean](false)
+              mutex   <- Mutex[F]
+              revoked <- Ref.of[F, Boolean](false)
+              state = PartitionState(topicPartition, channel, queued, paused, mutex, revoked)
+              _ <- states.set(current.updated(topicPartition, state))
+              _ <- output.send(readable(state)).void
+            yield state
 
     private def revokeMissing(assignment: Set[TopicPartition]): F[Unit] =
       mutex.lock.surround:

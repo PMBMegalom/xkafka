@@ -64,6 +64,18 @@ class AvroGeneratorSuite extends FunSuite:
     )
     assert(AvroGenerator.generate(files(in, "a.avsc" -> time("time-millis", "int", 86399999))).isRight)
 
+  directory.test("a default of a union's branch other than its first, in the field or inside it, is refused, since xkafka writes defaults first"):
+    in =>
+      val msg                  = "it holds a value of a union's branch other than its first, the one xkafka writes a default in"
+      def notes(items: String) = record(s"""{"name": "notes", "type": {"type": "array", "items": $items}, "default": ["x"]}""")
+      List("""["null", "string"]""", """["int", "string"]""").foreach: items =>
+        assertEquals(refused(in, "a.avsc" -> notes(items)), List(s"example.R.notes has a default xkafka cannot write: $msg"))
+      assert(AvroGenerator.generate(files(in, "a.avsc" -> notes("""["string", "int"]"""))).isRight)
+      assertEquals(
+        refused(in, "a.avsc" -> record("""{"name": "note", "type": ["int", "string"], "default": "x"}""")),
+        List(s"example.R.note has a default xkafka cannot write: $msg")
+      )
+
   directory.test("a type without a namespace is refused, since its package is made from it"): in =>
     assertEquals(
       refused(in, "a.avsc" -> """{"type": "record", "name": "R", "fields": []}"""),

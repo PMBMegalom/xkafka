@@ -22,7 +22,7 @@
 package xkafka.codegen
 
 import cats.syntax.all.*
-import xkafka.avro.{AvroField, AvroSchema, AvroSchemaJson, AvroValue, FullName, LogicalType}
+import xkafka.avro.{AvroBinary, AvroField, AvroSchema, AvroSchemaJson, AvroValue, FullName, LogicalType}
 
 /** The Scala source of a named Avro type in `namespace`, whose package also holds the types named `neighbours`. */
 private[codegen] final class AvroScala(namespace: String, neighbours: Set[String]):
@@ -81,8 +81,17 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
           case Nil        => Right(None)
           case one :: Nil => Right(Some(one))
           case _          => Left(s"$where holds decimals of different precisions, which one field cannot")
-      _       <- unionOrder(field, where)
-      default <- field.default.traverse(literal(field.schema, _, definitions).leftMap(reason => s"$where has a default xkafka cannot write: $reason"))
+      _ <- unionOrder(field, where)
+      // xkafka's codec leaves out a default it could not write in the field's own schema, which would then not be the file's.
+      default <-
+        field.default.traverse: value =>
+          val placed =
+            Either.cond(
+              AvroBinary.placeable(field.schema, value, definitions),
+              (),
+              "it holds a value of a union's branch other than its first, the one xkafka writes a default in"
+            )
+          (placed *> literal(field.schema, value, definitions)).leftMap(reason => s"$where has a default xkafka cannot write: $reason")
     yield
       val (scala, renamed) = Names.field(field.name)
       val marks            =

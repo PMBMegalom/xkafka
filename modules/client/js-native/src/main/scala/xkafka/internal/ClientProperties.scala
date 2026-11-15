@@ -37,7 +37,9 @@ private[xkafka] object ClientProperties:
   def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] = fetchWait(settings.fetchWait)
 
   /** librdkafka names the fetch wait `fetch.wait.max.ms`. */
-  def fetchWait(value: FiniteDuration): Map[String, String] = Map("fetch.wait.max.ms" -> value.toMillis.toString)
+  // librdkafka gives a fetch its socket timeout past the wait, so the properties change nothing here.
+  def fetchWait(value: FiniteDuration, @scala.annotation.unused properties: Map[String, String] = Map.empty): Map[String, String] =
+    Map("fetch.wait.max.ms" -> value.toMillis.toString)
 
   def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.librdkafka(settings)
 

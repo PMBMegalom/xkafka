@@ -180,6 +180,8 @@ final class ForeignKeySuite extends CatsEffectSuite:
     // A step after the result that keeps a store of its own is joined through that store, as Java's is.
     assert(Topology.of(rejoined(unkept.mapValues(Named("m"), Store("mapped"), text)(_ + "!"))).isRight)
     assert(Topology.of(rejoined(unkept.filter(Named("f"), Store("filtered"), text)((_, _) => true))).isRight)
+    // A filter that keeps a store of its own reads the old values it drops from there, and hands them on to the groupBy after it.
+    assert(Topology.of(grouped(unkept.filter(Named("f"), Store("filtered"), text)((_, _) => true))).isRight)
 
   test("a filter after a result kept in no store runs without old values, as Java's, a value it drops becoming a delete whatever came before"):
     val filtered                             = joined.filter(Named("f"))((_, value) => value.startsWith("a"))

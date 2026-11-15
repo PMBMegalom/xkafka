@@ -944,6 +944,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
             override private[xkafka] val lease: Option[Lease] = read.lease
 
+            override private[xkafka] val stillHeld: Option[F[Boolean]] =
+              Option.when(settings.assignmentFencing)(
+                leases.held.map(current => read.lease.exists(lease => current(leaseKeyOf(read.record)).contains(lease)))
+              )
+
             override private[xkafka] val membership: GroupMembership[F] =
               leases.membership(DriverConsumer.this, read.lease, groupHandle, releaseGroupMetadata, Some(committedElsewhere))
 

@@ -53,5 +53,11 @@ private[xkafka] object MockCluster:
   /** Kafka's `OffsetCommit` API, which commits a group's offsets. */
   val OffsetCommit = 8
 
+  /** Kafka's `Produce` API, which writes records. */
+  val Produce = 0
+
+  /** Kafka's `INVALID_PRODUCER_EPOCH` error, which librdkafka takes as a newer producer fencing a transactional one, fatal to it. */
+  val InvalidProducerEpoch = 47
+
   /** Kafka's `FENCED_INSTANCE_ID` error, which librdkafka takes as fatal to a static member. */
   val FencedInstanceId = 82

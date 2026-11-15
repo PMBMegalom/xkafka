@@ -69,7 +69,7 @@ private[xkafka] object JsSockets:
       background(_.socketOpen)(
         host,
         port,
-        timeout.toMillis.toInt,
+        timeout.toMillis.min(Int.MaxValue).toInt,
         if tls.isDefined then 1 else 0,
         c(settings.caLocation),
         c(settings.caPem),

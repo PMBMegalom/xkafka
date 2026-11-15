@@ -191,7 +191,7 @@ private[xkafka] final class Querying[F[_]](
           over(held, key => from.forall(StoreContents.keys.gteq(key, _)) && to.forall(StoreContents.keys.lteq(key, _)))
         case QueryRequest.Windows(_, Some(key), from, to) =>
           over(held, stored => under(key)(stored) && stored.size == key.size + 12 && between(stored, from, to))
-        case QueryRequest.Windows(_, None, from, to) => over(held, stored => stored.size > 12 && between(stored, from, to))
+        case QueryRequest.Windows(_, None, from, to) => over(held, stored => stored.size >= 12 && between(stored, from, to))
         case QueryRequest.Sessions(_, key)           => over(held, stored => under(key)(stored) && stored.size == key.size + 16)
 
   /** The entries `request` finds in `store`, as the store holds them. */

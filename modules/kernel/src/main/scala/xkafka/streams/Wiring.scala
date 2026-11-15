@@ -121,24 +121,24 @@ private[xkafka] object Wiring:
     if seen then added
     else
       consumer.expanded match
-        case Consumer.Then(_, step, next)                          => linked(next, added.keeping(step.kept))
-        case Consumer.Repartitioning(_, _, _, _, _, next, _, _, _) => linked(next, added)
-        case Consumer.Beside(table, _, next)                       => linked(next, added.copy(tables = added.tables ++ table))
-        case Consumer.Fan(children)                                => children.foldLeft(added)((graph, child) => linked(child, graph))
-        case Consumer.Merged(_, next)                              => linked(next, added)
-        case Consumer.Cogroup(_, _, next)                          => linked(next, added)
-        case Consumer.Copartitioned(next)                          => linked(next, added)
-        case Consumer.Splitting(_, branches)                       => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
-        case Consumer.Refused(_, next)                             => linked(next, added)
-        case Consumer.LeftTable(join)                              => onward(join.id, join.kept, join.next)
-        case Consumer.RightTable(join)                             => onward(join.id, join.kept, join.next)
-        case Consumer.LeftStream(join)                             => onward(join.id, join.kept, join.next)
-        case Consumer.RightStream(join)                            => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignLeft(join)                            => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignRight(join)                           => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignSubscribed(_)                         => added
-        case Consumer.ForeignAnswered(_)                           => added
-        case _                                                     => added
+        case Consumer.Then(_, step, next)                             => linked(next, added.keeping(step.kept))
+        case Consumer.Repartitioning(_, _, _, _, _, next, _, _, _, _) => linked(next, added)
+        case Consumer.Beside(table, _, next)                          => linked(next, added.copy(tables = added.tables ++ table))
+        case Consumer.Fan(children)                                   => children.foldLeft(added)((graph, child) => linked(child, graph))
+        case Consumer.Merged(_, next)                                 => linked(next, added)
+        case Consumer.Cogroup(_, _, next)                             => linked(next, added)
+        case Consumer.Copartitioned(next)                             => linked(next, added)
+        case Consumer.Splitting(_, branches)                          => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
+        case Consumer.Refused(_, next)                                => linked(next, added)
+        case Consumer.LeftTable(join)                                 => onward(join.id, join.kept, join.next)
+        case Consumer.RightTable(join)                                => onward(join.id, join.kept, join.next)
+        case Consumer.LeftStream(join)                                => onward(join.id, join.kept, join.next)
+        case Consumer.RightStream(join)                               => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignLeft(join)                               => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignRight(join)                              => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignSubscribed(_)                            => added
+        case Consumer.ForeignAnswered(_)                              => added
+        case _                                                        => added
 
   /** Whether `entry` only reads into a store the program's own topics keep from the same topic, as the table a join reads does where the program also
     * uses that table.
@@ -366,10 +366,12 @@ private[xkafka] object Wiring:
         arrive(next, after, made.coming(named.value, after))
       case Consumer.Output(named, topic, _, _, _) => walk
           .making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
-      case Consumer.Done()                                                                                  => walk
-      case Consumer.Repartitioning(repartition, key, value, atJoin, always, next, aggregate, partitions, _) =>
+      case Consumer.Done()                                                                                         => walk
+      case Consumer.Repartitioning(repartition, key, value, atJoin, always, next, aggregate, partitions, _, asked) =>
+        // Refusals name the repartitioning as the program did, as Java checks the name it is given.
+        val shown        = asked.getOrElse(repartition).value
         val read         = Entry(Origin.Repartitioned(repartition, key, value, aggregate, partitions), next)
-        val counted      = partitions.filter(_ < 1).map(TopologyError.InvalidPartitionCount(repartition.value, _)).toList
+        val counted      = partitions.filter(_ < 1).map(TopologyError.InvalidPartitionCount(shown, _)).toList ++ Topology.invalid(shown)
         val source       = Source.Repartitioned(repartition)
         val (node, name) = Describing.source(read.origin)
         val filter       = s"${repartition.value}-repartition-filter"
@@ -388,8 +390,7 @@ private[xkafka] object Wiring:
           )
         // Java's graph goes on through the repartition, so the grace of the windows before it carries across.
         val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil, grace = at.grace)
-        val refused =
-          if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(repartition.value))
+        val refused = if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(shown))
         // The source of a repartition that is not a grouped table's is a node the program makes, which no step may also be named; a grouped
         // table's is named after its aggregate, a step's name already.
         val placed =

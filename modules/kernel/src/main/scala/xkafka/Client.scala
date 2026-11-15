@@ -423,10 +423,20 @@ object ProducerSettings:
   /** The linger the settings accept up to and not including: librdkafka refuses one that is not below its message timeout, which is this. */
   val LingerLimit: FiniteDuration = 5.minutes
 
-  private def lingerErrors(value: FiniteDuration): List[SettingsError] =
+  /** Linger is below the limit, and below a message timeout (librdkafka's `message.timeout.ms`) or delivery timeout (Java's `delivery.timeout.ms`)
+    * the properties set, which each client refuses a linger that is not below.
+    */
+  private def lingerErrors(value: FiniteDuration, properties: Map[String, String]): List[SettingsError] =
+    val timeouts =
+      properties.collect:
+        case (name, set) if TimeoutProperties(name.trim.toLowerCase) => set.trim.toLongOption.filter(_ > 0).map(_.millis)
+      .flatten
+    val limit = (LingerLimit :: timeouts.toList).min
     if value < Duration.Zero then List(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, value))
-    else if value >= LingerLimit then List(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, value, LingerLimit))
+    else if value >= limit then List(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, value, limit))
     else partialErrors(SettingsError.DurationField.Linger, value)
+
+  private val TimeoutProperties = Set("message.timeout.ms", "delivery.timeout.ms")
 
   /** What the Java client waits for room by default, its `max.block.ms`. */
   val DefaultEnqueueTimeout: FiniteDuration = 1.minute
@@ -446,8 +456,8 @@ object ProducerSettings:
   ): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
-        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++ lingerErrors(linger) ++
-        batchSize.filter(_ <= 0).map(SettingsError.NonPositiveBatchSize(_)) ++
+        Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++
+        lingerErrors(linger, client.properties ++ properties) ++ batchSize.filter(_ <= 0).map(SettingsError.NonPositiveBatchSize(_)) ++
         durationErrors(SettingsError.DurationField.EnqueueTimeout, enqueueTimeout)
     validateSettings(errors).map(_ =>
       new ProducerSettings(
@@ -1457,6 +1467,8 @@ trait CommittableOffset[F[_]]:
 
       override private[xkafka] def lease: Option[Lease] = self.lease
 
+      override private[xkafka] def stillHeld: Option[F[Boolean]] = self.stillHeld
+
   /** The group membership this offset was read under, which is what a transaction records it against.
     *
     * A backend that cannot name that membership falls back to its committer's, which is the consumer's current one.
@@ -1465,6 +1477,11 @@ trait CommittableOffset[F[_]]:
 
   /** The lease this offset was read under, where its consumer fences its assignment and could name one. */
   private[xkafka] def lease: Option[Lease] = None
+
+  /** Whether the lease this offset was read under is still current, where its consumer fences its assignment: a record whose lease has ended was read
+    * under an assignment the group has since given to another member.
+    */
+  private[xkafka] def stillHeld: Option[F[Boolean]] = None
 
   final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (offsetAndMetadata, lease)))
 
@@ -1483,6 +1500,8 @@ trait CommittableOffset[F[_]]:
       override private[xkafka] def membership: GroupMembership[G] = self.membership.mapK(fk)
 
       override private[xkafka] def lease: Option[Lease] = self.lease
+
+      override private[xkafka] def stillHeld: Option[G[Boolean]] = self.stillHeld.map(fk(_))
 
 object CommittableOffset:
   given FunctorK[CommittableOffset] with

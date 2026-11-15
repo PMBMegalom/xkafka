@@ -129,6 +129,10 @@ field, and why:
 - a `decimal` in a union of several types;
 - a `time-millis` or `time-micros` default that is no time of day, such as a
   negative one;
+- a default holding a value of a union's branch other than its first, in the
+  field's union or in one inside it, such as `["x"]` for a list of
+  `["null", "string"]`, since xkafka writes a union's default in its first
+  branch;
 - `null` in a union anywhere but first, or right after the type of the field's
   default, and in a union inside a list or a map anywhere but first;
 - a record with fields of one Scala type at two precisions, such as a

@@ -115,13 +115,15 @@ static void xkafka_set_error(char *error, size_t error_size, int32_t *error_code
 }
 
 /* A failure as librdkafka reports it, where _FATAL, which only says the client is done, is reported as the failure that made it so,
- * so it is classified by its cause, as the Java client classifies it. */
+ * so it is classified by its cause, as the Java client classifies it. So is a record purged because the client is done, which
+ * librdkafka gives up once a failure is fatal. */
 static void xkafka_set_failure(rd_kafka_t *client, char *error, size_t error_size, int32_t *error_code, const char *value,
                                rd_kafka_resp_err_t code) {
         char reason[512];
         rd_kafka_resp_err_t cause;
 
-        if (code == RD_KAFKA_RESP_ERR__FATAL && client != NULL) {
+        if ((code == RD_KAFKA_RESP_ERR__FATAL || code == RD_KAFKA_RESP_ERR__PURGE_QUEUE || code == RD_KAFKA_RESP_ERR__PURGE_INFLIGHT) &&
+            client != NULL) {
                 cause = rd_kafka_fatal_error(client, reason, sizeof(reason));
                 if (cause != RD_KAFKA_RESP_ERR_NO_ERROR) {
                         xkafka_set_error_at(error, error_size, error_code, reason, cause);
@@ -129,6 +131,13 @@ static void xkafka_set_failure(rd_kafka_t *client, char *error, size_t error_siz
                 }
         }
         xkafka_set_error_at(error, error_size, error_code, value, code);
+}
+
+/* Whether the client has met a failure librdkafka holds fatal. */
+static int xkafka_fatal(rd_kafka_t *client) {
+        char reason[8];
+
+        return client != NULL && rd_kafka_fatal_error(client, reason, sizeof(reason)) != RD_KAFKA_RESP_ERR_NO_ERROR;
 }
 
 /* Only the two failures that a waiting call cannot otherwise explain are kept. */
@@ -366,7 +375,8 @@ xkafka_batch_t *xkafka_batch_new(size_t capacity) {
 }
 
 /* Enqueues one message, returning 0 where the batch took it, 1 where the
- * producer has no room for it yet, and -1 where it was refused. The message
+ * producer has no room for it yet, -2 where it was refused because the
+ * producer met a fatal failure, and -1 where it was refused otherwise. The message
  * owns a copy of its payload, so the caller's buffers may be released as soon
  * as this returns. */
 int xkafka_batch_add(rd_kafka_t *producer,
@@ -441,7 +451,7 @@ int xkafka_batch_add(rd_kafka_t *producer,
                 break;
         default:
                 xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(result), result);
-                return -1;
+                return xkafka_fatal(producer) ? -2 : -1;
         }
 
         batch->count++;
@@ -464,7 +474,7 @@ size_t xkafka_batch_pending(const xkafka_batch_t *batch) {
 }
 
 /* Reads the outcome of one delivery of a batch whose reports have all arrived,
- * returning 0 where it was delivered. */
+ * returning 0 where it was delivered, -2 where it failed once the producer met a fatal failure, and -1 where it failed otherwise. */
 int xkafka_batch_error_at(rd_kafka_t *producer,
                           xkafka_batch_t *batch,
                           size_t index,
@@ -485,7 +495,7 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
         /* Any failure but the client giving up on the brokers is the delivery's own. */
         if (!xkafka_unreached(err)) {
                 xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(err), err);
-                return -1;
+                return xkafka_fatal(producer) ? -2 : -1;
         }
         /* A delivery report that never reached a broker reports the retries
          * ending, so a recorded security failure is the cause. */

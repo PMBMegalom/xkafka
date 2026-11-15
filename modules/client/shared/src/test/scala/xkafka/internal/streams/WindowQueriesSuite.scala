@@ -197,6 +197,14 @@ final class WindowQueriesSuite extends CatsEffectSuite:
         assertEquals(windowed, Right(Vector(0L -> 1L, 10000L -> 7L, 30000L -> 8L)))
         assertEquals(sessioned, Right(Vector(Window(30000L, 31000L) -> 5L, Window(40000L, 41000L) -> 6L)))
 
+  test("a window of the empty key a task changed since it last committed is read by a query of every key"):
+    val empty   = Murmur2.partition(Chunk.empty, counted)
+    val pending =
+      Map(TaskId("0", empty) -> Map("windows" -> TreeMap(WindowStore.key(Chunk.empty, 30000L) -> Option(count(4L)))(using StoreContents.keys)))
+    member("a", (0 until counted).toSet, Nil, Forward.none[IO], here, pending).flatMap: querying =>
+      querying.query(windows.fetchAll(Timestamp.fromEpochMillis(30000L), Timestamp.fromEpochMillis(30000L)), false).map: found =>
+        assertEquals(found.map(_.map((windowed, n) => (windowed.key, n))), Right(Vector("" -> 4L)))
+
   test("a query of another kind than its store's names the store as unknown"):
     asking.flatMap: querying =>
       (

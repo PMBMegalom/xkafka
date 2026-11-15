@@ -117,10 +117,11 @@ private[xkafka] object Meta:
         case _                    => name
     val scalaName = written(tpe)
     // The namespace is the packages and the objects the type is in, so two types of one name in two objects are two types; the object Scala makes
-    // around a file's top-level definitions is left out.
-    val packages =
+    // around a file's top-level definitions is left out, and so is a package object, named `package`.
+    def packageObject(name: String) = name == "package" || name.endsWith("$package")
+    val packages                    =
       Iterator.iterate(symbol.owner)(_.owner).takeWhile(owner => !owner.isNoSymbol && owner != defn.RootClass)
-        .filter(owner => owner.isPackageDef || owner.flags.is(Flags.Module) && !owner.name.stripSuffix("$").endsWith("$package"))
+        .filter(owner => owner.isPackageDef || owner.flags.is(Flags.Module) && !packageObject(owner.name.stripSuffix("$")))
         .map(_.name.stripSuffix("$")).toList.reverse.filterNot(_ == "<empty>")
     val name: String              = text(annotations, "SchemaName").headOption.getOrElse(scalaName)
     val namespace: Option[String] = text(annotations, "SchemaNamespace").headOption.orElse(Option.when(packages.nonEmpty)(packages.mkString(".")))

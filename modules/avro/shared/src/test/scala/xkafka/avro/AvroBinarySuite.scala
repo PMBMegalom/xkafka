@@ -144,6 +144,14 @@ class AvroBinarySuite extends ScalaCheckSuite:
     )
     assert(AvroSchemaJson.parse("""{"type":"record","name":"N","fields":[{"name":"note","type":["null","string"],"default":1}]}""").isLeft)
 
+  test("a union field's default of a later branch is written back as that branch, so the schema reads again as it was"):
+    List(
+      """{"type":"record","name":"N","fields":[{"name":"note","type":["null","string"],"default":"none"}]}""",
+      """{"type":"record","name":"P","fields":[{"name":"at","type":["null",{"type":"record","name":"Q","fields":[{"name":"x","type":"int"}]}],"default":{"x":3}}]}"""
+    ).foreach: text =>
+      val schema = parsed(text)
+      assertEquals(AvroSchemaJson.parse(AvroSchemaJson.render(schema)), Right(schema), AvroSchemaJson.render(schema))
+
   test("a decimal held in a fixed type keeps its scale where a field names it, so another scale is refused there too"):
     val amount = """{"type":"fixed","name":"Amt","size":8,"logicalType":"decimal","precision":10,"scale":%d}"""
     val writer = parsed(s"""{"type":"record","name":"M","fields":[{"name":"price","type":${amount.format(2)}},{"name":"tax","type":"Amt"}]}""")

@@ -77,6 +77,24 @@ final class LibrdkafkaFailuresSuite extends CatsEffectSuite:
         assertEquals(code(outcomes._1), Some(ErrorCode.Fenced), outcomes._1)
         assertEquals(code(outcomes._2), Some(ErrorCode.Fenced), outcomes._2)
 
+  test("records librdkafka gives up once a failure is fatal report that failure, as fatal, not that they were purged"):
+    LibrdkafkaPlatform.mockCluster[IO](Map(MockCluster.Brokers)).use: cluster =>
+      for
+        _      <- cluster.createTopic(topic.value, 1)
+        client <- ClientSettings.from(NonEmptyList.one(cluster.bootstrapServers)).liftTo[IO]
+        // librdkafka keeps the gapless guarantee by holding a permanent failure of an idempotent producer fatal.
+        producing <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO], Map("enable.gapless.guarantee" -> "true")).liftTo[IO]
+        records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(n => ProducerRecord(topic, s"key-$n", "v" * 1000)))
+        attempts <-
+          KafkaClient[IO].producer(producing).use: producer =>
+            producer.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "v"))) *>
+              cluster.failRequests(MockCluster.Produce, List(MockCluster.InvalidProducerEpoch)) *> producer.produceAttemptEachAndAwait(records)
+      yield
+        val failures = attempts.toList.flatMap(_.outcome.left.toOption).collect { case failure: KafkaException.BackendFailure => failure }
+        assert(failures.size > 1, attempts.toList.map(_.outcome).distinct)
+        assertEquals(failures.filter(_.code.contains(ErrorCode.Purged)), Nil)
+        assertEquals(failures.map(_.fatal).distinct, List(Some(true)), failures.filter(_.fatal.isEmpty).map(_.getMessage).distinct)
+
   test("a committed offset the broker refuses for one partition fails with the error it gave that partition"):
     LibrdkafkaPlatform.mockCluster[IO](Map(MockCluster.Brokers)).use: cluster =>
       for

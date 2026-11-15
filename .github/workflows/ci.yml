@@ -483,7 +483,9 @@ jobs:
 
       - name: Install gdb
         if: runner.os == 'Linux'
-        run: sudo apt-get install --yes gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gdb
 
       - name: Test the shim in C under a leak checker
         run: sbt clientJS/rocksdbShimTest
@@ -756,7 +758,9 @@ jobs:
           sudo apt-get install --yes libssl-dev zlib1g-dev libzstd-dev
 
       - name: Install LeakSanitizer symbolizer
-        run: sudo apt-get install --yes llvm
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes llvm
 
       - name: Check the Native downstream application for leaks
         run: scripts/native-leak-check.sh

@@ -250,8 +250,9 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     setupNode,
     cacheLibrdkafkaLibrary.value,
     cacheRocksdb,
-    // The shim test prints the stacks of a harness that hangs, through gdb on Linux.
-    WorkflowStep.Run(List("sudo apt-get install --yes gdb"), name = Some("Install gdb"), cond = Some("runner.os == 'Linux'")),
+    // The shim test prints the stacks of a harness that hangs, through gdb on Linux. The runner's package index can name versions the mirrors no
+    // longer hold, so it is refreshed first.
+    WorkflowStep.Run(List("sudo apt-get update", "sudo apt-get install --yes gdb"), name = Some("Install gdb"), cond = Some("runner.os == 'Linux'")),
     WorkflowStep.Sbt(List("clientJS/rocksdbShimTest"), name = Some("Test the shim in C under a leak checker")),
     WorkflowStep.Sbt(
       List("clientJS/testOnly xkafka.internal.rocksdb.*"),
@@ -368,7 +369,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
     installNativeDependencies,
-    WorkflowStep.Run(List("sudo apt-get install --yes llvm"), name = Some("Install LeakSanitizer symbolizer")),
+    WorkflowStep.Run(List("sudo apt-get update", "sudo apt-get install --yes llvm"), name = Some("Install LeakSanitizer symbolizer")),
     WorkflowStep.Run(List("scripts/native-leak-check.sh"), name = Some("Check the Native downstream application for leaks"))
   ),
   oses = List("ubuntu-24.04"),

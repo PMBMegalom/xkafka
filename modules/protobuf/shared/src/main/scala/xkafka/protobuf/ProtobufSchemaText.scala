@@ -372,21 +372,26 @@ object ProtobufSchemaText:
             Left(s"field ${read.name} is numbered ${read.number}, which Protobuf does not allow")
           else Right((read, next))
 
+    private def mapAt(at: Int): Boolean = peek(at).contains(Token.Word("map")) && peek(at + 1).contains(Token.Symbol('<'))
+
+    // A map's values are refused as a map before they are read, so maps nested however deep are not read until the stack runs out.
+    private val mapValue: Step[FieldType] =
+      Step(at => if mapAt(at) then Left("a map's values are a map, which Protobuf does not allow") else fieldType.run(at))
+
     private val fieldType: Step[FieldType] =
       Step: at =>
         peek(at) match
-          case Some(Token.Word("group"))                                           => Left("the file declares a group, which xkafka does not read")
-          case Some(Token.Word("map")) if peek(at + 1).contains(Token.Symbol('<')) =>
+          case Some(Token.Word("group")) => Left("the file declares a group, which xkafka does not read")
+          case _ if mapAt(at)            =>
             (for
               _     <- word
               _     <- symbol('<')
               key   <- word
               _     <- symbol(',')
-              value <- fieldType
+              value <- mapValue
               _     <- symbol('>')
             yield (key, value)).run(at).flatMap:
-              case ((_, FieldType.Map(_, _)), _) => Left("a map's values are a map, which Protobuf does not allow")
-              case ((key, value), next)          => ProtobufSchema.scalars.get(key)
+              case ((key, value), next) => ProtobufSchema.scalars.get(key)
                   .filterNot(scalar => scalar == FieldType.Double || scalar == FieldType.Float || scalar == FieldType.Bytes) match
                   case Some(scalar) => Right((FieldType.Map(scalar, value), next))
                   case None         => Left(s"a map's keys are $key, which Protobuf does not allow")

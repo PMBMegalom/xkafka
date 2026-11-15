@@ -59,10 +59,10 @@ object Repartition:
     def value: String = repartition
 
     /** The repartitioning Java makes where it repartitions a stream: a name that already ends in `-repartition` names its topic as it is, as
-      * `<application id>-<name>`, and its nodes after it. A grouped table's repartitioning always adds the suffix, as Java's does.
+      * `<application id>-<name>`, and its nodes after it, `-repartition` alone too. A grouped table's repartitioning always adds the suffix, as
+      * Java's does.
       */
-    private[xkafka] def ofStream: Repartition =
-      if repartition.endsWith(Suffix) && repartition.length > Suffix.length then repartition.dropRight(Suffix.length) else repartition
+    private[xkafka] def ofStream: Repartition = repartition.stripSuffix(Suffix)
 
   private val Suffix = "-repartition"
 

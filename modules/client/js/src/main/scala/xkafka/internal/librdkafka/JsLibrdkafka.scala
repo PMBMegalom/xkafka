@@ -164,9 +164,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
             error.code
           )
         result.asInstanceOf[Int] match
-          case 0 => true
-          case 1 => false
-          case _ => throw error.failure
+          case 0      => true
+          case 1      => false
+          case answer => throw Failures.delivery(error.text, error.codeValue, answer)
       Enqueued(records.iterator.takeWhile(taken).size, gaveUp = false)
 
   private def nativeHeaders(shim: Shim, headers: Headers, error: ErrorSlot): js.Any =
@@ -196,8 +196,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
   override def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]] =
     direct: shim =>
       Vector.tabulate(shim.batchCount(batch).asInstanceOf[Double].toInt): index =>
-        val error = ErrorSlot()
-        if shim.batchErrorAt(producer, batch, index, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then Left(error.failure)
+        val error  = ErrorSlot()
+        val answer = shim.batchErrorAt(producer, batch, index, error.message, ErrorBufferSize, error.code).asInstanceOf[Int]
+        if answer != 0 then Left(Failures.delivery(error.text, error.codeValue, answer))
         else
           Right(Delivery(
             shim.batchPartitionAt(batch, index).asInstanceOf[Int],

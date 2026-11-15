@@ -389,7 +389,7 @@ private[xkafka] final class Task[F[_]](
       case Consumer.Then(named, last, next) => step(last, record, state, now, next.requests, node = named.value).flatMap: (after, records, written) =>
           allPushed(next, records, after, written, now)
       case Consumer.Output(_, topic, key, value, partitioner) => written(F.pure(topic), key, value, false, record, partitioner).map((state, _))
-      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate, _, partitioner) =>
+      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate, _, partitioner, _) =>
         written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record, partitioner)
           // Java drops a value that is null before a grouped table's repartition topic, which here is a change its serializer writes as none.
           .map(out => (state, if aggregate.isDefined then out.filter(_.value.isDefined) else out))

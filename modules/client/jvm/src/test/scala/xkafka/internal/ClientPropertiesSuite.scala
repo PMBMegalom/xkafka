@@ -42,3 +42,5 @@ final class ClientPropertiesSuite extends FunSuite:
     assertEquals(consumer(500.millis).get("request.timeout.ms"), None)
     assertEquals(consumer(1.minute).get("request.timeout.ms"), Some("90000"))
     assertEquals(consumer(1.minute, Map("request.timeout.ms" -> "120000")).get("request.timeout.ms"), None)
+    // As the streams engine's consumers ask for it.
+    assertEquals(ClientProperties.fetchWait(1.minute).get("request.timeout.ms"), Some("90000"))

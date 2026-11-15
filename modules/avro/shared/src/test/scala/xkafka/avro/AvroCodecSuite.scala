@@ -311,6 +311,9 @@ class AvroCodecSuite extends FunSuite:
   test("an object whose name ends in 'package' is in its types' namespace, as only the object Scala makes around a file's definitions is left out"):
     assertEquals(AvroCodec[Workpackage.Item].schema.fullName.map(_.value), Some("xkafka.avro.Workpackage.Item"))
 
+  test("a type in a package object is in its package's namespace, as one in the object Scala makes around a file's definitions is"):
+    assertEquals(AvroCodec[legacy.Old].schema.fullName.map(_.value), Some("xkafka.avro.legacy.Old"))
+
   test("a type used twice is one type, though its default differs between builds or is placed only once the type is complete"):
     assertEquals(AvroCodec[Stamped].refusal, None)
     assertEquals(AvroCodec[TwoChains].refusal, None)
