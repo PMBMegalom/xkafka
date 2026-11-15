@@ -171,7 +171,7 @@ A record without a value, such as a tombstone, fails to read with
 | --- | --- |
 | `Boolean`, `Int`, `Long`, `Float`, `Double`, `String` | `boolean`, `int`, `long`, `float`, `double`, `string` |
 | `fs2.Chunk[Byte]`, `Array[Byte]` | `bytes` |
-| `Option[A]` | a union of `null` and `A`, `null` first |
+| `Option[A]` | a union of `null` and `A`, `null` first; an option of an option is refused, since both nones would be `null` |
 | `List`, `Vector`, `Seq`, `Set` | `array` |
 | `Map[String, A]` | `map` |
 | `java.util.UUID` | `string` with logical type `uuid` |
@@ -349,7 +349,10 @@ def show(registry: SchemaRegistry[IO], topic: Topic, bytes: fs2.Chunk[Byte]): IO
 ```
 
 `AvroSerde.generic` writes values of a schema you hold, and reads any record
-converted to that schema, as a derived serde does:
+converted to that schema, as a derived serde does. `AvroSerde.genericText`
+does the same for a schema you hold as text, and registers that text as it is.
+Use it for a schema another client registered, such as one Kafka Connect
+registered with properties of its own, which xkafka's schemas do not keep:
 
 ```scala mdoc:compile-only
 // Write a line of an order, with a schema read from its JSON as the program runs
@@ -364,6 +367,8 @@ val text = """{"type":"record","name":"Line","namespace":"com.example","fields":
 def lines(registry: SchemaRegistry[IO]): IO[Serde[IO, AvroValue]] =
   IO.fromEither(AvroSchemaJson.parse(text).left.map(new IllegalArgumentException(_))).flatMap: schema =>
     AvroSerde.generic[IO](registry, schema, Part.Value)
+
+def linesAsWritten(registry: SchemaRegistry[IO]): IO[Serde[IO, AvroValue]] = AvroSerde.genericText[IO](registry, text, Part.Value)
 
 val line = AvroValue.Record(FullName(Some("com.example"), "Line"), Vector("sku" -> AvroValue.String("apple"), "quantity" -> AvroValue.Int(3)))
 ```
@@ -404,7 +409,7 @@ Records match what Confluent's `KafkaJsonSchemaSerializer` writes.
 | `Int`, `Long` | `integer` | numbers |
 | `Float`, `Double`, `BigDecimal` | `number` | numbers; infinities and NaN are refused; `@SchemaDecimal` changes nothing |
 | `fs2.Chunk[Byte]` | `string` with `contentEncoding` `base64` | base64 text |
-| `Option[A]` | `oneOf` `null` and `A` | `null` for `None` |
+| `Option[A]` | `oneOf` `null` and `A` | `null` for `None`; an option of an option is refused, since both nones would be `null` |
 | `List`, `Vector`, `Seq`, `Set` | `array` | arrays |
 | `Map[String, A]` | `object` whose properties are all `A` | objects |
 | `java.util.UUID` | `string` with `format` `uuid` | text |
@@ -750,8 +755,8 @@ subject's name, as Confluent's subject name strategies do:
 | `TopicRecordName` | `orders-com.example.Order` | `TopicRecordNameStrategy` |
 
 `RecordName` and `TopicRecordName` need a named record: writing a type that has
-none, such as a `String` in Avro, or a JSON Schema without a `title`, fails with
-`RegistryException.Unserializable`.
+none, such as a `String` or an enum in Avro, or a JSON Schema without a
+`title`, fails with `RegistryException.Unserializable`.
 
 `Subject.from` refuses an empty subject, and `.` and `..`, which would make
 the registry read another path.

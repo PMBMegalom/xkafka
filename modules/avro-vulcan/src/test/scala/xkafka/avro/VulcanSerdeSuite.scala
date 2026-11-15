@@ -82,6 +82,12 @@ class VulcanSerdeSuite extends CatsEffectSuite:
     assert(money.writer(decimal(4)).isRight)
     assert(money.writer(decimal(2)).isLeft)
 
+  test("only a record names the subject a record's name names, as Confluent's strategies take no enum or fixed type"):
+    def named(text: String) = VulcanBinary.recordName(new org.apache.avro.Schema.Parser().parse(text))
+    assertEquals(named("""{"type":"enum","name":"Kind","namespace":"example","symbols":["A","B"]}"""), None)
+    assertEquals(named("""{"type":"fixed","name":"Id","namespace":"example","size":4}"""), None)
+    assertEquals(named("""{"type":"record","name":"Line","namespace":"example","fields":[]}"""), Some("example.Line"))
+
   test("a codec's format registers the codec's schema, named by its record"):
     assertEquals(format[Visit].schema.text, vulcan.Codec[Visit].schema.map(_.toString).fold(error => fail(error.message), identity))
     assertEquals(format[Visit].recordName, Some("example.web.Visit"))

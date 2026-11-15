@@ -520,22 +520,20 @@ private[xkafka] final class Task[F[_]](
         case None        => F.pure((state, Vector.empty))
         case Some(bytes) =>
           for
-            found <- join.right.present(record.value).flatTraverse(join.otherValues.serializer.serialize(topic, record.headers, _))
-            held  <- storedUnder(state, join.subscribed.value, prefixOf(bytes))
-          yield
-            val answers =
-              held.flatMap: (combined, stored) =>
-                Subscription.decoded(stored.value).map: subscription =>
-                  val answer = Response(subscription.hash, found).encoded
+            found   <- join.right.present(record.value).flatTraverse(join.otherValues.serializer.serialize(topic, record.headers, _))
+            held    <- storedUnder(state, join.subscribed.value, prefixOf(bytes))
+            answers <-
+              held.flatMap((combined, stored) => Subscription.decoded(stored.value).map(combined -> _)).traverse: (combined, subscription) =>
+                answerKey(join, primaryOf(combined, bytes), record.headers).map: key =>
                   TaskOutput(
                     topic,
                     Some(subscription.primaryPartition),
-                    Some(primaryOf(combined, bytes)),
-                    Some(answer),
+                    key,
+                    Some(Response(subscription.hash, found).encoded),
                     record.timestamp,
                     record.headers
                   )
-            (state, answers)
+          yield (state, answers)
 
   /** A subscription as it reaches the other table's side: kept or deleted, and answered as it asks, as Java's `SubscriptionReceiveProcessorSupplier`
     * and `SubscriptionJoinProcessorSupplier` do.
@@ -569,14 +567,15 @@ private[xkafka] final class Task[F[_]](
                   key.flatTraverse(bytes =>
                     join.otherKeys.deserializer.deserialize(topic, record.headers, Some(bytes)).flatMap(lookup(join.right.view, _, after))
                   )
-                bytes <- foreign.flatTraverse(found => join.otherValues.serializer.serialize(responses, record.headers, found._1))
+                bytes   <- foreign.flatTraverse(found => join.otherValues.serializer.serialize(responses, record.headers, found._1))
+                primary <- answerKey(join, subscription.primaryKey, record.headers)
               yield
                 def answer(found: Option[Chunk[Byte]]) =
                   val at = foreign.fold(record.timestamp)(found => math.max(record.timestamp, found._2))
                   Vector(TaskOutput(
                     responses,
                     Some(subscription.primaryPartition),
-                    Some(subscription.primaryKey),
+                    primary,
                     Some(Response(subscription.hash, found).encoded),
                     at,
                     record.headers
@@ -611,15 +610,25 @@ private[xkafka] final class Task[F[_]](
             else
               response.foreign.traverse(bytes => join.otherValues.deserializer.deserialize(topic, record.headers, Some(bytes))).flatMap: found =>
                 val made = current.flatMap(row => join.joiner(row._1, found))
-                foreignResult(join, key, made, primary, record, state, now)
+                foreignResult(join, key, made, record, state, now)
         yield done
+
+  /** The key of an answer to the row whose key was written as `primary` for the subscriptions' `-pk` topic: the row's key written for the answers'
+    * topic, as Java's answers are.
+    */
+  private def answerKey[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      primary: Chunk[Byte],
+      headers: Headers
+  ): F[Option[Chunk[Byte]]] =
+    (topicNamed(s"$application-${join.subscriptions}-pk"), topicNamed(s"$application-${join.responses}")).tupled.flatMap: (primaryTopic, topic) =>
+      join.keys.deserializer.deserialize(primaryTopic, headers, Some(primary)).flatMap(join.keys.serializer.serialize(topic, headers, _))
 
   /** A foreign-key join's result going on, kept in its store where it has one, with the value it replaces. */
   private def foreignResult[K, V, KO, VO, R, C1, C2](
       join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
       key: K,
       made: Option[R],
-      primary: Chunk[Byte],
       record: Travelling[Option[Chunk[Byte]], Option[Chunk[Byte]]],
       state: TaskState,
       now: Long
@@ -629,19 +638,22 @@ private[xkafka] final class Task[F[_]](
     join.store match
       case None                  => pushed(join.next, Travelling[K, Option[R]](key, made, record.timestamp, record.headers, None), state, now)
       case Some((named, values)) => topicNamed(s"$application-${named.value}-changelog").flatMap: changelog =>
+          // Kept under its key as written for the store's changelog, as every store's keys are, and as the store's readers ask for it.
           for
-            held    <- storedAt(state, named.value, primary)
+            at      <- join.keys.serializer.serialize(changelog, Headers.empty, key)
+            held    <- at.flatTraverse(storedAt(state, named.value, _))
             old     <- held.traverse(stored => values.deserializer.deserialize(changelog, Headers.empty, Some(stored.value)))
             written <- made.flatTraverse(values.serializer.serialize(changelog, Headers.empty, _))
-            log = TaskOutput(changelog, Some(partition), Some(primary), written, record.timestamp, Headers.empty)
-            done <-
-              allPushed(
-                join.next,
-                Vector(result(old)),
-                state.written(named.value, primary, written.map(Stored(_, record.timestamp))),
-                Vector(log),
-                now
-              )
+            done    <-
+              at match
+                case Some(bytes) => allPushed(
+                    join.next,
+                    Vector(result(old)),
+                    state.written(named.value, bytes, written.map(Stored(_, record.timestamp))),
+                    Vector(TaskOutput(changelog, Some(partition), Some(bytes), written, record.timestamp, Headers.empty)),
+                    now
+                  )
+                case None => pushed(join.next, result(old), state, now)
           yield done
 
   /** One side of a stream-stream join as Java's processor for it sees it: its own window store and the other side's, the serdes of their values, how

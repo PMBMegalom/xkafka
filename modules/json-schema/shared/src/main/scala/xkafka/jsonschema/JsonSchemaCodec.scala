@@ -34,8 +34,33 @@ import fs2.Chunk
 import io.circe.Json
 import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown}
 
-/** A schema as it is described inside another: its JSON, and the types it names by reference, by name, with how to describe each. */
-private[jsonschema] final case class Described(json: Json, definitions: List[(String, () => Described)], problems: List[String] = Nil)
+/** A schema as it is described inside another: its JSON, and the types it names by reference, by name, with how to describe each. One that is `whole`
+  * is a schema file of its own, as a schema written by hand or generated from a file is.
+  */
+private[jsonschema] final case class Described(
+    json: Json,
+    definitions: List[(String, () => Described)],
+    problems: List[String] = Nil,
+    whole: Boolean = false
+)
+
+private[jsonschema] object Described:
+  /** `described` held inside another schema. A whole schema whose references name its own root or definitions is refused there, since they would name
+    * the other schema's.
+    */
+  def inside(described: Described): Described =
+    def refers(json: Json): Boolean =
+      json.fold(
+        false,
+        _ => false,
+        _ => false,
+        _ => false,
+        _.exists(refers),
+        _.toList.exists((key, value) => (key == "$ref" && value.asString.exists(_.startsWith("#"))) || refers(value))
+      )
+    val title   = described.json.hcursor.get[String]("title").toOption.fold("")(name => s", $name,")
+    val problem = s"a whole schema$title names its own definitions by reference, which inside another schema would name that schema's"
+    described.copy(problems = described.problems ++ Option.when(described.whole && refers(described.json))(problem), whole = false)
 
 /** How values of `A` are written as JSON, and read back, with the JSON Schema that describes them.
   *
@@ -94,7 +119,7 @@ object JsonSchemaCodec:
   def instance[A](described: Json, encode: A => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
     val (write, read) = (encode, decode)
     new JsonSchemaCodec[A]:
-      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil)
+      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil, whole = true)
       override def encode(value: A): Either[String, Json]                     = write(value)
       override def decode(json: Json): Either[String, A]                      = read(json)
 
@@ -105,7 +130,7 @@ object JsonSchemaCodec:
   /** JSON values of `schema` as they are, for schemas known only as the program runs; its `title` names it, as Confluent's tools name a schema. */
   def generic(described: Json): JsonSchemaCodec[Json] =
     new JsonSchemaCodec[Json]:
-      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil)
+      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil, whole = true)
       override def name: Option[String]                                       = described.hcursor.get[String]("title").toOption
       override def encode(value: Json): Either[String, Json]                  = Right(value)
       override def decode(json: Json): Either[String, Json]                   = Right(json)
@@ -189,7 +214,7 @@ object JsonSchemaCodec:
   /** A value that may be absent, as `oneOf` null and the value's schema, as Confluent's serializers describe one; a field of it may be left out. */
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[Option[A]] with
     override private[jsonschema] def describe(seen: Set[String]): Described =
-      val described = inner.describe(seen)
+      val described = Described.inside(inner.describe(seen))
       // Null is a value of both an option and the option inside it, so no value could match exactly one branch of the `oneOf`.
       val twice = Option.when(inner.optional)("an option holding an option cannot be told from none, as null is a value of both")
       described.copy(json = Json.obj("oneOf" -> Json.arr(typed("null"), described.json)), problems = described.problems ++ twice)
@@ -200,7 +225,7 @@ object JsonSchemaCodec:
   private def array[A, C](inner: JsonSchemaCodec[A])(items: C => Iterable[A], make: Vector[A] => C): JsonSchemaCodec[C] =
     new JsonSchemaCodec[C]:
       override private[jsonschema] def describe(seen: Set[String]): Described =
-        val described = inner.describe(seen)
+        val described = Described.inside(inner.describe(seen))
         described.copy(json = Json.obj("type" -> Json.fromString("array"), "items" -> described.json))
       override def encode(value: C): Either[String, Json] = items(value).toVector.traverse(inner.encode).map(Json.fromValues)
       override def decode(json: Json): Either[String, C]  =
@@ -214,7 +239,7 @@ object JsonSchemaCodec:
   /** Values by text keys, as an object whose every property is one. */
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[Map[String, A]] with
     override private[jsonschema] def describe(seen: Set[String]): Described =
-      val described = inner.describe(seen)
+      val described = Described.inside(inner.describe(seen))
       described.copy(json = Json.obj("type" -> Json.fromString("object"), "additionalProperties" -> described.json))
     override def encode(value: Map[String, A]): Either[String, Json] =
       value.toList.traverse((key, item) => inner.encode(item).map(key -> _)).map(Json.fromFields)
@@ -337,7 +362,7 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
 
   private def body(inside: Set[String]): Described =
     // A case is described here in full, even inside itself, since a reference to it could not take the property `type` its object refuses.
-    val described = cases.map(known => known -> known.codec.describe(inside -- known.codec.name))
+    val described = cases.map(known => known -> Described.inside(known.codec.describe(inside -- known.codec.name)))
     // A case that is a sealed trait of its own adds its cases, already told apart by their own names.
     val branches =
       described.flatMap: (known, of) =>
@@ -424,7 +449,7 @@ private[jsonschema] object Fields:
     override def decode(values: List[Json]): Either[String, EmptyTuple] = Right(EmptyTuple)
 
   given [H, T <: Tuple](using head: Resolved[H], tail: Fields[T]): Fields[H *: T] with
-    override def describe(seen: Set[String]): List[Described]       = head.codec.describe(seen) :: tail.describe(seen)
+    override def describe(seen: Set[String]): List[Described]       = Described.inside(head.codec.describe(seen)) :: tail.describe(seen)
     override def optional: List[Boolean]                            = head.codec.optional :: tail.optional
     override def encode(values: H *: T): Either[String, List[Json]] = (head.codec.encode(values.head), tail.encode(values.tail)).mapN(_ :: _)
     override def decode(values: List[Json]): Either[String, H *: T] =

@@ -43,14 +43,14 @@ private[protobuf] final class Pool(messages: Map[String, (Message, Syntax)], enu
       .toRight(s"type $name in $scope is declared in none of the files")
 
 private[protobuf] object Pool:
-  /** The pool of `root` and the files it imports, transitively, from `files` and the well-known types. */
+  /** The pool of `root` and the files it imports, transitively, from `files` and the files Confluent's serializers know. */
   def of(root: File, files: Map[String, File]): Either[String, Pool] =
     def gather(pending: List[String], seen: Map[String, File]): Either[String, List[File]] =
       pending match
         case Nil                                 => Right(seen.values.toList)
         case name :: rest if seen.contains(name) => gather(rest, seen)
         case name :: rest                        => files.get(name).orElse(WellKnown.files.get(name))
-            .toRight(s"the schema imports $name, which neither its references nor the well-known types hold")
+            .toRight(s"the schema imports $name, which neither its references nor the files Confluent's serializers know hold")
             .flatMap(file => gather(rest ++ file.imports, seen.updated(name, file)))
     gather(root.imports, Map.empty).map: imported =>
       val all                                                                                              = root :: imported

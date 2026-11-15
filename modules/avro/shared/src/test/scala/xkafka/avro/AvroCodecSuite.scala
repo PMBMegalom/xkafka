@@ -118,6 +118,15 @@ final case class Stamp(at: Long = System.nanoTime()) derives AvroCodec
 final case class Stamped(created: Stamp, updated: Stamp) derives AvroCodec
 final case class TwoChains(a: Chain, b: Chain) derives AvroCodec
 
+final case class Twice(value: Option[Option[String]]) derives AvroCodec
+
+sealed trait Shape derives AvroCodec
+final case class Split(left: Shape, right: Shape) extends Shape
+final case class Tip(v: Int)                      extends Shape
+
+/** A tree whose default moves first the branch of a type defined further into the union. */
+final case class Tree(root: Shape = Tip(0)) derives AvroCodec
+
 object Workpackage:
   final case class Item(x: Int) derives AvroCodec
 
@@ -310,6 +319,18 @@ class AvroCodecSuite extends FunSuite:
 
   test("an object whose name ends in 'package' is in its types' namespace, as only the object Scala makes around a file's definitions is left out"):
     assertEquals(AvroCodec[Workpackage.Item].schema.fullName.map(_.value), Some("xkafka.avro.Workpackage.Item"))
+
+  test("an option holding an option is refused, as its none and some none would both be written as null"):
+    val message = Some("an option holding an option cannot be told from none, as null is a value of both")
+    assertEquals(AvroCodec[Option[Option[Int]]].refusal, message)
+    assertEquals(AvroCodec[Twice].refusal, message)
+    assertEquals(AvroCodec[Option[Int]].refusal, None)
+
+  test("a type a default moves ahead of where it is defined is written in full where it is first met, so the schema reads again"):
+    val text = AvroSchemaJson.render(AvroCodec[Tree].schema)
+    assertEquals(AvroCodec[Tree].refusal, None)
+    assertEquals(AvroSchemaJson.parse(text).map(AvroSchemaJson.render), Right(text), text)
+    assertEquals(roundTrip(Tree(Split(Tip(1), Tip(2)))), Right(Tree(Split(Tip(1), Tip(2)))))
 
   test("a type in a package object is in its package's namespace, as one in the object Scala makes around a file's definitions is"):
     assertEquals(AvroCodec[legacy.Old].schema.fullName.map(_.value), Some("xkafka.avro.legacy.Old"))

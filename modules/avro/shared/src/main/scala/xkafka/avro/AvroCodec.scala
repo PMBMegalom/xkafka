@@ -173,12 +173,22 @@ object AvroCodec:
   /** Bytes as an array, copied on the way in and out so that changing the array later changes nothing written or read. */
   given AvroCodec[Array[Byte]] = AvroCodec[Chunk[Byte]].imap(_.toArray)(value => Chunk.array(value.clone))
 
-  /** A value that may be absent, as a union of null and the value's schema, null first, so a field of it may default to null. */
+  /** A value that may be absent, as a union of null and the value's schema, null first, so a field of it may default to null. One whose value may be
+    * null already, as an option's, is refused, since its none and the value's would both be written as null.
+    */
   given [A](using inner: AvroCodec[A]): AvroCodec[Option[A]] with
     override private[avro] def building: Building[AvroSchema] =
-      inner.building.map:
-        case AvroSchema.Union(branches) => AvroSchema.Union(AvroSchema.Null :: branches.filterNot(_ == AvroSchema.Null))
-        case other                      => AvroSchema.Union(List(AvroSchema.Null, other))
+      inner.building.flatMap: schema =>
+        val twice =
+          schema == AvroSchema.Null ||
+            (schema match
+              case AvroSchema.Union(branches) => branches.contains(AvroSchema.Null);
+              case _                          => false)
+        val clash = "an option holding an option cannot be told from none, as null is a value of both"
+        State.modify[Defining](defining => defining.copy(clashes = defining.clashes :+ clash)).whenA(twice).as:
+          schema match
+            case AvroSchema.Union(branches) => AvroSchema.Union(AvroSchema.Null :: branches.filterNot(_ == AvroSchema.Null))
+            case other                      => AvroSchema.Union(List(AvroSchema.Null, other))
     override def encode(value: Option[A]): Either[String, AvroValue] = value.fold(Right(AvroValue.Null))(inner.encode)
     override def decode(value: AvroValue): Either[String, Option[A]] =
       value match

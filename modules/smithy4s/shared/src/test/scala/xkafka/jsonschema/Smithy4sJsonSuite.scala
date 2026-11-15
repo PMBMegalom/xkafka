@@ -118,6 +118,13 @@ class Smithy4sJsonSuite extends FunSuite:
     assertEquals(at(order, "properties", "first-name", "anyOf"), jawn.parse("""[{"type":"null"},{"type":"string"}]""").toOption.get)
     assertEquals(at(order, "properties", "priority", "anyOf"), jawn.parse("""[{"type":"null"},{"type":"integer","enum":[1,2]}]""").toOption.get)
 
+  test("a required member with a default is required only where smithy4s writes it, so a value equal to its default fits the schema"):
+    val written  = jawn.parse(new String(smithy4s.json.Json.writeBlob(Counter(0)).toArray, "UTF-8")).toOption.get
+    val required = at(schema[Counter], "required").asArray.toList.flatten.flatMap(_.asString)
+    assertEquals(required.filterNot(name => written.hcursor.downField(name).succeeded), Nil, written.noSpaces)
+    assertEquals(required, List("count"))
+    assertEquals(written, Json.obj("count" -> Json.fromInt(0)))
+
   test("timestamps are numbers of seconds, or text, as their format has them, and smithy4s's other times as it writes them"):
     def kind(property: String) = at(schema[Order], "properties", property, "anyOf").asArray.flatMap(_.lastOption).getOrElse(fail(property))
     assertEquals(at(schema[Order], "properties", "placed"), Json.obj("type" -> Json.fromString("number")))

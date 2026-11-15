@@ -152,8 +152,11 @@ The companion object holds `jsonSchema`, the file's schema, and the type's
 codec. The codec registers the file's schema unchanged apart from whitespace,
 with `$schema` first. A file that names no draft is registered as draft 7, the
 draft Confluent's serializers take by default. With `SubjectNaming.RecordName`,
-the subject is the schema's `title`. Write and read the classes like any
-others:
+the subject is the schema's `title`. A file's type whose schema names its own
+definitions by reference cannot be a field of a derived type, or held in an
+`Option`, a collection or a map: those references would name the definitions of
+the other schema, so a serde of that type fails with
+`RegistryException.NoSchema`. Write and read the classes like any others:
 
 ```scala
 // Orders, generated from order.json
@@ -288,6 +291,8 @@ file, and why:
   two arrays, with a branch of any value, or with a union inside it, whose
   values written could not be told apart; and a type holding one union both as
   a `oneOf` and as an `anyOf`;
+- a `oneOf` two of whose branches take `null`, which then matches no one of
+  them;
 - a definition that holds itself without a type of its own, such as an array
   of itself;
 - two types of one name in one companion, or a type named as its file's;

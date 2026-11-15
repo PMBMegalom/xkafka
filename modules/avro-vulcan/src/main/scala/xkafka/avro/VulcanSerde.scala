@@ -75,11 +75,8 @@ private[avro] object VulcanBinary:
     else if schema.references.nonEmpty then Left("the schema names schemas registered under other subjects, which xkafka does not read yet")
     else Either.catchNonFatal(new ApacheSchema.Parser().parse(schema.text)).leftMap(error => s"the schema cannot be read: ${error.getMessage}")
 
-  /** The full name of `schema`, where it is a named type. */
-  def recordName(schema: ApacheSchema): Option[String] =
-    schema.getType match
-      case ApacheSchema.Type.RECORD | ApacheSchema.Type.ENUM | ApacheSchema.Type.FIXED => Some(schema.getFullName)
-      case _                                                                           => None
+  /** The full name of `schema`, where it is a record: Confluent's strategies that name subjects by record take no other type. */
+  def recordName(schema: ApacheSchema): Option[String] = Option.when(schema.getType == ApacheSchema.Type.RECORD)(schema.getFullName)
 
   /** Bytes on their own are written after the header as they are, with no length before them, as Confluent's serializers write them. */
   def write(schema: ApacheSchema, value: Any): Either[String, Chunk[Byte]] =

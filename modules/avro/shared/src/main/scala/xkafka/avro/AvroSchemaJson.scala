@@ -246,15 +246,17 @@ object AvroSchemaJson:
         "aliases" -> Json.fromValues(names.map(alias => Json.fromString(if alias.namespace == space then alias.name else alias.value)))
       )
     schema match
-      case AvroSchema.Null                                  => (Json.fromString("null"), written)
-      case AvroSchema.Boolean                               => (Json.fromString("boolean"), written)
-      case AvroSchema.Int                                   => (Json.fromString("int"), written)
-      case AvroSchema.Long                                  => (Json.fromString("long"), written)
-      case AvroSchema.Float                                 => (Json.fromString("float"), written)
-      case AvroSchema.Double                                => (Json.fromString("double"), written)
-      case AvroSchema.Bytes                                 => (Json.fromString("bytes"), written)
-      case AvroSchema.String                                => (Json.fromString("string"), written)
-      case AvroSchema.Named(full)                           => (Json.fromString(name(full)), written)
+      case AvroSchema.Null    => (Json.fromString("null"), written)
+      case AvroSchema.Boolean => (Json.fromString("boolean"), written)
+      case AvroSchema.Int     => (Json.fromString("int"), written)
+      case AvroSchema.Long    => (Json.fromString("long"), written)
+      case AvroSchema.Float   => (Json.fromString("float"), written)
+      case AvroSchema.Double  => (Json.fromString("double"), written)
+      case AvroSchema.Bytes   => (Json.fromString("bytes"), written)
+      case AvroSchema.String  => (Json.fromString("string"), written)
+      // A type named before the place it is defined in, as a union whose default's branch comes first, is defined where it is first met.
+      case AvroSchema.Named(full) if !written.contains(full) && defined.contains(full) => write(defined(full), namespace, defined, written)
+      case AvroSchema.Named(full)                                                      => (Json.fromString(name(full)), written)
       case named if named.fullName.exists(written.contains) => (named.fullName.fold(Json.Null)(full => Json.fromString(name(full))), written)
       case AvroSchema.Record(full, fields, doc, names)      =>
         val (rendered, after) =

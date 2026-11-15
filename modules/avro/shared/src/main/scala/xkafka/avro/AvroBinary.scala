@@ -65,12 +65,13 @@ object AvroBinary:
 
   private type Defined = Map[FullName, AvroSchema]
 
-  private def write(schema: AvroSchema, value: AvroValue, defined: Defined): Either[String, Vector[Chunk[Byte]]] =
+  /** `value` written as `schema` describes it, inside `depth` records, refused past the depth reading takes, as reading refuses it. */
+  private def write(schema: AvroSchema, value: AvroValue, defined: Defined, depth: Int = 0): Either[String, Vector[Chunk[Byte]]] =
     def mismatch = Left(s"${describe(value)} does not fit ${AvroSchemaJson.render(schema)}")
     (schema, value) match
-      case (AvroSchema.Named(name), _)          => defined.get(name).toRight(s"'${name.value}' is not defined").flatMap(write(_, value, defined))
-      case (AvroSchema.Logical(logicalType), _) => write(logicalType.underlying, value, defined)
-      case (AvroSchema.Null, AvroValue.Null)    => Right(Vector.empty)
+      case (AvroSchema.Named(name), _) => defined.get(name).toRight(s"'${name.value}' is not defined").flatMap(write(_, value, defined, depth))
+      case (AvroSchema.Logical(logicalType), _)           => write(logicalType.underlying, value, defined, depth)
+      case (AvroSchema.Null, AvroValue.Null)              => Right(Vector.empty)
       case (AvroSchema.Boolean, AvroValue.Boolean(value)) => Right(Vector(Chunk.singleton(if value then 1.toByte else 0.toByte)))
       case (AvroSchema.Int, AvroValue.Int(value))         => Right(Vector(varLong(value.toLong)))
       case (AvroSchema.Long, AvroValue.Long(value))       => Right(Vector(varLong(value)))
@@ -80,22 +81,24 @@ object AvroBinary:
       case (AvroSchema.String, AvroValue.String(text))    =>
         val bytes = text.getBytes(StandardCharsets.UTF_8)
         Right(Vector(varLong(bytes.length.toLong), Chunk.array(bytes)))
-      case (AvroSchema.Record(name, fields, _, _), AvroValue.Record(_, values)) =>
+      case (AvroSchema.Record(_, _, _, _), AvroValue.Record(_, _)) if depth >= MaxDepth => Left(s"the value is nested more than $MaxDepth deep")
+      case (AvroSchema.Record(name, fields, _, _), AvroValue.Record(_, values))         =>
         // Each field's value found once by its name, the first of a name as before.
         val byName = values.reverseIterator.toMap
         fields.traverse(field =>
           byName.get(field.name).orElse(field.default).toRight(s"record '${name.value}' has no field '${field.name}'")
-            .flatMap(write(field.schema, _, defined))
+            .flatMap(write(field.schema, _, defined, depth + 1))
         ).map(_.toVector.flatten)
       case (AvroSchema.Enum(name, symbols, _, _, _), AvroValue.Enum(_, symbol)) => symbols.indexOf(symbol) match
           case -1    => Left(s"'$symbol' is not a symbol of '${name.value}'")
           case index => Right(Vector(varLong(index.toLong)))
-      case (AvroSchema.Array(items), AvroValue.Array(values)) => blocks(values)(write(items, _, defined))
-      case (AvroSchema.Map(schema), AvroValue.Map(entries))   =>
-        blocks(entries)((key, value) => (write(AvroSchema.String, AvroValue.String(key), defined), write(schema, value, defined)).mapN(_ ++ _))
+      case (AvroSchema.Array(items), AvroValue.Array(values)) => blocks(values)(write(items, _, defined, depth))
+      case (AvroSchema.Map(schema), AvroValue.Map(entries))   => blocks(entries)((key, value) =>
+          (write(AvroSchema.String, AvroValue.String(key), defined, depth), write(schema, value, defined, depth)).mapN(_ ++ _)
+        )
       case (AvroSchema.Union(branches), _) => branches.indexWhere(fits(_, value, defined)) match
           case -1    => mismatch
-          case index => write(branches(index), value, defined).map(varLong(index.toLong) +: _)
+          case index => write(branches(index), value, defined, depth).map(varLong(index.toLong) +: _)
       case (AvroSchema.Fixed(name, size, _), AvroValue.Fixed(_, bytes)) => Either
           .cond(bytes.size == size, Vector(bytes), s"fixed '${name.value}' is $size bytes, but the value is ${bytes.size}")
       case _ => mismatch
@@ -105,7 +108,6 @@ object AvroBinary:
     if items.isEmpty then Right(Vector(varLong(0)))
     else items.flatTraverse(item).map(written => (varLong(items.size.toLong) +: written) :+ varLong(0))
 
-  /** Whether `value` is one `schema` describes, which picks the union branch it is written as: the first that fits. */
   /** Whether `schema` is bytes on their own, which Confluent's serializers write after the header as they are, with no length before them. */
   private[avro] def unframed(schema: AvroSchema): Boolean =
     schema match
@@ -138,6 +140,7 @@ object AvroBinary:
       case (AvroSchema.Map(held), AvroValue.Map(entries))     => entries.forall((_, entry) => placeable(held, entry, defined))
       case _                                                  => fits(schema, value, defined)
 
+  /** Whether `value` is one `schema` describes, which picks the union branch it is written as: the first that fits. */
   private[avro] def fits(schema: AvroSchema, value: AvroValue, defined: Map[FullName, AvroSchema]): Boolean =
     (schema, value) match
       case (AvroSchema.Named(name), _)                                    => defined.get(name).exists(fits(_, value, defined))

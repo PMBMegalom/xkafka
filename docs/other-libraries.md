@@ -191,11 +191,14 @@ found in that version of the file by its full name, such as
 name too. A message declared inside another, such as `Order.Line`, is written
 and read the same way.
 
-The file may import Protobuf's well-known types, such as
-`google/protobuf/timestamp.proto`, and `scalapb/scalapb.proto`, which holds
-ScalaPB's options. `ScalaPBSerde.of` fails with `RegistryException.NoSchema` if
-the file imports any other file, declares groups or extensions, or is written
-in an edition of Protobuf.
+The file may import the files Confluent's serializers know: Protobuf's
+well-known types, such as `google/protobuf/timestamp.proto`, and the others
+listed in
+[Protobuf values known only at run time](schema-registry.md#protobuf-values-known-only-at-run-time),
+such as `google/type/date.proto`. It may also import `scalapb/scalapb.proto`,
+which holds ScalaPB's options. `ScalaPBSerde.of` fails with
+`RegistryException.NoSchema` if the file imports any other file, declares
+groups or extensions, or is written in an edition of Protobuf.
 
 `xkafka-protobuf-scalapb` brings in ScalaPB's runtime 0.11.21. Generate your
 messages with the same version of ScalaPB's code generator, as

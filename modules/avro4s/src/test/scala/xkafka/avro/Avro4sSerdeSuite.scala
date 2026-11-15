@@ -67,6 +67,12 @@ class Avro4sSerdeSuite extends CatsEffectSuite:
     assert(format[BigDecimal].writer(decimal(2)).isRight)
     assert(format[BigDecimal].writer(decimal(4)).isLeft)
 
+  test("only a record names the subject a record's name names, as Confluent's strategies take no enum or fixed type"):
+    def named(text: String) = Avro4sBinary.recordName(new org.apache.avro.Schema.Parser().parse(text))
+    assertEquals(named("""{"type":"enum","name":"Kind","namespace":"example","symbols":["A","B"]}"""), None)
+    assertEquals(named("""{"type":"fixed","name":"Id","namespace":"example","size":4}"""), None)
+    assertEquals(named("""{"type":"record","name":"Line","namespace":"example","fields":[]}"""), Some("example.Line"))
+
   test("the format registers avro4s's schema, named by its record"):
     assertEquals(format[Visit].schema.text, AvroSchema[Visit].toString)
     assertEquals(format[Visit].recordName, Some("example.web.Visit"))

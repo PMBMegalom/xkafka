@@ -40,7 +40,7 @@ object Generated:
   def codec[A](described: Json, encode: A => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
     val (write, read) = (encode, decode)
     new JsonSchemaCodec[A]:
-      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil)
+      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil, whole = true)
       override def name: Option[String]                                       = described.hcursor.get[String]("title").toOption
       override def encode(value: A): Either[String, Json]                     = write(value)
       override def decode(json: Json): Either[String, A]                      = read(json)

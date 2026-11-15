@@ -40,7 +40,13 @@ private[protobuf] final case class Declared(namespace: Option[String], simple: S
   def full: String = namespace.fold(simple)(space => s"$space.$simple")
 
 /** A declaration's text, the messages and enums and the files it names, and why it cannot be declared, where it cannot. */
-private[protobuf] final case class Body(text: String, types: List[Declared], imports: List[String], problems: List[String])
+private[protobuf] final case class Body(
+    text: String,
+    types: List[Declared],
+    imports: List[String],
+    problems: List[String],
+    values: List[String] = Nil
+)
 
 /** How a field of a type is declared: the type's name in the declaration, the messages and enums and the files it names, and why a field of it cannot
   * be declared, where it cannot.
@@ -419,7 +425,11 @@ object ProtobufCodec:
           declared.map(_._1).groupBy(_.simple).toList.sortBy(_._1).collect {
             case (simple, many) if many.size > 1 => s"${many.map(_.full).mkString(" and ")} would both be declared as $simple"
           }
-        (root.problems ++ declared.flatMap(_._2.problems) ++ differing ++ clashes).distinct match
+        // An enum's values are named in the scope that holds the enum, the package here, as C++ names them, so no two enums may share one.
+        val values =
+          declared.flatMap(_._2.values).groupBy(identity).collect { case (name, many) if many.size > 1 => name }.toList.sorted
+            .map(name => s"two enum values are named $name, in one scope")
+        (root.problems ++ declared.flatMap(_._2.problems) ++ differing ++ clashes ++ values).distinct match
           case Nil =>
             val imports = (root.imports ++ declared.flatMap(_._2.imports)).distinct.sorted
             Right(
@@ -520,8 +530,9 @@ private[protobuf] final class EnumCodec[A](named: Meta.Named, values: List[(Case
   private def body: Body =
     // Protobuf takes an enum's first value as its zero.
     val ordered = values.filter(_._1.number == 0) ++ values.filterNot(_._1.number == 0)
-    val lines   = ordered.map((known, _) => s"  ${SumCodec.constant(named.name)}_${SumCodec.constant(known.tag)} = ${known.number};\n")
-    Body(ProtobufCodec.comment(named.doc, "") + s"enum ${named.name} {\n${lines.mkString}}", Nil, Nil, Nil)
+    val names   = ordered.map((known, _) => s"${SumCodec.constant(named.name)}_${SumCodec.constant(known.tag)}")
+    val lines   = names.lazyZip(ordered).map((name, value) => s"  $name = ${value._1.number};\n")
+    Body(ProtobufCodec.comment(named.doc, "") + s"enum ${named.name} {\n${lines.mkString}}", Nil, Nil, Nil, names)
 
   private def numberOf(value: A): Either[String, Int] =
     values.collectFirst { case (known, _) if known.test.unapply(value).isDefined => known.number }

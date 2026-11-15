@@ -23,8 +23,10 @@ package xkafka.protobuf
 
 import cats.data.NonEmptyList
 import cats.effect.IO
+import google.`type`.date.Date
 import com.google.protobuf.ByteString
 import com.google.protobuf.timestamp.Timestamp
+import example.dated.dated.Delivery
 import example.legacy.legacy.{Item, Kind}
 import example.open.open.Open
 import example.refused.refused.Basket
@@ -126,6 +128,17 @@ class ScalaPBSerdeSuite extends CatsEffectSuite:
         |""".stripMargin
     )
 
+  test("a message whose file imports a file Confluent's serializers know beside the well-known types is registered and read back"):
+    val delivery = Delivery(on = Some(Date(2026, 11, 14)))
+    for
+      registry <- client
+      serde    <- ScalaPBSerde.of[IO, Delivery](registry, Part.Value)
+      written  <- serde.serializer.serialize(topic, Headers.empty, delivery)
+      read     <- serde.deserializer.deserialize(topic, Headers.empty, written)
+    yield
+      assertEquals(read, delivery)
+      assert(schemaOf[Delivery].contains("import \"google/type/date.proto\";"), schemaOf[Delivery])
+
   test("a message is written as ScalaPB writes it, after its path through the file's messages, and read back"):
     for
       registry <- client
@@ -209,7 +222,10 @@ class ScalaPBSerdeSuite extends CatsEffectSuite:
       open     <- ScalaPBSerde.of[IO, Open](registry, Part.Value).attempt
     yield
       assert(noSchema(imports).startsWith("the schema imports shop.proto"), noSchema(imports))
-      assert(noSchema(imports).endsWith("; a ScalaPB message is registered with a file that imports only the well-known types"), noSchema(imports))
+      assert(
+        noSchema(imports).endsWith("; a ScalaPB message is registered with a file that imports only the files Confluent's serializers know"),
+        noSchema(imports)
+      )
       assertEquals(noSchema(open), "example.open.Open has extensions, which xkafka does not read")
 
   test("a file that declares a group or is written in an edition of Protobuf cannot be read"):

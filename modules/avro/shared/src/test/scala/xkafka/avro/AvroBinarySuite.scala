@@ -182,6 +182,15 @@ class AvroBinarySuite extends ScalaCheckSuite:
     val within = Chunk.from(Array.fill(AvroBinary.MaxDepth - 1)(0x02.toByte)) ++ bytes(0x00)
     assert(AvroBinary.decode(list, within).isRight)
 
+  test("values nested deeper than the limit are refused when written too, so nothing is written that the reader refuses"):
+    val list              = parsed("""{"type":"record","name":"Node","fields":[{"name":"next","type":["null","Node"]}]}""")
+    def nodes(count: Int) = (1 until count).foldLeft[AvroValue](AvroValue.Record(FullName(None, "Node"), Vector("next" -> AvroValue.Null))):
+      (inner, _) => AvroValue.Record(FullName(None, "Node"), Vector("next" -> inner))
+    assertEquals(AvroBinary.encode(list, nodes(AvroBinary.MaxDepth + 1)), Left(s"the value is nested more than ${AvroBinary.MaxDepth} deep"))
+    assertEquals(AvroBinary.encode(list, nodes(100000)), Left(s"the value is nested more than ${AvroBinary.MaxDepth} deep"))
+    val within = nodes(AvroBinary.MaxDepth)
+    assertEquals(AvroBinary.encode(list, within).flatMap(AvroBinary.decode(list, _)), Right(within))
+
   test("schemas with unknown types, a union in a union or of one type twice, or a name defined twice are refused"):
     assertEquals(AvroSchemaJson.parse("\"Missing\""), Left("'Missing' names no type defined before it"))
     assertEquals(AvroSchemaJson.parse("""["null",["int"]]"""), Left("a union cannot hold a union"))

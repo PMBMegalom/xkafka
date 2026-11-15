@@ -94,6 +94,25 @@ class JsonSchemaGeneratorSuite extends FunSuite:
       ).head.text
     assert(text.contains("d: Option[R.D]"), text)
 
+  directory.test("a value is optional only where every keyword saying what it may be takes null, and a oneOf two of whose branches do is refused"):
+    in =>
+      def text(property: String) = generated(in, JsonSchemaOptions(), "a.json" -> record(property, ""","required": ["k"]""")).head.text
+      assert(
+        text(""""k": {"type": ["string", "null"], "enum": ["a", "b"]}""").contains("k: R.K"),
+        text(""""k": {"type": ["string", "null"], "enum": ["a", "b"]}""")
+      )
+      assert(text(""""k": {"type": "string", "enum": ["a", null]}""").contains("k: R.K"), text(""""k": {"type": "string", "enum": ["a", null]}"""))
+      assert(text(""""k": {"type": ["string", "null"], "enum": ["a", null]}""").contains("k: Option[R.K]"))
+      assert(text(""""k": {"enum": ["a", null]}""").contains("k: Option[R.K]"))
+      assertEquals(
+        refused(in, "b.json" -> record(""""k": {"oneOf": [{"type": "null"}, {"type": ["string", "null"]}]}""")),
+        List("b.json: #/properties/k is a oneOf two of whose branches take null, so null would match no one of them")
+      )
+      assertEquals(
+        refused(in, "c.json" -> record(""""k": {"oneOf": [{"type": "null"}, {}]}""")),
+        List("c.json: #/properties/k is a oneOf two of whose branches take null, so null would match no one of them")
+      )
+
   directory.test("a required name no property declares is refused, since no value the class writes would have it"): in =>
     assertEquals(
       refused(in, "r.json" -> record(""""id": {"type": "string"}""", """, "required": ["id", "tenant"]""")),

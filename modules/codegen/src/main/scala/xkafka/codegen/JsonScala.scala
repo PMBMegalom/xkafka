@@ -168,8 +168,12 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
       (enumeration(schema, "").toOption.flatten.isDefined ||
         types(schema).toOption.exists(_.filterNot(_ == "null") == List("object")) && !mapLike(schema))
 
+  /** Whether null is a value of `schema`: one keyword saying so, a type or an enum holding it, and none saying what values it may be leaving it out.
+    */
   private def nullable(schema: JsonObject): Boolean =
-    types(schema).toOption.exists(_.contains("null")) || schema("enum").flatMap(_.asArray).exists(_.contains(Json.Null))
+    val typed  = Option.when(schema.contains("type"))(types(schema).toOption.exists(_.contains("null")))
+    val listed = schema("enum").flatMap(_.asArray).map(_.contains(Json.Null))
+    (typed.contains(true) || listed.contains(true)) && typed.forall(identity) && listed.forall(identity)
 
   /** The values of an enum of text, by their Scala names, or none where `schema` is not one. */
   private def enumeration(schema: JsonObject, where: String): Either[String, Option[List[(String, String)]]] =
@@ -303,6 +307,15 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
           else walk(branch, s"$where/$keyword/$index", owner, branchName(branch, hint, index), inlining).map(Some(_))
       present = walked.flatten
       shapes  = present.map(walked => strip(walked.shape))
+      // Null matching two branches of a oneOf matches no one of them, so none of the type's values could be written as null.
+      takingNull =
+        walked.lazyZip(branches).count:
+          case (None, _)          => true
+          case (Some(branch), at) => branch.shape.isInstanceOf[Shape.Maybe] ||
+            at.asObject.exists(open => open.isEmpty || open.keys.forall(_ == "description"))
+      _ <-
+        Either
+          .cond(keyword != "oneOf" || takingNull < 2, (), s"$where is a oneOf two of whose branches take null, so null would match no one of them")
       shape <-
         shapes match
           case Nil        => Left(s"$where is null alone, which has no Scala type")

@@ -1,0 +1,10 @@
+// A message whose file imports a file Confluent's serializers know beside the well-known types.
+syntax = "proto3";
+
+package example.dated;
+
+import "google/type/date.proto";
+
+message Delivery {
+  google.type.Date on = 1;
+}

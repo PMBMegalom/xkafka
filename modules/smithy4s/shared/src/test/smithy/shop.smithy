@@ -179,3 +179,9 @@ structure Forest {
     @required
     trees: Nodes
 }
+
+/// A count that is required, with a default.
+structure Counter {
+    @required
+    count: Integer = 0
+}

@@ -54,6 +54,25 @@ final case class Doc(a: Page[Page[Int]], b: Page[Page[String]]) derives JsonSche
 
 final case class Twice(note: Option[Option[String]]) derives JsonSchemaCodec
 
+/** A type whose schema is a whole file, written by hand, with a definition of its own that it names by reference. */
+final case class Listed(items: List[String])
+
+object Listed:
+  given JsonSchemaCodec[Listed] =
+    JsonSchemaCodec.from(
+      parse(
+        """{"$schema":"http://json-schema.org/draft-07/schema#","title":"Listed","type":"object","properties":{"items":{"type":"array","items":{"$ref":"#/definitions/Item"}}},"definitions":{"Item":{"type":"string"}}}"""
+      ).toOption.get,
+      io.circe.Encoder.forProduct1("items")(_.items),
+      io.circe.Decoder.forProduct1("items")(Listed(_))
+    )
+
+final case class HoldsListed(listed: Listed) derives JsonSchemaCodec
+
+sealed trait EitherListed derives JsonSchemaCodec
+final case class OneListed(listed: Listed) extends EitherListed
+final case class NoneListed()              extends EitherListed
+
 /** Two versions of one event, whose cases share a simple name. */
 sealed trait Event derives JsonSchemaCodec
 object Event:
@@ -134,6 +153,23 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
   test("an option holding an option is refused, since null would be a value of both and Some(None) would read back as None"):
     assert(JsonSchemaCodec[Twice].refusal.exists(_.contains("an option holding an option")), JsonSchemaCodec[Twice].refusal)
     assertEquals(JsonSchemaCodec[Maybe].refusal, None)
+
+  test("a whole schema naming its own definitions is refused inside another, where its references would name the other's, and taken on its own"):
+    val message = "a whole schema, Listed, names its own definitions by reference, which inside another schema would name that schema's"
+    List(
+      JsonSchemaCodec[HoldsListed].refusal,
+      JsonSchemaCodec[Option[Listed]].refusal,
+      JsonSchemaCodec[List[Listed]].refusal,
+      JsonSchemaCodec[Map[String, Listed]].refusal,
+      JsonSchemaCodec[EitherListed].refusal
+    ).foreach(refusal => assertEquals(refusal, Some(message)))
+    assertEquals(JsonSchemaCodec[Listed].refusal, None)
+    for
+      fake   <- FakeRegistry()
+      client <-
+        SchemaRegistry.of(RegistrySettings.from(NonEmptyList.one("http://registry:8081")).toOption.get, fake.transport("http://registry:8081"))
+      refused <- JsonSchemaSerde.of[IO, HoldsListed](client, Part.Value).attempt
+    yield assert(refused.left.exists(_.isInstanceOf[RegistryException.NoSchema]), refused)
 
   test("two types given one name are refused, since one definition cannot say what each is"):
     assert(JsonSchemaCodec[Doc].refusal.exists(_.contains("two types are named xkafka.jsonschema.Page__A")), JsonSchemaCodec[Doc].refusal)

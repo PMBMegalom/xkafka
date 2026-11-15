@@ -25,7 +25,7 @@ import cats.data.NonEmptyList
 import cats.effect.IO
 import munit.CatsEffectSuite
 import xkafka.{Headers, Topic}
-import xkafka.schemaregistry.{FakeRegistry, Part, RegistryException, RegistrySettings, SchemaRegistry}
+import xkafka.schemaregistry.{FakeRegistry, Part, RegistryException, RegistrySettings, SchemaRegistry, Writing}
 
 class AvroGenericSuite extends CatsEffectSuite:
   private val base     = "http://registry:8081"
@@ -48,6 +48,33 @@ class AvroGenericSuite extends CatsEffectSuite:
     yield
       assertEquals(read, line("apple", 3))
       assertEquals(typed, Line("apple", 3), "a typed serde reads what the generic one wrote")
+
+  test("only a record names the subject a record's name names, as Confluent's strategies take no enum or fixed type"):
+    def named(text: String) = AvroSchemaJson.parse(text).map(schema => AvroFormat(using AvroCodec.generic(schema)).recordName)
+    assertEquals(named("""{"type":"enum","name":"Kind","namespace":"example","symbols":["A","B"]}"""), Right(None))
+    assertEquals(named("""{"type":"fixed","name":"Id","namespace":"example","size":4}"""), Right(None))
+    assertEquals(
+      named("""{"type":"fixed","name":"Amount","namespace":"example","size":8,"logicalType":"decimal","precision":10,"scale":2}"""),
+      Right(None)
+    )
+    assertEquals(named("""{"type":"record","name":"Line","namespace":"example","fields":[]}"""), Right(Some("example.Line")))
+
+  test("a generic serde of schema text registers that text as it is, with the properties xkafka's schemas do not keep"):
+    // As Kafka Connect registers a schema, with a property of its own.
+    val text =
+      """{"type":"record","name":"Line","namespace":"xkafka.avro","connect.name":"xkafka.avro.Line","fields":[{"name":"sku","type":"string"},""" +
+        """{"name":"quantity","type":"int"}]}"""
+    for
+      fake    <- FakeRegistry()
+      client  <- SchemaRegistry.of(settings, fake.transport(base))
+      _       <- fake.registered("lines-value", text)
+      serde   <- AvroSerde.genericText[IO](client, text, Part.Value, writing = Writing.AlreadyRegistered)
+      written <- serde.serializer.serialize(topic, Headers.empty, line("apple", 3))
+      read    <- serde.deserializer.deserialize(topic, Headers.empty, written)
+      refused <- AvroSerde.genericText[IO](client, "{", Part.Value).attempt
+    yield
+      assertEquals(read, line("apple", 3))
+      assert(refused.left.exists(_.isInstanceOf[RegistryException.NoSchema]), refused)
 
   test("a generic serde reads a record written with another schema as its own schema describes it"):
     for

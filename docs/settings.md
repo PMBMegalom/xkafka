@@ -114,7 +114,9 @@ that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
 `withRebalanceSafeCommits`, `withStartingOffsets`, `withoutSessionTimeout`, and
 `withoutHeartbeatInterval`, and `TlsSettings`' `withCertificateAuthority` and
-`withClientCertificate` and `SaslSettings`' `withCredentials`. `StreamsSettings`
+`withClientCertificate`, `SaslSettings`' `withCredentials`, and
+`ConsumerSettings`' `withClient`, which checks the membership settings again
+under the new client's properties. `StreamsSettings`
 works the same way: its methods
 that set a duration, the concurrency or the state directory return
 `ValidatedNel[StreamsSettingsError, *]`. The others, such as

@@ -52,6 +52,33 @@ enum Status derives ProtobufCodec:
   @ProtobufField(1)
   case Paid
 
+/** An enum two of whose values Protobuf would give one name. */
+enum Doubled derives ProtobufCodec:
+  @ProtobufField(0)
+  case OpenNow
+  @ProtobufField(1)
+  case Open_Now
+
+enum Gate derives ProtobufCodec:
+  @ProtobufField(0)
+  case OpenNow
+
+enum GateOpen derives ProtobufCodec:
+  @ProtobufField(0)
+  case Now
+
+final case class HoldsDoubled(
+    @ProtobufField(1)
+    doubled: Doubled
+) derives ProtobufCodec
+
+final case class HoldsGates(
+    @ProtobufField(1)
+    gate: Gate,
+    @ProtobufField(2)
+    open: GateOpen
+) derives ProtobufCodec
+
 sealed trait Payment derives ProtobufCodec
 
 @ProtobufField(1)
@@ -501,6 +528,11 @@ class ProtobufCodecSuite extends CatsEffectSuite:
       written <- serde.serializer.serialize(topic, Headers.empty, Line("fig", 2))
       read    <- serde.deserializer.deserialize(topic, Headers.empty, written)
     yield assertEquals(read, Line("fig", 2))
+
+  test("two enum values Protobuf would give one name are refused, in one enum or in two, as its enums' values share the scope holding them"):
+    assertEquals(ProtobufCodec.file(ProtobufCodec[HoldsDoubled]), Left("two enum values are named DOUBLED_OPEN_NOW, in one scope"))
+    assertEquals(ProtobufCodec.file(ProtobufCodec[HoldsGates]), Left("two enum values are named GATE_OPEN_NOW, in one scope"))
+    assert(ProtobufCodec.file(ProtobufCodec[Line]).isRight)
 
   test("a serde of a type Protobuf cannot declare fails, saying why"):
     for
