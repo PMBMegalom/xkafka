@@ -465,8 +465,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   /** Refuses a header name holding NUL, since librdkafka gives names back only up to it, so no backend writes one. */
   private def nulInHeaderName(headers: Headers): F[Unit] =
-    headers.values.find(_.key.contains('\u0000')).traverse_ : header =>
-      F.raiseError(new IllegalArgumentException(s"a header name cannot hold the character NUL, was '${header.key.replace("\u0000", "\\u0000")}'"))
+    F.defer:
+      headers.values.find(_.key.contains('\u0000')).traverse_ : header =>
+        // Written out char by char, and only once refused: String.replace of a NUL throws on Scala Native on Linux, as CI found.
+        val shown = header.key.flatMap(char => if char == '\u0000' then "\\u0000" else char.toString)
+        F.raiseError(new IllegalArgumentException(s"a header name cannot hold the character NUL, was '$shown'"))
 
   /** Asks again after a failure the broker may get over, waiting 100 ms and twice as long each time up to a second, as the Java consumer does. */
   private def untilAnswered[A](request: F[A], attempt: Int): F[A] =
