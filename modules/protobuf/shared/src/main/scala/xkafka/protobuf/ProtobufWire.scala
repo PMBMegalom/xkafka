@@ -43,7 +43,7 @@ private[protobuf] object ProtobufWire:
       Some(Raw.Bytes(found.foldLeft(Chunk.empty[Byte]) { case (all, Raw.Bytes(more)) => all ++ more; case (all, _) => all }))
     else found.lastOption
 
-  /** How deep messages may hold messages before a record is refused instead of read, as protobuf-java's default limit. */
+  /** How many messages deep below a record's own a message may be, every message counted, a map's entries too, as protobuf-java's default limit. */
   val MaxDepth: Int = 100
 
   val VarintType: Int  = 0

@@ -65,6 +65,26 @@ final case class Placed(
     at: Instant
 ) derives ProtobufCodec
 
+/** A message that holds itself, a sealed trait whose case holds it, and a map of it, for how deep protobuf-java reads each. */
+final case class Deep(
+    @ProtobufField(1)
+    next: Option[Deep]
+) derives ProtobufCodec
+
+sealed trait Chain derives ProtobufCodec
+@ProtobufField(1)
+final case class Link(
+    @ProtobufField(1)
+    next: Chain
+) extends Chain
+@ProtobufField(2)
+final case class End() extends Chain
+
+final case class Kids(
+    @ProtobufField(1)
+    kids: Map[String, Kids]
+) derives ProtobufCodec
+
 class ConfluentProtobufSuite extends CatsEffectSuite:
   private val topic = Topic.from("orders").toOption.get
 
@@ -109,6 +129,26 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
     assertEquals((Chunk.array(paid.toByteArray), json(JsonFormat.printer().print(paid))), (cash, json("""{"cash":{}}""")))
     val (node, nested) = java(ProtobufCodec[Node], Node(1, Some(Node(2))))
     assertEquals(Chunk.array(nested.toByteArray), node)
+
+  test("records are read and written as deep as protobuf-java reads them, a oneof's message and a map's entries counted as it counts them"):
+    def message(number: Int, inner: Chunk[Byte]) = ProtobufWire.field(number, Raw.Bytes(inner))
+    def deep(levels: Int)                        = (0 until levels).foldLeft(Chunk.empty[Byte])((inner, _) => message(1, inner))
+    def chain(links: Int)                        = (0 until links).foldLeft(message(2, Chunk.empty))((inner, _) => message(1, message(1, inner)))
+    def kids(levels: Int)                        = (0 until levels)
+      .foldLeft(Chunk.empty[Byte])((inner, _) => message(1, message(1, Chunk.array("k".getBytes)) ++ message(2, inner)))
+    def agrees[A](codec: ProtobufCodec[A], full: String, bytes: Chunk[Byte], label: String): Unit =
+      val schema    = codec.schema.fold(fail(_), identity)
+      val javaReads = scala.util.Try(DynamicMessage.parseFrom(new ProtobufSchema(schema).toDescriptor, bytes.toArray)).isSuccess
+      val dynamic   = new Dynamic(ProtobufSchemaText.parse(schema).flatMap(Pool.of(_, Map.empty)).fold(fail(_), identity))
+      val read      = codec.decode(bytes)
+      assertEquals(read.isRight, javaReads, s"$label: read")
+      assertEquals(dynamic.decode(full, bytes).isRight, javaReads, s"$label: read as a value")
+      read.foreach(value => assertEquals(codec.encode(value), Right(bytes), s"$label: written"))
+    List(99, 100, 101).foreach(levels => agrees(ProtobufCodec[Deep], "xkafka.protobuf.Deep", deep(levels), s"$levels nested"))
+    List(48, 49, 50).foreach(links => agrees(ProtobufCodec[Chain], "xkafka.protobuf.Chain", chain(links), s"$links links"))
+    List(49, 50, 51).foreach(levels => agrees(ProtobufCodec[Kids], "xkafka.protobuf.Kids", kids(levels), s"$levels levels of entries"))
+    def links(count: Int): Chain = (0 until count).foldLeft[Chain](End())((inner, _) => Link(inner))
+    assert(ProtobufCodec[Chain].encode(links(50)).isLeft, "a chain protobuf-java refuses to read is refused when written")
 
   test("xkafka reads what protobuf-java writes"):
     val descriptor = confluent(ProtobufCodec[Order]).toDescriptor

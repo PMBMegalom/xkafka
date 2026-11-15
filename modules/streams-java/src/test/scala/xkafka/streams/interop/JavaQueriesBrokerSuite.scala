@@ -38,7 +38,9 @@ import munit.CatsEffectSuite
 import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.apache.kafka.common.serialization.Serdes as JavaSerdes
 import org.apache.kafka.streams.{KafkaStreams as JavaKafkaStreams, StreamsBuilder, StreamsConfig, Topology as JavaTopology}
-import org.apache.kafka.streams.kstream.{Materialized, Produced, SessionWindows as JavaSessionWindows, TimeWindows as JavaTimeWindows, WindowedSerdes}
+import org.apache.kafka.streams.kstream.{
+  Grouped, Materialized, Produced, SessionWindows as JavaSessionWindows, TimeWindows as JavaTimeWindows, WindowedSerdes
+}
 import org.apache.kafka.streams.state.HostInfo
 
 /** An xkafka member and a Java member of one application, the xkafka member's queries answered for the keys the Java member holds through
@@ -142,6 +144,26 @@ final class JavaQueriesBrokerSuite extends CatsEffectSuite:
         _.keyValue("counts", JavaSerdes.String, JavaSerdes.Long),
         streams => keys.toList.traverse((key, count) => streams.query(counts.get(key)).map(_ == Right(Some(count.toLong)))).map(_.forall(identity)),
         // The Java member's own queries, for keys either member holds, and of the whole store.
+        asking =>
+          keys.forall((key, count) => asking.get("counts", key, JavaSerdes.String, JavaSerdes.Long) == java.util.Optional.of(count.toLong)) &&
+            asking.all("counts", JavaSerdes.String, JavaSerdes.Long).size == keys.size
+      )
+
+    test("a Java member's queries reach a store filled from a repartition topic, which Java describes without the application id"):
+      val counts = QueryableStore.keyValue(Store("counts"), text, Serde.long[IO])
+      mixed(
+        broker,
+        (builder, application) =>
+          builder.stream[String, String](s"$application-input").groupBy[String]((key, _) => key, Grouped.as("by-key"))
+            .count(Materialized.as("counts")).toStream.to(s"$application-output", Produced.`with`(JavaSerdes.String, JavaSerdes.Long)): Unit,
+        application =>
+          Topology.of(
+            KStream(Named("read"), Topic.from(s"$application-input").orFail, text, text).groupBy(Repartition("by-key"), text, text)((key, _) => key)
+              .count(Named("count"), Store("counts")).toStream(Named("changes"))
+              .to(Named("write"), Topic.from(s"$application-output").orFail, text, Serde.long[IO])
+          ).orFail,
+        _.keyValue("counts", JavaSerdes.String, JavaSerdes.Long),
+        streams => keys.toList.traverse((key, count) => streams.query(counts.get(key)).map(_ == Right(Some(count.toLong)))).map(_.forall(identity)),
         asking =>
           keys.forall((key, count) => asking.get("counts", key, JavaSerdes.String, JavaSerdes.Long) == java.util.Optional.of(count.toLong)) &&
             asking.all("counts", JavaSerdes.String, JavaSerdes.Long).size == keys.size

@@ -537,7 +537,7 @@ private[xkafka] object Wiring:
     val onLeft  =
       List(send, sink, readAnswer, resolve).foldLeft(onRight)(_.making(left, _, named = false)).copy(checked =
         onRight.checked ++ List(send, sink, readRequest, lookup, changed, answer, readAnswer, resolve).map(_.name) ++
-          List(s"$named-subscription-registration-topic", s"$named-subscription-response-topic")
+          List(s"$named-subscription-registration-topic", s"$named-subscription-response-topic", named)
       )
     val made = onLeft.making(after, result).keeping(after, join.store.toList.map((stored, _) => KeptStore(stored))).refusing(unkept)
     arrive(join.next, after, made.coming(result.name, after))

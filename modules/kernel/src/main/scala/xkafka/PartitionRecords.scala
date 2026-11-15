@@ -76,12 +76,19 @@ object PartitionRecords:
   )(using F: Async[F]):
     /** A record source that ends carries the partition streams with it, so a graceful stop reaches whoever is reading partitions. */
     def stream: Stream[F, PartitionRecords[F, K, V]] =
-      output.stream.concurrently(followAssignments).concurrently(consumer.records.evalMap(route).onFinalize(close).drain)
+      output.stream.concurrently(followAssignments).concurrently(consumer.routedRecords.evalMap(route).onFinalize(close).drain)
 
+    /** Ends every partition's stream, and resumes the partitions it paused, which the next reader of the consumer would otherwise never get records
+      * of. A consumer being released may refuse the resume, which then matters to no one.
+      */
     def close: F[Unit] =
       mutex.lock.surround:
         F.uncancelable: _ =>
-          states.get.flatMap(current => current.values.toList.traverse_(_.channel.close.void)) >> output.close.void
+          states.get.flatMap(current => current.values.toList.traverse_(state => state.channel.close.void >> resumed(state))) >> output.close.void
+
+    private def resumed(state: PartitionState[F, K, V]): F[Unit] =
+      state.mutex.lock.surround:
+        state.paused.getAndSet(false).flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition)).attempt.void))
 
     private def followAssignments: Stream[F, Nothing] = assignments.evalMap(reconcile).drain
 
@@ -101,6 +108,9 @@ object PartitionRecords:
       stateFor(record.record.topicPartition, record.offset.assignment, held(record)).flatMap(_.traverse_(routedTo(_, record)))
 
     private def held(record: CommittableConsumerRecord[F, K, V]): F[Boolean] = record.offset.stillHeld.getOrElse(F.pure(true))
+
+    /** Whether the record is handed out, as it is only here that the application gets it. */
+    private def handing(record: CommittableConsumerRecord[F, K, V]): F[Boolean] = record.offset.handingOut.getOrElse(held(record))
 
     private def routedTo(state: PartitionState[F, K, V], record: CommittableConsumerRecord[F, K, V]): F[Unit] =
       state.mutex.lock.surround:
@@ -142,7 +152,7 @@ object PartitionRecords:
         state.channel.stream.chunks.evalMap: chunk =>
           state.mutex.lock.surround:
             state.queued.updateAndGet(_ - chunk.size).flatMap(queued => resumeWhenDrained(state, queued)) *>
-              state.revoked.get.ifM(F.pure(Chunk.empty), chunk.filterA(held))
+              state.revoked.get.ifM(F.pure(Chunk.empty), chunk.filterA(handing))
         .unchunks
       )
 

@@ -118,7 +118,7 @@ def visits(registry: SchemaRegistry[IO]): IO[Serde[IO, Visit]] = AvroSerde.of[IO
 ### What is refused
 
 The generator refuses a schema it cannot write exactly, saying which type and
-field, and why:
+field, and why, for example:
 
 - a named type without a namespace, which its package is made from;
 - properties of a schema or field other than the ones Avro defines, a field's
@@ -129,7 +129,8 @@ field, and why:
 - a `decimal` in a union of several types;
 - a `time-millis` or `time-micros` default that is no time of day, such as a
   negative one;
-- a `uuid` default that is no UUID, and a `decimal` default of no bytes;
+- a `uuid` default that is no UUID in its canonical form, of 36 characters,
+  and a `decimal` default of no bytes;
 - a default holding a value of a union's branch other than its first, in the
   field's union or in one inside it, such as `["x"]` for a list of
   `["null", "string"]`, since xkafka writes a union's default in its first
@@ -154,9 +155,10 @@ codec. The codec registers the file's schema unchanged apart from whitespace,
 with `$schema` first. A file that names no draft is registered as draft 7, the
 draft Confluent's serializers take by default. With `SubjectNaming.RecordName`,
 the subject is the schema's `title`. A file's type whose schema names its own
-definitions by reference cannot be a field of a derived type, or held in an
-`Option`, a collection or a map: those references would name the definitions of
-the other schema, so a serde of that type fails with
+definitions by reference, or that names a draft other than draft 7, cannot be a
+field of a derived type, or held in an `Option`, a collection or a map: those
+references would name the definitions of the other schema, and the schema
+holding it is for draft 7, so a serde of that type fails with
 `RegistryException.NoSchema`. Write and read the classes like any others:
 
 ```scala
@@ -271,7 +273,7 @@ an `integer` and a `number`, so a `oneOf` of the two fails on it, and an
 ### What is refused
 
 The generator refuses a schema it cannot make types of, saying where in which
-file, and why:
+file, and why, for example:
 
 - a file whose title names no package, if `xkafkaJsonSchemaPackage` sets
   none, and two files of one type;

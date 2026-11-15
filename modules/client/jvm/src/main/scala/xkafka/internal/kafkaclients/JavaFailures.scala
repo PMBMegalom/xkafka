@@ -35,15 +35,29 @@ import org.apache.kafka.common.protocol.Errors
 
 /** The portable failure for each Java client exception, classified the way librdkafka classifies the same condition. */
 private[kafkaclients] object JavaFailures:
-  val portable: PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException => failure(error) }
+  val portable: PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException => failure(error, producer = false) }
 
-  private def failure(error: JavaKafkaException): KafkaException.BackendFailure =
+  /** A producer's failure, of which the Java client holds some fatal, and whose error state only an abort leaves. */
+  val produced: PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException => failure(error, producer = true) }
+
+  private def failure(error: JavaKafkaException, producer: Boolean): KafkaException.BackendFailure =
     val message = Option(error.getMessage).getOrElse(error.getClass.getName)
     error.getCause match
-      // The error state a failure leaves the producer in, which the Java client reports by that failure as its cause.
+      // The error state a failure leaves the producer in, which the Java client reports by that failure as its cause. Retrying a call cannot leave
+      // that state: only aborting the transaction does, unless the failure is fatal.
       case cause: JavaKafkaException if error.getClass == classOf[JavaKafkaException] =>
-        val inner = failure(cause)
-        new KafkaException.BackendFailure(message, inner.code, inner.retriable, inner.fatal, cause = error)
+        val inner = failure(cause, producer)
+        if producer then
+          val fatal = inner.fatal.contains(true)
+          new KafkaException.BackendFailure(
+            message,
+            inner.code,
+            retriable = Some(false),
+            fatal = inner.fatal,
+            transactionAbortRequired = Some(!fatal),
+            cause = error
+          )
+        else new KafkaException.BackendFailure(message, inner.code, inner.retriable, inner.fatal, cause = error)
       case _ =>
         val code = protocolCode(error)
         new KafkaException.BackendFailure(
@@ -51,21 +65,23 @@ private[kafkaclients] object JavaFailures:
           code = code,
           // Derived from the portable code, so the same condition is retriable on every backend.
           retriable = code.map(_.retriable),
-          fatal = fatality(error),
+          fatal = fatality(error, producer),
           cause = error
         )
 
-  /** Whether the Java client cannot recover: true for the failures its producer holds fatal, false for those it retries, and not known for others. */
-  private def fatality(error: JavaKafkaException): Option[Boolean] =
+  /** Whether the Java client cannot recover: true for the failures its producer holds fatal, false for those it retries, and not known for others. An
+    * administration client and a consumer recover from every failure, so none of theirs is known fatal.
+    */
+  private def fatality(error: JavaKafkaException, producer: Boolean): Option[Boolean] =
     error match
-      case _: ClusterAuthorizationException | _: TransactionalIdAuthorizationException | _: ProducerFencedException | _: UnsupportedVersionException |
-          _: InvalidPidMappingException => Some(true)
       case _: RetriableException => Some(false)
-      case _                     => None
+      case _: ClusterAuthorizationException | _: TransactionalIdAuthorizationException | _: ProducerFencedException | _: UnsupportedVersionException |
+          _: InvalidPidMappingException if producer => Some(true)
+      case _ => None
 
   /** Why one record was not delivered. The Java client reports its own exceptions there, and anything else is kept as the cause. */
   def delivery(error: Throwable): KafkaException =
-    portable.lift(error).collect { case failure: KafkaException => failure }
+    produced.lift(error).collect { case failure: KafkaException => failure }
       .getOrElse(new KafkaException.BackendFailure(Option(error.getMessage).getOrElse(error.getClass.getName), cause = error))
 
   /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports.

@@ -149,7 +149,9 @@ sbt prePR test mimaReportBinaryIssues doc docs/tlSite
 `prePR` regenerates the CI workflow, adds missing license headers and formats
 the code, so commit what it changes; continuous integration checks all three.
 The rest runs the tests, the binary compatibility check, the API docs and the
-site, whose examples are compiled, as continuous integration does.
+site, whose examples are compiled, as continuous integration does. It also
+tests the sbt plugin on sbt 1 and sbt 2, which
+`sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'` runs.
 
 ## Changes to the build
 

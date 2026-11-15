@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
 import munit.CatsEffectSuite
 
 final class RevocationHoldSuite extends CatsEffectSuite:
@@ -32,16 +32,17 @@ final class RevocationHoldSuite extends CatsEffectSuite:
 
   test("a revocation waits until every record handed out of its partitions is committed"):
     for
-      hold    <- RevocationHold[IO](Some(1.minute))
-      _       <- hold.handOut(first, 0L, 3L) *> hold.handOut(second, 0L, 7L)
-      revoked <- hold.revoke(List(first, second)).timed.start
-      _       <- IO.sleep(200.millis) *> hold.committed(List(first -> 3L))
-      _       <- IO.sleep(200.millis) *> hold.committed(List(second -> 7L))
-      outcome <- revoked.joinWithNever.timeout(10.seconds)
+      hold        <- RevocationHold[IO](Some(1.minute))
+      _           <- hold.handOut(first, 0L, 3L) *> hold.handOut(second, 0L, 7L)
+      ended       <- Deferred[IO, Set[LeaseKey]]
+      revoked     <- hold.revoke(List(first, second)).flatTap(ended.complete).start
+      _           <- IO.sleep(200.millis) *> hold.committed(List(first -> 3L)) *> IO.sleep(200.millis)
+      early       <- ended.tryGet
+      _           <- hold.committed(List(second -> 7L))
+      uncommitted <- revoked.joinWithNever.timeout(10.seconds)
     yield
-      val (waited, uncommitted) = outcome
+      assertEquals(early, None, "the revocation ended before the second partition was committed")
       assertEquals(uncommitted, Set.empty[LeaseKey])
-      assert(waited >= 400.millis, s"the revocation ended after $waited, before the second partition was committed")
 
   test("a revocation stops waiting at its limit and reports the partitions still uncommitted"):
     for

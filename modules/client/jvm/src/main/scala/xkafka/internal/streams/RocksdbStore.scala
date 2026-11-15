@@ -162,14 +162,27 @@ private[xkafka] object RocksdbStore:
           finally batch.close()
         } *> clocked.set(after) *> positioned.update(_ ++ positions)
 
+    /** Deletes every entry as one range of each family, from its first key to past its last, written at once, so that a query reads the store whole
+      * or emptied, and no entry is read to do it.
+      */
     def clear: F[Unit] =
       F.blocking {
         val batch = new WriteBatch()
         try
-          opened.families.foreach(family => scanned(family, None, None)((key, _) => key).foreach(batch.delete(family, _)))
+          opened.families.foreach(family => bounds(family).foreach((first, past) => batch.deleteRange(family, first, past)))
           db.write(writing, batch)
         finally batch.close()
       } *> clocked.set(WindowStore.NoTime) *> positioned.set(Map.empty)
+
+    /** A family's first key and the key just past its last, its last with a zero byte after it. */
+    private def bounds(family: ColumnFamilyHandle): Option[(Array[Byte], Array[Byte])] =
+      val cursor = db.newIterator(family)
+      try
+        cursor.seekToFirst()
+        Option.when(cursor.isValid)(cursor.key).map: first =>
+          cursor.seekToLast()
+          first -> (cursor.key :+ 0.toByte)
+      finally cursor.close()
 
     def close: F[Unit] =
       F.blocking:

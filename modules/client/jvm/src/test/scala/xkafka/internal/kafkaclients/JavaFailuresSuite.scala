@@ -27,33 +27,49 @@ import munit.FunSuite
 import org.apache.kafka.common.KafkaException as JavaKafkaException
 import org.apache.kafka.common.errors.{
   ClusterAuthorizationException, GroupAuthorizationException, NotEnoughReplicasException, ProducerFencedException, RecordTooLargeException,
-  TopicAuthorizationException, TransactionalIdAuthorizationException
+  TimeoutException, TopicAuthorizationException, TransactionalIdAuthorizationException, UnsupportedVersionException
 }
 
 /** Whether the Java client's failures are fatal: true for those it holds fatal, false for those it retries, and unknown for the rest. */
 final class JavaFailuresSuite extends FunSuite:
-  private def portable(error: Throwable): KafkaException.BackendFailure =
-    JavaFailures.portable(error) match
+  private def classified(classify: PartialFunction[Throwable, Throwable])(error: Throwable): KafkaException.BackendFailure =
+    classify(error) match
       case failure: KafkaException.BackendFailure => failure
       case other                                  => fail(s"expected a backend failure, got $other")
 
+  private def portable(error: Throwable) = classified(JavaFailures.portable)(error)
+  private def produced(error: Throwable) = classified(JavaFailures.produced)(error)
+
+  private def errorState(cause: Throwable) = new JavaKafkaException("Cannot execute transactional method because we are in an error state", cause)
+
   test("a failure the Java producer holds fatal is fatal, one it retries is not, and of any other it is not known"):
-    assertEquals(portable(new TransactionalIdAuthorizationException("refused")).fatal, Some(true))
-    assertEquals(portable(new ClusterAuthorizationException("refused")).fatal, Some(true))
-    assertEquals(portable(new ProducerFencedException("fenced")).fatal, Some(true))
+    assertEquals(produced(new TransactionalIdAuthorizationException("refused")).fatal, Some(true))
+    assertEquals(produced(new ClusterAuthorizationException("refused")).fatal, Some(true))
+    assertEquals(produced(new ProducerFencedException("fenced")).fatal, Some(true))
+    assertEquals(produced(new UnsupportedVersionException("old")).fatal, Some(true))
+    assertEquals(produced(new NotEnoughReplicasException("later")).fatal, Some(false))
+    assertEquals(produced(new RecordTooLargeException("large")).fatal, None)
+
+  test("an administration client or a consumer recovers from the failures a producer holds fatal, so none of theirs is known fatal"):
+    assertEquals(portable(new UnsupportedVersionException("old")).fatal, None)
+    assertEquals(portable(new ClusterAuthorizationException("refused")).fatal, None)
     assertEquals(portable(new NotEnoughReplicasException("later")).fatal, Some(false))
-    assertEquals(portable(new RecordTooLargeException("large")).fatal, None)
 
   test("an authorization failure is reported by its own code, though Kafka's class for it extends its configuration failure"):
     assertEquals(portable(new TopicAuthorizationException("refused")).code, Some(ErrorCode.TopicAuthorizationFailed))
     assertEquals(portable(new GroupAuthorizationException("refused")).code, Some(ErrorCode.GroupAuthorizationFailed))
     assertEquals(portable(new ClusterAuthorizationException("refused")).code, Some(ErrorCode.ClusterAuthorizationFailed))
 
-  test("the error state a failure left the producer in is reported as that failure, with its code and fatal"):
-    val wrapped =
-      portable(new JavaKafkaException(
-        "Cannot execute transactional method because we are in an error state",
-        new TransactionalIdAuthorizationException("refused")
-      ))
-    assertEquals(wrapped.code, Some(ErrorCode.Other(53)))
-    assertEquals(wrapped.fatal, Some(true))
+  test("the error state a fatal failure left the producer in is reported as that failure, with its code, fatal and no abort to make"):
+    val wrapped = produced(errorState(new TransactionalIdAuthorizationException("refused")))
+    assertEquals(
+      (wrapped.code, wrapped.retriable, wrapped.fatal, wrapped.transactionAbortRequired),
+      (Some(ErrorCode.Other(53)), Some(false), Some(true), Some(false))
+    )
+
+  test("the error state a retriable failure left the producer in cannot be retried, only aborted, as librdkafka says of the same state"):
+    val wrapped = produced(errorState(new TimeoutException("expired")))
+    assertEquals(
+      (wrapped.code, wrapped.retriable, wrapped.fatal, wrapped.transactionAbortRequired),
+      (Some(ErrorCode.RequestTimedOut), Some(false), Some(false), Some(true))
+    )

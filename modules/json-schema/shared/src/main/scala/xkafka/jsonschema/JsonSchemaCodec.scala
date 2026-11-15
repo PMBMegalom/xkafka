@@ -60,9 +60,11 @@ private[jsonschema] object Described:
       )
     val title   = described.json.hcursor.get[String]("title").toOption.fold("")(name => s", $name,")
     val problem = s"a whole schema$title names its own definitions by reference, which inside another schema would name that schema's"
-    // The schema holding it is for draft 7, as derived schemas are, so a later draft's keywords inside would mean nothing.
+    // The schema holding it is for draft 7, as derived schemas are, so a later draft's keywords inside would mean nothing. Draft 7 is named over
+    // http or https, with or without the closing '#', as the validator Confluent uses names it.
     val draft =
-      described.json.hcursor.get[String]("$schema").toOption.filter(named => described.whole && named.stripSuffix("#") != Draft7.stripSuffix("#"))
+      described.json.hcursor.get[String]("$schema").toOption
+        .filter(named => described.whole && named.stripSuffix("#").replaceFirst("^https://", "http://") != Draft7.stripSuffix("#"))
         .map(named => s"a whole schema for $named cannot be held in another, which is for draft 7")
     described.copy(problems = described.problems ++ Option.when(described.whole && refers(described.json))(problem) ++ draft, whole = false)
 
@@ -147,14 +149,28 @@ object JsonSchemaCodec:
       override def encode(value: Json): Either[String, Json]                  = Right(value)
       override def decode(json: Json): Either[String, Json]                   = Right(json)
 
-  /** Whether null is a value of `schema`: an empty one, or one whose type or enum holds null, or one of whose branches takes it. */
-  private[jsonschema] def takesNull(schema: Json): Boolean =
-    schema.asBoolean.contains(true) || schema.asObject.exists: fields =>
-      val typed  = fields("type").map(kind => kind.asString.contains("null") || kind.asArray.exists(_.contains(Json.fromString("null"))))
-      val listed = fields("enum").flatMap(_.asArray).map(_.contains(Json.Null))
-      val either = List("oneOf", "anyOf").flatMap(fields(_)).flatMap(_.asArray.toList.flatten).exists(takesNull)
-      val open   = fields.keys.forall(key => List("title", "description", "$comment", "$schema", "default").contains(key))
-      open || either || ((typed.contains(true) || listed.contains(true)) && typed.forall(identity) && listed.forall(identity))
+  /** Whether null may be a value of `schema`: it is unless a keyword rules it out, as every keyword of a schema must take a value. A `type`, `enum`
+    * or `const` without null rules it out, as does a branch of `allOf` that rules it out, every branch of `anyOf` or `oneOf` ruling it out, or a
+    * `not` of a schema that surely takes it. A reference is taken as an object's, as a derived type's to its definition is; a schema that names its
+    * own definitions is refused inside another anyway.
+    */
+  private[jsonschema] def takesNull(schema: Json): Boolean = schema.asBoolean.getOrElse(schema.asObject.forall(!rulesOutNull(_)))
+
+  /** Whether `schema` takes null whatever else it is given, which a `not` of it then rules out. */
+  private def surelyNull(schema: Json): Boolean =
+    schema.asBoolean.getOrElse(
+      schema.asObject.exists: fields =>
+        !rulesOutNull(fields) && fields("anyOf").forall(_.asArray.exists(_.exists(surelyNull))) && fields("oneOf").isEmpty && fields("allOf")
+          .forall(_.asArray.exists(_.forall(surelyNull)))
+    )
+
+  private def rulesOutNull(fields: io.circe.JsonObject): Boolean =
+    def branches(key: String) = fields(key).flatMap(_.asArray)
+    val typed    = fields("type").exists(kind => !(kind.asString.contains("null") || kind.asArray.exists(_.contains(Json.fromString("null")))))
+    val listed   = fields("enum").flatMap(_.asArray).exists(!_.contains(Json.Null))
+    val constant = fields("const").exists(_ != Json.Null)
+    typed || listed || constant || fields.contains("$ref") || branches("allOf").exists(_.exists(!takesNull(_))) || branches("anyOf")
+      .exists(_.forall(!takesNull(_))) || branches("oneOf").exists(_.forall(!takesNull(_))) || fields("not").exists(surelyNull)
 
   private val draft7 = "http://json-schema.org/draft-07/schema#"
 

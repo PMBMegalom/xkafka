@@ -790,7 +790,9 @@ final class ClientSuite extends FunSuite:
       ProducerSettings.from(clientSettings, serializer, serializer, Map("delivery.timeout.ms" -> "20000", "request.timeout.ms" -> "10000")).isValid
     )
 
-  test("a transactional producer's message and socket timeouts the properties set fit its transaction timeout, as librdkafka refuses them otherwise"):
+  test(
+    "a transactional producer's message and socket timeouts the properties set fit its transaction timeout, as librdkafka refuses them otherwise, however they are set"
+  ):
     val serializer                          = Serializer.const[IO, String](None)
     val id                                  = TransactionalId.from("writer").toOption.get
     def made(properties: (String, String)*) =
@@ -805,6 +807,15 @@ final class ClientSuite extends FunSuite:
       Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("socket.timeout.ms", 60101.millis, 60100.millis)))
     )
     assert(made("message.timeout.ms" -> "60000", "socket.timeout.ms" -> "60100").isRight)
+    val valid = made().toOption.get
+    assertEquals(
+      valid.withProperty("message.timeout.ms", "120000").toEither,
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 120.seconds, 60.seconds)))
+    )
+    assertEquals(
+      valid.withProperties(Map("socket.timeout.ms" -> "60101")).toEither,
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("socket.timeout.ms", 60101.millis, 60100.millis)))
+    )
 
   test("linger is below a message or delivery timeout the properties set, as both clients refuse it otherwise"):
     val serializer = Serializer.const[IO, String](None)

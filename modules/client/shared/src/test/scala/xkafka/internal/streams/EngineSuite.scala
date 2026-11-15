@@ -504,7 +504,7 @@ final class EngineSuite extends CatsEffectSuite:
         ended   <- world.ended
       yield assertEquals((fetches.size, ended), (2, None))
 
-  test("at least once, a failure recovered from counts no longer once records are processed again, so a later one starts its own task timeout"):
+  test("at least once, a failure recovered from counts no longer once the tasks commit again, so a later one starts its own task timeout"):
     val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
     val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
     run(committed = _ => IO.pure(committed), taskTimeout = 1.second): world =>
@@ -768,6 +768,19 @@ final class EngineSuite extends CatsEffectSuite:
           log <- world.log.get
         yield assertEquals(log.collect { case followed: Event.Followed => followed }, List(Event.Followed(Vector(StartAt(changelog(1), 0L, -1)))))
 
+  test("a standby whose store holds a position waits for its changelog's bounds while the changelog's leader moves, and the engine goes on"):
+    MemoryStateDirectory(Map(("0_1", "counts") -> (StoreContents.empty, Map(1 -> 5L)))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _     <- world.endsAt(Map(changelog(1) -> 10L)) *> world.failEnds(2)
+          _     <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+          _     <- IO.sleep(1.second)
+          log   <- world.log.get
+          ended <- world.ended
+        yield
+          assertEquals(ended, None)
+          assertEquals(log.collect { case followed: Event.Followed => followed }, List(Event.Followed(Vector(StartAt(changelog(1), 5L, -1)))))
+
   test("a standby task follows its changelog from the start, and where it is and where the changelog ends are its task offsets"):
     run(): world =>
       for
@@ -902,6 +915,31 @@ final class EngineSuite extends CatsEffectSuite:
         fetches <- world.fetches.get
         ended   <- world.ended
       yield assertEquals((fetches.size, ended), (2, None))
+
+  test(
+    "at least once, a write of a suppression's buffer that fails at every commit stops the engine once the task timeout has passed, though records are processed between"
+  ):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing, taskTimeout = 1.second): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _     <- world.failWrites(timedOut)
+        _     <- (0L until 20L).toList.traverse_(offset => world.records(record(1, offset, s"k$offset", 1000L)) *> IO.sleep(150.millis))
+        ended <- world.ended
+      yield assertEquals(ended, Some(Left(timedOut)))
+
+  test("a write of a suppression's buffer that fails in a way worth retrying as its task is handed back gives the task up, and the engine goes on"):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _     <- world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(50.millis)
+        _     <- world.failWrite(timedOut) *> world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1)))) *> IO.sleep(500.millis)
+        log   <- world.log.get
+        ended <- world.ended
+      yield
+        assertEquals(ended, None)
+        assert(log.contains(Event.Revoked(2)), log)
 
   test("a suppression's buffer logs what it changed before the offsets are committed"):
     run(topology = suppressing, commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 1, 29)))): world =>
@@ -1608,6 +1646,9 @@ object EngineSuite:
     /** Makes the next write fail with `failure`, once. */
     def failWrite(failure: Throwable): IO[Unit] = purging.update(_.copy(_2 = IO.raiseError(failure)))
 
+    /** Fails every write from now on, each failure arming the next. */
+    def failWrites(failure: Throwable): IO[Unit] = purging.update(_.copy(_2 = failWrites(failure) *> IO.raiseError(failure)))
+
     def tell(change: MemberAction): IO[Unit]                = changes.offer(Some(change))
     def records(polled: PolledRecord*): IO[Unit]            = polled.toList.traverse_(incoming.offer)
     def ended: IO[Option[Either[Throwable, Unit]]]          = outcome.get
@@ -1667,9 +1708,9 @@ object EngineSuite:
         def followed: IO[List[PolledRecord]]          =
           standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
         // Each changelog starts at its first offset, 0, and ends where `endsAt` says.
-        def bounds(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, (Long, Long)]] =
-          ending.get.map(_._1.view.filterKeys(partitions.toSet).mapValues(0L -> _).toMap)
-        def ends(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, Long]] =
+        // Each fails while `failEnds` says, as while a leader moves.
+        def bounds(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, (Long, Long)]] = ends(partitions).map(_.view.mapValues(0L -> _).toMap)
+        def ends(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, Long]]           =
           ending.modify((ends, failing) => ((ends, (failing - 1).max(0)), failing)).flatMap: failing =>
             if failing > 0 then IO.raiseError(new KafkaException.BackendFailure("no leader", Some(ErrorCode.NotLeaderOrFollower), Some(true)))
             else ending.get.map(_._1.view.filterKeys(partitions.toSet).toMap)

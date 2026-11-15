@@ -67,6 +67,10 @@ def routed(orders: Topic, large: Topic, small: Topic): Pipeline[IO] =
     .defaultBranch(Named("small"))(_.to(Named("write-small"), small, text, text))  // Everything else takes this branch
 ```
 
+A branch's step is named by the split's name and the branch's together, such as
+`route-large`, and `Topology.of` refuses one Kafka's rules for names refuse, as
+it refuses any step's name. Java names the node the same way without checking it.
+
 ## Paths that share what follows
 
 With `fork`, each path has steps of its own, so two paths cannot lead into the same

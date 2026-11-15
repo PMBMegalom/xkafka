@@ -678,13 +678,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       case portable: KafkaException => portable
       case other                    => new KafkaException.BackendFailure(other.toString, cause = other)
 
-  /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
   /** Listing groups wraps the reason it found no broker in a plain Java client exception, which classifies as nothing. */
   private val withoutWrapper: PartialFunction[Throwable, Throwable] = {
     case error: JavaKafkaException if error.getClass == classOf[JavaKafkaException] && error.getCause.isInstanceOf[JavaKafkaException] =>
       error.getCause
   }
 
+  /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
   private def unreached(failure: KafkaException): Boolean =
     failure match
       case backendFailure: KafkaException.BackendFailure => backendFailure.code
@@ -704,7 +704,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def producing[A](client: Client)(use: JavaProducer[Array[Byte], Array[Byte]] => F[A]): F[A] =
     client match
-      case JavaClient.Producer(value) => javaCall(F.defer(use(value)))
+      case JavaClient.Producer(value) => F.defer(use(value)).adaptError(JavaFailures.produced)
       case other                      => F.raiseError(new IllegalArgumentException(s"not a producer: $other"))
 
   private def administering[A](client: Client)(use: Admin => F[A]): F[A] =

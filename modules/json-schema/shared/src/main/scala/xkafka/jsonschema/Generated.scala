@@ -36,21 +36,36 @@ object Generated:
   /** A schema generated code holds as its text, which the generator wrote from a valid schema. */
   def parsed(text: String): Json = io.circe.jawn.parse(text).fold(error => throw new IllegalArgumentException(error.message), identity)
 
-  /** The codec of a type generated from a whole schema file, whose JSON is `described`, registered as it is and named by its `title`. */
-  def codec[A](described: Json, encode: A => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
+  /** The codec of a type generated from a whole schema file, whose JSON is `described`, registered as it is and named by its `title`. `encode` writes
+    * a value as deep as its depth says, which a record refuses nested more than 100 deep, as derived records do.
+    */
+  def codec[A](described: Json, encode: (A, Int) => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
     val (write, read) = (encode, decode)
     new JsonSchemaCodec[A]:
-      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil, whole = true)
-      override def name: Option[String]                                       = described.hcursor.get[String]("title").toOption
-      override def encode(value: A): Either[String, Json]                     = write(value)
-      override def decode(json: Json): Either[String, A]                      = read(json)
+      override private[jsonschema] def describe(seen: Set[String]): Described                   = Described(described, Nil, whole = true)
+      override def name: Option[String]                                                         = described.hcursor.get[String]("title").toOption
+      override def encode(value: A): Either[String, Json]                                       = write(value, 0)
+      override private[jsonschema] def encodeWithin(value: A, depth: Int): Either[String, Json] = write(value, depth)
+      override def decode(json: Json): Either[String, A]                                        = read(json)
 
   /** The codec of a type generated from part of a schema file, which is never registered on its own, so its schema accepts any value. */
-  def part[A](encode: A => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
-    JsonSchemaCodec.instance(Json.obj(), encode, decode)
+  def part[A](encode: (A, Int) => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
+    val (write, read) = (encode, decode)
+    new JsonSchemaCodec[A]:
+      override private[jsonschema] def describe(seen: Set[String]): Described                   = Described(Json.obj(), Nil)
+      override def encode(value: A): Either[String, Json]                                       = write(value, 0)
+      override private[jsonschema] def encodeWithin(value: A, depth: Int): Either[String, Json] = write(value, depth)
+      override def decode(json: Json): Either[String, A]                                        = read(json)
 
   /** Any JSON value, as it is. */
-  val anything: JsonSchemaCodec[Json] = part(Right(_), Right(_))
+  val anything: JsonSchemaCodec[Json] = part((json, _) => Right(json), Right(_))
+
+  /** A record's properties, written by `write`, at `depth`, refused nested more than 100 deep before any is written. */
+  def within(depth: Int)(write: => Either[String, Json]): Either[String, Json] =
+    if depth >= JsonSchemaFormat.MaxDepth then Left(s"the record is nested more than ${JsonSchemaFormat.MaxDepth} deep") else write
+
+  /** A value at `depth`, as a branch of a union is written, no deeper than the union. */
+  def encodeWithin[A](value: A, depth: Int)(using codec: JsonSchemaCodec[A]): Either[String, Json] = codec.encodeWithin(value, depth)
 
   /** A time of day with its offset from UTC, JSON Schema's `time`, written with its seconds, as RFC 3339 has it. */
   val time: JsonSchemaCodec[OffsetTime] =
@@ -68,13 +83,13 @@ object Generated:
   def write(properties: Either[String, Option[(String, Json)]]*): Either[String, Json] =
     properties.toList.sequence.map(written => Json.fromFields(written.flatten))
 
-  /** A property that is always written. */
-  def property[A](name: String, value: A)(using codec: JsonSchemaCodec[A]): Either[String, Option[(String, Json)]] =
-    codec.encode(value).bimap(reason => s"$name: $reason", json => Some(name -> json))
+  /** A property that is always written, of a record at `depth`, a level deeper. */
+  def property[A](name: String, value: A, depth: Int)(using codec: JsonSchemaCodec[A]): Either[String, Option[(String, Json)]] =
+    codec.encodeWithin(value, depth + 1).bimap(reason => s"$name: $reason", json => Some(name -> json))
 
-  /** A property that is left out where it has no value. */
-  def optional[A](name: String, value: Option[A])(using codec: JsonSchemaCodec[A]): Either[String, Option[(String, Json)]] =
-    value.flatTraverse(property(name, _))
+  /** A property that is left out where it has no value, of a record at `depth`, a level deeper. */
+  def optional[A](name: String, value: Option[A], depth: Int)(using codec: JsonSchemaCodec[A]): Either[String, Option[(String, Json)]] =
+    value.flatTraverse(property(name, _, depth))
 
   /** A property whose value is always `value`, which tells the schema's branches apart. */
   def constant(name: String, value: Json): Either[String, Option[(String, Json)]] = Right(Some(name -> value))

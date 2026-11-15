@@ -224,7 +224,8 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
         val digits = chunk.toList.mkString(s"${Names.builtin("Array", neighbours)}[${Names.builtin("Byte", neighbours)}](", ", ", ")")
         Right(s"${Names.builtin("BigDecimal", neighbours)}(${Names.builtin("BigInt", neighbours)}($digits), $scale)")
       case (LogicalType.Uuid, AvroValue.String(text)) => Either.cond(
-          scala.util.Try(java.util.UUID.fromString(text)).isSuccess,
+          // The JVM takes shorter forms that Scala.js and Scala Native refuse, so only the canonical one is a UUID on every platform.
+          scala.util.Try(java.util.UUID.fromString(text)).toOption.exists(_.toString.equalsIgnoreCase(text)),
           s"_root_.java.util.UUID.fromString(${Names.quote(text)})",
           s"'$text' is no UUID"
         )

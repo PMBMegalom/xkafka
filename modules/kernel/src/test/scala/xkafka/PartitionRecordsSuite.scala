@@ -162,6 +162,22 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _       <- reading.cancel
     yield assertEquals(made, Vector(s"pause ${Set(firstPartition)}", s"resume ${Set(firstPartition)}"))
 
+  test("a partition paused for its reader is resumed when the partitioned records end, so the consumer's next reader gets its records"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls      <- Ref[IO].of(Vector.empty[String])
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit]  = calls.update(_ :+ s"pause $topicPartitions")
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] = calls.update(_ :+ s"resume $topicPartitions")
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- IO.sleep(100.millis)
+      _       <- reading.cancel
+      made    <- calls.get
+    yield assertEquals(made, Vector(s"pause ${Set(firstPartition)}", s"resume ${Set(firstPartition)}"))
+
   test("a partition revoked while its pause is being made is resumed after the pause, so it is not left paused"):
     for
       assignment   <- Ref[IO].of(Set(firstPartition))

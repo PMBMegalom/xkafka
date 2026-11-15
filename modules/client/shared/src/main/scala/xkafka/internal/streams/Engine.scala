@@ -666,15 +666,15 @@ private[xkafka] object Engine:
     private def window(running: Running[F]): F[Running[F]] =
       transactions match
         // A write that fails in a way worth retrying starts the tasks again from what the group committed, as Java revives them, whether it was made
-        // processing records or writing a buffer at the commit. Records processed since end the time a failure counts against, as a transaction that
-        // commits does.
-        // The offsets' commit after has its own way of asking again.
+        // processing records or writing a buffer at the commit. Only a commit ends the time a failure counts against, as a transaction that commits
+        // does: a poll that brings nothing, or records whose writes fail at the commit again, are no progress. The offsets' commit after has its own
+        // way of asking again.
         case None =>
           def recovering(from: Running[F])(attempt: F[Running[F]]): F[Running[F]] =
             attempt.recoverWith:
               case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
                 recovered(from, failure, F.unit)
-          recovering(running)(poll(running).flatMap(process(running, _, plane.write)).map(_.copy(failing = None))).flatMap: after =>
+          recovering(running)(poll(running).flatMap(process(running, _, plane.write))).flatMap: after =>
             F.monotonic.flatMap: now =>
               if now - after.committed < commitInterval then F.pure(after)
               else
@@ -682,7 +682,7 @@ private[xkafka] object Engine:
                   case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
                     recovered(after, failure, F.unit).map(Left(_))
                 }.flatMap:
-                  case Right(written)  => committed(written, after.tasks.keySet).map(_._1.copy(committed = now))
+                  case Right(written)  => committed(written, after.tasks.keySet).map(_._1.copy(committed = now, failing = None))
                   case Left(restarted) => F.pure(restarted)
         case Some(transaction) => (poll(running), F.realTime).tupled.flatMap: (polled, clock) =>
             // A punctuator that is due runs without records, in a transaction of its own that records no offsets.
@@ -747,7 +747,6 @@ private[xkafka] object Engine:
             )
       .toMap
 
-    /** Starts every task again from what the group committed, dropping what it held and where it read to since. */
     /** The tasks started again from what the group committed, after `finish`, while the task timeout has not passed since the first of the failures
       * that came one after another, the last of which is `failure`.
       */
@@ -756,7 +755,9 @@ private[xkafka] object Engine:
         val since = running.failing.getOrElse(now)
         if now - since >= taskTimeout then F.raiseError(failure) else finish *> restart(running).map(_.copy(failing = Some(since)))
 
-    // While the tasks restore their stores, queries answer that the group is rebalancing, as while an assignment restores them.
+    /** Starts every task again from what the group committed, dropping what it held and where it read to since. While the tasks restore their stores,
+      * queries answer that the group is rebalancing, as while an assignment restores them.
+      */
     private def restart(running: Running[F]): F[Running[F]] =
       val restoring = running.tasks.keys.exists(id => subtopologies(id.subtopology).stores.nonEmpty)
       phase.set(StreamsPhase.Restoring).whenA(restoring) *> (closed(running.tasks.toList) *> start(running.tasks.keys.toList, Map.empty), F.monotonic)
@@ -771,7 +772,11 @@ private[xkafka] object Engine:
     private def changed(running: Running[F], told: Either[Throwable, MemberAction]): F[Running[F]] =
       told.liftTo[F].flatMap:
         // A task whose commit the group did not take may already be another member's, writing to its changelogs, so its stores keep their own place.
-        case Revoke(round, tasks) => committing(running, tasks).flatMap((after, taken) => gaveUp(after, tasks, settled = taken))
+        // A write of its buffers that fails in a way worth retrying gives it up uncommitted, as Java gives up a corrupted task it hands back: its next
+        // owner reads again from what the group committed.
+        case Revoke(round, tasks) => flushed(running, tasks, plane.write).map(Some(_))
+            .recover { case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) => None }
+            .flatMap(_.fold(F.pure((running, false)))(committed(_, tasks))).flatMap((after, taken) => gaveUp(after, tasks, settled = taken))
             .flatTap(after => reassign(after) *> report(after) *> member.revoked(round))
         case Assign(round, assignment, epoch) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
@@ -844,7 +849,7 @@ private[xkafka] object Engine:
         standing.get(id).filter(_.stores.nonEmpty).fold(
           (changelogsOf(id), storesOf(id)).tupled.flatMap: (changelogs, stores) =>
             changelogs.toList.traverse((partition, store) => stores(store).position.map(at => (partition, store, at))).flatMap: held =>
-              plane.bounds(held.collect { case (partition, _, Some(_)) => partition }.toVector).flatMap: bounds =>
+              Restore.whileMoving(plane.bounds(held.collect { case (partition, _, Some(_)) => partition }.toVector)).flatMap: bounds =>
                 val outside =
                   held.collect:
                     case (partition, store, Some(at)) if bounds.get(partition).exists((low, high) => at < low || at > high) => store
@@ -931,13 +936,6 @@ private[xkafka] object Engine:
           from.flatMap(plane.restore(changelogs, _, stores)) *> WindowStore.swept(stores, subtopologies(id.subtopology).retentions).as(id -> stores)
       .map(_.toMap)
 
-    /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready. A member the group no
-      * longer counts commits nothing: its tasks go to others, which read again from the group's last commit.
-      */
-    /** Commits these tasks, answering whether the group took the commit. */
-    private def committing(running: Running[F], tasks: Set[TaskId]): F[(Running[F], Boolean)] =
-      flushed(running, tasks, plane.write).flatMap(committed(_, tasks))
-
     /** Writes what these tasks' suppression buffers log at a commit, before the commit, as Java's buffers log before the producer flushes. */
     private def flushed(running: Running[F], tasks: Set[TaskId], write: Writer[F]): F[Running[F]] =
       running.tasks.view.filterKeys(tasks).toList.filter(_._2.state.dirty.values.exists(_.keys.nonEmpty))
@@ -947,6 +945,10 @@ private[xkafka] object Engine:
 
     private def flushed(running: Running[F], write: Writer[F]): F[Running[F]] = flushed(running, running.tasks.keySet, write)
 
+    /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready, and answers whether
+      * the group took the commit. A member the group no longer counts commits nothing: its tasks go to others, which read again from the group's last
+      * commit.
+      */
     private def committed(running: Running[F], tasks: Set[TaskId]): F[(Running[F], Boolean)] =
       val named = running.tasks.view.filterKeys(tasks).toList
       val due   = named.filter(_._2.read)

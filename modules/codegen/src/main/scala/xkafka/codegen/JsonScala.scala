@@ -425,8 +425,10 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
         val name  = Names.typeName(path.last)
         val codec =
           val decode = if byPath.get(path).exists(_.isInstanceOf[Decl.Record]) then "decodeJson(_, false)" else "decodeJson"
-          if path == rootPath then s"given $codecs[$name] = $helpers.codec(jsonSchema, encodeJson, $decode)"
-          else s"$access given $codecs[$name] = $helpers.part(encodeJson, $decode)"
+          // Symbols hold nothing deeper, so they are written at any depth.
+          val encode = if byPath.get(path).exists(_.isInstanceOf[Decl.Symbols]) then "(value, _) => encodeJson(value)" else "encodeJson"
+          if path == rootPath then s"given $codecs[$name] = $helpers.codec(jsonSchema, $encode, $decode)"
+          else s"$access given $codecs[$name] = $helpers.part($encode, $decode)"
         s"object $name${Names.opening(name)}\n" + (schema.toList ++ inner ++ members :+ codec).map(indent).mkString("\n\n") + "\n"
 
     private def recordSource(record: Decl.Record): Either[String, String] =
@@ -452,8 +454,9 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
         needed <- givens(record.path, fields.map(_.shape))
         members =
           needed ++ List(
-            s"$access def encodeJson(value: ${scalaPath(record.path)}): ${result(jsonType)} =\n  $helpers.write(${writes.map("\n    " + _)
-                .mkString(",")}\n  )",
+            s"$access def encodeJson(value: ${scalaPath(record.path)}, depth: ${builtin("Int")} = 0): ${result(
+                jsonType
+              )} =\n  $helpers.within(depth)(\n    $helpers.write(${writes.map("\n      " + _).mkString(",")}\n    )\n  )",
             s"$access def decodeJson(json: $jsonType, strict: ${builtin("Boolean")}): ${result(
                 scalaPath(record.path)
               )} =\n  $helpers.read(json, ${label(record.path)}, strict, ${builtin("Set")}($known))\n$decoding"
@@ -478,8 +481,8 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
       val name = Names.quote(field.json)
       field.presence match
         case Presence.Constant(value) => s"$helpers.constant($name, ${json(value)})"
-        case Presence.Optional        => s"$helpers.optional[${scala(strip(field.shape))}]($name, value.${field.scala})"
-        case _                        => s"$helpers.property[${scala(field.shape)}]($name, value.${field.scala})"
+        case Presence.Optional        => s"$helpers.optional[${scala(strip(field.shape))}]($name, value.${field.scala}, depth)"
+        case _                        => s"$helpers.property[${scala(field.shape)}]($name, value.${field.scala}, depth)"
 
     private def read(field: Field, index: Int): Either[String, Option[String]] =
       val name = Names.quote(field.json)
@@ -513,8 +516,9 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
       }.toLeft(special ++ unions.zipWithIndex.map((union, index) => unionGiven(union, s"jsonUnion${index + 1}")))
 
     private def unionGiven(union: Shape.Union, name: String): String =
-      val all      = scala(union)
-      val writes   = union.branches.map(branch => s"\n      case value: ${pattern(branch)} => summon[$codecs[${scala(branch)}]].encode(value)")
+      val all    = scala(union)
+      val writes =
+        union.branches.map(branch => s"\n          case value: ${pattern(branch)} => $helpers.encodeWithin[${scala(branch)}](value, depth)")
       val branches =
         union.branches.map: branch =>
           val reading =
@@ -524,8 +528,9 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
               case Shape.Named(path) => s"(json: $jsonType, _: ${builtin("Boolean")}) => ${scalaPath(path)}.decodeJson(json)"
               case other             => s"(json: $jsonType, _: ${builtin("Boolean")}) => summon[$codecs[${scala(other)}]].decode(json)"
           s"\n      (${Names.quote(scala(branch))}, $reading)"
-      s"private given $name: $codecs[$all] =\n  $helpers.part[$all](\n    {${writes.mkString}\n    },\n    $helpers.union[$all](${Names
-          .quote(all)}, ${union.exactlyOne}, ${builtin("List")}(${branches.mkString(",")}\n    ))\n  )"
+      s"private given $name: $codecs[$all] =\n  $helpers.part[$all](\n    { (value, depth) =>\n        value match {${writes
+          .mkString}\n        }\n    },\n    $helpers.union[$all](${Names.quote(all)}, ${union.exactlyOne}, ${builtin("List")}(${branches
+          .mkString(",")}\n    ))\n  )"
 
     /** The type a value of a union's branch is matched by, where its type arguments cannot be checked. */
     private def pattern(shape: Shape): String =
@@ -559,8 +564,8 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
         List(
           s"private val jsonReader = $helpers.union[$full](${label(choice.path)}, ${choice.exactlyOne}, ${builtin("List")}(${branches
               .mkString(",")}\n  ))",
-          s"$access def encodeJson(value: $full): ${result(jsonType)} =\n  value match" +
-            choice.branches.map(path => s"\n    case value: ${scalaPath(path)} => ${scalaPath(path)}.encodeJson(value)").mkString,
+          s"$access def encodeJson(value: $full, depth: ${builtin("Int")} = 0): ${result(jsonType)} =\n  value match" +
+            choice.branches.map(path => s"\n    case value: ${scalaPath(path)} => ${scalaPath(path)}.encodeJson(value, depth)").mkString,
           s"$access def decodeJson(json: $jsonType): ${result(full)} = jsonReader(json)"
         )
       s"${scaladoc(choice.doc, Nil)}sealed trait $name\n\n" + companion(choice.path, members).fold(identity, identity)

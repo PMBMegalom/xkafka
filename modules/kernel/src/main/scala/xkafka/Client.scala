@@ -531,7 +531,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     withProperties(producer.properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
-    producer.withProperties(values).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+    producer.withProperties(values).andThen(TransactionalProducerSettings.checked(_, transactionalId, transactionTimeout))
 
 object TransactionalProducerSettings:
   /** What Kafka's own producers use for `transaction.timeout.ms`. */
@@ -1480,6 +1480,8 @@ trait CommittableOffset[F[_]]:
 
       override private[xkafka] def stillHeld: Option[F[Boolean]] = self.stillHeld
 
+      override private[xkafka] def handingOut: Option[F[Boolean]] = self.handingOut
+
       override private[xkafka] def assignment: Option[Long] = self.assignment
 
   /** The group membership this offset was read under, which is what a transaction records it against.
@@ -1495,6 +1497,11 @@ trait CommittableOffset[F[_]]:
     * under an assignment the group has since given to another member.
     */
   private[xkafka] def stillHeld: Option[F[Boolean]] = None
+
+  /** Whether the record can still be handed out, counting it handed out where it can, for a reader that takes it from [[KafkaConsumer.routedRecords]]
+    * and hands it out later; where the consumer counts none, whether it is still held.
+    */
+  private[xkafka] def handingOut: Option[F[Boolean]] = None
 
   /** How many times the group had assigned this offset's partition to its consumer when the record was read, where the consumer counts them. */
   private[xkafka] def assignment: Option[Long] = None
@@ -1518,6 +1525,8 @@ trait CommittableOffset[F[_]]:
       override private[xkafka] def lease: Option[Lease] = self.lease
 
       override private[xkafka] def stillHeld: Option[G[Boolean]] = self.stillHeld.map(fk(_))
+
+      override private[xkafka] def handingOut: Option[G[Boolean]] = self.handingOut.map(fk(_))
 
       override private[xkafka] def assignment: Option[Long] = self.assignment
 
@@ -1763,6 +1772,11 @@ trait KafkaConsumer[F[_], K, V]:
     */
   private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] = assignmentChanges.map(_.map(_ -> 0L).toMap)
 
+  /** The records, not yet counted as handed out, for a reader that hands each out later through its offset's `handingOut`: a record it drops then, as
+    * one fetched before a seek, is not waited for by rebalance-safe commits.
+    */
+  private[xkafka] def routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] = records
+
   /** Stops fetching, so the record streams end once the records already fetched have been handed over.
     *
     * This is how a consumer stops gracefully: nothing already fetched is dropped, and offsets stay committable afterwards. It returns as soon as
@@ -1861,6 +1875,8 @@ trait KafkaConsumer[F[_], K, V]:
       override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
 
       override private[xkafka] def assignmentNumbers: Stream[G, Map[TopicPartition, Long]] = self.assignmentNumbers.translate(fk)
+
+      override private[xkafka] def routedRecords: Stream[G, CommittableConsumerRecord[G, K, V]] = self.routedRecords.map(_.mapK(fk)).translate(fk)
 
       override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[OffsetAndMetadata]]] =
         fk(self.committed(topicPartitions))

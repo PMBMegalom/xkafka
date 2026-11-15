@@ -127,6 +127,34 @@ final case class NamedArguments(
     count: Int
 ) derives AvroCodec
 
+/** A sealed trait two of whose records are given one name, and are alike. */
+sealed trait Recorded derives AvroCodec
+@SchemaName("Created")
+final case class FirstCreated(id: Int) extends Recorded
+@SchemaName("Created")
+final case class SecondCreated(id: Int) extends Recorded
+
+/** A record put in no namespace, as a schema file that names none puts it. */
+@SchemaNamespace("")
+final case class Unspaced(id: Int) derives AvroCodec
+
+/** Constants annotations take, in place of literals. */
+object Constants:
+  final val Name      = "Order"
+  final val Size      = 4
+  final val Precision = 6
+
+/** A record whose annotations take constants the compiler folds. */
+@SchemaNamespace("com." + "example") @SchemaName(Constants.Name)
+final case class ConstantArguments(
+    @SchemaDecimal(Constants.Precision, 2)
+    price: BigDecimal,
+    hash: ConstantFixed
+) derives AvroCodec
+
+@AvroFixed(Constants.Size)
+final case class ConstantFixed(bytes: Chunk[Byte]) derives AvroCodec
+
 /** An enum two of whose cases are named alike, in two objects. */
 sealed trait Happened derives AvroCodec
 object Happened:
@@ -345,6 +373,7 @@ class AvroCodecSuite extends FunSuite:
   test("an enum two of whose cases have one symbol, and a union two of whose branches are of one type, are refused, as Avro allows neither"):
     assertEquals(AvroCodec[Happened].refusal, Some("enum 'xkafka.avro.Happened' holds the symbol 'Created' twice"))
     assertEquals(AvroCodec.union[(java.time.Instant, Long)].refusal, Some("a union holds 'Long' twice"))
+    assertEquals(AvroCodec[Recorded].refusal, Some("'xkafka.avro.Recorded' has two cases named 'xkafka.avro.Created'"))
     assertEquals(AvroCodec.union[(Int, String)].refusal, None)
 
   test("a union of a named type and a primitive of the same name is read, as their full names differ"):
@@ -359,7 +388,23 @@ class AvroCodecSuite extends FunSuite:
     )
     assert(
       compileErrors("""val name = "x"; @SchemaName(name) final case class Computed(n: Int) derives AvroCodec""")
-        .contains("@SchemaName takes literal text")
+        .contains("@SchemaName takes constant text")
+    )
+    assert(
+      compileErrors("final case class Computed(@SchemaDoc(\"\"\"|a\n  |b\"\"\".stripMargin) n: Int) derives AvroCodec")
+        .contains("@SchemaDoc takes constant text")
+    )
+
+  test("a type given an empty namespace has none, so its schema matches a file that names none"):
+    val file = """{"type":"record","name":"Unspaced","fields":[{"name":"id","type":"int"}]}"""
+    assertEquals(AvroSchemaJson.render(AvroCodec[Unspaced].schema), file)
+    assertEquals(AvroFormat(using AvroCodec[Unspaced]).recordName, Some("Unspaced"))
+    assertEquals(AvroCodec[Unspaced].matching(file).refusal, None)
+
+  test("annotations take any constant the compiler folds, such as a final val or joined literals"):
+    assertEquals(
+      AvroSchemaJson.render(AvroCodec[ConstantArguments].schema),
+      """{"type":"record","name":"Order","namespace":"com.example","fields":[{"name":"price","type":{"type":"bytes","logicalType":"decimal","precision":6,"scale":2}},{"name":"hash","type":{"type":"fixed","name":"ConstantFixed","namespace":"xkafka.avro","size":4}}]}"""
     )
 
   test("an option holding an option is refused, as its none and some none would both be written as null"):

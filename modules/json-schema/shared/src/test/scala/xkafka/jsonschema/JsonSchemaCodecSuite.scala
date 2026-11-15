@@ -162,17 +162,38 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       Some("a whole schema for https://json-schema.org/draft/2020-12/schema cannot be held in another, which is for draft 7")
     )
     assertEquals(later.refusal, None)
+    List("http://json-schema.org/draft-07/schema#", "https://json-schema.org/draft-07/schema#", "http://json-schema.org/draft-07/schema").foreach:
+      named =>
+        val seven: JsonSchemaCodec[String] =
+          JsonSchemaCodec
+            .from(parse(s"""{"$$schema":"$named","type":"string"}""").toOption.get, io.circe.Encoder.encodeString, io.circe.Decoder.decodeString)
+        assertEquals(JsonSchemaCodec[List[String]](using JsonSchemaCodec.given_JsonSchemaCodec_List(using seven)).refusal, None, named)
 
   test("an option of a schema that takes null already is refused, since null would match both branches of its oneOf"):
     def written(schema: String): JsonSchemaCodec[String] =
       JsonSchemaCodec.from(parse(schema).toOption.get, io.circe.Encoder.encodeString, io.circe.Decoder.decodeString)
-    List("""{"type":["string","null"]}""", """{"enum":["a",null]}""", """{}""", """{"oneOf":[{"type":"null"},{"type":"string"}]}""").foreach:
-      schema =>
-        assert(JsonSchemaCodec[Option[String]](using JsonSchemaCodec.given_JsonSchemaCodec_Option(using written(schema))).refusal.isDefined, schema)
-    assertEquals(
-      JsonSchemaCodec[Option[String]](using JsonSchemaCodec.given_JsonSchemaCodec_Option(using written("""{"type":"string"}"""))).refusal,
-      None
-    )
+    def refusal(schema: String) = JsonSchemaCodec[Option[String]](using JsonSchemaCodec.given_JsonSchemaCodec_Option(using written(schema))).refusal
+    // Every keyword must take a value, so null is one unless a keyword rules it out.
+    List(
+      """{"type":["string","null"]}""",
+      """{"enum":["a",null]}""",
+      """{}""",
+      """{"oneOf":[{"type":"null"},{"type":"string"}]}""",
+      """{"examples":[1]}""",
+      """{"minimum":0}""",
+      """{"format":"email"}""",
+      """{"const":null}""",
+      """{"not":{"type":"string"}}""",
+      """{"allOf":[{"type":"null"}]}"""
+    ).foreach(schema => assert(refusal(schema).isDefined, schema))
+    List(
+      """{"type":"string"}""",
+      """{"type":"string","oneOf":[{},{"minLength":1}]}""",
+      """{"const":"a"}""",
+      """{"not":{}}""",
+      """{"allOf":[{"type":"string"},{}]}""",
+      """{"anyOf":[{"type":"string"},{"type":"integer"}]}"""
+    ).foreach(schema => assertEquals(refusal(schema), None, schema))
 
   test("an option holding an option is refused, since null would be a value of both and Some(None) would read back as None"):
     assert(JsonSchemaCodec[Twice].refusal.exists(_.contains("an option holding an option")), JsonSchemaCodec[Twice].refusal)

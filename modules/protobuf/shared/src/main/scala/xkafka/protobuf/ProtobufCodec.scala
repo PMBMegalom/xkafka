@@ -78,14 +78,15 @@ private[protobuf] trait Single[A]:
   def put(value: A): Either[String, Raw]
   def take(raw: Raw): Either[String, A]
 
-  /** The value written inside as many messages as `depth` says, which a message refuses at `ProtobufWire.MaxDepth`, as reading does. */
+  /** The value written inside as many messages as `depth` says, which a message refuses past `ProtobufWire.MaxDepth`, as reading does. */
   def putWithin(
       value: A,
       @unused
       depth: Int
   ): Either[String, Raw] = put(value)
 
-  /** The value inside as many messages as `depth` says, which a message refuses at `ProtobufWire.MaxDepth`, so that no record runs the stack out. */
+  /** The value inside as many messages as `depth` says, which a message refuses past `ProtobufWire.MaxDepth`, so that no record runs the stack out.
+    */
   def takeWithin(
       raw: Raw,
       @unused
@@ -365,17 +366,21 @@ object ProtobufCodec:
     override private[protobuf] def label: Label                           = Label.Mapped
     override private[protobuf] def single: Option[Single[Map[String, A]]] = None
     override private[protobuf] def writeWithin(number: Int, value: Map[String, A], presence: Boolean, depth: Int): Either[String, Chunk[Byte]] =
+      // Each entry is a message of its own, which protobuf-java counts as a level.
       inner.single.toRight(notSingle("a map")).flatMap: one =>
-        value.toList.traverse((key, item) =>
-          (ProtobufCodec[String].write(1, key, presence = true), one.putWithin(item, depth)).mapN(_ ++ ProtobufWire.field(2, _))
-        ).map(_.foldLeft(Chunk.empty[Byte])((written, entry) => written ++ ProtobufWire.field(number, Raw.Bytes(entry))))
+        if value.nonEmpty && depth > ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+        else
+          value.toList.traverse((key, item) =>
+            (ProtobufCodec[String].write(1, key, presence = true), one.putWithin(item, depth + 1)).mapN(_ ++ ProtobufWire.field(2, _))
+          ).map(_.foldLeft(Chunk.empty[Byte])((written, entry) => written ++ ProtobufWire.field(number, Raw.Bytes(entry))))
     override private[protobuf] def read(found: Vector[Raw]): Either[String, Map[String, A]]                   = readWithin(found, 0)
     override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, Map[String, A]] =
       inner.single.toRight(notSingle("a map")).flatMap: one =>
         found.traverse:
-          case Raw.Bytes(entry) => ProtobufWire.fields(entry).flatMap: fields =>
+          case Raw.Bytes(_) if depth > ProtobufWire.MaxDepth => Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+          case Raw.Bytes(entry)                              => ProtobufWire.fields(entry).flatMap: fields =>
               def at(number: Int) = fields.collect { case (`number`, raw) => raw }
-              (ProtobufCodec[String].read(at(1)), at(2).lastOption.fold(one.absent)(one.takeWithin(_, depth))).tupled
+              (ProtobufCodec[String].read(at(1)), at(2).lastOption.fold(one.absent)(one.takeWithin(_, depth + 1))).tupled
           case other => Left(s"expected a map's entry, found ${kind(other)}")
         .map(_.toMap)
 
@@ -503,7 +508,7 @@ private[protobuf] final class MessageCodec[A, T <: Tuple](
   override def put(value: A): Either[String, Raw] = putWithin(value, 0)
 
   override def putWithin(value: A, depth: Int): Either[String, Raw] =
-    if depth >= ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    if depth > ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
     else
       fields.write(toTuple(value), numbers, presence, depth + 1).bimap(
         reason => s"$full: $reason",
@@ -514,8 +519,8 @@ private[protobuf] final class MessageCodec[A, T <: Tuple](
 
   override def takeWithin(raw: Raw, depth: Int): Either[String, A] =
     raw match
-      case Raw.Bytes(_) if depth >= ProtobufWire.MaxDepth => Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
-      case Raw.Bytes(bytes)                               => ProtobufWire.fields(bytes).flatMap: read =>
+      case Raw.Bytes(_) if depth > ProtobufWire.MaxDepth => Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+      case Raw.Bytes(bytes)                              => ProtobufWire.fields(bytes).flatMap: read =>
           val byNumber = read.groupMap(_._1)(_._2)
           // A field the record lacks takes its default, where it has one.
           fields.readWithin(numbers.zip(written).map((number, default) => byNumber.get(number).orElse(default).getOrElse(Vector.empty)), depth + 1)
@@ -595,19 +600,23 @@ private[protobuf] final class OneofCodec[A](named: Meta.Named, cases: List[Case[
 
   override def put(value: A): Either[String, Raw] = putWithin(value, 0)
 
+  // The message holding the oneof is a level of its own, which protobuf-java counts, its case one deeper.
   override def putWithin(value: A, depth: Int): Either[String, Raw] =
-    cases
-      .collectFirstSome(known => known.test.unapply(value).map(narrowed => known.codec.writeWithin(known.number, narrowed, presence = true, depth)))
-      .getOrElse(Left(s"${Shown(value)} is none of the cases of $full")).map(Raw.Bytes(_))
+    if depth > ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    else
+      cases.collectFirstSome(known =>
+        known.test.unapply(value).map(narrowed => known.codec.writeWithin(known.number, narrowed, presence = true, depth + 1))
+      ).getOrElse(Left(s"${Shown(value)} is none of the cases of $full")).map(Raw.Bytes(_))
 
   override def take(raw: Raw): Either[String, A] = takeWithin(raw, 0)
 
   override def takeWithin(raw: Raw, depth: Int): Either[String, A] =
     raw match
-      case Raw.Bytes(bytes) => ProtobufWire.fields(bytes).flatMap: read =>
-          // Of a oneof's fields, the last one written is the one set; its message counts how deep it is.
+      case Raw.Bytes(_) if depth > ProtobufWire.MaxDepth => Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+      case Raw.Bytes(bytes)                              => ProtobufWire.fields(bytes).flatMap: read =>
+          // Of a oneof's fields, the last one written is the one set, a level below the message holding them.
           read.reverseIterator.flatMap((number, value) => cases.find(_.number == number).map(_ -> value)).nextOption() match
-            case Some((known, value)) => known.codec.readWithin(Vector(value), depth).map(known.widen)
+            case Some((known, value)) => known.codec.readWithin(Vector(value), depth + 1).map(known.widen)
             case None                 => Left(s"no case of $full is set")
       case _ => Left(s"expected a message of $full, found another wire type")
 

@@ -75,6 +75,11 @@ limit. The exceptions are:
 - Under exactly-once, a streams `commitInterval` must be at most
   `StreamsSettings.TransactionTimeout` (10 seconds), as Java refuses, since the
   broker aborts a transaction open longer.
+- A streams application's client properties must make producer settings these
+  rules allow, since its producers take them: under exactly-once, those of a
+  transactional producer with the 10-second transaction timeout. One that does
+  not fails with `StreamsSettingsError.ProducerSetting`, holding the producer's
+  `SettingsError`.
 - The group membership intervals are at most
   `ConsumerSettings.SessionTimeoutLimit` (1 hour),
   `ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
@@ -130,8 +135,8 @@ that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `TransactionalProducerSettings`, which check the settings again under the new
 client's properties. `StreamsSettings`
 works the same way: its methods
-that set a duration, the concurrency, the guarantee or the state directory
-return `ValidatedNel[StreamsSettingsError, *]`. The others, such as
+that set a duration, the concurrency, the guarantee, the client or the state
+directory return `ValidatedNel[StreamsSettingsError, *]`. The others, such as
 `withCompression` or `withIsolationLevel`, return the settings directly.
 
 ```scala mdoc:compile-only

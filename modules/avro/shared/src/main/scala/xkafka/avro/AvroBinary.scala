@@ -300,17 +300,21 @@ object AvroBinary:
 
     private def found[A](result: Either[String, A]): Planning[A] = EitherT.fromEither(result)
 
-    /** The reader field each writer field is read into, where there is one: the reader field of its name, as Java finds a field by its name first, or
-      * one no writer field names whose alias names it, each reader field taken by one writer field only.
+    /** The reader field each writer field is read into, where there is one, as Java's `applyAliases` finds it: where the writer's record is the
+      * reader's by its full name or an alias of it, each writer field an alias of a reader field names takes that field's name, the later of two
+      * reader fields with one alias winning, and then each is read into the reader field of its name. Two writer fields that come to one name are
+      * refused, as Java refuses them. A record read by its simple name alone has its fields read by their names.
       */
-    private def matched(written: AvroSchema.Record, read: AvroSchema.Record): AvroField => Option[AvroField] =
-      val byName  = read.fields.reverseIterator.map(field => field.name -> field).toMap
-      val named   = written.fields.map(_.name).toSet
-      val aliased =
-        read.fields.filterNot(field => named.contains(field.name)).flatMap: field =>
-          written.fields.find(writer => field.aliases.contains(writer.name)).map(writer => writer.name -> field)
-        .reverseIterator.toMap
-      field => byName.get(field.name).orElse(aliased.get(field.name))
+    private def matched(written: AvroSchema.Record, read: AvroSchema.Record): Either[String, AvroField => Option[AvroField]] =
+      val renames =
+        if written.name != read.name && !read.aliases.contains(written.name) then Map.empty[String, String]
+        else read.fields.flatMap(field => field.aliases.map(_ -> field.name)).toMap
+      val names = written.fields.map(field => renames.getOrElse(field.name, field.name))
+      names.diff(names.distinct).headOption match
+        case Some(twice) => Left(s"record '${written.name.value}' has two fields read as '$twice' of '${read.name.value}'")
+        case None        =>
+          val byName = read.fields.map(field => field.name -> field).toMap
+          Right(field => byName.get(renames.getOrElse(field.name, field.name)))
 
     /** The first place a value of `writer` would mean something else written as `reader`, for `writable`; `seen` holds the record pairs met. */
     def clash(writer: AvroSchema, reader: AvroSchema): Option[String] = clashing(writer, reader).runA(Set.empty).value
@@ -342,9 +346,12 @@ object AvroBinary:
           State.get[Set[(FullName, FullName)]].flatMap: checked =>
             if checked(pair) then State.pure(None)
             else
-              val readerField = matched(written, read)
-              State.modify[Set[(FullName, FullName)]](_ + pair) *> first(written.fields): field =>
-                readerField(field).fold(State.pure(None))(target => clashing(field.schema, target.schema))
+              matched(written, read).fold(
+                twice => State.pure(Some(twice)),
+                readerField =>
+                  State.modify[Set[(FullName, FullName)]](_ + pair) *> first(written.fields): field =>
+                    readerField(field).fold(State.pure(None))(target => clashing(field.schema, target.schema))
+              )
         // Avro reads bytes as text, which changes bytes that are not UTF-8, so they are not written as it.
         case (AvroSchema.Bytes, AvroSchema.String) => State
             .pure(Some("bytes are not written as a string, which would change bytes that are not text"))
@@ -418,7 +425,9 @@ object AvroBinary:
         case _ => Left(s"${render(reader)} cannot read what ${render(writer)} wrote")
 
     private def record(written: AvroSchema.Record, read: AvroSchema.Record): Planning[Step] =
-      val readerField = matched(written, read)
+      found(matched(written, read)).flatMap(readerField => fields(written, read, readerField))
+
+    private def fields(written: AvroSchema.Record, read: AvroSchema.Record, readerField: AvroField => Option[AvroField]): Planning[Step] =
       // A field the reader lacks is read only to be skipped, as the writer's own schema reads it, whatever the reader names the same.
       def skipped(field: AvroField) = found(Resolution(writers, writers).plan(field.schema, field.schema))
       val planned                   =

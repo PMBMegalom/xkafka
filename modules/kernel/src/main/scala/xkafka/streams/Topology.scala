@@ -1709,13 +1709,13 @@ final class CogroupedKStream[F[_], K, A, O] private[xkafka] (sides: Vector[Cogro
     CogroupedKStream(sides :+ other.side(add), key, ending)
 
   /** The stream of what `fold` makes of each side's records, which meet in the node `<named>-cogroup-merge`, each side's step being
-    * `<named>-cogroup-agg-<number>`, as Java names them.
+    * `<named>-cogroup-agg-<number>`, as Java names them. The name itself is refused where Java's `Named` refuses it, though no node takes it alone.
     */
   private[xkafka] def folded[K2, R](named: Named, fold: CogroupFold[F, K, A, K2, R], problems: Option[TopologyError]): KStream.Ends[F, K2, R, O] =
     val merge = Named(s"${named.value}-cogroup-merge")
     KStream.of[F, K2, R, KeyState.AsRead, O](
       next =>
-        val met = Consumer.Cogroup(merge, sides.size > 1, Consumer.refusing(problems, next))
+        val met = Consumer.Cogroup(merge, sides.size > 1, Consumer.refusing(problems ++ Topology.invalid(named.value), next))
         sides.zipWithIndex.map((side, number) => side.fed(Named(s"${named.value}-cogroup-agg-$number"), number, sides.size == 1, fold, met))
           .reduceLeft(ending.both)
       ,

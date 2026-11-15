@@ -76,10 +76,16 @@ class AvroGeneratorSuite extends FunSuite:
         List(s"example.R.note has a default xkafka cannot write: $msg")
       )
 
-  directory.test("a uuid default that is no UUID, and a decimal default of no bytes, are refused, since the class could not hold them"): in =>
+  directory.test(
+    "a uuid default that is no UUID in its canonical form, and a decimal default of no bytes, are refused, since the class could not hold them"
+  ): in =>
     assertEquals(
       refused(in, "a.avsc" -> record("""{"name": "id", "type": {"type": "string", "logicalType": "uuid"}, "default": "none"}""")),
       List("example.R.id has a default xkafka cannot write: 'none' is no UUID")
+    )
+    assertEquals(
+      refused(in, "c.avsc" -> record("""{"name": "id", "type": {"type": "string", "logicalType": "uuid"}, "default": "0-0-0-0-0"}""")),
+      List("example.R.id has a default xkafka cannot write: '0-0-0-0-0' is no UUID")
     )
     assertEquals(
       refused(

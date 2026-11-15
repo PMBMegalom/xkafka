@@ -80,6 +80,38 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(StreamsSettings.from(client, app, commitInterval = Some(30.seconds)).orFail.withGuarantee(exactly), refused)
     assert(StreamsSettings.from(client, app, exactly, commitInterval = Some(StreamsSettings.TransactionTimeout)).isValid)
     assert(StreamsSettings.from(client, app, commitInterval = Some(30.seconds)).isValid)
+    assertEquals(
+      StreamsSettings.from(client, app, exactly, commitInterval = Some(30.seconds), concurrency = 0),
+      Validated.invalid(NonEmptyList.of(
+        StreamsSettingsError.CommitIntervalAboveTransactionTimeout(30.seconds, StreamsSettings.TransactionTimeout),
+        StreamsSettingsError.NonPositiveConcurrency(0)
+      )),
+      "reported with every other reason"
+    )
+
+  test("client properties the application's producers refuse are refused as the settings are made, however they are made"):
+    def withProperty(name: String, value: String) = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map(name -> value)).orFail
+    val exactly                                   = ProcessingGuarantee.ExactlyOnce
+    val short                                     = withProperty("delivery.timeout.ms", "20000")
+    val refusedShort                              =
+      Validated.invalidNel(
+        StreamsSettingsError.ProducerSetting(SettingsError.PropertyDurationBelowMinimum("delivery.timeout.ms", 20.seconds, 30.seconds + 5.millis))
+      )
+    assertEquals(StreamsSettings.from(short, app), refusedShort)
+    assertEquals(StreamsSettings.from(client, app).orFail.withClient(short), refusedShort)
+    // Exactly once, a message timeout past the transaction timeout is refused too, as a transactional producer refuses it.
+    val long        = withProperty("message.timeout.ms", "20000")
+    val refusedLong =
+      Validated
+        .invalidNel(StreamsSettingsError.ProducerSetting(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 20.seconds, 10.seconds)))
+    assert(StreamsSettings.from(long, app).isValid)
+    assertEquals(StreamsSettings.from(long, app, exactly), refusedLong)
+    assertEquals(StreamsSettings.from(long, app).orFail.withGuarantee(exactly), refusedLong)
+    assertEquals(
+      StreamsSettingsError.ProducerSetting(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 20.seconds, 10.seconds)).message,
+      "the application's producers refuse their settings: " + SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 20.seconds, 10.seconds)
+        .message
+    )
 
   test("every invalid setting is reported at once"):
     assertEquals(

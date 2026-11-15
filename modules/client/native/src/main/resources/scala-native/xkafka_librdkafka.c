@@ -497,6 +497,12 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
                 xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(err), err);
                 return xkafka_fatal(producer) ? -2 : -1;
         }
+        /* One that timed out once the producer met a fatal failure is reported as that failure, which made it fatal too, as
+         * librdkafka retries nothing after it: a fenced producer's deliveries then say it was fenced. */
+        if (xkafka_fatal(producer)) {
+                xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(RD_KAFKA_RESP_ERR__FATAL), RD_KAFKA_RESP_ERR__FATAL);
+                return -2;
+        }
         /* A delivery report that never reached a broker reports the retries
          * ending, so a recorded security failure is the cause. */
         if (!batch->security_read) {
@@ -507,8 +513,7 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
                 xkafka_set_error_at(error, error_size, error_code, batch->security_message, batch->security_error);
         else
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);
-        /* One that timed out once the producer met a fatal failure is fatal too, as librdkafka retries nothing after it. */
-        return xkafka_fatal(producer) ? -2 : -1;
+        return -1;
 }
 
 size_t xkafka_batch_count(const xkafka_batch_t *batch) {

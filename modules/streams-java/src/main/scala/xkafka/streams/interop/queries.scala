@@ -254,24 +254,33 @@ final class JavaQuerying private (
     * counts only the partitions some member holds, which miss one while it moves (KAFKA-20887).
     */
   private def keyed[K](store: String, key: K, serde: JavaSerde[K], request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
-    val holders        = holdersOf(store)
-    val (topic, count) = sourcesOf(store).toList.map(topic => topic -> partitions(topic)).maxBy(_._2)
-    val partition      = Murmur2.partition(Chunk.array(serde.serializer.serialize(topic, key)), count)
+    val (topics, holders) = holdersOf(store)
+    val (topic, count)    = topics.toList.map(topic => topic -> partitions(topic)).maxBy(_._2)
+    val partition         = Murmur2.partition(Chunk.array(serde.serializer.serialize(topic, key)), count)
     JavaQuerying.holderOf(partition, holders)
       .fold(throw new QueryProblemException(QueryProblem.Rebalancing))(at => asked(at, Asked(request, List(partition), false)))
 
   /** The entries every member holding part of `store` finds for `request`, each asked for its partitions of the topic the store is filled from. */
   private def everywhere(store: String, request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
-    val holders = holdersOf(store)
-    if !JavaQuerying.covers(sourcesOf(store).toList.map(partitions).max, holders) then throw new QueryProblemException(QueryProblem.Rebalancing)
+    val (topics, holders) = holdersOf(store)
+    if !JavaQuerying.covers(topics.toList.map(partitions).max, holders) then throw new QueryProblemException(QueryProblem.Rebalancing)
     holders.toVector.flatMap((at, partitions) => asked(at, Asked(request, partitions, false))).sortBy(_._1)(using QueryRequest.unsigned)
 
-  /** The members Java's metadata says hold part of `store`, each with the partitions it holds as an active task. */
-  private def holdersOf(store: String): List[(HostInfo, List[Int])] =
-    val topics = sourcesOf(store)
-    settled(streams.streamsMetadataForStore(store)).asScala.toList
-      .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(held => topics(held.topic)).map(_.partition).toList.sorted.distinct)
-      .filter((at, held) => held.nonEmpty && at.port >= 0)
+  /** The topics `store` is filled from, as the brokers name them, and the members Java's metadata says hold part of it, each with the partitions it
+    * holds as an active task. Java describes a topic of the application's own, as a repartition topic, without the application id the brokers name it
+    * by, which its metadata gives; while no member is known to hold the store, it is moving.
+    */
+  private def holdersOf(store: String): (Set[String], List[(HostInfo, List[Int])]) =
+    val described = sourcesOf(store)
+    val metadata  = settled(streams.streamsMetadataForStore(store)).asScala.toList
+    val held      = metadata.flatMap(_.topicPartitions.asScala.map(_.topic)).toSet
+    val topics    = described.map(topic => Some(s"$application-$topic").filter(held).getOrElse(topic))
+    val holders   =
+      metadata
+        .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(partition => topics(partition.topic)).map(_.partition).toList.sorted.distinct)
+        .filter((at, partitions) => partitions.nonEmpty && at.port >= 0)
+    if holders.isEmpty then throw new QueryProblemException(QueryProblem.Rebalancing)
+    (topics, holders)
 
   /** The topics the sub-topology keeping `store` reads. */
   private def sourcesOf(store: String): Set[String] =

@@ -189,7 +189,8 @@ A record without a value, such as a tombstone, fails to read with
   class's name carries its type arguments in full, `Box[List[Int]]` being
   `Box__List__Int`, where the class is derived for those arguments.
 - Two types given one name, for example with `@SchemaName`, make no schema,
-  so writing or reading them fails.
+  so making a serde of them fails with `RegistryException.NoSchema`. So do two
+  cases of a sealed trait given one name, which would be one union branch twice.
 - A field's Scala default is its default in the schema. An optional field whose
   default is a value has that value's branch first in its union, since Avro takes
   a union's default from its first branch. A default the schema cannot place is
@@ -429,12 +430,15 @@ Records match what Confluent's `KafkaJsonSchemaSerializer` writes.
   default, or an optional one, as a new version of the schema, and refuses to
   let you remove a field.
 - A case of a sealed trait must not have a field named `type`: writing it fails.
-- These make no schema, so writing or reading them fails: two cases of a sealed
+- These make no schema, so making a serde of them fails with
+  `RegistryException.NoSchema`: two cases of a sealed
   trait or enum with one name, such as `V1.Created` and `V2.Created`, which
   `type` could not tell apart; two types of one name that hold themselves, as a
   generic class derived once for every type argument gives; and an option
-  holding an option, or a schema written by hand that takes `null`, which
-  `null` would be a value of twice. Neither can a schema written by hand that
+  holding an option, or a schema written by hand that may take `null`, which
+  `null` would be a value of twice. A schema may take `null` unless a keyword
+  rules it out, such as a `type` or `enum` without `null`, since `null` must
+  satisfy every keyword, so `{"minimum": 0}` takes it. Neither can a schema written by hand that
   names its own definitions by reference, or that is written for a draft other
   than draft 7, be held in a derived type, in an option, a collection or a map:
   the schema holding it is for draft 7, and its references would name that
@@ -717,12 +721,14 @@ declare groups or extensions, or are written in an edition of Protobuf.
 ## Names and documentation
 
 These annotations, in `xkafka.schemaregistry`, change what a derived schema
-calls things, for every format:
+calls things, for every format. Each takes a constant, a literal or a value the
+compiler folds to one, such as a `final val`; any other argument fails to
+compile:
 
 | Annotation | On | Effect |
 | --- | --- | --- |
 | `@SchemaName("name")` | a type or field | names it in place of its Scala name |
-| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's and objects' |
+| `@SchemaNamespace("com.example")` | a type | puts it in this namespace in place of its package's and objects', or in none for `@SchemaNamespace("")` |
 | `@SchemaDoc("text")` | a type or field | documents it |
 | `@SchemaAlias("Old")` | a type or field | another name it was known by, so records written under that name are read |
 | `@SchemaNoDefault` | a field | leaves its Scala default out of the schema |
@@ -823,7 +829,9 @@ Failures are `RegistryException`s:
 
 A record nested more than 100 deep, such as a list of 101 nodes that each hold
 the next, is also `Unserializable`, written or read, in every format with
-xkafka's own codecs. So are:
+xkafka's own codecs. A Protobuf record may hold 100 messages below its own, as
+protobuf-java reads it, counting a oneof's message and each map entry as one, so
+a list of 102 nodes is refused there. So are:
 
 - an Avro record whose arrays or maps claim more items than its bytes can hold,
   or that has bytes left after its value, with xkafka's codecs or with vulcan's

@@ -71,6 +71,9 @@ enum StreamsSettingsError derives CanEqual:
   case NegativeTaskTimeout(value: FiniteDuration)
   case CommitIntervalAboveTransactionTimeout(value: FiniteDuration, transactionTimeout: FiniteDuration)
 
+  /** The client's properties make settings the application's producers refuse, as the producers would refuse them when the application starts. */
+  case ProducerSetting(error: SettingsError)
+
   def message: String =
     this match
       case EmptyApplicationId                    => "application id must not be empty"
@@ -87,6 +90,7 @@ enum StreamsSettingsError derives CanEqual:
       case NegativeTaskTimeout(value)            => s"task timeout must not be negative, was $value"
       case CommitIntervalAboveTransactionTimeout(value, timeout) =>
         s"commit interval must not exceed the transaction timeout of $timeout under exactly-once, was $value"
+      case ProducerSetting(error) => s"the application's producers refuse their settings: ${error.message}"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -140,13 +144,16 @@ sealed abstract case class StreamsSettings private (
     fetchWait: FiniteDuration,
     taskTimeout: FiniteDuration
 ):
-  def withClient(value: ClientSettings): StreamsSettings = copy(client = value)
+  /** The client, whose properties the application's producers take too, so that what they refuse is refused here. */
+  def withClient(value: ClientSettings): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    StreamsSettings.producing(value, applicationId, guarantee).map(_ => copy(client = value))
 
   def withApplicationId(value: ApplicationId): StreamsSettings = copy(applicationId = value)
 
   /** The guarantee, which exactly-once refuses with a commit interval past its transaction timeout. */
   def withGuarantee(value: ProcessingGuarantee): ValidatedNel[StreamsSettingsError, StreamsSettings] =
-    StreamsSettings.committing(value, commitInterval).map(_ => copy(guarantee = value))
+    (StreamsSettings.committing(value, commitInterval), StreamsSettings.producing(client, applicationId, value))
+      .mapN((_, _) => copy(guarantee = value))
 
   def withCommitInterval(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.positive(value, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))
@@ -240,20 +247,40 @@ object StreamsSettings:
       taskTimeout: FiniteDuration = DefaultTaskTimeout
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
-      commitInterval.traverse(positive(_, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))),
+      commitInterval.traverse(positive(_, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_)))
+        .andThen(interval => committing(guarantee, interval).as(interval)),
       atLeastOne(concurrency),
       positive(closeTimeout, "close timeout")(StreamsSettingsError.NonPositiveCloseTimeout(_)),
       stateDirectory.traverse(directory),
       fetchWaitOf(fetchWait),
-      taskTimeoutOf(taskTimeout)
-    ).mapN((interval, tasks, timeout, kept, wait, stall) =>
+      taskTimeoutOf(taskTimeout),
+      producing(client, applicationId, guarantee)
+    ).mapN((interval, tasks, timeout, kept, wait, stall, _) =>
       new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait, stall) {}
-    ).andThen(settings => committing(guarantee, settings.commitInterval).map(_ => settings))
+    )
 
   /** The transaction timeout of an exactly-once application's producers, Java Streams' `transaction.timeout.ms`. */
   val TransactionTimeout: FiniteDuration = 10.seconds
 
   /** Exactly-once keeps a transaction open until it commits, so the broker would abort every one that waits past its timeout, as Java refuses. */
+  /** The settings the application's producers are made with from the client, as the engine makes them: under exactly-once, a transactional producer
+    * with the transaction timeout, which refuses more of the client's properties.
+    */
+  private def producing(
+      client: ClientSettings,
+      applicationId: ApplicationId,
+      guarantee: ProcessingGuarantee
+  ): ValidatedNel[StreamsSettingsError, Unit] =
+    val none = Serializer.const[cats.Id, Unit](None)
+    val made =
+      guarantee match
+        case ProcessingGuarantee.AtLeastOnce => ProducerSettings.from(client, none, none).void
+        case ProcessingGuarantee.ExactlyOnce => TransactionalId.from(applicationId.value).fold(
+            _ => ProducerSettings.from(client, none, none).void,
+            id => TransactionalProducerSettings.from(client, id, none, none, TransactionTimeout).void
+          )
+    made.leftMap(_.map(StreamsSettingsError.ProducerSetting(_)))
+
   private def committing(guarantee: ProcessingGuarantee, interval: Option[FiniteDuration]): ValidatedNel[StreamsSettingsError, Unit] =
     interval.filter(value => guarantee == ProcessingGuarantee.ExactlyOnce && value > TransactionTimeout) match
       case Some(value) => StreamsSettingsError.CommitIntervalAboveTransactionTimeout(value, TransactionTimeout).invalidNel

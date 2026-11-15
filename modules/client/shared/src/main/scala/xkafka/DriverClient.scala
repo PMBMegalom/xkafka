@@ -843,11 +843,16 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       * revocation waits for what was handed out to be committed. With fencing, so is one read under a lease that has since ended, which no commit
       * could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
       */
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalFilter(read =>
-        (sinceLastSeek(read), leased(read)).mapN(_ && _)
-          .ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false))
-      ).evalMap(decode)
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = PollQueue.read(polled, failure).evalFilter(handingOut).evalMap(decode)
+
+    // Counted as handed out only once the partition's stream hands them out, so one dropped before then is not waited for.
+    override private[xkafka] val routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] =
+      PollQueue.read(polled, failure).evalFilter(stillHeld).evalMap(decode)
+
+    private def stillHeld(read: ReadRecord): F[Boolean] = (sinceLastSeek(read), leased(read)).mapN(_ && _)
+
+    private def handingOut(read: ReadRecord): F[Boolean] =
+      stillHeld(read).ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false))
 
     /** Whether the record's lease is still current, where fencing gives records leases. */
     private def leased(read: ReadRecord): F[Boolean] =
@@ -869,10 +874,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
       assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
-    // Read once the assignment has changed, so a partition assigned again since shows its later number.
+    // Told apart by their numbers, not by the partitions alone: a partition revoked and assigned again between two looks shows only its later
+    // number, in an assignment of the same partitions.
     override private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] =
-      assignmentChanges
+      assignments.discrete
         .evalMap(assignment => numbers.get.map(held => assignment.map(partition => partition -> held.getOrElse(leaseKey(partition), 0L)).toMap))
+        .changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
@@ -963,7 +970,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
             override private[xkafka] val lease: Option[Lease] = read.lease
 
             // Neither a lease that has ended nor a seek made since the record was fetched lets it be handed out, as `records` hands out none such.
-            override private[xkafka] val stillHeld: Option[F[Boolean]] = Some((leased(read), sinceLastSeek(read)).mapN(_ && _))
+            override private[xkafka] val stillHeld: Option[F[Boolean]] = Some(DriverConsumer.this.stillHeld(read))
+
+            override private[xkafka] val handingOut: Option[F[Boolean]] = Some(DriverConsumer.this.handingOut(read))
 
             override private[xkafka] val assignment: Option[Long] = Some(read.number)
 

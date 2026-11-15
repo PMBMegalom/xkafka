@@ -348,6 +348,20 @@ final class DriverClientSuite extends CatsEffectSuite:
           _         <- fake.until(_.contains("resynchronise"))
         yield assert(!early, "the assignment was cleared while a transaction was still recording its offset")
 
+  test("a partition revoked and assigned again while no one looked shows its later number, though the partitions assigned are the same"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          gate    <- Deferred[IO, Unit]
+          seen    <- Ref[IO].of(Vector.empty[Map[TopicPartition, Long]])
+          looking <- consumer.assignmentNumbers.evalMap(numbers => seen.update(_ :+ numbers) *> gate.get.whenA(numbers.nonEmpty)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1) *> IO.sleep(100.millis)
+          _       <- fake.revoke *> fake.assign *> fake.until(_.count(_ == "assign") == 2) *> IO.sleep(100.millis)
+          _       <- gate.complete(()) *> IO.sleep(200.millis)
+          numbers <- seen.get
+          _       <- looking.cancel
+        yield assertEquals(numbers.filter(_.nonEmpty).map(_.values.toList), Vector(List(1L), List(2L)))
+
   test("a record from a poll a revocation interrupted is not handed out, and the next, read under the new assignment, is and can be recorded"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
@@ -422,6 +436,19 @@ final class DriverClientSuite extends CatsEffectSuite:
           _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
           after <- fake.deliver(1L) *> fake.deliver(2L) *> consumer.records.take(2).compile.toList
         yield assertEquals(after.map(_.record.offset.value), List(1L, 2L))
+
+  test("with rebalance-safe commits, records a partition's stream dropped for a seek are not waited for, as the application never had them"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(10.seconds, RebalanceSafeCommits.AtLimit.Fail)): consumer =>
+        for
+          opened  <- Deferred[IO, PartitionRecords[IO, String, String]]
+          routing <- consumer.partitionedRecords(100).evalMap(opened.complete(_)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+          _       <- (0L until 5L).toList.traverse_(fake.deliver) *> fake.drained *> IO.sleep(100.millis)
+          _       <- opened.get *> consumer.seek(eventsZero, Offset.from(10L).toOption.get)
+          waited  <- (fake.revoke *> fake.until(_.contains("unassign"))).timed.map(_._1).timeout(5.seconds).attempt
+          _       <- routing.cancel
+        yield assert(waited.exists(_ < 2.seconds), s"the revocation waited for records never handed out: $waited")
 
   test("with rebalance-safe commits, a revocation goes ahead at its limit and the consumer carries on"):
     FakeDriver().flatMap: fake =>

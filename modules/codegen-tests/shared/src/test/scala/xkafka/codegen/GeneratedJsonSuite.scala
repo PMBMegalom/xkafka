@@ -116,6 +116,13 @@ class GeneratedJsonSuite extends FunSuite:
     assertEquals(roundTrip(Tree(1, List(Tree(2), Tree(3, List(Tree(4)))))), Right(Tree(1, List(Tree(2), Tree(3, List(Tree(4)))))))
     Level.values.foreach(level => assertEquals(roundTrip(level), Right(level)))
 
+  test("a generated type that holds itself is refused nested past the limit as a derived record is, however deep, and written up to it"):
+    def nested(depth: Int) = (1 until depth).foldLeft(Tree(0))((inner, level) => Tree(level, List(inner)))
+    val refused            = "the record is nested more than 100 deep"
+    assert(summon[JsonSchemaCodec[Tree]].encode(nested(100000)).left.exists(_.endsWith(refused)))
+    assert(summon[JsonSchemaCodec[Tree]].encode(nested(101)).left.exists(_.endsWith(refused)))
+    assert(summon[JsonSchemaCodec[Tree]].encode(nested(100)).isRight)
+
   test("properties are written under the file's names, optional ones left out where they have no value, and nullable ones written as null"):
     val written = this.written(Order(id = id, placed = placed, lines = Nil, payment = Order.Cash(1), note = None)).asObject.get
     assertEquals(written("kind"), Some(Json.fromString("order")))

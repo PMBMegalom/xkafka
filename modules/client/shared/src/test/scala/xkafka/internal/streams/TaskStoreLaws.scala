@@ -66,6 +66,11 @@ abstract class TaskStoreLaws(kind: String) extends CatsEffectSuite:
       assertEquals(emptied, (Vector.empty, Map.empty, WindowStore.NoTime, Vector.empty))
       assertEquals(after, 2L)
 
+  test(s"$kind: a store of more keys than a clear reads at a time, the greatest of them all 0xff bytes, is cleared of every one"):
+    val keys = (0 until 2500).map(n => Chunk.array(java.nio.ByteBuffer.allocate(4).putInt(n).array)) ++ List(bytes(0xff), bytes(0xff, 0xff, 0xff))
+    filled(keys*).flatMap: store =>
+      (store.clear *> store.all).map(left => assertEquals(left, Vector.empty))
+
   test(s"$kind: a range holds the keys from its start to before its end, by their bytes taken as unsigned, either end open"):
     val keys = List(bytes(0x01), bytes(0x01, 0x00), bytes(0x02), bytes(0x7f), bytes(0x80), bytes(0xff), bytes(0xff, 0xff))
     filled(keys.reverse*).flatMap: store =>

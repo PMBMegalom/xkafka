@@ -485,9 +485,9 @@ private[avro] object FixedSize:
       case Some((annotation, arguments)) =>
         val size =
           arguments match
-            case List(Literal(IntConstant(value)))              => value
-            case List(NamedArg(_, Literal(IntConstant(value)))) => value
-            case _                                              => report.errorAndAbort("@AvroFixed takes a literal number", annotation.pos)
+            case List(argument) => xkafka.schemaregistry.Meta.constantNumber(argument)
+                .getOrElse(report.errorAndAbort("@AvroFixed takes a constant number", annotation.pos))
+            case _ => report.errorAndAbort("@AvroFixed takes a constant number", annotation.pos)
         val fields =
           symbol.primaryConstructor.paramSymss.flatten.filterNot(_.isTypeParam).map(field => tpe.memberType(symbol.fieldMember(field.name)))
         val bytes =
@@ -517,9 +517,9 @@ private[avro] object EnumDefault:
       case Some((annotation, arguments)) =>
         val default =
           arguments match
-            case List(Literal(StringConstant(value)))              => value
-            case List(NamedArg(_, Literal(StringConstant(value)))) => value
-            case _                                                 => report.errorAndAbort("@AvroEnumDefault takes literal text", annotation.pos)
+            case List(argument) => xkafka.schemaregistry.Meta.constantText(argument)
+                .getOrElse(report.errorAndAbort("@AvroEnumDefault takes constant text", annotation.pos))
+            case _ => report.errorAndAbort("@AvroEnumDefault takes constant text", annotation.pos)
         val cases = symbol.children
         if !cases.forall(child => child.isTerm || child.flags.is(Flags.Module)) then
           report.errorAndAbort(s"@AvroEnumDefault on ${symbol.name}, whose cases are not all objects, so it is not an Avro enum", annotation.pos)
@@ -555,12 +555,14 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
         val twice = symbols.diff(symbols.distinct).headOption.map(symbol => s"enum '${name.value}' holds the symbol '$symbol' twice")
         AvroCodec.named(name, State.pure(AvroSchema.Enum(name, symbols, default, named.doc, named.aliases.map(FullName.from(_, name.namespace)))))
           .flatTap(_ => State.modify[AvroCodec.Defining](defining => defining.copy(clashes = defining.clashes ++ twice)))
-      case None => cases.traverse(_.codec.building).map: schemas =>
-          AvroSchema.Union(
+      // Two cases of one name, though alike, would be one branch twice, which Avro could not tell apart.
+      case None => cases.traverse(_.codec.building).flatMap: schemas =>
+          val flat =
             schemas.flatMap:
               case AvroSchema.Union(branches) => branches
               case other                      => List(other)
-          )
+          val clash = AvroSchemaJson.twice(flat).map(kind => s"'${name.value}' has two cases named '$kind'")
+          State.modify[AvroCodec.Defining](defining => defining.copy(clashes = defining.clashes ++ clash)).as(AvroSchema.Union(flat))
 
   override def encode(value: A): Either[String, AvroValue] = encodeWithin(value, 0)
 

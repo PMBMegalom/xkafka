@@ -39,7 +39,7 @@ Most applications need `xkafka-client` only. The other modules are:
   other's stores over http4s. See [Queries](streams/queries.md).
 - `xkafka-streams-java`, on the JVM only, lets streams programs use code written
   for Java Kafka Streams, such as its partitioners. It depends on Java Kafka
-  Streams itself. See [Streams](streams/README.md).
+  Streams itself. See [Java Kafka Streams](streams/java-kafka-streams.md).
 
 ## Versioning
 
