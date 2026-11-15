@@ -548,13 +548,22 @@ private[xkafka] final class Task[F[_]](
     val store      = join.subscribed.value
     record.value.flatMap(Subscription.decoded).liftTo[F](unreadable).flatMap: subscription =>
       val deleting = subscription.instruction == DeleteAndPropagate || subscription.instruction == DeleteNoPropagate
-      (topicNamed(s"$application-$store-changelog"), topicNamed(s"$application-${join.subscriptions}"), topicNamed(s"$application-${join.responses}"))
-        .tupled.flatMap: (changelog, topic, responses) =>
-          // Java drops a subscription without a foreign key unless it needs an answer, which that key then finds nothing for.
-          record.key match
-            case None if subscription.instruction != PropagateNullIfMissing => F.pure((state, Vector.empty))
-            case key                                                        =>
-              val kept            = key.map(combinedOf(_, subscription.primaryKey))
+      (
+        topicNamed(s"$application-$store-changelog"),
+        topicNamed(s"$application-${join.subscriptions}"),
+        topicNamed(s"$application-${join.subscriptions}-fk"),
+        topicNamed(s"$application-${join.responses}")
+      ).tupled.flatMap: (changelog, topic, keyTopic, responses) =>
+        // Java drops a subscription without a foreign key unless it needs an answer, which that key then finds nothing for.
+        record.key match
+          case None if subscription.instruction != PropagateNullIfMissing => F.pure((state, Vector.empty))
+          case key                                                        =>
+            // The foreign key is kept as written for the `-fk` topic, as Java's store keeps it and as a change to the other table looks it up.
+            key.flatTraverse(bytes =>
+              join.otherKeys.deserializer.deserialize(topic, record.headers, Some(bytes))
+                .flatMap(foreign => join.otherKeys.serializer.serialize(keyTopic, record.headers, foreign).map(_.map(foreign -> _)))
+            ).flatMap: decoded =>
+              val kept            = decoded.map((_, bytes) => combinedOf(bytes, subscription.primaryKey))
               val (after, logged) =
                 kept.fold((state, Vector.empty[TaskOutput])): combined =>
                   val value = Option.when(!deleting)(record.value).flatten
@@ -563,10 +572,7 @@ private[xkafka] final class Task[F[_]](
                     Vector(TaskOutput(changelog, Some(partition), Some(combined), value, record.timestamp, record.headers))
                   )
               for
-                foreign <-
-                  key.flatTraverse(bytes =>
-                    join.otherKeys.deserializer.deserialize(topic, record.headers, Some(bytes)).flatMap(lookup(join.right.view, _, after))
-                  )
+                foreign <- decoded.flatTraverse((foreign, _) => lookup(join.right.view, foreign, after))
                 bytes   <- foreign.flatTraverse(found => join.otherValues.serializer.serialize(responses, record.headers, found._1))
                 primary <- answerKey(join, subscription.primaryKey, record.headers)
               yield

@@ -69,6 +69,7 @@ enum StreamsSettingsError derives CanEqual:
   case PartialMilliseconds(setting: String, value: FiniteDuration)
   case ReservedApplicationId(value: String)
   case NegativeTaskTimeout(value: FiniteDuration)
+  case CommitIntervalAboveTransactionTimeout(value: FiniteDuration, transactionTimeout: FiniteDuration)
 
   def message: String =
     this match
@@ -84,6 +85,8 @@ enum StreamsSettingsError derives CanEqual:
       case PartialMilliseconds(setting, value)   => s"$setting must be whole milliseconds, was $value"
       case ReservedApplicationId(value)          => s"application id must not be '$value'"
       case NegativeTaskTimeout(value)            => s"task timeout must not be negative, was $value"
+      case CommitIntervalAboveTransactionTimeout(value, timeout) =>
+        s"commit interval must not exceed the transaction timeout of $timeout under exactly-once, was $value"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -141,11 +144,13 @@ sealed abstract case class StreamsSettings private (
 
   def withApplicationId(value: ApplicationId): StreamsSettings = copy(applicationId = value)
 
-  def withGuarantee(value: ProcessingGuarantee): StreamsSettings = copy(guarantee = value)
+  /** The guarantee, which exactly-once refuses with a commit interval past its transaction timeout. */
+  def withGuarantee(value: ProcessingGuarantee): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    StreamsSettings.committing(value, commitInterval).map(_ => copy(guarantee = value))
 
   def withCommitInterval(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.positive(value, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))
-      .map(valid => copy(commitInterval = Some(valid)))
+      .andThen(valid => StreamsSettings.committing(guarantee, Some(valid)).map(_ => copy(commitInterval = Some(valid))))
 
   /** Commits at Java Streams' interval for the guarantee. */
   def withoutCommitInterval: StreamsSettings = copy(commitInterval = None)
@@ -182,7 +187,8 @@ sealed abstract case class StreamsSettings private (
     StreamsSettings.fetchWaitOf(value).map(valid => copy(fetchWait = valid))
 
   /** How long the application keeps asking the group's coordinator while it is not ready, does not know the member yet, or while asking fails in a
-    * way worth retrying, before it stops with the last failure; with zero, it stops at the first.
+    * way worth retrying, and keeps starting its tasks again after a failure worth retrying, before it stops with the last failure; with zero, it
+    * stops at the first.
     */
   def withTaskTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.taskTimeoutOf(value).map(valid => copy(taskTimeout = valid))
@@ -242,7 +248,16 @@ object StreamsSettings:
       taskTimeoutOf(taskTimeout)
     ).mapN((interval, tasks, timeout, kept, wait, stall) =>
       new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait, stall) {}
-    )
+    ).andThen(settings => committing(guarantee, settings.commitInterval).map(_ => settings))
+
+  /** The transaction timeout of an exactly-once application's producers, Java Streams' `transaction.timeout.ms`. */
+  val TransactionTimeout: FiniteDuration = 10.seconds
+
+  /** Exactly-once keeps a transaction open until it commits, so the broker would abort every one that waits past its timeout, as Java refuses. */
+  private def committing(guarantee: ProcessingGuarantee, interval: Option[FiniteDuration]): ValidatedNel[StreamsSettingsError, Unit] =
+    interval.filter(value => guarantee == ProcessingGuarantee.ExactlyOnce && value > TransactionTimeout) match
+      case Some(value) => StreamsSettingsError.CommitIntervalAboveTransactionTimeout(value, TransactionTimeout).invalidNel
+      case None        => ().validNel
 
   // 0.7.0's signature, before the fetch wait, which code compiled against 0.7.0 calls.
   private[streams] def from(

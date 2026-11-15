@@ -51,6 +51,21 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
   // Checking that no failed poll is lost takes 80,000 consumers, which a CI runner needs more than munit's default 30 seconds for.
   override val munitIOTimeout: Duration = 3.minutes
 
+  test("a producer's look-up of a topic keeps looking past max.block.ms to its own time limit, and fails as an unknown topic"):
+    for
+      client   <- ClientSettings.from(NonEmptyList.one("localhost:1"), metadataRefreshInterval = 5.seconds).liftTo[IO]
+      settings <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO], enqueueTimeout = 1.second).liftTo[IO]
+      started  <- IO.monotonic
+      outcome  <- KafkaClient[IO].producer(settings).use(_.partitionsFor(Topic.from("nowhere").toOption.get)).attempt.timeout(30.seconds)
+      took     <- IO.monotonic.map(_ - started)
+    yield
+      assert(took >= 4.seconds, s"took $took")
+      assert(
+        outcome.left
+          .exists { case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.UnknownTopicOrPartition); case _ => false },
+        outcome
+      )
+
   test("a producer's look-up of a topic gives up within its client's metadata refresh interval, as on every backend, not after max.block.ms"):
     for
       client   <- ClientSettings.from(NonEmptyList.one("localhost:1"), metadataRefreshInterval = 1.second).liftTo[IO]

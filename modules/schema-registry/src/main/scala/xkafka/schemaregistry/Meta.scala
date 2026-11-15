@@ -46,11 +46,15 @@ private[xkafka] object Meta:
   /** Each constructor parameter's default, written as the format whose codecs are `C` writes it, once asked for, in order. */
   inline def defaults[A, C[_], Out]: List[Option[() => Either[String, Out]]] = ${ defaultsOf[A, C, Out] }
 
-  private def text(using Quotes)(annotations: List[quotes.reflect.Term], annotation: String): List[String] =
+  /** The text each annotation `annotation` of these gives, in place or named; any other argument is refused as the code is compiled. */
+  private[xkafka] def text(using Quotes)(annotations: List[quotes.reflect.Term], annotation: String): List[String] =
     import quotes.reflect.*
     annotations.collect:
-      case Apply(Select(New(tpt), _), List(Literal(StringConstant(value)))) if tpt.tpe.typeSymbol.fullName == s"xkafka.schemaregistry.$annotation" =>
-        value
+      case applied @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == s"xkafka.schemaregistry.$annotation" =>
+        arguments match
+          case List(Literal(StringConstant(value)))              => value
+          case List(NamedArg(_, Literal(StringConstant(value)))) => value
+          case _                                                 => report.errorAndAbort(s"@$annotation takes literal text", applied.pos)
 
   private def marked(using Quotes)(annotations: List[quotes.reflect.Term], annotation: String): Boolean =
     annotations.exists(_.tpe.typeSymbol.fullName == s"xkafka.schemaregistry.$annotation")

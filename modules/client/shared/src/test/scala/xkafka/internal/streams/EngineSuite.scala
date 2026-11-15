@@ -274,6 +274,7 @@ final class EngineSuite extends CatsEffectSuite:
           def timed(from: Long, to: Long): IO[Vector[(Chunk[Byte], Stored)]]                               = store.timed(from, to)
           def clock: IO[Long]                                                                              = store.clock
           def close: IO[Unit]                                                                              = store.close
+          def clear: IO[Unit]                                                                              = store.clear
           def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = batches.update(_ :+ changes) *> store.write(changes, positions)
           def positions: IO[Map[Int, Long]]                                     = store.positions
 
@@ -502,6 +503,21 @@ final class EngineSuite extends CatsEffectSuite:
         fetches <- world.fetches.get
         ended   <- world.ended
       yield assertEquals((fetches.size, ended), (2, None))
+
+  test("at least once, a failure recovered from counts no longer once records are processed again, so a later one starts its own task timeout"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), taskTimeout = 1.second): world =>
+      for
+        _ <- world.tell(assign(TaskId("0", 0)))
+        _ <- IO.sleep(100.millis)
+        _ <- world.failWrite(timedOut) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(500.millis)
+        // Processed well for longer than the task timeout, then a failure of its own.
+        _       <- (6L to 9L).toList.traverse_(offset => world.records(record(0, offset, "k", 1000L)) *> IO.sleep(500.millis))
+        _       <- world.failWrite(timedOut) *> world.records(record(0, 10L, "k", 1000L)) *> IO.sleep(500.millis)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield assertEquals((fetches.size, ended), (3, None))
 
   test("exactly once, a fatal failure of a transaction stops the engine with it, and one Java recovers from does after the task timeout"):
     val fatal = new KafkaException.BackendFailure("not authorized", Some(ErrorCode.Other(53)), Some(false), Some(true))
@@ -741,6 +757,17 @@ final class EngineSuite extends CatsEffectSuite:
       Headers.empty
     )
 
+  test("a standby whose store holds a position outside its changelog, as after the topic was made anew, is emptied and follows it from the start"):
+    val stale = StoreContents.unchanged.updated(Chunk.array("gone".getBytes), Some(Stored(Chunk.array(Array[Byte](1)), 1L)))
+    MemoryStateDirectory(Map(("0_1", "counts") -> (StoreContents.empty.after(stale), Map(1 -> 50L)))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _   <- world.endsAt(Map(changelog(1) -> 10L))
+          _   <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+          _   <- IO.sleep(500.millis)
+          log <- world.log.get
+        yield assertEquals(log.collect { case followed: Event.Followed => followed }, List(Event.Followed(Vector(StartAt(changelog(1), 0L, -1)))))
+
   test("a standby task follows its changelog from the start, and where it is and where the changelog ends are its task offsets"):
     run(): world =>
       for
@@ -861,6 +888,20 @@ final class EngineSuite extends CatsEffectSuite:
           Set((Some(0L), true), (Some(20000L), false))
         )
         assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => java.nio.ByteBuffer.wrap(v.toArray).getLong), List(2L))
+
+  test(
+    "at least once, a write of a suppression's buffer at a commit that fails in a way worth retrying starts the tasks again, and the engine goes on"
+  ):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing): world =>
+      for
+        _ <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _ <- world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(300.millis)
+        // Processed, the buffer's change waits for the commit, whose write of it is the next.
+        _       <- world.failWrite(timedOut) *> IO.sleep(1500.millis)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield assertEquals((fetches.size, ended), (2, None))
 
   test("a suppression's buffer logs what it changed before the offsets are committed"):
     run(topology = suppressing, commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 1, 29)))): world =>
@@ -1194,6 +1235,25 @@ final class EngineSuite extends CatsEffectSuite:
           assertEquals(offsets.positions, Nil)
           assertEquals(held, Map.empty)
 
+  test(
+    "with a state directory, a standby taken away whose stores are all kept in memory is not kept, as its stores are closed with nothing of it left"
+  ):
+    val inMemory =
+      KStream(Named("read"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts").inMemory)
+        .toStream(Named("to-stream")).to(Named("write"), Topic.from("out").orFail, text, Serde.long[IO])
+    MemoryStateDirectory().flatMap: directory =>
+      run(topology = Topology.of(inMemory).orFail, state = Some(directory)): world =>
+        for
+          _       <- world.endsAt(Map(changelog(1) -> 7L))
+          _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1)) *> IO.sleep(500.millis)
+          standby <- world.taskOffsets.map(_.positions.map(_.partition))
+          _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty), 1))
+          // Waited for, as the engine handles the change in its own time; a standby kept would be reported for good.
+          left <- (IO.sleep(20.millis) *> world.taskOffsets.map(_.positions)).iterateUntil(_.isEmpty).timeout(5.seconds).attempt
+        yield
+          assertEquals(standby, List(1))
+          assert(left.isRight, left)
+
   test("a standby taken away keeps its store, reported in task offsets, and its task made active soon after restores only what it had not read"):
     run(): world =>
       droppedThenActive(world, 1.minute).map: (from, offsets) =>
@@ -1252,7 +1312,7 @@ final class EngineSuite extends CatsEffectSuite:
           (name, time, held) =>
             TaskStore.memory[IO].apply(name, time, held).map: store =>
               new TaskStore[IO]:
-                export store.{clock, get, positions, range, timed}
+                export store.{clear, clock, get, positions, range, timed}
                 def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
                 def close: IO[Unit] = closes.getAndUpdate(_ + 1).flatMap(before => IO.raiseWhen(before == 0)(boom))
         Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), failing)
@@ -1268,7 +1328,7 @@ final class EngineSuite extends CatsEffectSuite:
           (name, time, held) =>
             TaskStore.memory[IO].apply(name, time, held).map: store =>
               new TaskStore[IO]:
-                export store.{clock, get, positions, range, timed}
+                export store.{clear, clock, get, positions, range, timed}
                 def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
                 def close: IO[Unit]                                                   = closes.update(_ + 1) *> store.close
         val none = Assignment(Set.empty, Set.empty, Set.empty)
@@ -1340,7 +1400,7 @@ final class EngineSuite extends CatsEffectSuite:
           (name, time, held) =>
             TaskStore.memory[IO].apply(name, time, held).map: store =>
               new TaskStore[IO]:
-                export store.{clock, get, positions, range, timed}
+                export store.{clear, clock, get, positions, range, timed}
                 def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
                 def close: IO[Unit] = closes.getAndUpdate(_ + 1).flatMap(before => IO.raiseWhen(before == 0)(boom))
         Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), failing).use:
@@ -1358,7 +1418,7 @@ final class EngineSuite extends CatsEffectSuite:
           (name, time, held) =>
             TaskStore.memory[IO].apply(name, time, held).map: store =>
               new TaskStore[IO]:
-                export store.{clock, get, positions, range, timed}
+                export store.{clear, clock, get, positions, range, timed}
                 def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
                 def close: IO[Unit]                                                   = closes.update(_ + 1) *> IO.sleep(CloseTimeout * 2)
         // Leaving takes the task back, which the engine gives back by closing its store.
@@ -1606,6 +1666,9 @@ object EngineSuite:
         def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
         def followed: IO[List[PolledRecord]]          =
           standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
+        // Each changelog starts at its first offset, 0, and ends where `endsAt` says.
+        def bounds(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, (Long, Long)]] =
+          ending.get.map(_._1.view.filterKeys(partitions.toSet).mapValues(0L -> _).toMap)
         def ends(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, Long]] =
           ending.modify((ends, failing) => ((ends, (failing - 1).max(0)), failing)).flatMap: failing =>
             if failing > 0 then IO.raiseError(new KafkaException.BackendFailure("no leader", Some(ErrorCode.NotLeaderOrFollower), Some(true)))

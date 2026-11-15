@@ -27,24 +27,41 @@ import org.apache.kafka.clients.consumer.{CommitFailedException, InvalidOffsetEx
 import org.apache.kafka.common.KafkaException as JavaKafkaException
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.errors.{
-  AuthenticationException, InvalidConfigurationException, InvalidPidMappingException, ProducerFencedException, SaslAuthenticationException,
-  SslAuthenticationException, TransactionAbortedException
+  AuthenticationException, AuthorizationException, ClusterAuthorizationException, InvalidConfigurationException, InvalidPidMappingException,
+  ProducerFencedException, RetriableException, SaslAuthenticationException, SslAuthenticationException, TransactionAbortedException,
+  TransactionalIdAuthorizationException, UnsupportedVersionException
 }
 import org.apache.kafka.common.protocol.Errors
 
 /** The portable failure for each Java client exception, classified the way librdkafka classifies the same condition. */
 private[kafkaclients] object JavaFailures:
-  val portable: PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException =>
-    val code = protocolCode(error)
-    new KafkaException.BackendFailure(
-      Option(error.getMessage).getOrElse(error.getClass.getName),
-      code = code,
-      // Derived from the portable code, so the same condition is retriable on every backend.
-      retriable = code.map(_.retriable),
-      fatal = Some(error.isInstanceOf[InvalidPidMappingException] || error.isInstanceOf[ProducerFencedException]),
-      cause = error
-    )
-  }
+  val portable: PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException => failure(error) }
+
+  private def failure(error: JavaKafkaException): KafkaException.BackendFailure =
+    val message = Option(error.getMessage).getOrElse(error.getClass.getName)
+    error.getCause match
+      // The error state a failure leaves the producer in, which the Java client reports by that failure as its cause.
+      case cause: JavaKafkaException if error.getClass == classOf[JavaKafkaException] =>
+        val inner = failure(cause)
+        new KafkaException.BackendFailure(message, inner.code, inner.retriable, inner.fatal, cause = error)
+      case _ =>
+        val code = protocolCode(error)
+        new KafkaException.BackendFailure(
+          message,
+          code = code,
+          // Derived from the portable code, so the same condition is retriable on every backend.
+          retriable = code.map(_.retriable),
+          fatal = fatality(error),
+          cause = error
+        )
+
+  /** Whether the Java client cannot recover: true for the failures its producer holds fatal, false for those it retries, and not known for others. */
+  private def fatality(error: JavaKafkaException): Option[Boolean] =
+    error match
+      case _: ClusterAuthorizationException | _: TransactionalIdAuthorizationException | _: ProducerFencedException | _: UnsupportedVersionException |
+          _: InvalidPidMappingException => Some(true)
+      case _: RetriableException => Some(false)
+      case _                     => None
 
   /** Why one record was not delivered. The Java client reports its own exceptions there, and anything else is kept as the cause. */
   def delivery(error: Throwable): KafkaException =
@@ -71,6 +88,8 @@ private[kafkaclients] object JavaFailures:
       case _: TransactionAbortedException => Some(ErrorCode.Purged)
       // The consumer raises these itself, for a partition its reset policy leaves without a position.
       case _: InvalidOffsetException => Some(ErrorCode.OffsetResetRequired)
+      // Kafka's authorization failures extend its configuration failure, though each has its own code.
+      case _: AuthorizationException => tabled(error)
       // A client that cannot be built wraps the setting it could not use in failures of its own, or refuses a combination of settings outright.
       case _ if causes(error).exists(cause => cause.isInstanceOf[InvalidConfigurationException] || cause.isInstanceOf[ConfigException]) =>
         Some(ErrorCode.InvalidConfiguration)

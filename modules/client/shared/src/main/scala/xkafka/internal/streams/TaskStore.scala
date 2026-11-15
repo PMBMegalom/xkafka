@@ -65,6 +65,9 @@ private[xkafka] trait TaskStore[F[_]]:
   /** Releases what the store holds open, after which it is not used again; a store in memory holds nothing open. */
   def close: F[Unit]
 
+  /** Empties the store, as one made anew: what it holds, its positions and its clock. */
+  def clear: F[Unit]
+
   /** The keys starting with `prefix` and what they hold, in order. */
   final def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Stored)]] = range(Some(prefix), StoreContents.past(prefix))
 
@@ -98,6 +101,7 @@ private[xkafka] object TaskStore:
         def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Stored)]] = reading(store.range(from, to))
         def timed(from: Long, to: Long): F[Vector[(Chunk[Byte], Stored)]]                               = reading(store.timed(from, to))
         def clock: F[Long]                                                                              = reading(store.clock)
+        def clear: F[Unit]                                                                              = reading(store.clear)
         def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit]                            = reading(store.write(changes, positions))
         def positions: F[Map[Int, Long]]                                                                = reading(store.positions)
         def close: F[Unit]                                                                              =
@@ -123,9 +127,10 @@ private[xkafka] object TaskStore:
           state.get.map: now =>
             if from > to then Vector.empty
             else now.byTime.rangeFrom((from, Chunk.empty)).keysIterator.takeWhile(_._1 <= to).map((_, key) => key -> now.contents(key)).toVector
-        def clock: F[Long]                                                   = state.get.map(_.clock)
-        def positions: F[Map[Int, Long]]                                     = state.get.map(_.positions)
-        def close: F[Unit]                                                   = F.unit
+        def clock: F[Long]               = state.get.map(_.clock)
+        def positions: F[Map[Int, Long]] = state.get.map(_.positions)
+        def close: F[Unit]               = F.unit
+        def clear: F[Unit]               = state.set(Held(StoreContents.empty, TreeMap.empty(using timeThenKey), WindowStore.NoTime, Map.empty))
         def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit] =
           state.update: now =>
             val moved = now.positions ++ positions

@@ -142,6 +142,12 @@ private[xkafka] object LibraryStore:
             positions.toVector.map((partition, at) => RocksdbWrite.Put(Meta, s"$Position$partition".getBytes, longBytes(at)))
         access.write(db, writes ++ meta).unlessA(writes.isEmpty && meta.isEmpty) *> clocked.set(after) *> positioned.update(_ ++ positions)
 
+    def clear: F[Unit] =
+      List(Entries, ByTime, Meta)
+        .flatTraverse(family => access.range(db, family, None, None).map(_.toList.map((key, _) => RocksdbWrite.Delete(family, key))))
+        .flatMap(deletes => access.write(db, deletes.toVector).unlessA(deletes.isEmpty)) *> clocked.set(WindowStore.NoTime) *>
+        positioned.set(Map.empty)
+
     def close: F[Unit] = access.close(db)
 
 /** A state directory kept through a platform's RocksDB calls and file operations, as the JVM's is kept: each task's stores under `<task id>/<store>`,

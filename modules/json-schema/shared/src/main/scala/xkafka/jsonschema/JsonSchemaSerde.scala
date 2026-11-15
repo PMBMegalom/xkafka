@@ -46,8 +46,12 @@ object JsonSchemaFormat:
       override val recordName: Option[String] = codec.name
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        codec.refusal.toLeft(()) *> json(target)
-          .map(_ => value => codec.encode(value).map(written => Chunk.array(written.noSpaces.getBytes(StandardCharsets.UTF_8))))
+        // What is written is held to the depth reading takes, so nothing is written that reading refuses.
+        codec.refusal.toLeft(()) *> json(target).map(_ =>
+          value =>
+            codec.encode(value).filterOrElse(shallow, s"the record is nested more than $MaxDepth deep")
+              .map(written => Chunk.array(written.noSpaces.getBytes(StandardCharsets.UTF_8)))
+        )
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
         codec.refusal.toLeft(()) *> json(writer).map(_ => bytes => read(bytes).flatMap(codec.decode))

@@ -718,7 +718,7 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
     assertEquals(updated.closeTimeout, 5.seconds)
-    assertEquals(updated.withClient(clientSettings).closeTimeout, 5.seconds)
+    assertEquals(updated.withClient(clientSettings).map(_.closeTimeout).toOption, Some(5.seconds))
     assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.closeTimeout, 5.seconds)
 
   test("compression and linger default to what both backends do, and are carried by their withers"):
@@ -769,6 +769,43 @@ final class ClientSuite extends FunSuite:
       Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(2.seconds, 2.seconds)))
     )
 
+  test("a producer's settings are checked again under the client they are moved to, as the client's properties may refuse their linger"):
+    val serializer = Serializer.const[IO, String](None)
+    val timed      = clientSettings.withProperty("message.timeout.ms", "5000").toOption.get
+    val producer   = ProducerSettings.from(clientSettings, serializer, serializer, linger = 10.seconds).toOption.get
+    val refused    = NonEmptyList.one(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, 10.seconds, 5.seconds))
+    assertEquals(producer.withClient(timed).toEither, Left(refused))
+    assert(producer.withClient(clientSettings).isValid)
+    val id            = TransactionalId.from("writer").toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, linger = 10.seconds).toOption.get
+    assertEquals(transactional.withClient(timed).toEither, Left(refused))
+
+  test("a delivery timeout the properties set leaves room for linger and a request, as the Java client refuses one that does not"):
+    val serializer = Serializer.const[IO, String](None)
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, Map("delivery.timeout.ms" -> "20000")).toEither,
+      Left(NonEmptyList.one(SettingsError.PropertyDurationBelowMinimum("delivery.timeout.ms", 20.seconds, 30.seconds + 5.millis)))
+    )
+    assert(
+      ProducerSettings.from(clientSettings, serializer, serializer, Map("delivery.timeout.ms" -> "20000", "request.timeout.ms" -> "10000")).isValid
+    )
+
+  test("a transactional producer's message and socket timeouts the properties set fit its transaction timeout, as librdkafka refuses them otherwise"):
+    val serializer                          = Serializer.const[IO, String](None)
+    val id                                  = TransactionalId.from("writer").toOption.get
+    def made(properties: (String, String)*) =
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, properties = properties.toMap, transactionTimeout = 60.seconds)
+        .toEither
+    assertEquals(
+      made("message.timeout.ms" -> "120000"),
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 120.seconds, 60.seconds)))
+    )
+    assertEquals(
+      made("socket.timeout.ms" -> "60101"),
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("socket.timeout.ms", 60101.millis, 60100.millis)))
+    )
+    assert(made("message.timeout.ms" -> "60000", "socket.timeout.ms" -> "60100").isRight)
+
   test("linger is below a message or delivery timeout the properties set, as both clients refuse it otherwise"):
     val serializer = Serializer.const[IO, String](None)
     val field      = SettingsError.DurationField
@@ -778,7 +815,12 @@ final class ClientSuite extends FunSuite:
         Left(NonEmptyList.one(SettingsError.DurationNotBelowLimit(field.Linger, 30.seconds, 10.seconds))),
         name
       )
-      assert(ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "10000"), linger = 1.second).isValid, name)
+      // With a request timeout that leaves room for linger, as Java's delivery timeout needs.
+      assert(
+        ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "10000", "request.timeout.ms" -> "5000"), linger = 1.second)
+          .isValid,
+        name
+      )
     val viaClient = clientSettings.withProperty("message.timeout.ms", "10000").toOption.get
     assert(ProducerSettings.from(viaClient, serializer, serializer, linger = 30.seconds).isInvalid)
 

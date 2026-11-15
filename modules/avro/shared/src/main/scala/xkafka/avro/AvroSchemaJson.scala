@@ -83,16 +83,18 @@ object AvroSchemaJson:
 
   /** A union, refused where it holds a union, or two branches of one type other than named types of different names, as the specification says. */
   private def union(branches: List[AvroSchema]): Either[String, AvroSchema] =
-    def kind(schema: AvroSchema): String =
+    if branches.exists { case AvroSchema.Union(_) => true; case _ => false } then Left("a union cannot hold a union")
+    else twice(branches).map(kind => s"a union holds '$kind' twice").toLeft(AvroSchema.Union(branches))
+
+  /** The type two branches of a union are of, where two are: a named type by its full name, which a primitive of the same name is not. */
+  private[avro] def twice(branches: List[AvroSchema]): Option[String] =
+    def kind(schema: AvroSchema): (Boolean, String) =
       schema match
         case AvroSchema.Logical(logicalType)  => kind(logicalType.underlying)
-        case named if named.fullName.nonEmpty => named.fullName.fold("")(_.value)
-        case other                            => other.productPrefix
-    if branches.exists { case AvroSchema.Union(_) => true; case _ => false } then Left("a union cannot hold a union")
-    else
-      branches.map(kind).diff(branches.map(kind).distinct).headOption match
-        case Some(twice) => Left(s"a union holds '$twice' twice")
-        case None        => Right(AvroSchema.Union(branches))
+        case named if named.fullName.nonEmpty => (true, named.fullName.fold("")(_.value))
+        case other                            => (false, other.productPrefix)
+    val kinds = branches.map(kind)
+    kinds.diff(kinds.distinct).headOption.map(_._2)
 
   private def complex(fields: JsonObject, namespace: Option[String], defined: Defined): Either[String, (AvroSchema, Defined)] =
     def string(key: String)            = fields(key).flatMap(_.asString)

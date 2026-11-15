@@ -179,7 +179,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
       seeks  <- Resource.eval((Mutex[F], Ref.of[F, Map[LeaseKey, Long]](Map.empty)).mapN(Seeks(_, _)))
-      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks)
+      // How many times the group has assigned each partition, whatever the settings, which partition streams tell assignments apart by.
+      numbers <- Resource.eval(Ref.of[F, Map[LeaseKey, Long]](Map.empty))
+      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks, numbers)
       // Released after both below stop, and before the client: a rebalance polled after `rebalancing` failed is applied here, since the client cannot
       // close while one waits.
       _ <- Resource.onFinalize(consumer.applyQueued)
@@ -689,8 +691,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         Option.when(delivery.timestamp >= 0L)(delivery.timestamp).map(Timestamp.fromEpochMillis)
       )
 
-  /** `sought` is how many seeks of the record's partition had been made when it was polled. */
-  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long, sought: Long)
+  /** `sought` is how many seeks of the record's partition had been made when it was polled, and `number` how many times the group had assigned the
+    * partition.
+    */
+  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long, sought: Long, number: Long)
 
   /** How many seeks of each partition have been made. A poll and a seek each hold `exclusive`, so every record a poll returns was fetched after the
     * seeks counted when it returns and before any made later.
@@ -708,7 +712,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       stopping: Deferred[F, Unit],
       random: Random[F],
       failure: Deferred[F, Throwable],
-      seeks: Seeks
+      seeks: Seeks,
+      numbers: Ref[F, Map[LeaseKey, Long]]
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
@@ -756,8 +761,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
       PollQueue.feed(
         Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
-          .evalMap(_ => leases.reading(pollOnce)((record, _) => leaseKeyOf(record)).product(hold.readUnder)).flatMap((read, assignment) =>
-            Stream.emits(read.map { case ((record, sought), lease) => ReadRecord(record, lease, assignment(leaseKeyOf(record)), sought) })
+          .evalMap(_ => (leases.reading(pollOnce)((record, _) => leaseKeyOf(record)), hold.readUnder, numbers.get).tupled)
+          .flatMap((read, assignment, assigned) =>
+            Stream.emits(read.map { case ((record, sought), lease) =>
+              val key = leaseKeyOf(record)
+              ReadRecord(record, lease, assignment(key), sought, assigned.getOrElse(key, 0L))
+            })
           ),
         polled,
         failure
@@ -808,7 +817,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       startsFor(settings.startingOffsets, partitions.flatMap(topicPartition).toSet).handleErrorWith(error => failure.complete(error).as(Vector.empty))
 
     private def assigned(partitions: List[LeaseKey]): F[Unit] =
-      client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(partitions, replacing = !cooperative)) *> hold.assign(partitions)
+      client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(partitions, replacing = !cooperative)) *>
+        hold.assign(partitions) *> numbers.update(held => held ++ partitions.map(key => key -> (held.getOrElse(key, 0L) + 1L)))
 
     /** With rebalance-safe commits, waits for the records handed out of revoked partitions to be committed.
       *
@@ -858,6 +868,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
       assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+
+    // Read once the assignment has changed, so a partition assigned again since shows its later number.
+    override private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] =
+      assignmentChanges
+        .evalMap(assignment => numbers.get.map(held => assignment.map(partition => partition -> held.getOrElse(leaseKey(partition), 0L)).toMap))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
@@ -947,10 +962,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
             override private[xkafka] val lease: Option[Lease] = read.lease
 
-            override private[xkafka] val stillHeld: Option[F[Boolean]] =
-              Option.when(settings.assignmentFencing)(
-                leases.held.map(current => read.lease.exists(lease => current(leaseKeyOf(read.record)).contains(lease)))
-              )
+            // Neither a lease that has ended nor a seek made since the record was fetched lets it be handed out, as `records` hands out none such.
+            override private[xkafka] val stillHeld: Option[F[Boolean]] = Some((leased(read), sinceLastSeek(read)).mapN(_ && _))
+
+            override private[xkafka] val assignment: Option[Long] = Some(read.number)
 
             override private[xkafka] val membership: GroupMembership[F] =
               leases.membership(DriverConsumer.this, read.lease, groupHandle, releaseGroupMetadata, Some(committedElsewhere))

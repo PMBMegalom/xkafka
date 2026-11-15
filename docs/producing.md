@@ -136,7 +136,9 @@ nor a partition goes to a partition the platform's client chooses.
 
 `partitionsFor` returns the partitions a topic currently has. Use it to pick a
 partition to produce to. Asking about a topic the cluster does not have creates
-it if the broker creates topics on request, which Kafka brokers do by default. A
+it if the broker creates topics on request, which Kafka brokers do by default. It
+waits for a topic still being created up to the client's
+`metadataRefreshInterval` or 30 seconds, whichever is shorter, and then fails. A
 [consumer's `partitionsFor`](consuming.md#inspecting-the-consumer) does not create
 a topic.
 
@@ -212,7 +214,8 @@ def batched[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSetting
 ```
 
 `withLinger` returns a `ValidatedNel`, because a negative linger, or one of
-`ProducerSettings.LingerLimit` or longer, is rejected.
+`ProducerSettings.LingerLimit` or longer, is rejected, and so is one not less
+than a `message.timeout.ms` or `delivery.timeout.ms` the properties set.
 
 A batch is sent as soon as it is full or its linger has passed, whichever comes
 first. `batchSize` sets how many bytes of records make a batch full. Unless it is

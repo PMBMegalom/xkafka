@@ -39,7 +39,7 @@ object PartitionRecords:
 
   private[xkafka] def fromConsumer[F[_]: Async, K, V](
       consumer: KafkaConsumer[F, K, V],
-      assignments: Stream[F, Set[TopicPartition]],
+      assignments: Stream[F, Map[TopicPartition, Long]],
       maxQueuedRecords: Int,
       pausing: PartitionPausing[F]
   ): Stream[F, PartitionRecords[F, K, V]] =
@@ -51,9 +51,12 @@ object PartitionRecords:
   private[xkafka] def validateMaxQueuedRecords(value: Int): Either[IllegalArgumentException, Int] =
     Either.cond(value > 0, value, new IllegalArgumentException("maxQueuedRecords must be positive"))
 
-  /** `queued` counts what has been reserved for routing and not yet read, which is what decides whether the partition is paused. */
+  /** `queued` counts what has been reserved for routing and not yet read, which is what decides whether the partition is paused. `assignment` is
+    * which assignment of the partition it holds, by how many times the group had assigned the partition.
+    */
   private final case class PartitionState[F[_], K, V](
       topicPartition: TopicPartition,
+      assignment: Long,
       channel: Channel[F, CommittableConsumerRecord[F, K, V]],
       queued: Ref[F, Int],
       paused: Ref[F, Boolean],
@@ -64,7 +67,7 @@ object PartitionRecords:
 
   private final class Runtime[F[_], K, V](
       consumer: KafkaConsumer[F, K, V],
-      assignments: Stream[F, Set[TopicPartition]],
+      assignments: Stream[F, Map[TopicPartition, Long]],
       maxQueuedRecords: Int,
       pausing: PartitionPausing.Backend[F],
       output: Channel[F, PartitionRecords[F, K, V]],
@@ -82,9 +85,11 @@ object PartitionRecords:
 
     private def followAssignments: Stream[F, Nothing] = assignments.evalMap(reconcile).drain
 
-    /** Opens a stream for each assigned partition, so one appears as soon as the partition is owned, and ends the streams of revoked ones. */
-    private def reconcile(assignment: Set[TopicPartition]): F[Unit] =
-      assignment.toList.traverse_(partition => stateFor(partition, F.pure(true)).void) >> revokeMissing(assignment)
+    /** Opens a stream for each assigned partition, so one appears as soon as the partition is owned, and ends the streams of revoked ones, and of
+      * those assigned again since their stream was opened, which may have been revoked between two looks at the assignment.
+      */
+    private def reconcile(assignment: Map[TopicPartition, Long]): F[Unit] =
+      assignment.toList.traverse_((partition, number) => stateFor(partition, Some(number), F.pure(true)).void) >> revokeMissing(assignment.keySet)
 
     /** Routes a record, opening the partition's stream first if the assignment has not reported it yet.
       *
@@ -93,7 +98,7 @@ object PartitionRecords:
       * under the lock the revocation takes, which it takes once the lease has ended.
       */
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
-      stateFor(record.record.topicPartition, held(record)).flatMap(_.traverse_(routedTo(_, record)))
+      stateFor(record.record.topicPartition, record.offset.assignment, held(record)).flatMap(_.traverse_(routedTo(_, record)))
 
     private def held(record: CommittableConsumerRecord[F, K, V]): F[Boolean] = record.offset.stillHeld.getOrElse(F.pure(true))
 
@@ -141,11 +146,24 @@ object PartitionRecords:
         .unchunks
       )
 
-    private def stateFor(topicPartition: TopicPartition, held: F[Boolean]): F[Option[PartitionState[F, K, V]]] =
+    /** The state of the partition's `assignment`, where it is not one the stream has moved past. A later one ends the stream of an earlier, as the
+      * partition was revoked in between, and a record of an earlier one is not handed out, its partition having been revoked since.
+      */
+    private def stateFor(topicPartition: TopicPartition, assignment: Option[Long], held: F[Boolean]): F[Option[PartitionState[F, K, V]]] =
       mutex.lock.surround:
-        held.ifM(stateOf(topicPartition).map(Some(_)), F.pure(None))
+        held.ifM(
+          states.get.map(_.get(topicPartition)).flatMap:
+            case Some(state) => assignment match
+                case Some(number) if number > state.assignment =>
+                  F.uncancelable(_ => ended(List(state))) *> stateOf(topicPartition, number).map(Some(_))
+                case Some(number) if number < state.assignment => F.pure(None)
+                case _                                         => F.pure(Some(state))
+            case None => stateOf(topicPartition, assignment.getOrElse(0L)).map(Some(_))
+          ,
+          F.pure(None)
+        )
 
-    private def stateOf(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
+    private def stateOf(topicPartition: TopicPartition, assignment: Long): F[PartitionState[F, K, V]] =
       states.get.flatMap: current =>
         current.get(topicPartition) match
           case Some(state) => F.pure(state)
@@ -157,7 +175,7 @@ object PartitionRecords:
               paused  <- Ref.of[F, Boolean](false)
               mutex   <- Mutex[F]
               revoked <- Ref.of[F, Boolean](false)
-              state = PartitionState(topicPartition, channel, queued, paused, mutex, revoked)
+              state = PartitionState(topicPartition, assignment, channel, queued, paused, mutex, revoked)
               _ <- states.set(current.updated(topicPartition, state))
               _ <- output.send(readable(state)).void
             yield state
@@ -165,25 +183,27 @@ object PartitionRecords:
     private def revokeMissing(assignment: Set[TopicPartition]): F[Unit] =
       mutex.lock.surround:
         F.uncancelable: _ =>
-          states.get.flatMap: current =>
-            val revoked = current.removedAll(assignment)
-            // librdkafka keeps a partition paused through its revocation, so one paused for its reader is resumed, to be fetched once assigned again.
-            // Each is resumed under its own lock, after a pause being made for a record, and all are, though one fails, before the first failure is
-            // raised.
-            states.set(current.removedAll(revoked.keySet)) >> revoked.values.toList.traverse: state =>
-              state.mutex.lock.surround:
-                state.revoked.set(true) >> state.channel.close.void >> state.paused.getAndSet(false)
-                  .flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition))))
-              .attempt
-            .flatMap: outcomes =>
-              outcomes.collect { case Left(error) => error } match
-                case first :: rest => F.raiseError(rest.foldLeft(first) { (all, more) => all.addSuppressed(more); all })
-                case Nil           => F.unit
+          states.get.flatMap(current => ended(current.removedAll(assignment).values.toList))
+
+    /** Ends the streams of partitions revoked, under the runtime's lock. librdkafka keeps a partition paused through its revocation, so one paused
+      * for its reader is resumed, to be fetched once assigned again. Each is resumed under its own lock, after a pause being made for a record, and
+      * all are, though one fails, before the first failure is raised.
+      */
+    private def ended(revoked: List[PartitionState[F, K, V]]): F[Unit] =
+      states.update(_.removedAll(revoked.map(_.topicPartition))) >> revoked.traverse: state =>
+        state.mutex.lock.surround:
+          state.revoked.set(true) >> state.channel.close.void >> state.paused.getAndSet(false)
+            .flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition))))
+        .attempt
+      .flatMap: outcomes =>
+        outcomes.collect { case Left(error) => error } match
+          case first :: rest => F.raiseError(rest.foldLeft(first) { (all, more) => all.addSuppressed(more); all })
+          case Nil           => F.unit
 
   private object Runtime:
     def create[F[_]: Async, K, V](
         consumer: KafkaConsumer[F, K, V],
-        assignments: Stream[F, Set[TopicPartition]],
+        assignments: Stream[F, Map[TopicPartition, Long]],
         maxQueuedRecords: Int,
         pausing: PartitionPausing[F]
     ): F[Runtime[F, K, V]] =

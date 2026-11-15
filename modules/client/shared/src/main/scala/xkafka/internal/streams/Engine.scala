@@ -65,7 +65,7 @@ private[xkafka] object Engine:
   val StateCleanupDelay: FiniteDuration = 10.minutes
 
   /** How long a transaction may stay open before the coordinator aborts it, Java Streams' `transaction.timeout.ms` under exactly-once. */
-  val TransactionTimeout: FiniteDuration = 10.seconds
+  val TransactionTimeout: FiniteDuration = StreamsSettings.TransactionTimeout
 
   /** How long the coordinator waits for a member to give back its tasks, Java's `max.poll.interval.ms`, which Java Streams sends as its rebalance
     * timeout.
@@ -190,8 +190,9 @@ private[xkafka] object Engine:
             consumer("read_committed", reportEnds = true).use(Restore(driver, _, changelogs, from, stores))
           def follow(starts: Vector[StartAt]): F[Unit]                               = driver.assign(follower, starts.map(_.partition), starts)
           def followed: F[List[PolledRecord]]                                        = driver.poll(follower, PollMillis).map(_.records)
-          def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]] =
-            partitions.traverse(partition => driver.watermarks(follower, partition, 30000).map(marks => partition -> marks._2)).map(_.toMap)
+          def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]] = bounds(partitions).map(_.view.mapValues(_._2).toMap)
+          def bounds(partitions: Vector[TopicPartition]): F[Map[TopicPartition, (Long, Long)]] =
+            partitions.traverse(partition => driver.watermarks(follower, partition, 30000).map(partition -> _)).map(_.toMap)
           def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
           def purge(before: Map[TopicPartition, Offset]): F[Unit]                                             =
             NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
@@ -486,6 +487,9 @@ private[xkafka] object Engine:
     /** Where each of these partitions ends. */
     def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]]
 
+    /** Where each of these partitions starts and ends. */
+    def bounds(partitions: Vector[TopicPartition]): F[Map[TopicPartition, (Long, Long)]]
+
     /** Writes the records, waiting until each is delivered. */
     def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit]
 
@@ -661,13 +665,25 @@ private[xkafka] object Engine:
       */
     private def window(running: Running[F]): F[Running[F]] =
       transactions match
-        // A write that fails in a way worth retrying starts the tasks again from what the group committed, as Java revives them.
-        case None => poll(running).flatMap(process(running, _, plane.write)).recoverWith {
-            case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
-              recovered(running, failure, F.unit)
-          }.flatMap: after =>
+        // A write that fails in a way worth retrying starts the tasks again from what the group committed, as Java revives them, whether it was made
+        // processing records or writing a buffer at the commit. Records processed since end the time a failure counts against, as a transaction that
+        // commits does.
+        // The offsets' commit after has its own way of asking again.
+        case None =>
+          def recovering(from: Running[F])(attempt: F[Running[F]]): F[Running[F]] =
+            attempt.recoverWith:
+              case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
+                recovered(from, failure, F.unit)
+          recovering(running)(poll(running).flatMap(process(running, _, plane.write)).map(_.copy(failing = None))).flatMap: after =>
             F.monotonic.flatMap: now =>
-              if now - after.committed >= commitInterval then commit(after, after.tasks.keySet).map(_.copy(committed = now)) else F.pure(after)
+              if now - after.committed < commitInterval then F.pure(after)
+              else
+                flushed(after, after.tasks.keySet, plane.write).map(Right(_)).recoverWith {
+                  case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
+                    recovered(after, failure, F.unit).map(Left(_))
+                }.flatMap:
+                  case Right(written)  => committed(written, after.tasks.keySet).map(_._1.copy(committed = now))
+                  case Left(restarted) => F.pure(restarted)
         case Some(transaction) => (poll(running), F.realTime).tupled.flatMap: (polled, clock) =>
             // A punctuator that is due runs without records, in a transaction of its own that records no offsets.
             if polled.isEmpty && !running.tasks.values.exists(live => live.task.due(live.state, clock.toMillis)) then F.pure(running)
@@ -790,13 +806,13 @@ private[xkafka] object Engine:
       (givingUp(giving, settled), F.monotonic).tupled.map: (held, now) =>
         running.copy(tasks = running.tasks -- tasks, kept = running.kept ++ held.map((id, kept) => id -> (kept, now)))
 
-    /** The standby tasks no longer wanted, as they are kept: those whose stores are in memory as they are, and the others with their stores, on disk,
-      * closed and recorded as given up.
+    /** The standby tasks no longer wanted, as they are kept: without a state directory, with their stores in memory as they are, and with one, those
+      * with stores on disk, closed and recorded as given up. One whose stores are all in memory then keeps nothing, its stores closed.
       */
     private def dropped(gone: List[(TaskId, Standby[F])]): F[Map[TaskId, Standby[F]]] =
       gone.traverse: (id, standby) =>
-        if state.isEmpty then F.pure(id -> standby) else released(id, standby.stores, settled = false).map(held => id -> held.getOrElse(standby))
-      .map(_.toMap)
+        if state.isEmpty then F.pure(Some(id -> standby)) else released(id, standby.stores, settled = false).map(_.map(id -> _))
+      .map(_.flatten.toMap)
 
     /** Runs from `running`, keeping the tasks a state directory holds stores of as an earlier run left them, as given up now, and reporting them. */
     def begin(running: Running[F], held: Map[TaskId, Map[String, Long]]): F[Unit] =
@@ -819,13 +835,22 @@ private[xkafka] object Engine:
           )
         .map(_.toMap)
 
-    /** The standby tasks of `wanted` that keep stores, those already standing by as they are and the others from the start of their changelogs. */
+    /** The standby tasks of `wanted` that keep stores, those already standing by as they are and the others from where their stores hold their
+      * changelogs to, or their start. A store whose position is outside its changelog, as one past its end after the topic was made anew, holds what
+      * the changelog no longer does: it is emptied and follows from the start, as the restore of an active task does.
+      */
     private def standby(wanted: Set[TaskId], standing: Map[TaskId, Standby[F]]): F[Map[TaskId, Standby[F]]] =
       wanted.toList.filter(id => subtopologies(id.subtopology).stores.nonEmpty).traverse: id =>
         standing.get(id).filter(_.stores.nonEmpty).fold(
           (changelogsOf(id), storesOf(id)).tupled.flatMap: (changelogs, stores) =>
-            changelogs.toList.traverse((partition, store) => stores(store).position.map(at => partition -> at.getOrElse(0L)))
-              .map(positions => Standby(stores, changelogs, positions.toMap))
+            changelogs.toList.traverse((partition, store) => stores(store).position.map(at => (partition, store, at))).flatMap: held =>
+              plane.bounds(held.collect { case (partition, _, Some(_)) => partition }.toVector).flatMap: bounds =>
+                val outside =
+                  held.collect:
+                    case (partition, store, Some(at)) if bounds.get(partition).exists((low, high) => at < low || at > high) => store
+                outside.distinct.traverse_(stores(_).clear).as:
+                  val positions = held.map((partition, store, at) => partition -> at.filterNot(_ => outside.contains(store)).getOrElse(0L))
+                  Standby(stores, changelogs, positions.toMap)
         )(F.pure).map(id -> _)
       .map(_.toMap)
 
@@ -909,8 +934,6 @@ private[xkafka] object Engine:
     /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready. A member the group no
       * longer counts commits nothing: its tasks go to others, which read again from the group's last commit.
       */
-    private def commit(running: Running[F], tasks: Set[TaskId]): F[Running[F]] = committing(running, tasks).map(_._1)
-
     /** Commits these tasks, answering whether the group took the commit. */
     private def committing(running: Running[F], tasks: Set[TaskId]): F[(Running[F], Boolean)] =
       flushed(running, tasks, plane.write).flatMap(committed(_, tasks))

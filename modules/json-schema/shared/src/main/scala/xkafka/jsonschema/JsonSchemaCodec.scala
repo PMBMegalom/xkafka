@@ -60,7 +60,13 @@ private[jsonschema] object Described:
       )
     val title   = described.json.hcursor.get[String]("title").toOption.fold("")(name => s", $name,")
     val problem = s"a whole schema$title names its own definitions by reference, which inside another schema would name that schema's"
-    described.copy(problems = described.problems ++ Option.when(described.whole && refers(described.json))(problem), whole = false)
+    // The schema holding it is for draft 7, as derived schemas are, so a later draft's keywords inside would mean nothing.
+    val draft =
+      described.json.hcursor.get[String]("$schema").toOption.filter(named => described.whole && named.stripSuffix("#") != Draft7.stripSuffix("#"))
+        .map(named => s"a whole schema for $named cannot be held in another, which is for draft 7")
+    described.copy(problems = described.problems ++ Option.when(described.whole && refers(described.json))(problem) ++ draft, whole = false)
+
+  private val Draft7 = "http://json-schema.org/draft-07/schema#"
 
 /** How values of `A` are written as JSON, and read back, with the JSON Schema that describes them.
   *
@@ -98,6 +104,11 @@ trait JsonSchemaCodec[A]:
 
   def encode(value: A): Either[String, Json]
 
+  /** `value` encoded inside `depth` objects of derived types, which one refuses past the depth reading takes, so a value too deep is refused before
+    * it could exhaust the stack. A codec holding none encodes as `encode` does.
+    */
+  private[jsonschema] def encodeWithin(value: A, @scala.annotation.unused depth: Int): Either[String, Json] = encode(value)
+
   def decode(json: Json): Either[String, A]
 
   /** A codec for `B`, written as the `A` that `to` makes of it and read as `from` makes of an `A`. */
@@ -110,6 +121,7 @@ trait JsonSchemaCodec[A]:
       override private[jsonschema] def optional: Boolean                      = self.optional
       override def name: Option[String]                                       = self.name
       override def encode(value: B): Either[String, Json]                     = self.encode(to(value))
+      override private[jsonschema] def encodeWithin(value: B, depth: Int)     = self.encodeWithin(to(value), depth)
       override def decode(json: Json): Either[String, B]                      = self.decode(json).flatMap(from)
 
 object JsonSchemaCodec:
@@ -134,6 +146,15 @@ object JsonSchemaCodec:
       override def name: Option[String]                                       = described.hcursor.get[String]("title").toOption
       override def encode(value: Json): Either[String, Json]                  = Right(value)
       override def decode(json: Json): Either[String, Json]                   = Right(json)
+
+  /** Whether null is a value of `schema`: an empty one, or one whose type or enum holds null, or one of whose branches takes it. */
+  private[jsonschema] def takesNull(schema: Json): Boolean =
+    schema.asBoolean.contains(true) || schema.asObject.exists: fields =>
+      val typed  = fields("type").map(kind => kind.asString.contains("null") || kind.asArray.exists(_.contains(Json.fromString("null"))))
+      val listed = fields("enum").flatMap(_.asArray).map(_.contains(Json.Null))
+      val either = List("oneOf", "anyOf").flatMap(fields(_)).flatMap(_.asArray.toList.flatten).exists(takesNull)
+      val open   = fields.keys.forall(key => List("title", "description", "$comment", "$schema", "default").contains(key))
+      open || either || ((typed.contains(true) || listed.contains(true)) && typed.forall(identity) && listed.forall(identity))
 
   private val draft7 = "http://json-schema.org/draft-07/schema#"
 
@@ -215,20 +236,29 @@ object JsonSchemaCodec:
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[Option[A]] with
     override private[jsonschema] def describe(seen: Set[String]): Described =
       val described = Described.inside(inner.describe(seen))
-      // Null is a value of both an option and the option inside it, so no value could match exactly one branch of the `oneOf`.
-      val twice = Option.when(inner.optional)("an option holding an option cannot be told from none, as null is a value of both")
+      // Null is a value of both an option and the option inside it, so no value could match exactly one branch of the `oneOf`; so is it of a schema
+      // written by hand that takes null.
+      val twice =
+        if inner.optional then Some("an option holding an option cannot be told from none, as null is a value of both")
+        else
+          Option.when(JsonSchemaCodec.takesNull(described.json))(s"an option of ${described.json
+              .noSpaces} cannot be told from none, as null is a value of both")
       described.copy(json = Json.obj("oneOf" -> Json.arr(typed("null"), described.json)), problems = described.problems ++ twice)
-    override private[jsonschema] def optional: Boolean          = true
-    override def encode(value: Option[A]): Either[String, Json] = value.fold(Right(Json.Null))(inner.encode)
-    override def decode(json: Json): Either[String, Option[A]]  = if json.isNull then Right(None) else inner.decode(json).map(Some(_))
+    override private[jsonschema] def optional: Boolean                                                = true
+    override def encode(value: Option[A]): Either[String, Json]                                       = encodeWithin(value, 0)
+    override private[jsonschema] def encodeWithin(value: Option[A], depth: Int): Either[String, Json] =
+      value.fold(Right(Json.Null))(inner.encodeWithin(_, depth))
+    override def decode(json: Json): Either[String, Option[A]] = if json.isNull then Right(None) else inner.decode(json).map(Some(_))
 
   private def array[A, C](inner: JsonSchemaCodec[A])(items: C => Iterable[A], make: Vector[A] => C): JsonSchemaCodec[C] =
     new JsonSchemaCodec[C]:
       override private[jsonschema] def describe(seen: Set[String]): Described =
         val described = Described.inside(inner.describe(seen))
         described.copy(json = Json.obj("type" -> Json.fromString("array"), "items" -> described.json))
-      override def encode(value: C): Either[String, Json] = items(value).toVector.traverse(inner.encode).map(Json.fromValues)
-      override def decode(json: Json): Either[String, C]  =
+      override def encode(value: C): Either[String, Json]                                       = encodeWithin(value, 0)
+      override private[jsonschema] def encodeWithin(value: C, depth: Int): Either[String, Json] =
+        items(value).toVector.traverse(inner.encodeWithin(_, depth)).map(Json.fromValues)
+      override def decode(json: Json): Either[String, C] =
         json.asArray.toRight(s"expected an array, found ${Shown(json.noSpaces)}").flatMap(_.traverse(inner.decode)).map(make)
 
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[List[A]]   = array(inner)(identity, _.toList)
@@ -241,8 +271,9 @@ object JsonSchemaCodec:
     override private[jsonschema] def describe(seen: Set[String]): Described =
       val described = Described.inside(inner.describe(seen))
       described.copy(json = Json.obj("type" -> Json.fromString("object"), "additionalProperties" -> described.json))
-    override def encode(value: Map[String, A]): Either[String, Json] =
-      value.toList.traverse((key, item) => inner.encode(item).map(key -> _)).map(Json.fromFields)
+    override def encode(value: Map[String, A]): Either[String, Json]                                       = encodeWithin(value, 0)
+    override private[jsonschema] def encodeWithin(value: Map[String, A], depth: Int): Either[String, Json] =
+      value.toList.traverse((key, item) => inner.encodeWithin(item, depth).map(key -> _)).map(Json.fromFields)
     override def decode(json: Json): Either[String, Map[String, A]] =
       json.asObject.toRight(s"expected an object, found ${Shown(json.noSpaces)}")
         .flatMap(_.toList.traverse((key, item) => inner.decode(item).map(key -> _))).map(_.toMap)
@@ -311,8 +342,11 @@ private[jsonschema] final class ObjectCodec[A, T <: Tuple](
       )
     Described(json, described.map(_.definitions).foldLeft(List.empty[(String, () => Described)])(_ ++ _), described.flatMap(_.problems))
 
-  override def encode(value: A): Either[String, Json] =
-    fields.encode(toTuple(value)).bimap(reason => s"$full: $reason", values => Json.fromFields(infos.map(_.name).zip(values)))
+  override def encode(value: A): Either[String, Json] = encodeWithin(value, 0)
+
+  override private[jsonschema] def encodeWithin(value: A, depth: Int): Either[String, Json] =
+    if depth >= JsonSchemaFormat.MaxDepth then Left(s"the record is nested more than ${JsonSchemaFormat.MaxDepth} deep")
+    else fields.encode(toTuple(value), depth + 1).bimap(reason => s"$full: $reason", values => Json.fromFields(infos.map(_.name).zip(values)))
 
   override def decode(json: Json): Either[String, A] =
     json.asObject.toRight(s"expected an object of $full, found ${Shown(json.noSpaces)}").flatMap: read =>
@@ -392,8 +426,10 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
       case None => Json
           .obj("allOf" -> Json.arr(json, Json.obj("properties" -> Json.fromFields(List(property)), "required" -> Json.arr(Json.fromString("type")))))
 
-  override def encode(value: A): Either[String, Json] =
-    cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encode(narrowed)))) match
+  override def encode(value: A): Either[String, Json] = encodeWithin(value, 0)
+
+  override private[jsonschema] def encodeWithin(value: A, depth: Int): Either[String, Json] =
+    cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encodeWithin(narrowed, depth)))) match
       case None                   => Left(s"${Shown(value)} is none of the cases of $full")
       case Some((known, encoded)) =>
         if singletons.isDefined then Right(Json.fromString(known.tag))
@@ -438,20 +474,21 @@ private[jsonschema] object Elements:
 private[jsonschema] trait Fields[T <: Tuple]:
   def describe(seen: Set[String]): List[Described]
   def optional: List[Boolean]
-  def encode(values: T): Either[String, List[Json]]
+  def encode(values: T, depth: Int): Either[String, List[Json]]
   def decode(values: List[Json]): Either[String, T]
 
 private[jsonschema] object Fields:
   given Fields[EmptyTuple] with
-    override def describe(seen: Set[String]): List[Described]           = Nil
-    override def optional: List[Boolean]                                = Nil
-    override def encode(values: EmptyTuple): Either[String, List[Json]] = Right(Nil)
-    override def decode(values: List[Json]): Either[String, EmptyTuple] = Right(EmptyTuple)
+    override def describe(seen: Set[String]): List[Described]                       = Nil
+    override def optional: List[Boolean]                                            = Nil
+    override def encode(values: EmptyTuple, depth: Int): Either[String, List[Json]] = Right(Nil)
+    override def decode(values: List[Json]): Either[String, EmptyTuple]             = Right(EmptyTuple)
 
   given [H, T <: Tuple](using head: Resolved[H], tail: Fields[T]): Fields[H *: T] with
-    override def describe(seen: Set[String]): List[Described]       = Described.inside(head.codec.describe(seen)) :: tail.describe(seen)
-    override def optional: List[Boolean]                            = head.codec.optional :: tail.optional
-    override def encode(values: H *: T): Either[String, List[Json]] = (head.codec.encode(values.head), tail.encode(values.tail)).mapN(_ :: _)
+    override def describe(seen: Set[String]): List[Described]                   = Described.inside(head.codec.describe(seen)) :: tail.describe(seen)
+    override def optional: List[Boolean]                                        = head.codec.optional :: tail.optional
+    override def encode(values: H *: T, depth: Int): Either[String, List[Json]] =
+      (head.codec.encodeWithin(values.head, depth), tail.encode(values.tail, depth)).mapN(_ :: _)
     override def decode(values: List[Json]): Either[String, H *: T] =
       values match
         case value :: rest => (head.codec.decode(value), tail.decode(rest)).mapN(_ *: _)

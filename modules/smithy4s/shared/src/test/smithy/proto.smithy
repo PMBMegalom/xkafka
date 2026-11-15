@@ -254,3 +254,17 @@ structure WrappedList {
     @protoWrapped
     tags: Tags
 }
+
+/// A ticket whose kind numbers its default second.
+structure Ticket {
+    @protoIndex(1)
+    grade: Grade
+}
+
+enum Grade {
+    @protoIndex(4)
+    HIGH
+
+    @protoIndex(0)
+    NONE
+}

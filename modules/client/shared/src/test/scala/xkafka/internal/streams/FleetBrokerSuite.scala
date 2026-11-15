@@ -187,7 +187,7 @@ final class FleetBrokerSuite extends CatsEffectSuite:
     def xkafka(restores: Ref[IO, List[Map[TopicPartition, Long]]], follows: Ref[IO, List[Vector[StartAt]]]): Resource[IO, Unit] =
       def watch(plane: Engine.Plane[IO]): Engine.Plane[IO] =
         new Engine.Plane[IO]:
-          export plane.{ends, followed, poll, purge, read, write}
+          export plane.{bounds, ends, followed, poll, purge, read, write}
           def restore(changelogs: Map[TopicPartition, String], from: Map[TopicPartition, Long], stores: Map[String, TaskStore[IO]]) =
             restores.update(_ :+ from) *> plane.restore(changelogs, from, stores)
           def follow(starts: Vector[StartAt]) = follows.update(_ :+ starts) *> plane.follow(starts)

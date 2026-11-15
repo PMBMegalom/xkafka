@@ -69,7 +69,9 @@ def visits(registry: SchemaRegistry[IO]): IO[Serde[IO, Visit]] = Avro4sSerde.of[
 ```
 
 xkafka registers the library's schema for the type. With
-`SubjectNaming.RecordName`, the subject is that schema's full name. Records are
+`SubjectNaming.RecordName`, the subject is that schema's full name where it is a
+record; a type that is not one, such as an enum, fails to write with
+`RegistryException.Unserializable`, as a derived one does. Records are
 the bytes Confluent's `KafkaAvroSerializer` writes for the library's values, so
 Confluent's serializers and these serdes read each other's records.
 

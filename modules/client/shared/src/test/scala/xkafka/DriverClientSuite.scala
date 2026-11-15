@@ -217,6 +217,20 @@ final class DriverClientSuite extends CatsEffectSuite:
       assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
       assertEquals(enqueued, Vector.empty, "nothing reached the driver")
 
+  test("records waiting in a partition's stream when it seeks are not handed out after the seek, as no record fetched before it is"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          opened  <- Deferred[IO, PartitionRecords[IO, String, String]]
+          routing <- consumer.partitionedRecords(100).evalMap(opened.complete(_)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+          _       <- (0L until 5L).toList.traverse_(fake.deliver) *> fake.drained *> IO.sleep(100.millis)
+          stream  <- opened.get
+          _       <- consumer.seek(eventsZero, Offset.from(10L).toOption.get) *> fake.deliver(10L)
+          first   <- stream.records.take(1).compile.lastOrError.timeout(10.seconds)
+          _       <- routing.cancel
+        yield assertEquals(first.record.offset.value, 10L)
+
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
@@ -654,8 +668,8 @@ final class DriverClientSuite extends CatsEffectSuite:
   test("a producer waits for a topic being created no longer than its client's metadata refresh interval"):
     val quick = client.withMetadataRefreshInterval(1.milli).toOption.get
     FakeDriver().flatMap: fake =>
-      new DriverClient[IO](fake).producer(producerSettings.withClient(quick)).use(_.partitionsFor(Topic.from("creating").toOption.get)).attempt
-        .timeout(10.seconds).product(fake.count("metadata"))
+      new DriverClient[IO](fake).producer(producerSettings.withClient(quick).toOption.get).use(_.partitionsFor(Topic.from("creating").toOption.get))
+        .attempt.timeout(10.seconds).product(fake.count("metadata"))
     .map: (outcome, lookups) =>
       assert(
         outcome.left
@@ -930,7 +944,7 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def positions(consumer: Client, partitions: Vector[TopicPartition]): IO[Vector[Long]] = unused("positions")
 
-    override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): IO[Unit] = unused("seek")
+    override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): IO[Unit] = record("seek")
 
     /** Knows `events` with one partition, and lists `bare` without any, which no Kafka cluster answers. `creating` has its partition from the third
       * lookup on, as a topic the broker creates when asked about does.

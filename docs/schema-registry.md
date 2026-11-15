@@ -433,7 +433,12 @@ Records match what Confluent's `KafkaJsonSchemaSerializer` writes.
   trait or enum with one name, such as `V1.Created` and `V2.Created`, which
   `type` could not tell apart; two types of one name that hold themselves, as a
   generic class derived once for every type argument gives; and an option
-  holding an option, which `null` would be a value of twice.
+  holding an option, or a schema written by hand that takes `null`, which
+  `null` would be a value of twice. Neither can a schema written by hand that
+  names its own definitions by reference, or that is written for a draft other
+  than draft 7, be held in a derived type, in an option, a collection or a map:
+  the schema holding it is for draft 7, and its references would name that
+  schema's definitions.
 
 For a schema written by hand, give its JSON with circe's codecs for its values,
 which must write what the schema describes:
@@ -755,8 +760,8 @@ subject's name, as Confluent's subject name strategies do:
 | `TopicRecordName` | `orders-com.example.Order` | `TopicRecordNameStrategy` |
 
 `RecordName` and `TopicRecordName` need a named record: writing a type that has
-none, such as a `String` or an enum in Avro, or a JSON Schema without a
-`title`, fails with `RegistryException.Unserializable`.
+none, such as a `String`, an enum or a fixed type in Avro, or a JSON Schema
+without a `title`, fails with `RegistryException.Unserializable` when written.
 
 `Subject.from` refuses an empty subject, and `.` and `..`, which would make
 the registry read another path.
@@ -817,13 +822,17 @@ Failures are `RegistryException`s:
 | `NoSchema` | your type has no schema in the serde's format, such as a list of lists in Protobuf |
 
 A record nested more than 100 deep, such as a list of 101 nodes that each hold
-the next, is also `Unserializable`, in every format. So are:
+the next, is also `Unserializable`, written or read, in every format with
+xkafka's own codecs. So are:
 
 - an Avro record whose arrays or maps claim more items than its bytes can hold,
   or that has bytes left after its value, with xkafka's codecs or with vulcan's
   and avro4s's;
 - a JSON or Protobuf record whose text is not UTF-8. An Avro record's text is
   read with such bytes replaced.
+
+The serdes of vulcan, avro4s, ScalaPB and smithy4s write and read nested records
+as their libraries do.
 
 A value an error names is cut short after 200 characters, with its full
 length.
@@ -840,6 +849,7 @@ record without a value raises `Deserializer.NullValueException` (see
   schemas are read: derived serdes read by field number and do not need the
   other schemas, and `ProtobufSerde.asWritten` fetches them.
 - Generic Protobuf serdes, and serdes of messages ScalaPB generated, of files
-  that import files other than those known files.
+  that import files other than those
+  [Confluent's serializers know](#protobuf-values-known-only-at-run-time).
 - Protobuf files that declare groups or extensions, or are written in an edition
   of Protobuf.

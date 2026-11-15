@@ -2462,7 +2462,7 @@ object Topology:
     // A step named as a node the program makes of its own, such as a repartition's or a join's, is refused as Java refuses two nodes of one name;
     // those nodes share names with each other only when a repartition or join is named twice, which is refused as such.
     val problems =
-      wired.problems ++ (stores ++ wired.steps ++ wired.joinNames).flatMap(invalid) ++
+      wired.problems ++ (stores ++ wired.steps ++ wired.joinNames ++ wired.checked).distinct.flatMap(invalid) ++
         (twice(wired.steps) ++ twice(wired.joinNames) ++ wired.steps.filter(wired.generated.contains)).distinct.sorted
           .map(TopologyError.DuplicateName(_)) ++ twice(stores).sorted.map(TopologyError.DuplicateStore(_)) ++
         twice(repartitions).sorted.map(name => TopologyError.DuplicateRepartition(wired.asked.getOrElse(name, name))) ++ twice(wired.inputs)

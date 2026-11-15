@@ -106,6 +106,29 @@ final class ForeignKeySuite extends CatsEffectSuite:
       assertEquals(to(result._2, "app-result-changelog").map(_.key), Vector(Some(bytes("app-result-changelog:k1"))))
       assertEquals(to(result._2, "out").map(_.key), Vector(Some(bytes("k1"))))
 
+  test("a foreign key is kept for the subscriptions as written for their -fk topic, so a change to the other table finds them, as Java's does"):
+    val tagged =
+      Serde[IO, String](
+        Serializer.instance((topic, _, key) => IO.pure(Some(bytes(s"${topic.value}:$key")))),
+        Deserializer.instance: (topic, _, written) =>
+          written.map(read => new String(read.toArray)) match
+            case Some(text) if text.startsWith(s"${topic.value}:") => IO.pure(text.stripPrefix(s"${topic.value}:"))
+            case other => IO.raiseError(new IllegalArgumentException(s"$other was not written for ${topic.value}"))
+      )
+    val taggedUsers = KTable(Named("users"), other, tagged, text, Store("users"))
+    val topology    = program(rows.joinOnForeignKey(Named("fk"), taggedUsers, text, tagged, text)((_, value) => Some(value))((l, r) => s"$l+$r"))
+    for
+      rowsTask  <- taskReading(topology, "left", 0)
+      usersTask <- taskReading(topology, "other", 0)
+      sent      <- rowsTask.process(TaskState.empty, input("left", "k1", Some(bytes("a"))), 0L)
+      request = to(sent._2, requests).head
+      subscribed <- usersTask.process(TaskState.empty, TaskInput(request.key, request.value, request.timestamp, request.headers, requests, 0, 0L), 0L)
+      changed    <- usersTask.process(subscribed._1, TaskInput(Some(bytes("other:a")), Some(bytes("A")), 2000L, Headers.empty, "other", 0, 0L), 0L)
+    yield
+      val kept = to(subscribed._2, "app-fk-subscription-store-changelog").flatMap(_.key).map(key => new String(key.toArray))
+      assert(kept.exists(_.contains(s"$requests-fk:a")), kept)
+      assertEquals(to(changed._2, responses).size, 1)
+
   test("an answer for a value the row has since changed from is dropped, and one for the value it holds makes the result"):
     val topology                   = program(joined)
     val hashOf                     = (value: String) => Some(Murmur3.hash128(bytes(value)))

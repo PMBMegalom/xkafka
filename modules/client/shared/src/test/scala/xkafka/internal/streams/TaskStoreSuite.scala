@@ -56,7 +56,7 @@ final class TaskStoreSuite extends CatsEffectSuite:
       closed  <- IO.ref(false)
       slow =
         new TaskStore[IO]:
-          export inner.{clock, positions, range, timed, write}
+          export inner.{clear, clock, positions, range, timed, write}
           def get(key: Chunk[Byte]): IO[Option[Stored]] = began.complete(()) *> release.get *> inner.get(key)
           def close: IO[Unit]                           = closed.set(true)
       store   <- TaskStore.guarded(slow)

@@ -120,6 +120,21 @@ final case class TwoChains(a: Chain, b: Chain) derives AvroCodec
 
 final case class Twice(value: Option[Option[String]]) derives AvroCodec
 
+/** A record whose annotations name their arguments. */
+@SchemaNamespace(namespace = "com.example") @SchemaName(name = "Order") @SchemaDoc(doc = "An order.") @SchemaAlias(alias = "Purchase")
+final case class NamedArguments(
+    @SchemaName(name = "n") @SchemaDoc(doc = "How many.")
+    count: Int
+) derives AvroCodec
+
+/** An enum two of whose cases are named alike, in two objects. */
+sealed trait Happened derives AvroCodec
+object Happened:
+  object First:
+    case object Created extends Happened
+  object Second:
+    case object Created extends Happened
+
 sealed trait Shape derives AvroCodec
 final case class Split(left: Shape, right: Shape) extends Shape
 final case class Tip(v: Int)                      extends Shape
@@ -319,6 +334,33 @@ class AvroCodecSuite extends FunSuite:
 
   test("an object whose name ends in 'package' is in its types' namespace, as only the object Scala makes around a file's definitions is left out"):
     assertEquals(AvroCodec[Workpackage.Item].schema.fullName.map(_.value), Some("xkafka.avro.Workpackage.Item"))
+
+  test("a value nested deeper than the limit is refused as it is encoded, with the reading limit's reason, not encoded until the stack runs out"):
+    def nodes(count: Int) = (1 until count).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    val refused           = s"the value is nested more than ${AvroBinary.MaxDepth} deep"
+    assertEquals(AvroCodec[Node].encode(nodes(100000)).left.toOption.exists(_.endsWith(refused)), true)
+    assertEquals(AvroCodec[Node].encode(nodes(AvroBinary.MaxDepth + 1)).left.toOption.exists(_.endsWith(refused)), true)
+    assert(AvroCodec[Node].encode(nodes(AvroBinary.MaxDepth)).isRight)
+
+  test("an enum two of whose cases have one symbol, and a union two of whose branches are of one type, are refused, as Avro allows neither"):
+    assertEquals(AvroCodec[Happened].refusal, Some("enum 'xkafka.avro.Happened' holds the symbol 'Created' twice"))
+    assertEquals(AvroCodec.union[(java.time.Instant, Long)].refusal, Some("a union holds 'Long' twice"))
+    assertEquals(AvroCodec.union[(Int, String)].refusal, None)
+
+  test("a union of a named type and a primitive of the same name is read, as their full names differ"):
+    val text = """["string",{"type":"record","name":"String","fields":[]},{"type":"map","values":"int"},{"type":"record","name":"Map","fields":[]}]"""
+    assert(AvroSchemaJson.parse(text).isRight, AvroSchemaJson.parse(text))
+    assertEquals(AvroSchemaJson.parse("""["string","string"]"""), Left("a union holds 'String' twice"))
+
+  test("annotations whose arguments are named are read as those given in place"):
+    assertEquals(
+      AvroSchemaJson.render(AvroCodec[NamedArguments].schema),
+      """{"type":"record","name":"Order","namespace":"com.example","doc":"An order.","fields":[{"name":"n","type":"int","doc":"How many."}],"aliases":["Purchase"]}"""
+    )
+    assert(
+      compileErrors("""val name = "x"; @SchemaName(name) final case class Computed(n: Int) derives AvroCodec""")
+        .contains("@SchemaName takes literal text")
+    )
 
   test("an option holding an option is refused, as its none and some none would both be written as null"):
     val message = Some("an option holding an option cannot be told from none, as null is a value of both")

@@ -507,7 +507,8 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
                 xkafka_set_error_at(error, error_size, error_code, batch->security_message, batch->security_error);
         else
                 xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(err), err);
-        return -1;
+        /* One that timed out once the producer met a fatal failure is fatal too, as librdkafka retries nothing after it. */
+        return xkafka_fatal(producer) ? -2 : -1;
 }
 
 size_t xkafka_batch_count(const xkafka_batch_t *batch) {
@@ -1241,25 +1242,14 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
         for (topic_index = 0; topic_index < metadata->topic_cnt; topic_index++) {
                 const rd_kafka_metadata_topic_t *topic_metadata =
                     &metadata->topics[topic_index];
-                int partition_index;
 
+                /* Only a topic's own error fails the call: a partition whose leader is offline is listed with the others, as the Java client
+                 * lists it. */
                 if (topic_metadata->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
                         xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(topic_metadata->err),
                                             topic_metadata->err);
                         rd_kafka_metadata_destroy(metadata);
                         return NULL;
-                }
-                for (partition_index = 0;
-                     partition_index < topic_metadata->partition_cnt;
-                     partition_index++) {
-                        rd_kafka_resp_err_t partition_error =
-                            topic_metadata->partitions[partition_index].err;
-                        if (partition_error != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(partition_error),
-                                                    partition_error);
-                                rd_kafka_metadata_destroy(metadata);
-                                return NULL;
-                        }
                 }
         }
         return (void *)metadata;

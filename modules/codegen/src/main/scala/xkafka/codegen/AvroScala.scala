@@ -218,11 +218,17 @@ private[codegen] final class AvroScala(namespace: String, neighbours: Set[String
   private def logicalLiteral(logicalType: LogicalType, value: AvroValue): Either[String, String] =
     val epoch = "_root_.java.time.Instant.EPOCH"
     (logicalType, value) match
-      case (LogicalType.Decimal(_, scale), AvroValue.Bytes(chunk)) =>
+      // Each default is made as the class is, so one that cannot be would fail each time it is taken.
+      case (LogicalType.Decimal(_, _), AvroValue.Bytes(chunk)) if chunk.isEmpty => Left("a decimal of no bytes is no number")
+      case (LogicalType.Decimal(_, scale), AvroValue.Bytes(chunk))              =>
         val digits = chunk.toList.mkString(s"${Names.builtin("Array", neighbours)}[${Names.builtin("Byte", neighbours)}](", ", ", ")")
         Right(s"${Names.builtin("BigDecimal", neighbours)}(${Names.builtin("BigInt", neighbours)}($digits), $scale)")
-      case (LogicalType.Uuid, AvroValue.String(text)) => Right(s"_root_.java.util.UUID.fromString(${Names.quote(text)})")
-      case (LogicalType.Date, AvroValue.Int(days))    => Right(s"_root_.java.time.LocalDate.ofEpochDay(${days}L)")
+      case (LogicalType.Uuid, AvroValue.String(text)) => Either.cond(
+          scala.util.Try(java.util.UUID.fromString(text)).isSuccess,
+          s"_root_.java.util.UUID.fromString(${Names.quote(text)})",
+          s"'$text' is no UUID"
+        )
+      case (LogicalType.Date, AvroValue.Int(days)) => Right(s"_root_.java.time.LocalDate.ofEpochDay(${days}L)")
       // A default past a day would make a time the class cannot hold, failing each time the default is taken.
       case (LogicalType.TimeMillis, AvroValue.Int(millis)) => Either.cond(
           millis >= 0 && millis < DayMillis,

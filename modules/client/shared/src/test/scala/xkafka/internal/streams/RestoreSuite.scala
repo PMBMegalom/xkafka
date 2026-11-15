@@ -106,6 +106,26 @@ final class RestoreSuite extends CatsEffectSuite:
           held  <- store.all
         yield assertEquals(held.map(entry => new String(entry._1.toArray)).toSet, Set("k1", "k2"))
 
+  for broker <- server.toList do
+    test("a global table whose store is past its topic's end, as after the topic was made anew, is emptied and read from the start"):
+      Names.fresh:
+        val table    = topic("global-anew")
+        val serde    = xkafka.Serde.utf8[IO]
+        val read     = xkafka.streams.GlobalKTable(xkafka.streams.Named("g"), table, serde, serde, xkafka.streams.Store("gs"))
+        val consumer =
+          Resource.make(
+            driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
+          )(driver.destroyConsumer)
+        // A store kept from before the topic was made anew, far past where the topic now ends.
+        val kept: TaskStore.Open[IO] =
+          (name, time, held) =>
+            TaskStore.memory[IO].apply(name, time, held).flatTap: store =>
+              store.write(StoreContents.unchanged.updated(text("gone"), Some(Stored(text("v"), 1L))), Map(0 -> 50L, 1 -> 50L))
+        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k1", Some("v"), 1000L))).void) *> consumer.use:
+          client =>
+            GlobalStores(driver, client, List(read), _ => IO.pure(2), kept).use: held =>
+              held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, Set("k1")))
+
   test(
     "each store's changes from a batch of its changelog keep each key's latest value with its record's time, and a record without a value removes it"
   ):

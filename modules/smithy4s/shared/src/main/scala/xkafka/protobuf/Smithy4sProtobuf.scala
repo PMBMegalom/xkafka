@@ -186,9 +186,10 @@ object Smithy4sProtobufSchema:
         val values  =
           if indexed.forall(_.isDefined) then enumeration.values.zip(indexed.flatten).map((value, number) => (value.name, number))
           else enumeration.values.zipWithIndex.map((value, number) => (value.name, number))
+        // proto3 takes an enum's first value as its zero, so the value numbered 0 is declared first.
         Either.cond(
           values.exists(_._2 == 0),
-          Right(Enum(enumeration.shapeId.name, values)),
+          Right(Enum(enumeration.shapeId.name, values.filter(_._2 == 0) ++ values.filterNot(_._2 == 0))),
           s"${show(enumeration.shapeId)} has no value numbered 0, which Protobuf's enums start with"
         )
       case other => Left(s"${show(other.shapeId)} is not a message")

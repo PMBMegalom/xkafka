@@ -162,6 +162,15 @@ private[xkafka] object RocksdbStore:
           finally batch.close()
         } *> clocked.set(after) *> positioned.update(_ ++ positions)
 
+    def clear: F[Unit] =
+      F.blocking {
+        val batch = new WriteBatch()
+        try
+          opened.families.foreach(family => scanned(family, None, None)((key, _) => key).foreach(batch.delete(family, _)))
+          db.write(writing, batch)
+        finally batch.close()
+      } *> clocked.set(WindowStore.NoTime) *> positioned.set(Map.empty)
+
     def close: F[Unit] =
       F.blocking:
         val flushing = new FlushOptions().setWaitForFlush(true)

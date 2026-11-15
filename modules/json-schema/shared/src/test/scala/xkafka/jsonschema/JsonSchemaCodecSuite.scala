@@ -150,6 +150,30 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
   test("two cases whose names would both tell the case apart are refused, since a value of one would read as the other"):
     assert(JsonSchemaCodec[Event].refusal.exists(_.contains("'Created'")), JsonSchemaCodec[Event].refusal)
 
+  test("a whole schema written for another draft is refused inside another, which is written for draft 7, and taken on its own"):
+    val later: JsonSchemaCodec[String] =
+      JsonSchemaCodec.from(
+        parse("""{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"}""").toOption.get,
+        io.circe.Encoder.encodeString,
+        io.circe.Decoder.decodeString
+      )
+    assertEquals(
+      JsonSchemaCodec[List[String]](using JsonSchemaCodec.given_JsonSchemaCodec_List(using later)).refusal,
+      Some("a whole schema for https://json-schema.org/draft/2020-12/schema cannot be held in another, which is for draft 7")
+    )
+    assertEquals(later.refusal, None)
+
+  test("an option of a schema that takes null already is refused, since null would match both branches of its oneOf"):
+    def written(schema: String): JsonSchemaCodec[String] =
+      JsonSchemaCodec.from(parse(schema).toOption.get, io.circe.Encoder.encodeString, io.circe.Decoder.decodeString)
+    List("""{"type":["string","null"]}""", """{"enum":["a",null]}""", """{}""", """{"oneOf":[{"type":"null"},{"type":"string"}]}""").foreach:
+      schema =>
+        assert(JsonSchemaCodec[Option[String]](using JsonSchemaCodec.given_JsonSchemaCodec_Option(using written(schema))).refusal.isDefined, schema)
+    assertEquals(
+      JsonSchemaCodec[Option[String]](using JsonSchemaCodec.given_JsonSchemaCodec_Option(using written("""{"type":"string"}"""))).refusal,
+      None
+    )
+
   test("an option holding an option is refused, since null would be a value of both and Some(None) would read back as None"):
     assert(JsonSchemaCodec[Twice].refusal.exists(_.contains("an option holding an option")), JsonSchemaCodec[Twice].refusal)
     assertEquals(JsonSchemaCodec[Maybe].refusal, None)
@@ -194,6 +218,15 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
   test("a record that is not UTF-8 is refused, not read with its bad bytes replaced"):
     assertEquals(JsonSchemaFormat.read(Chunk[Byte]('"', 'a', 0xff.toByte, '"')), Left("the record is not UTF-8"))
     assertEquals(JsonSchemaFormat.read(Chunk.array("\"é\"".getBytes("UTF-8"))), Right(Json.fromString("é")))
+
+  test("records nested deeper than the limit are refused when written too, so nothing is written that reading refuses"):
+    def nodes(count: Int)   = (1 until count).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    val refused             = s"the record is nested more than ${JsonSchemaFormat.MaxDepth} deep"
+    val format              = JsonSchemaFormat[Node]
+    def written(count: Int) = format.writer(format.schema).flatMap(_(nodes(count)))
+    assert(written(JsonSchemaFormat.MaxDepth + 1).left.exists(_.endsWith(refused)), written(JsonSchemaFormat.MaxDepth + 1).map(_.size))
+    assert(written(100000).left.exists(_.endsWith(refused)))
+    assert(written(JsonSchemaFormat.MaxDepth).isRight)
 
   test("records nested deeper than the limit are refused, not read until the stack runs out"):
     val nested = Chunk.array(("[" * 1000 + "]" * 1000).getBytes("UTF-8"))

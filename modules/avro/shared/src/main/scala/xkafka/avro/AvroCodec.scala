@@ -56,6 +56,11 @@ trait AvroCodec[A]:
 
   def encode(value: A): Either[String, AvroValue]
 
+  /** `value` encoded inside `depth` records, which a record refuses past the depth reading takes, so a value too deep is refused before it could
+    * exhaust the stack. A codec holding no records encodes as `encode` does.
+    */
+  private[avro] def encodeWithin(value: A, @scala.annotation.unused depth: Int): Either[String, AvroValue] = encode(value)
+
   /** The value `value` is, which was read with this codec's schema. */
   def decode(value: AvroValue): Either[String, A]
 
@@ -78,6 +83,7 @@ trait AvroCodec[A]:
       override private[avro] def building: AvroCodec.Building[AvroSchema] = self.building
       override private[avro] def mismatch: Option[String]                 = problem
       override def encode(value: A): Either[String, AvroValue]            = self.encode(value)
+      override private[avro] def encodeWithin(value: A, depth: Int)       = self.encodeWithin(value, depth)
       override def decode(value: AvroValue): Either[String, A]            = self.decode(value)
 
   /** A codec for `B`, written as the `A` that `to` makes of it and read as `from` makes of an `A`. */
@@ -88,6 +94,7 @@ trait AvroCodec[A]:
     new AvroCodec[B]:
       override private[avro] def building: AvroCodec.Building[AvroSchema] = self.building
       override def encode(value: B): Either[String, AvroValue]            = self.encode(to(value))
+      override private[avro] def encodeWithin(value: B, depth: Int)       = self.encodeWithin(to(value), depth)
       override def decode(value: AvroValue): Either[String, B]            = self.decode(value).flatMap(from)
 
 object AvroCodec:
@@ -189,7 +196,9 @@ object AvroCodec:
           schema match
             case AvroSchema.Union(branches) => AvroSchema.Union(AvroSchema.Null :: branches.filterNot(_ == AvroSchema.Null))
             case other                      => AvroSchema.Union(List(AvroSchema.Null, other))
-    override def encode(value: Option[A]): Either[String, AvroValue] = value.fold(Right(AvroValue.Null))(inner.encode)
+    override def encode(value: Option[A]): Either[String, AvroValue]                                 = encodeWithin(value, 0)
+    override private[avro] def encodeWithin(value: Option[A], depth: Int): Either[String, AvroValue] =
+      value.fold(Right(AvroValue.Null))(inner.encodeWithin(_, depth))
     override def decode(value: AvroValue): Either[String, Option[A]] =
       value match
         case AvroValue.Null => Right(None)
@@ -197,9 +206,11 @@ object AvroCodec:
 
   private def array[A, C](inner: AvroCodec[A])(items: C => Iterable[A], make: Vector[A] => C): AvroCodec[C] =
     new AvroCodec[C]:
-      override private[avro] def building: Building[AvroSchema] = inner.building.map(AvroSchema.Array(_))
-      override def encode(value: C): Either[String, AvroValue]  = items(value).toVector.traverse(inner.encode).map(AvroValue.Array(_))
-      override def decode(value: AvroValue): Either[String, C]  =
+      override private[avro] def building: Building[AvroSchema]                                = inner.building.map(AvroSchema.Array(_))
+      override def encode(value: C): Either[String, AvroValue]                                 = encodeWithin(value, 0)
+      override private[avro] def encodeWithin(value: C, depth: Int): Either[String, AvroValue] =
+        items(value).toVector.traverse(inner.encodeWithin(_, depth)).map(AvroValue.Array(_))
+      override def decode(value: AvroValue): Either[String, C] =
         value match
           case AvroValue.Array(values) => values.traverse(inner.decode).map(make)
           case other                   => Left(s"expected an array, found ${Shown(other)}")
@@ -211,9 +222,10 @@ object AvroCodec:
 
   /** Values by text keys, as an Avro map. */
   given [A](using inner: AvroCodec[A]): AvroCodec[Map[String, A]] with
-    override private[avro] def building: Building[AvroSchema]             = inner.building.map(AvroSchema.Map(_))
-    override def encode(value: Map[String, A]): Either[String, AvroValue] =
-      value.toVector.traverse((key, item) => inner.encode(item).map(key -> _)).map(AvroValue.Map(_))
+    override private[avro] def building: Building[AvroSchema]                                             = inner.building.map(AvroSchema.Map(_))
+    override def encode(value: Map[String, A]): Either[String, AvroValue]                                 = encodeWithin(value, 0)
+    override private[avro] def encodeWithin(value: Map[String, A], depth: Int): Either[String, AvroValue] =
+      value.toVector.traverse((key, item) => inner.encodeWithin(item, depth).map(key -> _)).map(AvroValue.Map(_))
     override def decode(value: AvroValue): Either[String, Map[String, A]] =
       value match
         case AvroValue.Map(entries) => entries.traverse((key, item) => inner.decode(item).map(key -> _)).map(_.toMap)
@@ -375,9 +387,13 @@ private[avro] final class RecordCodec[A, T <: Tuple](
           case _                         => None
       case other => Some(other)
 
-  override def encode(value: A): Either[String, AvroValue] =
-    fields.encode(toTuple(value))
-      .bimap(reason => s"record '${name.value}': $reason", values => AvroValue.Record(name, infos.map(_.name).zip(values).toVector))
+  override def encode(value: A): Either[String, AvroValue] = encodeWithin(value, 0)
+
+  override private[avro] def encodeWithin(value: A, depth: Int): Either[String, AvroValue] =
+    if depth >= AvroBinary.MaxDepth then Left(s"the value is nested more than ${AvroBinary.MaxDepth} deep")
+    else
+      fields.encode(toTuple(value), depth + 1)
+        .bimap(reason => s"record '${name.value}': $reason", values => AvroValue.Record(name, infos.map(_.name).zip(values).toVector))
 
   override def decode(value: AvroValue): Either[String, A] =
     value match
@@ -401,7 +417,7 @@ private[avro] final class FixedCodec[A, T <: Tuple](
     AvroCodec.named(name, State.pure(AvroSchema.Fixed(name, size, named.aliases.map(FullName.from(_, name.namespace)))))
 
   override def encode(value: A): Either[String, AvroValue] =
-    field.encode(toTuple(value)).flatMap:
+    field.encode(toTuple(value), 0).flatMap:
       case List(AvroValue.Bytes(bytes)) if bytes.size == size => Right(AvroValue.Fixed(name, bytes))
       case List(AvroValue.Bytes(bytes))                       => Left(s"fixed '${name.value}': ${bytes.size} bytes, not $size")
       case other                                              => Left(s"fixed '${name.value}': expected bytes, found ${Shown(other)}")
@@ -415,15 +431,19 @@ private[avro] final class FixedCodec[A, T <: Tuple](
 private[avro] final class UnionCodec[U](branches: List[Branch[U]]) extends AvroCodec[U]:
   // A branch that is a union itself, as a sealed trait of records is, gives its branches, since Avro has no union inside a union.
   override private[avro] def building: AvroCodec.Building[AvroSchema] =
-    branches.traverse(_.codec.building).map: schemas =>
-      AvroSchema.Union(
+    branches.traverse(_.codec.building).flatMap: schemas =>
+      val flat =
         schemas.flatMap:
           case AvroSchema.Union(inner) => inner
           case other                   => List(other)
-      )
+      // Avro takes a union's branch by its type, so two of one type could not be told apart.
+      val clash = AvroSchemaJson.twice(flat).map(kind => s"a union holds '$kind' twice")
+      State.modify[AvroCodec.Defining](defining => defining.copy(clashes = defining.clashes ++ clash)).as(AvroSchema.Union(flat))
 
-  override def encode(value: U): Either[String, AvroValue] =
-    branches.collectFirstSome(branch => branch.tag.unapply(value).map(branch.codec.encode))
+  override def encode(value: U): Either[String, AvroValue] = encodeWithin(value, 0)
+
+  override private[avro] def encodeWithin(value: U, depth: Int): Either[String, AvroValue] =
+    branches.collectFirstSome(branch => branch.tag.unapply(value).map(branch.codec.encodeWithin(_, depth)))
       .getOrElse(Left(s"${Shown(value)} is of none of the union's types"))
 
   override def decode(value: AvroValue): Either[String, U] =
@@ -488,11 +508,7 @@ private[avro] object EnumDefault:
   private def defaultOf[A: Type](using Quotes): Expr[Option[String]] =
     import quotes.reflect.*
     val symbol                      = TypeRepr.of[A].typeSymbol
-    def renamed(of: Symbol): String =
-      of.annotations.collectFirst:
-        case Apply(Select(New(tpt), _), List(Literal(StringConstant(name)))) if tpt.tpe.typeSymbol.fullName == "xkafka.schemaregistry.SchemaName" =>
-          name
-      .getOrElse(of.name.stripSuffix("$"))
+    def renamed(of: Symbol): String = xkafka.schemaregistry.Meta.text(of.annotations, "SchemaName").headOption.getOrElse(of.name.stripSuffix("$"))
     symbol.annotations.collectFirst:
       case annotation @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == "xkafka.avro.AvroEnumDefault" =>
         (annotation, arguments)
@@ -533,8 +549,12 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
 
   override private[avro] def building: AvroCodec.Building[AvroSchema] =
     singletons match
-      case Some(_) => AvroCodec
-          .named(name, State.pure(AvroSchema.Enum(name, cases.map(symbol), default, named.doc, named.aliases.map(FullName.from(_, name.namespace)))))
+      case Some(_) =>
+        val symbols = cases.map(symbol)
+        // An Avro enum's symbols are its values, so two alike would read as one.
+        val twice = symbols.diff(symbols.distinct).headOption.map(symbol => s"enum '${name.value}' holds the symbol '$symbol' twice")
+        AvroCodec.named(name, State.pure(AvroSchema.Enum(name, symbols, default, named.doc, named.aliases.map(FullName.from(_, name.namespace)))))
+          .flatTap(_ => State.modify[AvroCodec.Defining](defining => defining.copy(clashes = defining.clashes ++ twice)))
       case None => cases.traverse(_.codec.building).map: schemas =>
           AvroSchema.Union(
             schemas.flatMap:
@@ -542,8 +562,10 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
               case other                      => List(other)
           )
 
-  override def encode(value: A): Either[String, AvroValue] =
-    cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encode(narrowed)))) match
+  override def encode(value: A): Either[String, AvroValue] = encodeWithin(value, 0)
+
+  override private[avro] def encodeWithin(value: A, depth: Int): Either[String, AvroValue] =
+    cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => (known, known.codec.encodeWithin(narrowed, depth)))) match
       case Some((known, encoded)) => if singletons.isDefined then Right(AvroValue.Enum(name, symbol(known))) else encoded
       case None                   => Left(s"${Shown(value)} is none of the cases of '${name.value}'")
 
@@ -574,7 +596,9 @@ private[avro] trait DerivedResolved:
 /** The codecs of a case class's fields, whose types are `T`. */
 private[avro] trait Fields[T <: Tuple]:
   def building: AvroCodec.Building[List[AvroSchema]]
-  def encode(values: T): Either[String, List[AvroValue]]
+
+  /** The fields' values encoded inside `depth` records. */
+  def encode(values: T, depth: Int): Either[String, List[AvroValue]]
   def decode(values: List[AvroValue]): Either[String, T]
 
 private[avro] object Fields:
@@ -597,13 +621,14 @@ private[avro] object Fields:
       case found: ImplicitSearchSuccess   => '{ ${ found.tree.asExpr }.asInstanceOf[Fields[T]] }
       case missing: ImplicitSearchFailure => report.errorAndAbort(missing.explanation)
   given Fields[EmptyTuple] with
-    override def building: AvroCodec.Building[List[AvroSchema]]              = State.pure(Nil)
-    override def encode(values: EmptyTuple): Either[String, List[AvroValue]] = Right(Nil)
-    override def decode(values: List[AvroValue]): Either[String, EmptyTuple] = Right(EmptyTuple)
+    override def building: AvroCodec.Building[List[AvroSchema]]                          = State.pure(Nil)
+    override def encode(values: EmptyTuple, depth: Int): Either[String, List[AvroValue]] = Right(Nil)
+    override def decode(values: List[AvroValue]): Either[String, EmptyTuple]             = Right(EmptyTuple)
 
   given [H, T <: Tuple](using head: Resolved[H], tail: Fields[T]): Fields[H *: T] with
-    override def building: AvroCodec.Building[List[AvroSchema]]          = (head.codec.building, tail.building).mapN(_ :: _)
-    override def encode(values: H *: T): Either[String, List[AvroValue]] = (head.codec.encode(values.head), tail.encode(values.tail)).mapN(_ :: _)
+    override def building: AvroCodec.Building[List[AvroSchema]]                      = (head.codec.building, tail.building).mapN(_ :: _)
+    override def encode(values: H *: T, depth: Int): Either[String, List[AvroValue]] =
+      (head.codec.encodeWithin(values.head, depth), tail.encode(values.tail, depth)).mapN(_ :: _)
     override def decode(values: List[AvroValue]): Either[String, H *: T] =
       values match
         case value :: rest => (head.codec.decode(value), tail.decode(rest)).mapN(_ *: _)

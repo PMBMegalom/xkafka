@@ -152,6 +152,19 @@ class AvroBinarySuite extends ScalaCheckSuite:
       val schema = parsed(text)
       assertEquals(AvroSchemaJson.parse(AvroSchemaJson.render(schema)), Right(schema), AvroSchemaJson.render(schema))
 
+  test("a reader field whose alias names a second writer field is read from the one of its own name, as an alias matches only a field not named"):
+    val writer  = parsed("""{"type":"record","name":"R","fields":[{"name":"a","type":"int"},{"name":"b","type":"int"}]}""")
+    val reader  = parsed("""{"type":"record","name":"R","fields":[{"name":"a","type":"int","aliases":["b"]}]}""")
+    val written = AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
+    val read    = AvroBinary.encode(writer, written).flatMap(bytes => AvroBinary.decoder(writer, reader).flatMap(_(bytes)))
+    assertEquals(read, Right(AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1)))))
+    // Named by no writer field, a reader field is read from the one its alias names.
+    val renamed = parsed("""{"type":"record","name":"R","fields":[{"name":"c","type":"int","aliases":["b"]}]}""")
+    assertEquals(
+      AvroBinary.encode(writer, written).flatMap(bytes => AvroBinary.decoder(writer, renamed).flatMap(_(bytes))),
+      Right(AvroValue.Record(FullName(None, "R"), Vector("c" -> AvroValue.Int(2))))
+    )
+
   test("a decimal held in a fixed type keeps its scale where a field names it, so another scale is refused there too"):
     val amount = """{"type":"fixed","name":"Amt","size":8,"logicalType":"decimal","precision":10,"scale":%d}"""
     val writer = parsed(s"""{"type":"record","name":"M","fields":[{"name":"price","type":${amount.format(2)}},{"name":"tax","type":"Amt"}]}""")

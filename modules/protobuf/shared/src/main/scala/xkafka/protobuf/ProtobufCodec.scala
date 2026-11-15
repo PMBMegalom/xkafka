@@ -78,6 +78,13 @@ private[protobuf] trait Single[A]:
   def put(value: A): Either[String, Raw]
   def take(raw: Raw): Either[String, A]
 
+  /** The value written inside as many messages as `depth` says, which a message refuses at `ProtobufWire.MaxDepth`, as reading does. */
+  def putWithin(
+      value: A,
+      @unused
+      depth: Int
+  ): Either[String, Raw] = put(value)
+
   /** The value inside as many messages as `depth` says, which a message refuses at `ProtobufWire.MaxDepth`, so that no record runs the stack out. */
   def takeWithin(
       raw: Raw,
@@ -92,12 +99,13 @@ private[protobuf] object Single:
   /** Single values of `B`, written as the `A` that `to` makes of them and read as `from` makes of an `A`. */
   def emap[A, B](self: Single[A])(from: A => Either[String, B])(to: B => A): Single[B] =
     new Single[B]:
-      override def wire: Int                                           = self.wire
-      override def zero(value: B): Boolean                             = self.zero(to(value))
-      override def put(value: B): Either[String, Raw]                  = self.put(to(value))
-      override def take(raw: Raw): Either[String, B]                   = self.take(raw).flatMap(from)
-      override def takeWithin(raw: Raw, depth: Int): Either[String, B] = self.takeWithin(raw, depth).flatMap(from)
-      override def absent: Either[String, B]                           = self.absent.flatMap(from)
+      override def wire: Int                                            = self.wire
+      override def zero(value: B): Boolean                              = self.zero(to(value))
+      override def put(value: B): Either[String, Raw]                   = self.put(to(value))
+      override def putWithin(value: B, depth: Int): Either[String, Raw] = self.putWithin(to(value), depth)
+      override def take(raw: Raw): Either[String, B]                    = self.take(raw).flatMap(from)
+      override def takeWithin(raw: Raw, depth: Int): Either[String, B]  = self.takeWithin(raw, depth).flatMap(from)
+      override def absent: Either[String, B]                            = self.absent.flatMap(from)
 
 /** How values of `A` are written as Protobuf, and read back, with the .proto declaration that describes them.
   *
@@ -115,7 +123,10 @@ trait ProtobufCodec[A]:
   private[protobuf] def single: Option[Single[A]]
 
   /** Field `number` holding `value`: nothing where it is absent, or where it is zero and has no `presence`. */
-  private[protobuf] def write(number: Int, value: A, presence: Boolean): Either[String, Chunk[Byte]]
+  private[protobuf] def write(number: Int, value: A, presence: Boolean): Either[String, Chunk[Byte]] = writeWithin(number, value, presence, 0)
+
+  /** Field `number` holding `value`, inside as many messages as `depth` says. */
+  private[protobuf] def writeWithin(number: Int, value: A, presence: Boolean, depth: Int): Either[String, Chunk[Byte]]
 
   /** A field's value from the values written under its number, in order; none where it is absent. */
   private[protobuf] def read(found: Vector[Raw]): Either[String, A]
@@ -153,10 +164,11 @@ trait ProtobufCodec[A]:
   /** A codec for `B`, written as the `A` that `to` makes of it and read as `from` makes of an `A`, which may refuse it. */
   final def emap[B](from: A => Either[String, B])(to: B => A): ProtobufCodec[B] =
     new ProtobufCodec[B]:
-      override private[protobuf] def describe: Described                                           = self.describe
-      override private[protobuf] def label: Label                                                  = self.label
-      override private[protobuf] def single: Option[Single[B]]                                     = self.single.map(Single.emap(_)(from)(to))
-      override private[protobuf] def write(number: Int, value: B, presence: Boolean)               = self.write(number, to(value), presence)
+      override private[protobuf] def describe: Described                                               = self.describe
+      override private[protobuf] def label: Label                                                      = self.label
+      override private[protobuf] def single: Option[Single[B]]                                         = self.single.map(Single.emap(_)(from)(to))
+      override private[protobuf] def writeWithin(number: Int, value: B, presence: Boolean, depth: Int) =
+        self.writeWithin(number, to(value), presence, depth)
       override private[protobuf] def read(found: Vector[Raw]): Either[String, B]                   = self.read(found).flatMap(from)
       override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, B] = self.readWithin(found, depth).flatMap(from)
       override def name: Option[String]                                                            = self.name
@@ -165,8 +177,8 @@ trait ProtobufCodec[A]:
 private[protobuf] abstract class Singular[A] extends ProtobufCodec[A], Single[A]:
   override private[protobuf] def single: Option[Single[A]] = Some(this)
 
-  override private[protobuf] def write(number: Int, value: A, presence: Boolean): Either[String, Chunk[Byte]] =
-    if !presence && zero(value) then Right(Chunk.empty) else put(value).map(ProtobufWire.field(number, _))
+  override private[protobuf] def writeWithin(number: Int, value: A, presence: Boolean, depth: Int): Either[String, Chunk[Byte]] =
+    if !presence && zero(value) then Right(Chunk.empty) else putWithin(value, depth).map(ProtobufWire.field(number, _))
 
   override private[protobuf] def read(found: Vector[Raw]): Either[String, A]                   = readWithin(found, 0)
   override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, A] =
@@ -310,8 +322,8 @@ object ProtobufCodec:
       described.copy(problems = described.problems ++ unheld(inner, "an option"))
     override private[protobuf] def label: Label                      = Label.Optional(inner.label != Label.Message)
     override private[protobuf] def single: Option[Single[Option[A]]] = None
-    override private[protobuf] def write(number: Int, value: Option[A], presence: Boolean): Either[String, Chunk[Byte]] =
-      inner.single.toRight(notSingle("an option")).flatMap(_ => value.fold(Right(Chunk.empty))(inner.write(number, _, presence = true)))
+    override private[protobuf] def writeWithin(number: Int, value: Option[A], presence: Boolean, depth: Int): Either[String, Chunk[Byte]] =
+      inner.single.toRight(notSingle("an option")).flatMap(_ => value.fold(Right(Chunk.empty))(inner.writeWithin(number, _, presence = true, depth)))
     override private[protobuf] def read(found: Vector[Raw]): Either[String, Option[A]]                   = readWithin(found, 0)
     override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, Option[A]] =
       if found.isEmpty then Right(None) else inner.readWithin(found, depth).map(Some(_))
@@ -322,11 +334,11 @@ object ProtobufCodec:
       override private[protobuf] def describe: Described =
         val described = inner.describe
         described.copy(problems = described.problems ++ unheld(inner, "a list"))
-      override private[protobuf] def label: Label                                                                 = Label.Repeated
-      override private[protobuf] def single: Option[Single[C]]                                                    = None
-      override private[protobuf] def write(number: Int, value: C, presence: Boolean): Either[String, Chunk[Byte]] =
+      override private[protobuf] def label: Label                                                                                   = Label.Repeated
+      override private[protobuf] def single: Option[Single[C]]                                                                      = None
+      override private[protobuf] def writeWithin(number: Int, value: C, presence: Boolean, depth: Int): Either[String, Chunk[Byte]] =
         inner.single.toRight(notSingle("a list")).flatMap: one =>
-          items(value).toVector.traverse(one.put).map: raws =>
+          items(value).toVector.traverse(one.putWithin(_, depth)).map: raws =>
             if raws.isEmpty then Chunk.empty
             else if one.wire != ProtobufWire.BytesType then
               ProtobufWire.field(number, Raw.Bytes(raws.foldLeft(Chunk.empty[Byte])((packed, raw) => packed ++ ProtobufWire.payload(raw))))
@@ -350,13 +362,13 @@ object ProtobufCodec:
     override private[protobuf] def describe: Described =
       val described = inner.describe
       described.copy(name = s"map<string, ${described.name}>", problems = described.problems ++ unheld(inner, "a map"))
-    override private[protobuf] def label: Label                                                                              = Label.Mapped
-    override private[protobuf] def single: Option[Single[Map[String, A]]]                                                    = None
-    override private[protobuf] def write(number: Int, value: Map[String, A], presence: Boolean): Either[String, Chunk[Byte]] =
+    override private[protobuf] def label: Label                           = Label.Mapped
+    override private[protobuf] def single: Option[Single[Map[String, A]]] = None
+    override private[protobuf] def writeWithin(number: Int, value: Map[String, A], presence: Boolean, depth: Int): Either[String, Chunk[Byte]] =
       inner.single.toRight(notSingle("a map")).flatMap: one =>
-        value.toList
-          .traverse((key, item) => (ProtobufCodec[String].write(1, key, presence = true), one.put(item)).mapN(_ ++ ProtobufWire.field(2, _)))
-          .map(_.foldLeft(Chunk.empty[Byte])((written, entry) => written ++ ProtobufWire.field(number, Raw.Bytes(entry))))
+        value.toList.traverse((key, item) =>
+          (ProtobufCodec[String].write(1, key, presence = true), one.putWithin(item, depth)).mapN(_ ++ ProtobufWire.field(2, _))
+        ).map(_.foldLeft(Chunk.empty[Byte])((written, entry) => written ++ ProtobufWire.field(number, Raw.Bytes(entry))))
     override private[protobuf] def read(found: Vector[Raw]): Either[String, Map[String, A]]                   = readWithin(found, 0)
     override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, Map[String, A]] =
       inner.single.toRight(notSingle("a map")).flatMap: one =>
@@ -488,11 +500,15 @@ private[protobuf] final class MessageCodec[A, T <: Tuple](
   override def wire: Int               = ProtobufWire.BytesType
   override def zero(value: A): Boolean = false
 
-  override def put(value: A): Either[String, Raw] =
-    fields.write(toTuple(value), numbers, presence).bimap(
-      reason => s"$full: $reason",
-      written => Raw.Bytes(numbers.zip(written).sortBy(_._1).foldLeft(Chunk.empty[Byte])((all, field) => all ++ field._2))
-    )
+  override def put(value: A): Either[String, Raw] = putWithin(value, 0)
+
+  override def putWithin(value: A, depth: Int): Either[String, Raw] =
+    if depth >= ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    else
+      fields.write(toTuple(value), numbers, presence, depth + 1).bimap(
+        reason => s"$full: $reason",
+        written => Raw.Bytes(numbers.zip(written).sortBy(_._1).foldLeft(Chunk.empty[Byte])((all, field) => all ++ field._2))
+      )
 
   override def take(raw: Raw): Either[String, A] = takeWithin(raw, 0)
 
@@ -577,8 +593,11 @@ private[protobuf] final class OneofCodec[A](named: Meta.Named, cases: List[Case[
   override def wire: Int               = ProtobufWire.BytesType
   override def zero(value: A): Boolean = false
 
-  override def put(value: A): Either[String, Raw] =
-    cases.collectFirstSome(known => known.test.unapply(value).map(narrowed => known.codec.write(known.number, narrowed, presence = true)))
+  override def put(value: A): Either[String, Raw] = putWithin(value, 0)
+
+  override def putWithin(value: A, depth: Int): Either[String, Raw] =
+    cases
+      .collectFirstSome(known => known.test.unapply(value).map(narrowed => known.codec.writeWithin(known.number, narrowed, presence = true, depth)))
       .getOrElse(Left(s"${Shown(value)} is none of the cases of $full")).map(Raw.Bytes(_))
 
   override def take(raw: Raw): Either[String, A] = takeWithin(raw, 0)
@@ -617,7 +636,7 @@ private[protobuf] trait Fields[T <: Tuple]:
   def labels: List[Label]
 
   /** Each field as it is written under its number, written even where it is zero where it has `presence`. */
-  def write(values: T, numbers: List[Int], presence: List[Boolean]): Either[String, List[Chunk[Byte]]]
+  def write(values: T, numbers: List[Int], presence: List[Boolean], depth: Int): Either[String, List[Chunk[Byte]]]
 
   /** The fields from the values written under each one's number. */
   def read(found: List[Vector[Raw]]): Either[String, T] = readWithin(found, 0)
@@ -627,18 +646,18 @@ private[protobuf] trait Fields[T <: Tuple]:
 
 private[protobuf] object Fields:
   given Fields[EmptyTuple] with
-    override def describe: List[Described]                                                                                 = Nil
-    override def labels: List[Label]                                                                                       = Nil
-    override def write(values: EmptyTuple, numbers: List[Int], presence: List[Boolean]): Either[String, List[Chunk[Byte]]] = Right(Nil)
-    override def readWithin(found: List[Vector[Raw]], depth: Int): Either[String, EmptyTuple]                              = Right(EmptyTuple)
+    override def describe: List[Described]                                                                                             = Nil
+    override def labels: List[Label]                                                                                                   = Nil
+    override def write(values: EmptyTuple, numbers: List[Int], presence: List[Boolean], depth: Int): Either[String, List[Chunk[Byte]]] = Right(Nil)
+    override def readWithin(found: List[Vector[Raw]], depth: Int): Either[String, EmptyTuple] = Right(EmptyTuple)
 
   given [H, T <: Tuple](using head: Resolved[H], tail: Fields[T]): Fields[H *: T] with
     override def describe: List[Described] = head.codec.describe :: tail.describe
     override def labels: List[Label]       = head.codec.label :: tail.labels
-    override def write(values: H *: T, numbers: List[Int], presence: List[Boolean]): Either[String, List[Chunk[Byte]]] =
+    override def write(values: H *: T, numbers: List[Int], presence: List[Boolean], depth: Int): Either[String, List[Chunk[Byte]]] =
       (
-        head.codec.write(numbers.head, values.head, presence.head).leftMap(reason => s"field ${numbers.head}: $reason"),
-        tail.write(values.tail, numbers.tail, presence.tail)
+        head.codec.writeWithin(numbers.head, values.head, presence.head, depth).leftMap(reason => s"field ${numbers.head}: $reason"),
+        tail.write(values.tail, numbers.tail, presence.tail, depth)
       ).mapN(_ :: _)
     override def readWithin(found: List[Vector[Raw]], depth: Int): Either[String, H *: T] =
       found match

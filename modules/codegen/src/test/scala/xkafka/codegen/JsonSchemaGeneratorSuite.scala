@@ -104,6 +104,18 @@ class JsonSchemaGeneratorSuite extends FunSuite:
       assert(text(""""k": {"type": "string", "enum": ["a", null]}""").contains("k: R.K"), text(""""k": {"type": "string", "enum": ["a", null]}"""))
       assert(text(""""k": {"type": ["string", "null"], "enum": ["a", null]}""").contains("k: Option[R.K]"))
       assert(text(""""k": {"enum": ["a", null]}""").contains("k: Option[R.K]"))
+      // An enum of numbers, which is typed: the enum lacking null, the value is never null.
+      assert(
+        text(""""k": {"type": ["integer", "null"], "enum": [1, 2]}""").contains("k: Long"),
+        text(""""k": {"type": ["integer", "null"], "enum": [1, 2]}""")
+      )
+      assert(
+        generated(
+          in,
+          JsonSchemaOptions(),
+          "d.json" -> record(""""k": {"oneOf": [{"type": "null"}, {"type": ["integer", "null"], "enum": [1, 2]}]}""")
+        ).nonEmpty
+      )
       assertEquals(
         refused(in, "b.json" -> record(""""k": {"oneOf": [{"type": "null"}, {"type": ["string", "null"]}]}""")),
         List("b.json: #/properties/k is a oneOf two of whose branches take null, so null would match no one of them")
@@ -112,6 +124,11 @@ class JsonSchemaGeneratorSuite extends FunSuite:
         refused(in, "c.json" -> record(""""k": {"oneOf": [{"type": "null"}, {}]}""")),
         List("c.json: #/properties/k is a oneOf two of whose branches take null, so null would match no one of them")
       )
+      List("e" -> "true", "f" -> """{"title": "Any"}""", "g" -> """{"$comment": "x"}""").foreach: (file, branch) =>
+        assertEquals(
+          refused(in, s"$file.json" -> record(s"\"k\": {\"oneOf\": [{\"type\": \"null\"}, $branch]}")),
+          List(s"$file.json: #/properties/k is a oneOf two of whose branches take null, so null would match no one of them")
+        )
 
   directory.test("a required name no property declares is refused, since no value the class writes would have it"): in =>
     assertEquals(

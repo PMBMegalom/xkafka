@@ -310,6 +310,24 @@ final class BranchingSuite extends CatsEffectSuite:
     val long = "x" * (Topology.MaxNameLength - 5) + "-repartition"
     assert(refused(counted(long)).exists(_.exists(_ == TopologyError.InvalidName(long, s"it is longer than ${Topology.MaxNameLength} characters"))))
 
+  test("a join is refused a name whose nodes Java would name past 249 characters, as Java checks each name it makes with a suffix"):
+    def long(name: String)  = TopologyError.InvalidName(name, s"it is longer than ${Topology.MaxNameLength} characters")
+    def table(name: String) = KTable(Named(s"$name-read"), topic(s"$name-in"), text, text, Store(s"$name-store"))
+    val tables              = "t" * 240
+    val joinedTables        =
+      table("l").join(Named(tables), table("r"))((a, b) => a + b).toStream(Named("ts")).to(Named("tw"), topic("t-out"), text, text.option)
+    assert(refused(joinedTables).exists(_.contains(long(s"$tables-join-other"))), refused(joinedTables))
+    val streams       = "s" * 236
+    val joinedStreams =
+      read("in").join(Named(streams), read("other"), JoinWindows.withNoGrace(1.second), Store("ss"), text, text, text)((a, b) => a + b)
+        .to(Named("sw"), topic("s-out"), text, text)
+    assert(refused(joinedStreams).exists(_.contains(long(s"$streams-other-windowed"))), refused(joinedStreams))
+    val foreign       = "f" * 220
+    val joinedForeign =
+      table("fl").joinOnForeignKey(Named(foreign), table("fr"), text, text, text)((_, value) => Some(value))((a, b) => a + b).toStream(Named("fs"))
+        .to(Named("fw"), topic("f-out"), text, text.option)
+    assert(refused(joinedForeign).exists(_.contains(long(s"$foreign-subscription-registration-processor"))), refused(joinedForeign))
+
   test("a program a flow prints in, labelled by its own name with no step before it, and by the step before where there is one"):
     given Console[IO] = Console.make[IO]
     val named         = Flow.asRead[IO, String, String].print(Named("shown"))

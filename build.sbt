@@ -1356,18 +1356,19 @@ lazy val avrohuggerTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     }.taskValue
   )
 
-// The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it.
+// Java Kafka Streams' partitioners and processors in xkafka's streams programs, published for the JVM.
 lazy val streamsJava = project
   .in(file("modules/streams-java"))
   .dependsOn(client.jvm % "compile->compile;test->test")
   .settings(commonSettings)
   .settings(
-    name                   := "xkafka-streams-java",
-    description            := "Java Kafka Streams' partitioners and processors in xkafka streams programs, on the JVM",
-    tlMimaPreviousVersions := Set.empty,
+    name        := "xkafka-streams-java",
+    description := "Java Kafka Streams' partitioners and processors in xkafka streams programs, on the JVM",
     libraryDependencies ++= Seq("org.apache.kafka" % "kafka-streams" % kafkaClientsVersion)
   )
 
+// The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it, and only it
+// builds this project, which the root does not aggregate.
 lazy val streamsFixture = project
   .in(file("modules/streams-fixture"))
   .enablePlugins(NoPublishPlugin)

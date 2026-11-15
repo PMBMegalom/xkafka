@@ -238,9 +238,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
     producing(producer)(value => withinTimeout(timeoutMillis)(value.abortTransaction()))
 
-  /** The Java client bounds a transaction call by its `max.block.ms`, the enqueue timeout, and a call that timed out or was interrupted is safe to
-    * make again. So it is made again until `timeoutMillis` has passed, when the one still waiting is interrupted, as librdkafka's call gives up then.
-    */
+  /** A topic the producer's look-up did not find within the time given, which librdkafka answers as unknown. */
   private def notFound(topic: String): KafkaException.BackendFailure =
     new KafkaException.BackendFailure(
       s"the topic '$topic' was not found within the time given",
@@ -248,6 +246,9 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       Some(ErrorCode.UnknownTopicOrPartition.retriable)
     )
 
+  /** The Java client bounds a transaction call by its `max.block.ms`, the enqueue timeout, and a call that timed out or was interrupted is safe to
+    * make again. So it is made again until `timeoutMillis` has passed, when the one still waiting is interrupted, as librdkafka's call gives up then.
+    */
   private def withinTimeout(timeoutMillis: Int)(call: => Unit): F[Unit] =
     F.monotonic.flatMap: started =>
       val deadline         = started + timeoutMillis.millis
@@ -394,10 +395,12 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             Vector(name -> partitions(value.partitionsFor(name, timeout)))
           )
       case JavaClient.Producer(value) => topic match
-          // The Java producer waits for the topic up to max.block.ms; the look-up is bounded by the time given, as librdkafka's is, and a topic not
-          // found by then is unknown, as librdkafka answers.
-          case Some(name) => javaCall(F.interruptible(Vector(name -> partitions(value.partitionsFor(name)))))
-              .timeoutTo(timeoutMillis.millis, F.raiseError(notFound(name)))
+          // The Java producer waits for the topic up to max.block.ms, so it is asked again each time it gives up, until the time given passes, as
+          // librdkafka's look-up waits; a topic not found by then is unknown, as librdkafka answers.
+          case Some(name) =>
+            def lookUp: F[Vector[(String, Vector[Int])]] =
+              F.interruptible(Vector(name -> partitions(value.partitionsFor(name)))).recoverWith { case _: JavaTimeoutException => lookUp }
+            javaCall(lookUp).timeoutTo(timeoutMillis.millis, F.raiseError(notFound(name)))
           case None => F.raiseError(new IllegalArgumentException("a producer looks up one topic at a time"))
       case JavaClient.Administration(value) =>
         val names =

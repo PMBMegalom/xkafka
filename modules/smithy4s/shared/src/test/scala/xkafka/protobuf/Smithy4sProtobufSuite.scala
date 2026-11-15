@@ -180,6 +180,9 @@ class Smithy4sProtobufSuite extends FunSuite:
     )
     assertEquals(receipt.enums.map(found => found.name -> found.values), List("Kind" -> List("UNKNOWN" -> 0, "COPY" -> 5)))
 
+  test("an enum whose value numbered 0 is not its first declares that value first, as proto3 needs"):
+    assertEquals(file[Ticket].enums.map(found => found.name -> found.values), List("Grade" -> List("NONE" -> 0, "HIGH" -> 4)))
+
   test("every field smithy4s writes is declared by the file, as the type it is written as"):
     val message = read(most)
     assertEquals(unknown(message), Vector.empty)

@@ -7,7 +7,7 @@ need only `xkafka-avro` or `xkafka-json-schema` to compile.
 
 ## With sbt
 
-Add the plugin (it works with sbt 1 and sbt 2) and the module for your schema
+Add the plugin (it works with sbt 1.10 or newer and sbt 2) and the module for your schema
 format:
 
 ```scala
@@ -129,6 +129,7 @@ field, and why:
 - a `decimal` in a union of several types;
 - a `time-millis` or `time-micros` default that is no time of day, such as a
   negative one;
+- a `uuid` default that is no UUID, and a `decimal` default of no bytes;
 - a default holding a value of a union's branch other than its first, in the
   field's union or in one inside it, such as `["x"]` for a list of
   `["null", "string"]`, since xkafka writes a union's default in its first

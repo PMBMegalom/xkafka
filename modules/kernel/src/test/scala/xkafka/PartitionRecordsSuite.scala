@@ -292,6 +292,27 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
           .race(processed.waitUntil(_.contains("b"))).timeout(10.seconds)
     yield assert(outcome.isRight, s"consumeChunk stopped: $outcome")
 
+  test(
+    "a partition revoked and assigned again before the change is seen ends its first stream, opens another, and drops the old assignment's records"
+  ):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      numbers    <- SignallingRef[IO].of(Map(firstPartition -> 1L))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      seen       <- Ref[IO].of(Vector.empty[(Long, Long)])
+      ended      <- Ref[IO].of(Vector.empty[Long])
+      reading    <-
+        testConsumer(assignment, input, numbers = Some(numbers)).partitionedRecords(10).zipWithIndex.map((partition, index) =>
+          partition.records.evalMap(read => seen.update(_ :+ (index -> read.record.offset.value))).onFinalize(ended.update(_ :+ index))
+        ).parJoinUnbounded.compile.drain.start
+      _ <- input.send(record(firstPartition, 0L, "a", Some(1L))) *> IO.sleep(100.millis)
+      // Revoked and assigned again at once: the assignment never shows the partition missing.
+      _ <- numbers.set(Map(firstPartition -> 2L)) *> IO.sleep(100.millis)
+      _ <- input.send(record(firstPartition, 5L, "b", Some(2L))) *> input.send(record(firstPartition, 1L, "late", Some(1L))) *> IO.sleep(100.millis)
+      counts <- (seen.get, ended.get).tupled
+      _      <- reading.cancel
+    yield assertEquals(counts, (Vector(0L -> 0L, 1L -> 5L), Vector(0L)))
+
   test("consumeChunk hands over the records waiting for a partition together, not one at a time"):
     for
       assignment <- Ref[IO].of(Set(firstPartition))
@@ -330,9 +351,12 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
   private def testConsumer(
       currentAssignment: Ref[IO, Set[TopicPartition]],
       input: Channel[IO, CommittableConsumerRecord[IO, String, String]],
-      partitionPausing: PartitionPausing[IO] = PartitionPausing.Absent()
+      partitionPausing: PartitionPausing[IO] = PartitionPausing.Absent(),
+      numbers: Option[SignallingRef[IO, Map[TopicPartition, Long]]] = None
   ): KafkaConsumer[IO, String, String] =
     new KafkaConsumer[IO, String, String]:
+      override private[xkafka] def assignmentNumbers: Stream[IO, Map[TopicPartition, Long]] =
+        numbers.fold(assignmentChanges.map(_.map(_ -> 0L).toMap))(_.discrete)
       override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = input.stream
       override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
       override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes
@@ -358,15 +382,21 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] =
         IO(assertEquals(topicPartitions, Set(firstPartition))) >> resumed.complete(()).void
 
-  private def record(topicPartition: TopicPartition, offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
+  private def record(
+      topicPartition: TopicPartition,
+      offsetValue: Long,
+      value: String,
+      under: Option[Long] = None
+  ): CommittableConsumerRecord[IO, String, String] =
     val partition       = topicPartition
     val offset          = Offset.from(offsetValue).toOption.get
     val followingOffset = offset.next.toOption.get
     val committable     =
       new CommittableOffset[IO]:
-        override val topicPartition: TopicPartition = partition
-        override val nextOffset: Offset             = followingOffset
-        override val committer: OffsetCommitter[IO] =
+        override private[xkafka] val assignment: Option[Long] = under
+        override val topicPartition: TopicPartition           = partition
+        override val nextOffset: Offset                       = followingOffset
+        override val committer: OffsetCommitter[IO]           =
           new OffsetCommitter[IO]:
             override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
     CommittableConsumerRecord(ConsumerRecord(topicPartition, offset, None, "key", value, Headers.empty), committable)

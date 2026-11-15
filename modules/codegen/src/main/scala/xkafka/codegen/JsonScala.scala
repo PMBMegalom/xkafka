@@ -212,7 +212,7 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
           case several    => several.traverse(single(_, schema, where, owner, hint, inlining)).flatMap: walked =>
               checkedUnion(walked.map(_.shape), where)
                 .map(shapes => Walked(Shape.Union(shapes, exactlyOne = false), walked.flatMap(_.decls), walked.flatMap(_.refs).toSet))
-      inner.map(walked => walked.copy(shape = maybe(walked.shape, all.contains("null"))))
+      inner.map(walked => walked.copy(shape = maybe(walked.shape, nullable(schema))))
 
   private def single(
       kind: String,
@@ -310,9 +310,9 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
       // Null matching two branches of a oneOf matches no one of them, so none of the type's values could be written as null.
       takingNull =
         walked.lazyZip(branches).count:
-          case (None, _)          => true
-          case (Some(branch), at) => branch.shape.isInstanceOf[Shape.Maybe] ||
-            at.asObject.exists(open => open.isEmpty || open.keys.forall(_ == "description"))
+          case (None, _) => true
+          // A branch of any value takes null too.
+          case (Some(branch), _) => branch.shape.isInstanceOf[Shape.Maybe] || strip(branch.shape) == Shape.Plain(Kind.Anything)
       _ <-
         Either
           .cond(keyword != "oneOf" || takingNull < 2, (), s"$where is a oneOf two of whose branches take null, so null would match no one of them")

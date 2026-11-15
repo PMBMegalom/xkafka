@@ -56,14 +56,25 @@ count no finer. It must also be positive. In these settings it must be at most
 limit. The exceptions are:
 
 - `linger` may be zero, and must be less than `ProducerSettings.LingerLimit`
-  (5 minutes). A transactional producer's linger must also be less than its
-  `transactionTimeout`.
+  (5 minutes), and less than a `message.timeout.ms` or `delivery.timeout.ms`
+  the properties set. A transactional producer's linger must also be less than
+  its `transactionTimeout`.
+- A `delivery.timeout.ms` the properties set must be at least `linger` and the
+  request timeout, `request.timeout.ms` or 30 seconds, together, as the Java
+  client needs. A transactional producer's `message.timeout.ms` or
+  `delivery.timeout.ms` must be at most its `transactionTimeout`, and its
+  `socket.timeout.ms` at most 100 milliseconds more, as librdkafka needs. These
+  fail with `SettingsError.PropertyDurationBelowMinimum` and
+  `SettingsError.PropertyDurationAboveLimit`.
 - `transactionTimeout` is at least
   `TransactionalProducerSettings.TransactionTimeoutMinimum` (1 second).
 - `metadataRefreshInterval` is at most
   `ClientSettings.MetadataRefreshIntervalLimit` (1 hour).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
 - The streams `taskTimeout` may be zero.
+- Under exactly-once, a streams `commitInterval` must be at most
+  `StreamsSettings.TransactionTimeout` (10 seconds), as Java refuses, since the
+  broker aborts a transaction open longer.
 - The group membership intervals are at most
   `ConsumerSettings.SessionTimeoutLimit` (1 hour),
   `ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
@@ -114,12 +125,13 @@ that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
 `withRebalanceSafeCommits`, `withStartingOffsets`, `withoutSessionTimeout`, and
 `withoutHeartbeatInterval`, and `TlsSettings`' `withCertificateAuthority` and
-`withClientCertificate`, `SaslSettings`' `withCredentials`, and
-`ConsumerSettings`' `withClient`, which checks the membership settings again
-under the new client's properties. `StreamsSettings`
+`withClientCertificate`, `SaslSettings`' `withCredentials`, and the
+`withClient` of `ConsumerSettings`, `ProducerSettings` and
+`TransactionalProducerSettings`, which check the settings again under the new
+client's properties. `StreamsSettings`
 works the same way: its methods
-that set a duration, the concurrency or the state directory return
-`ValidatedNel[StreamsSettingsError, *]`. The others, such as
+that set a duration, the concurrency, the guarantee or the state directory
+return `ValidatedNel[StreamsSettingsError, *]`. The others, such as
 `withCompression` or `withIsolationLevel`, return the settings directly.
 
 ```scala mdoc:compile-only
@@ -220,7 +232,7 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | `queryEndpoint` | unset, so other members cannot query this one | where this member answers other members' [queries](streams/queries.md) |
 | `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Keeping stores on disk](streams/running.md#keeping-stores-on-disk)) |
 | `fetchWait` | 500ms | how long the broker may hold a fetch of the application's consumers, from zero up to 5m |
-| `taskTimeout` | 5m | how long the application keeps asking the group's coordinator to read or commit offsets while it is not ready, does not know the member yet, or while asking fails in a way worth retrying, before it stops with the last failure; with zero, it stops at the first |
+| `taskTimeout` | 5m | how long the application keeps asking the group's coordinator to read or commit offsets while it is not ready, does not know the member yet, or while asking fails in a way worth retrying, and keeps starting its tasks again after a failure worth retrying, before it stops with the last failure; with zero, it stops at the first |
 
 See [Streams](streams/running.md#guarantees) for each of them. `fetchWait` works
 as a [consumer's](#consumer-settings) does, and `fetch.min.bytes`, set in the

@@ -43,7 +43,7 @@ final class MemoryStateDirectory private (
       val (contents, positions) = found.filter(_._2.nonEmpty).getOrElse((StoreContents.empty, Map.empty[Int, Long]))
       TaskStore.inMemory[IO](contents, time, positions).map: store0 =>
         new TaskStore[IO]:
-          export store0.{clock, get, positions, range, timed}
+          export store0.{clear, clock, get, positions, range, timed}
           def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store0.write(changes, positions)
           def close: IO[Unit]                                                   =
             (store0.all, store0.positions).flatMapN((all, at) => stores.update(_.updated((owner, store), (StoreContents.of(all), at))))

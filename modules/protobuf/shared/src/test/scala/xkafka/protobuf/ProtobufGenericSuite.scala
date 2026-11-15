@@ -291,6 +291,14 @@ class ProtobufGenericSuite extends CatsEffectSuite:
     val within = (1 until ProtobufWire.MaxDepth).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
     assert(list.decode("p.N", within).isRight)
 
+  test("messages nested deeper than the limit are refused when written too, so nothing is written that reading refuses"):
+    val list                              = dynamic(parsed("syntax = \"proto3\"; package p; message N { N next = 1; }"))
+    def nested(count: Int): ProtobufValue = (1 until count).foldLeft[ProtobufValue](ProtobufValue.Message("p.N", Vector.empty)): (inner, _) =>
+      ProtobufValue.Message("p.N", Vector("next" -> inner))
+    assert(list.encode("p.N", nested(ProtobufWire.MaxDepth + 1)).left.exists(_.endsWith(s"the record is nested more than ${ProtobufWire
+        .MaxDepth} deep")))
+    assert(list.encode("p.N", nested(ProtobufWire.MaxDepth)).isRight)
+
   test("a number in a file that is not one is refused, saying where"):
     assert(ProtobufSchemaText.parse("message A { int32 a = 0x; }").isLeft)
     assert(ProtobufSchemaText.parse("message A { int32 a = 0xZZ; }").isLeft)

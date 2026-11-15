@@ -72,6 +72,15 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(earlier.fetchWait, ConsumerSettings.DefaultFetchWait)
     assertEquals(StreamsSettingsError.FetchWaitOutOfRange((-1).milli).message, "fetch wait must be from 0 to 5 minutes, was -1 milliseconds")
 
+  test("exactly once commits within its transaction timeout, as Java refuses a commit interval past it, however the settings are made"):
+    val refused = Validated.invalidNel(StreamsSettingsError.CommitIntervalAboveTransactionTimeout(30.seconds, StreamsSettings.TransactionTimeout))
+    val exactly = ProcessingGuarantee.ExactlyOnce
+    assertEquals(StreamsSettings.from(client, app, exactly, commitInterval = Some(30.seconds)), refused)
+    assertEquals(StreamsSettings.from(client, app, exactly).orFail.withCommitInterval(30.seconds), refused)
+    assertEquals(StreamsSettings.from(client, app, commitInterval = Some(30.seconds)).orFail.withGuarantee(exactly), refused)
+    assert(StreamsSettings.from(client, app, exactly, commitInterval = Some(StreamsSettings.TransactionTimeout)).isValid)
+    assert(StreamsSettings.from(client, app, commitInterval = Some(30.seconds)).isValid)
+
   test("every invalid setting is reported at once"):
     assertEquals(
       StreamsSettings.from(client, app, commitInterval = Some(Duration.Zero), concurrency = 0, closeTimeout = (-1).second),
@@ -97,8 +106,9 @@ final class StreamsSettingsSuite extends FunSuite:
   test("each setting can be changed, and invalid changes are refused"):
     val settings = StreamsSettings.from(client, app).orFail
     val changed  =
-      settings.withGuarantee(ProcessingGuarantee.ExactlyOnce).withApplicationId(ApplicationId.from("other").orFail).withCommitInterval(1.second)
-        .andThen(_.withConcurrency(4)).andThen(_.withCloseTimeout(5.seconds)).orFail
+      settings.withGuarantee(ProcessingGuarantee.ExactlyOnce)
+        .andThen(_.withApplicationId(ApplicationId.from("other").orFail).withCommitInterval(1.second)).andThen(_.withConcurrency(4))
+        .andThen(_.withCloseTimeout(5.seconds)).orFail
     assertEquals(
       (changed.guarantee, changed.applicationId.value, changed.commitInterval, changed.concurrency, changed.closeTimeout),
       (ProcessingGuarantee.ExactlyOnce, "other", Some(1.second), 4, 5.seconds)
