@@ -106,6 +106,38 @@ object AvroBinary:
     else items.flatTraverse(item).map(written => (varLong(items.size.toLong) +: written) :+ varLong(0))
 
   /** Whether `value` is one `schema` describes, which picks the union branch it is written as: the first that fits. */
+  /** Whether `schema` is bytes on their own, which Confluent's serializers write after the header as they are, with no length before them. */
+  private[avro] def unframed(schema: AvroSchema): Boolean =
+    schema match
+      case AvroSchema.Bytes                => true
+      case AvroSchema.Logical(logicalType) => unframed(logicalType.underlying)
+      case _                               => false
+
+  /** What goes after the header for a value of `schema` whose Avro bytes are `written`: those bytes, or for bytes on their own, the bytes alone. */
+  private[avro] def toPayload(schema: AvroSchema, written: Chunk[Byte]): Either[String, Chunk[Byte]] =
+    if unframed(schema) then
+      decode(AvroSchema.Bytes, written).flatMap:
+        case AvroValue.Bytes(value) => Right(value)
+        case other                  => Left(s"expected bytes, found ${Shown(other)}")
+    else Right(written)
+
+  /** The Avro bytes of the value of `schema` that `payload`, read after the header, holds. */
+  private[avro] def fromPayload(schema: AvroSchema, payload: Chunk[Byte]): Either[String, Chunk[Byte]] =
+    if unframed(schema) then encode(AvroSchema.Bytes, AvroValue.Bytes(payload)) else Right(payload)
+
+  /** Whether `value` is a default Avro can read as `schema` says, taking each union's default from its first branch, at every depth. */
+  private[avro] def placeable(schema: AvroSchema, value: AvroValue, defined: Map[FullName, AvroSchema]): Boolean =
+    (schema, value) match
+      case (AvroSchema.Named(name), _)                                              => defined.get(name).exists(placeable(_, value, defined))
+      case (AvroSchema.Logical(logicalType), _)                                     => placeable(logicalType.underlying, value, defined)
+      case (AvroSchema.Union(first :: _), _)                                        => placeable(first, value, defined)
+      case (AvroSchema.Union(Nil), _)                                               => false
+      case (AvroSchema.Record(name, fields, _, _), AvroValue.Record(named, values)) => name == named &&
+        fields.forall(field => values.collectFirst { case (field.name, held) => held }.forall(placeable(field.schema, _, defined)))
+      case (AvroSchema.Array(items), AvroValue.Array(values)) => values.forall(placeable(items, _, defined))
+      case (AvroSchema.Map(held), AvroValue.Map(entries))     => entries.forall((_, entry) => placeable(held, entry, defined))
+      case _                                                  => fits(schema, value, defined)
+
   private[avro] def fits(schema: AvroSchema, value: AvroValue, defined: Map[FullName, AvroSchema]): Boolean =
     (schema, value) match
       case (AvroSchema.Named(name), _)                                    => defined.get(name).exists(fits(_, value, defined))

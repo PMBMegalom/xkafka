@@ -36,6 +36,14 @@ private[protobuf] enum Raw:
 /** Protobuf's encoding: each field as its number and wire type, then its value as a varint, little-endian fixed bytes or length-prefixed bytes. */
 private[protobuf] object ProtobufWire:
   /** How deep messages may hold messages before a record is refused instead of read, as protobuf-java's default limit. */
+  /** What a field written more than once holds: the last written, or for a message, every one merged, as protobuf merges them by reading their bytes
+    * one after another.
+    */
+  private[protobuf] def last(found: Vector[Raw], message: Boolean): Option[Raw] =
+    if message && found.size > 1 && found.forall { case Raw.Bytes(_) => true; case _ => false } then
+      Some(Raw.Bytes(found.foldLeft(Chunk.empty[Byte]) { case (all, Raw.Bytes(more)) => all ++ more; case (all, _) => all }))
+    else found.lastOption
+
   val MaxDepth: Int = 100
 
   val VarintType: Int  = 0

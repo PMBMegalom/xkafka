@@ -324,6 +324,59 @@ class ProtobufGenericSuite extends CatsEffectSuite:
 
   private def client: IO[SchemaRegistry[IO]] = FakeRegistry().flatMap(fake => SchemaRegistry.of(settings, fake.transport("http://registry:8081")))
 
+  test("a message field written twice is the two merged, as protobuf merges them, and of a oneof's fields the last written is read"):
+    val read =
+      dynamic(parsed("""syntax = "proto3";
+        |message Inner { int32 a = 1; int32 b = 2; }
+        |message Outer { Inner in = 1; oneof pick { string text = 2; int32 count = 3; } }
+        |""".stripMargin))
+    val inner = read.decode("Outer", Chunk[Byte](0x0a, 0x02, 0x08, 0x01, 0x0a, 0x02, 0x10, 0x02))
+    assertEquals(
+      inner.map(_.fields.toMap.get("in")),
+      Right(Some(ProtobufValue.Message("Inner", Vector("a" -> ProtobufValue.Int32(1), "b" -> ProtobufValue.Int32(2)))))
+    )
+    val picked = read.decode("Outer", Chunk[Byte](0x12, 0x01, 0x78, 0x18, 0x07))
+    assertEquals(picked.map(_.fields.map(_._1)), Right(Vector("count")))
+
+  test("a map entry whose message value is left out holds the empty message, as protobuf reads one"):
+    val read = dynamic(parsed("""syntax = "proto3"; message Item { int32 n = 1; } message Bag { map<string, Item> items = 1; }"""))
+    // One entry, of the key "k" alone.
+    val bag = read.decode("Bag", Chunk[Byte](0x0a, 0x03, 0x0a, 0x01, 0x6b))
+    assertEquals(
+      bag.map(_.fields.toMap.get("items")),
+      Right(Some(ProtobufValue.Map(Vector(ProtobufValue.String("k") -> ProtobufValue.Message("Item", Vector("n" -> ProtobufValue.Int32(0)))))))
+    )
+
+  test("a file nesting messages deeper than records may be nested is refused, and a map of maps, which Protobuf has no field for"):
+    val deep = "syntax = \"proto3\"; " + "message A { " * 5000 + "}" * 5000
+    assert(ProtobufSchemaText.parse(deep).left.exists(_.contains("nested more than")), "nesting")
+    assert(ProtobufSchemaText.parse("""syntax = "proto3"; message M { map<string, map<string, int32>> m = 1; }""").isLeft)
+    assert(ProtobufSchemaText.parse("syntax = \"proto3\"; " + "message A { " * 50 + "}" * 50).isRight)
+
+  test("the files Confluent's serializers know without references are known here too, as Kafka Connect's decimals and dates import them"):
+    assertEquals(WellKnown.files.keySet, WellKnown.texts.keySet)
+    val file =
+      parsed("""syntax = "proto3";
+        |import "confluent/type/decimal.proto";
+        |import "google/type/date.proto";
+        |message Priced { confluent.type.Decimal amount = 1; google.type.Date on = 2; }
+        |""".stripMargin)
+    // amount: value 0x01, scale 2; on: year 2026.
+    val read = dynamic(file).decode("Priced", Chunk[Byte](0x0a, 0x05, 0x0a, 0x01, 0x01, 0x18, 0x02, 0x12, 0x03, 0x08, 0xea.toByte, 0x0f))
+    assertEquals(read.map(_.fields.map(_._1)), Right(Vector("amount", "on")))
+
+  test("a field option of any name whose value is an aggregate is skipped, nested braces and all"):
+    val text =
+      """syntax = "proto2"; message M { optional bool on = 1 [feature_support = { removed: { at: 1 } }, default = true, json_name = "on"]; }"""
+    assertEquals(ProtobufSchemaText.parse(text).map(_.messages.flatMap(_.fields.map(_.default))), Right(List(Some("true"))))
+
+  test("an enum two of whose values share a number is written with allow_alias, as protoc requires of one"):
+    val file = parsed("""syntax = "proto3"; enum E { option allow_alias = true; A = 0; B = 0; C = 1; }""")
+    val text = ProtobufSchemaText.render(file)
+    assert(text.contains("option allow_alias = true;"), text)
+    assertEquals(ProtobufSchemaText.parse(text), Right(file))
+    assert(!ProtobufSchemaText.render(parsed("""syntax = "proto3"; enum F { A = 0; B = 1; }""")).contains("allow_alias"))
+
   test("a generic serde writes values of a file it holds, which a derived serde reads, and reads what one writes"):
     val file = parsed(ProtobufCodec[Line].schema.fold(fail(_), identity))
     val line = ProtobufValue.Message("xkafka.protobuf.Line", Vector("sku" -> ProtobufValue.String("kiwi"), "quantity" -> ProtobufValue.Int32(4)))

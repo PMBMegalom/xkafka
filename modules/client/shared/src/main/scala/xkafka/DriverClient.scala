@@ -180,6 +180,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       random <- Resource.eval(Random.scalaUtilRandom[F])
       seeks  <- Resource.eval((Mutex[F], Ref.of[F, Map[LeaseKey, Long]](Map.empty)).mapN(Seeks(_, _)))
       consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks)
+      // Released after both below stop, and before the client: a rebalance polled after `rebalancing` failed is applied here, since the client cannot
+      // close while one waits.
+      _ <- Resource.onFinalize(consumer.applyQueued)
       // Both are started after the client and cancelled before it, so neither is using the handle when it is destroyed.
       _ <- consumer.rebalancing.compile.drain.onError(failure.complete(_).void).background
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
@@ -774,8 +777,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       * before it gets to it, and the ones still queued are applied as the stream ends.
       */
     val rebalancing: Stream[F, Nothing] =
-      Stream.repeatEval(F.uncancelable(poll => poll(rebalances.take).flatMap(rebalanced(poll)))).drain
-        .onFinalize(rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event, Vector.empty)))))
+      Stream.repeatEval(F.uncancelable(poll => poll(rebalances.take).flatMap(rebalanced(poll)))).drain.onFinalize(applyQueued)
+
+    /** Applies the rebalances still queued, with no starting offsets chosen. */
+    def applyQueued: F[Unit] =
+      rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event, Vector.empty))))
 
     private def rebalanced(poll: Poll[F])(taken: Rebalance[driver.Event]): F[Unit] =
       Ref.of[F, Vector[StartAt]](Vector.empty).flatMap: starts =>
@@ -786,8 +792,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
             // Partitions the group has already given away can commit nothing more, so no commit is waited for, only a transaction already sending
             // offsets for them, which its timeout bounds.
             case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
-            // Anything else clears the assignment to resynchronise, which ends every lease with it.
-            case _ => leases.assign(Nil, replacing = true)
+            // Anything else clears the assignment to resynchronise, which loses what is assigned, as a lost assignment does, and ends every lease.
+            case _ => assignments.get.map(_.toList.map(leaseKey)).flatMap(all => hold.lose(all) *> leases.revoke(all)) *>
+                leases.assign(Nil, replacing = true)
         val applying = starts.get.flatMap(chosen => client(driver.applyRebalance(client.handle, taken.event, chosen)))
         poll(leasing).guarantee(applying) *> poll(assignment.flatMap(assignments.set))
 
@@ -820,12 +827,19 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
     /** A record of a partition being revoked, or read under an assignment the group has since replaced, is dropped and not handed out, where the
-      * revocation waits for what was handed out to be committed. So is a record fetched before a seek of its partition.
+      * revocation waits for what was handed out to be committed. With fencing, so is one read under a lease that has since ended, which no commit
+      * could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
       */
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure)
-        .evalFilter(read => sinceLastSeek(read).ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false)))
-        .evalMap(decode)
+      PollQueue.read(polled, failure).evalFilter(read =>
+        (sinceLastSeek(read), leased(read)).mapN(_ && _)
+          .ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false))
+      ).evalMap(decode)
+
+    /** Whether the record's lease is still current, where fencing gives records leases. */
+    private def leased(read: ReadRecord): F[Boolean] =
+      if settings.assignmentFencing then leases.held.map(current => read.lease.exists(lease => current(leaseKeyOf(read.record)).contains(lease)))
+      else F.pure(true)
 
     private def sinceLastSeek(read: ReadRecord): F[Boolean] = seeks.made.get.map(_.getOrElse(leaseKeyOf(read.record), 0L) == read.sought)
 

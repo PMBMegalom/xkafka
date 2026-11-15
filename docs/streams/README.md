@@ -153,8 +153,10 @@ starts a [flow](branching.md#paths-that-share-what-follows).
 
 The application's own topics are named after its id: a store's changelog is
 `<application id>-<store>-changelog`, and a repartition topic is
-`<application id>-<name>-repartition`. The broker creates them when the
-application first starts.
+`<application id>-<name>-repartition`. As in Java, a stream's repartition whose
+name already ends in `-repartition` takes it as it is, so `orders-repartition`
+is `<application id>-orders-repartition`; a grouped table's always has the
+suffix added. The broker creates them when the application first starts.
 
 `Topology.of` checks the program and reports every problem at once, such as two
 stores or steps with the same name, or one topic read by two sources (to send

@@ -131,7 +131,7 @@ RocksDB library found each way a Native application finds it.
 ## Published artifacts
 
 ```sh
-XKAFKA_VERSION=0.7.0 scripts/downstream-test.sh
+XKAFKA_VERSION=<version> scripts/downstream-test.sh
 ```
 
 Builds a separate application against the published `xkafka-client` artifacts

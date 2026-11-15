@@ -85,6 +85,26 @@ class ConfluentAvroSuite extends CatsEffectSuite:
         case other => fail(s"expected a record, got $other")
       assertEquals(back, order.copy(note = None, payment = Cash))
 
+  test("bytes on their own are written after the header as they are, with no length before them, and read so, as Confluent's serializers do"):
+    val mock    = new MockSchemaRegistryClient()
+    val payload = Chunk[Byte](1, 2, 3, 4)
+    for
+      serde  <- AvroSerde.of[IO, Chunk[Byte]](ConfluentRegistry.bridged(mock), Part.Value)
+      ours   <- serde.serializer.serialize(topic, Headers.empty, payload).map(_.get)
+      read   <- IO.blocking(ConfluentRegistry.deserializer(mock).deserialize("orders", ours.toArray))
+      theirs <- IO.blocking(Chunk.array(ConfluentRegistry.serializer(mock).serialize("orders", Array[Byte](5, 6, 7))))
+      back   <- serde.deserializer.deserialize(topic, Headers.empty, Some(theirs))
+    yield
+      assertEquals(ours.drop(5), payload)
+      assertEquals(
+        read match
+          case bytes: Array[Byte] => Chunk.array(bytes);
+          case other              => fail(s"expected bytes, got $other")
+        ,
+        payload
+      )
+      assertEquals(back, Chunk[Byte](5, 6, 7))
+
   test("subjects are named as Confluent's strategies name them, for keys and values"):
     val strategies =
       List(

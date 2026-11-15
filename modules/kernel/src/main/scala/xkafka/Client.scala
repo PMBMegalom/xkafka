@@ -359,7 +359,7 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
       enqueueTimeout
     ) {}
 
-  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
+  /** How long a record waits for others to join its batch before the batch is sent, from zero to below `ProducerSettings.LingerLimit`. */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     ProducerSettings
       .from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value, batchSize, enqueueTimeout)
@@ -495,7 +495,9 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withCompression(value: Compression): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withCompression(value), transactionalId, transactionTimeout) {}
 
-  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
+  /** How long a record waits for others to join its batch before the batch is sent, from zero to below `ProducerSettings.LingerLimit` and below the
+    * transaction timeout.
+    */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
     producer.withLinger(value).andThen(TransactionalProducerSettings.checked(_, transactionalId, transactionTimeout))
 
@@ -702,7 +704,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       fetchWait
     ) {}
 
-  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
+  /** The settings for another client, checked against it, as its properties can set the group protocol the membership settings are checked under. */
+  def withClient(value: ClientSettings): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(client = value)
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] = copied(groupId = value)
 
@@ -855,6 +858,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     ) {}
 
   private def revalidated(
+      client: ClientSettings = client,
       commitTimeout: FiniteDuration = commitTimeout,
       pollTimeout: FiniteDuration = pollTimeout,
       requestTimeout: FiniteDuration = requestTimeout,
@@ -955,7 +959,9 @@ object ConsumerSettings:
       startingOffsets: Option[StartingOffsets[F]] = None,
       fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
-    val classic   = !properties.exists((name, value) => name.trim.equalsIgnoreCase("group.protocol") && value.trim.equalsIgnoreCase("consumer"))
+    // The protocol may be set for the whole client or for the consumer, which then reads the consumer's.
+    val protocol  = (client.properties ++ properties).collect { case (name, value) if name.trim.equalsIgnoreCase("group.protocol") => value.trim }
+    val classic   = !protocol.exists(_.equalsIgnoreCase("consumer"))
     val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
     val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
     val intervals =
@@ -1722,7 +1728,9 @@ trait KafkaConsumer[F[_], K, V]:
   /** Hands every record to `process` a chunk at a time and commits each chunk once it returns.
     *
     * Partitions are processed alongside one another, so a slow chunk holds back only the partition it came from. It returns once `stopConsuming` has
-    * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails.
+    * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails. A chunk whose commit
+    * is refused as `ErrorCode.IllegalGeneration`, its partition having gone to another member, is not committed, and the member it went to reads its
+    * records again.
     *
     * @param maxQueuedRecords
     *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
@@ -1732,7 +1740,10 @@ trait KafkaConsumer[F[_], K, V]:
       _.records.chunks.evalMap: chunk =>
         val (offsets, records) =
           chunk.mapAccumulate(CommittableOffsetBatch.empty[F])((batch, committable) => (batch.updated(committable.offset), committable.record))
-        F.productR(process(records))(offsets.commit)
+        F.productR(process(records))(
+          offsets.commit.recover:
+            case failure: KafkaException.BackendFailure if failure.code.contains(ErrorCode.IllegalGeneration) => ()
+        )
     ).parJoinUnbounded.compile.drain
 
   /** One stream for each partition this consumer is assigned, ending once the partition is revoked.

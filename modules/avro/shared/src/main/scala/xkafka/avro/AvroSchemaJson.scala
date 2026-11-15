@@ -162,7 +162,7 @@ object AvroSchemaJson:
               (AvroField(name, schema, default, doc, aliases), known)
 
   /** The value `json` gives a field of `schema` by default, as the specification writes defaults: bytes as text of the characters 0 to 255, and a
-    * union's as its first branch's.
+    * union's as the first branch it fits.
     */
   def default(json: Json, schema: AvroSchema, defined: Map[FullName, AvroSchema]): Either[String, AvroValue] =
     def number = json.asNumber.toRight(s"expected a number, found ${json.noSpaces}")
@@ -197,7 +197,9 @@ object AvroSchemaJson:
           .flatMap(_.traverse(default(_, items, defined))).map(AvroValue.Array(_))
       case AvroSchema.Map(values) => json.asObject.toRight(s"expected an object, found ${json.noSpaces}")
           .flatMap(_.toVector.traverse((key, value) => default(value, values, defined).map(key -> _))).map(AvroValue.Map(_))
-      case AvroSchema.Union(branches)      => branches.headOption.toRight("a union without branches has no values").flatMap(default(json, _, defined))
+      // Avro 1.12 reads a union's default as the first branch it fits, where earlier versions took the first branch only.
+      case AvroSchema.Union(branches) => branches.iterator.map(default(json, _, defined)).find(_.isRight)
+          .getOrElse(Left(s"${json.noSpaces} fits none of the union's branches"))
       case AvroSchema.Fixed(name, size, _) => bytes.filterOrElse(_.size == size, s"expected $size bytes").map(AvroValue.Fixed(name, _))
       case AvroSchema.Logical(logicalType) => default(json, logicalType.underlying, defined)
       case AvroSchema.Named(name)          => defined.get(name).toRight(s"'${name.value}' is not defined").flatMap(default(json, _, defined))

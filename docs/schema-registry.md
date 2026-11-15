@@ -192,8 +192,14 @@ A record without a value, such as a tombstone, fails to read with
   so writing or reading them fails.
 - A field's Scala default is its default in the schema. An optional field whose
   default is a value has that value's branch first in its union, since Avro takes
-  a union's default from its first branch. A default the schema cannot place,
-  such as one of the record its field is in, is left out.
+  a union's default from its first branch. A default the schema cannot place is
+  left out: one of the record its field is in, or one holding a value of a
+  union's later branch inside it, such as `Inner(Some(5))` for a field of a
+  record with an optional field. A schema registered by another application
+  may give a union field a default of any branch, as Avro 1.12 allows.
+- A key or value that is bytes on its own is written after the header as it
+  is, with no length before it, as Confluent's serializers write it, here and
+  in the vulcan and avro4s serdes.
 - For a recursive type, such as a linked list's node, put `derives AvroCodec`
   on the type itself.
 - Writing a `fixed` value of the wrong size fails. Avro gives a
@@ -418,6 +424,11 @@ Records match what Confluent's `KafkaJsonSchemaSerializer` writes.
   default, or an optional one, as a new version of the schema, and refuses to
   let you remove a field.
 - A case of a sealed trait must not have a field named `type`: writing it fails.
+- These make no schema, so writing or reading them fails: two cases of a sealed
+  trait or enum with one name, such as `V1.Created` and `V2.Created`, which
+  `type` could not tell apart; two types of one name that hold themselves, as a
+  generic class derived once for every type argument gives; and an option
+  holding an option, which `null` would be a value of twice.
 
 For a schema written by hand, give its JSON with circe's codecs for its values,
 which must write what the schema describes:
@@ -514,7 +525,7 @@ import "google/protobuf/timestamp.proto";
 
 message Order {
   string id = 1;
-  google.protobuf.Timestamp placedAt = 2;
+  .google.protobuf.Timestamp placedAt = 2;
   repeated Line lines = 3;
   optional string note = 4;
 }
@@ -614,8 +625,12 @@ files.
 
 `ProtobufSerde.asWritten` reads each record as it was written, together with
 the .proto file its writer registered. If that file imports files registered
-under other subjects, they are fetched from the registry. Protobuf's well-known
-types, such as `google/protobuf/timestamp.proto`, need no fetching.
+under other subjects, they are fetched from the registry. The files Confluent's
+serializers know without references need no fetching: Protobuf's own, such as
+`google/protobuf/timestamp.proto` and `google/protobuf/descriptor.proto`, Google's
+common types under `google/type/`, such as `date.proto` and `money.proto`, and
+Confluent's `confluent/meta.proto` and `confluent/type/decimal.proto`, which
+Kafka Connect's records import.
 
 ```scala mdoc:compile-only
 // Read any Protobuf record of any schema, and show its message and one of its fields
@@ -651,7 +666,7 @@ def lines(registry: SchemaRegistry[IO]): IO[Serde[IO, ProtobufValue]] =
 val line = ProtobufValue.Message("com.example.Line", Vector("sku" -> ProtobufValue.String("apple"), "quantity" -> ProtobufValue.Int32(3)))
 ```
 
-The file may import only the well-known types, and must declare the message you
+The file may import only those known files, and must declare the message you
 name; otherwise `ProtobufSerde.generic` fails with `RegistryException.NoSchema`.
 `ProtobufSchemaText.render` turns a `ProtobufSchema.File` back into text.
 
@@ -820,6 +835,6 @@ record without a value raises `Deserializer.NullValueException` (see
   schemas are read: derived serdes read by field number and do not need the
   other schemas, and `ProtobufSerde.asWritten` fetches them.
 - Generic Protobuf serdes, and serdes of messages ScalaPB generated, of files
-  that import files other than the well-known types.
+  that import files other than those known files.
 - Protobuf files that declare groups or extensions, or are written in an edition
   of Protobuf.

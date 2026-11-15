@@ -162,8 +162,9 @@ private[protobuf] abstract class Singular[A] extends ProtobufCodec[A], Single[A]
   override private[protobuf] def write(number: Int, value: A, presence: Boolean): Either[String, Chunk[Byte]] =
     if !presence && zero(value) then Right(Chunk.empty) else put(value).map(ProtobufWire.field(number, _))
 
-  override private[protobuf] def read(found: Vector[Raw]): Either[String, A]                   = found.lastOption.fold(absent)(take)
-  override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, A] = found.lastOption.fold(absent)(takeWithin(_, depth))
+  override private[protobuf] def read(found: Vector[Raw]): Either[String, A]                   = readWithin(found, 0)
+  override private[protobuf] def readWithin(found: Vector[Raw], depth: Int): Either[String, A] =
+    ProtobufWire.last(found, label == Label.Message).fold(absent)(takeWithin(_, depth))
 
 object ProtobufCodec:
   def apply[A](using codec: ProtobufCodec[A]): ProtobufCodec[A] = codec
@@ -259,10 +260,12 @@ object ProtobufCodec:
   /** The seconds of the first and last instants `google.protobuf.Timestamp` holds, the start of year 1 and the end of year 9999. */
   private val (earliest, latest) = (-62135596800L, 253402300799L)
 
-  /** An instant as `google.protobuf.Timestamp`, seconds and nanoseconds since the epoch, which every Protobuf library and the registry know. */
+  /** An instant as `google.protobuf.Timestamp`, seconds and nanoseconds since the epoch, which every Protobuf library and the registry know. It is
+    * named from the root, so a package with a `google` part of its own does not hide it.
+    */
   given ProtobufCodec[Instant] =
     new Singular[Instant]:
-      override private[protobuf] def describe: Described = Described("google.protobuf.Timestamp", Nil, List("google/protobuf/timestamp.proto"), Nil)
+      override private[protobuf] def describe: Described = Described(".google.protobuf.Timestamp", Nil, List("google/protobuf/timestamp.proto"), Nil)
       override private[protobuf] def label: Label        = Label.Message
       override def wire: Int                             = ProtobufWire.BytesType
       override def zero(value: Instant): Boolean         = false
@@ -365,9 +368,10 @@ object ProtobufCodec:
     * sealed trait or enum, as a message whose one field, of a `oneof`, is its case. Every field and case is numbered with [[ProtobufField]]; an enum
     * needs a case numbered 0, which a field of it reads where it is absent.
     *
-    * A field with a Scala default is labelled `optional` and written even where it is zero, so a record lacking it reads the default; other fields
-    * are written as proto3 writes them, left out where they are zero and read as zero where they are absent. Names come from the Scala names and
-    * packages, which the annotations of `xkafka.schemaregistry` change.
+    * A field of a single value or a message with a Scala default is labelled `optional` and written even where it is zero, so a record lacking it
+    * reads the default; a list, map or option does not use its default, and a record lacking one reads it as empty or none. Other fields are written
+    * as proto3 writes them, left out where they are zero and read as zero where they are absent. Names come from the Scala names and packages, which
+    * the annotations of `xkafka.schemaregistry` change.
     */
   inline def derived[A](using mirror: Mirror.Of[A]): ProtobufCodec[A] =
     inline mirror match
@@ -397,20 +401,25 @@ object ProtobufCodec:
     root.types.headOption.filter(declared => declared.message && codec.label == Label.Message && declared.simple == root.name) match
       case None      => Left(s"${root.name} is not a message, and a Protobuf record is one")
       case Some(top) =>
-        def close(pending: List[Declared], done: Vector[(Declared, Body)]): Vector[(Declared, Body)] =
+        // A type met again is compared with the first of its name: each names the types inside it, so the two are told apart at once, and two
+        // that differ are two types given one name, as a generic class derived once for every type argument gives each.
+        def close(pending: List[Declared], done: Vector[(Declared, Body)], differing: Vector[String]): (Vector[(Declared, Body)], Vector[String]) =
           pending match
-            case Nil                                                         => done
-            case declared :: rest if done.exists(_._1.full == declared.full) => close(rest, done)
-            case declared :: rest                                            =>
-              val body = declared.body()
-              close(rest ++ body.types, done :+ (declared -> body))
-        val declared = close(List(top), Vector.empty)
+            case Nil              => (done, differing)
+            case declared :: rest => done.find(_._1.full == declared.full) match
+                case Some((_, first)) =>
+                  val same = declared.body().text == first.text
+                  close(rest, done, if same then differing else differing :+ s"two types are named ${declared.full}")
+                case None =>
+                  val body = declared.body()
+                  close(rest ++ body.types, done :+ (declared -> body), differing)
+        val (declared, differing) = close(List(top), Vector.empty, Vector.empty)
         // Every type is declared in the package of the message, by its simple name, so two types may not share one.
         val clashes =
           declared.map(_._1).groupBy(_.simple).toList.sortBy(_._1).collect {
             case (simple, many) if many.size > 1 => s"${many.map(_.full).mkString(" and ")} would both be declared as $simple"
           }
-        (root.problems ++ declared.flatMap(_._2.problems) ++ clashes).distinct match
+        (root.problems ++ declared.flatMap(_._2.problems) ++ differing ++ clashes).distinct match
           case Nil =>
             val imports = (root.imports ++ declared.flatMap(_._2.imports)).distinct.sorted
             Right(

@@ -625,8 +625,9 @@ private[xkafka] final class Task[F[_]](
       now: Long
   ): F[(TaskState, Vector[TaskOutput])] =
     def result(old: Option[R]) = Travelling[K, Option[R]](key, made, record.timestamp, record.headers, Some(old))
+    // Kept in no store, the result knows no value it replaces, so it goes with none, not with one saying there was nothing before.
     join.store match
-      case None                  => pushed(join.next, result(None), state, now)
+      case None                  => pushed(join.next, Travelling[K, Option[R]](key, made, record.timestamp, record.headers, None), state, now)
       case Some((named, values)) => topicNamed(s"$application-${named.value}-changelog").flatMap: changelog =>
           for
             held    <- storedAt(state, named.value, primary)
@@ -935,12 +936,12 @@ private[xkafka] final class Task[F[_]](
       case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
-      case Step.RecordFilter(keep)            => passing(if keep(asRead(record, state)) then Vector(record) else Vector.empty)
-      case Step.RecordPeek(effect)            => effect(asRead(record, state)) *> passing(Vector(record))
-      case Step.EvalRecordFilter(keep)        => keep(asRead(record, state)).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
-      case Step.RecordMap(change)             => passing(change(asRead(record, state)).iterator.map(travelling).toVector)
-      case Step.EvalRecordMap(change, result) => change(asRead(record, state)).flatMap(made => passing(Vector(travelling(result(made)))))
-      case Step.ToStream()                    => passing(Vector(record))
+      case Step.RecordFilter(keep)     => passing(if keep(asRead(record, state)) then Vector(record) else Vector.empty)
+      case Step.RecordPeek(effect)     => effect(asRead(record, state)) *> passing(Vector(record))
+      case Step.EvalRecordFilter(keep) => keep(asRead(record, state)).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
+      case Step.RecordMap(change, _)   => passing(change(asRead(record, state)).iterator.map(travelling).toVector)
+      case Step.EvalRecordMap(change, result, _) => change(asRead(record, state)).flatMap(made => passing(Vector(travelling(result(made)))))
+      case Step.ToStream()                       => passing(Vector(record))
       case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _, _)   => windowed(folding, record, state, now, clock)
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
@@ -949,7 +950,7 @@ private[xkafka] final class Task[F[_]](
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
       case joining @ Step.GlobalJoin(_, _, _)                            => globallyJoined(joining, record, state)
-      case filtering @ Step.TableFilter(_, _, _)                         => tableFiltered(filtering, record, state)
+      case filtering @ Step.TableFilter(_, _, _, _)                      => tableFiltered(filtering, record, state)
       case mapping @ Step.TableMapValues(_, _, _, _)                     => tableMapped(mapping, record, state, asked)
       case Step.ToTable(lift, store, key, value)                         => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
@@ -1151,8 +1152,8 @@ private[xkafka] final class Task[F[_]](
             .sortBy((key, start, end, _) => (end, key, -start))(using Ordering.Tuple3(using Ordering.Long, StoreContents.keys, Ordering.Long))
 
   /** What Java's table filter makes of a change: its value where `keep` keeps it, and otherwise none, with the old value filtered too; a change from
-    * no value to no value goes no further. Java's filter always asks for old values, which every table here can give. Kept in no store, the old value
-    * comes from the change.
+    * no value to no value goes no further. Kept in no store, the old value comes from the change, and where the table before has none to send, as a
+    * foreign-key join's result kept in no store has not, a value dropped is a delete whatever came before, as Java's filter makes it then.
     */
   private def tableFiltered[K, C, V](
       step: Step.TableFilter[F, K, C, V],
@@ -1163,7 +1164,10 @@ private[xkafka] final class Task[F[_]](
     step.store match
       case None =>
         val old  = record.old.flatMap(step.present).filter(step.keep(record.key, _))
-        val goes = if old.isEmpty && value.isEmpty then Vector.empty else Vector(record.copy(value = value, old = Some(old)))
+        val goes =
+          if step.unseen then Vector(record.copy(value = value, old = None))
+          else if old.isEmpty && value.isEmpty then Vector.empty
+          else Vector(record.copy(value = value, old = Some(old)))
         F.pure((state, goes, Vector.empty))
       case Some(kept) => keptResult(kept, record.key, value, record.timestamp, state, true).map:
           case None                         => (state, Vector.empty, Vector.empty)

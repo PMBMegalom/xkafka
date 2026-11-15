@@ -55,8 +55,10 @@ object Main extends IOApp:
 
   private[codegen] def generate(files: List[Path], json: JsonSchemaOptions): Either[NonEmptyList[String], List[GeneratedFile]] =
     val (schemas, avro) = files.partition(_.toString.endsWith(".json"))
-    val fromAvro        = if avro.isEmpty then Right(Nil) else AvroGenerator.generate(avro)
-    (fromAvro.toValidated, JsonSchemaGenerator.generate(schemas, json).toValidated).mapN(_ ++ _).toEither.flatMap(apart)
+    // A type of either format hides a Scala type of its name from the other's code in its package, so each is told the other's names.
+    val fromAvro = if avro.isEmpty then Right(Nil) else AvroGenerator.generate(avro, JsonSchemaGenerator.names(schemas, json))
+    val fromJson = JsonSchemaGenerator.generate(schemas, json, if avro.isEmpty then Map.empty else AvroGenerator.names(avro))
+    (fromAvro.toValidated, fromJson.toValidated).mapN(_ ++ _).toEither.flatMap(apart)
 
   /** The files, unless two would be one: one type's would replace the other's, as where an Avro and a JSON Schema type have one name, or where two
     * names differ only in case, which macOS and Windows take to be one file.

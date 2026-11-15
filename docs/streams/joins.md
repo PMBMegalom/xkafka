@@ -170,7 +170,11 @@ is dropped.
 The result is kept in no store. To group it, or to join it with something else, keep
 it in one, by passing the store's name and a serde for its values:
 `joinOnForeignKey(named, other, value, otherKey, otherValue, Store("results"), serde)`.
-`Topology.of` refuses a program that needs this and does not do it.
+`Topology.of` refuses a program that needs this and does not do it. A step
+after the result that keeps a store of its own, such as `mapValues` given a
+`Store`, can be joined or grouped through that store instead. A `filter` of the
+result runs without a store, as in Java, and makes a delete of every value it
+drops, whether or not the key held a value that passed before.
 
 With the name `order-customer`, the join adds these to the application:
 

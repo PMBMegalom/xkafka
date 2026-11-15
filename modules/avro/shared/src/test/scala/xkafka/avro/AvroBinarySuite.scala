@@ -133,6 +133,17 @@ class AvroBinarySuite extends ScalaCheckSuite:
     assert(read(optional(decimal(10, 2)), optional(decimal(8, 2))).isLeft, "a smaller precision, each in a union")
     assert(read(optional(decimal(8, 2)), optional(decimal(10, 2))).isRight, "a larger precision, each in a union")
 
+  test("a union field's default may be of any of its branches, as Avro 1.12 allows, and reads as the first branch it fits"):
+    val schema = parsed("""{"type":"record","name":"N","fields":[{"name":"note","type":["null","string"],"default":"none"}]}""")
+    assertEquals(
+      schema match
+        case AvroSchema.Record(_, fields, _, _) => fields.map(_.default);
+        case _                                  => Nil
+      ,
+      List(Some(AvroValue.String("none")))
+    )
+    assert(AvroSchemaJson.parse("""{"type":"record","name":"N","fields":[{"name":"note","type":["null","string"],"default":1}]}""").isLeft)
+
   test("a decimal held in a fixed type keeps its scale where a field names it, so another scale is refused there too"):
     val amount = """{"type":"fixed","name":"Amt","size":8,"logicalType":"decimal","precision":10,"scale":%d}"""
     val writer = parsed(s"""{"type":"record","name":"M","fields":[{"name":"price","type":${amount.format(2)}},{"name":"tax","type":"Amt"}]}""")

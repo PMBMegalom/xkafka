@@ -33,6 +33,13 @@ class MainSuite extends FunSuite:
 
   private def avro(name: String): String = s"""{"type": "record", "name": "$name", "namespace": "example", "fields": []}"""
 
+  directory.test("a type of one format named as a Scala type does not hide that type from the other format's code in the same package"): in =>
+    val optional = """{"title": "example.Order", "type": "object", "properties": {"note": {"type": "string"}}}"""
+    val named    = """{"type": "record", "name": "Holder", "namespace": "example", "fields": [{"name": "kept", "type": ["null", "string"]}]}"""
+    val written  = Main.generate(files(in, "option.avsc" -> avro("Option"), "order.json" -> optional, "holder.avsc" -> named), JsonSchemaOptions())
+    val order    = written.toOption.flatMap(_.find(_.path.toString == "example/Order.scala")).map(_.text)
+    assert(order.exists(_.contains("_root_.scala.Option[")), order)
+
   directory.test("types of either format that would be written to one file are refused, as are files whose names differ only in case"): in =>
     val json = """{"title": "example.Same", "type": "object", "properties": {"a": {"type": "string"}}}"""
     assertEquals(

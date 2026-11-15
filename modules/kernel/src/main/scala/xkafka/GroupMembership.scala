@@ -22,7 +22,7 @@
 package xkafka
 
 import cats.arrow.FunctionK
-import cats.effect.{MonadCancelThrow, Resource}
+import cats.effect.{MonadCancelThrow, Poll, Resource}
 import cats.syntax.all.*
 
 /** What a backend needs in order to record a consumer's offsets against its group.
@@ -60,7 +60,9 @@ private[xkafka] object GroupMembership:
   )(using F: MonadCancelThrow[F]): Resource[F, List[(GroupHandle, Map[TopicPartition, OffsetAndMetadata])]] =
     batch.memberships.toList.traverse { (membership, offsets) =>
       membership.handle match
-        case Some(handle) => Resource.makeFull[F, GroupHandle](poll => poll(handle.acquire))(handle.release).map(_ -> offsets)
+        // A membership that holds something as it takes its handle takes it under the poll, and gives it back where it is cancelled meanwhile; once
+        // the handle is taken, its release is registered before anything can cancel it.
+        case Some(handle) => Resource.makeFull[F, GroupHandle](poll => handle.acquireWith(poll))(handle.release).map(_ -> offsets)
         case None         => Resource
             .eval(F.raiseError(new KafkaException.Unsupported("a transaction can only record offsets that came from a consumer of the same backend")))
     }
@@ -88,9 +90,15 @@ private[xkafka] object GroupMembership:
       val key: Any,
       val acquire: F[GroupHandle],
       val release: GroupHandle => F[Unit],
-      val onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]] = None
+      val onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]] = None,
+      // Where taking the handle holds something until it is released, as a lease is counted in flight: taking it under the poll given, and giving back
+      // what it holds where it is cancelled meanwhile; `acquire` then takes it whole, as it cannot be cancelled.
+      val acquiring: Option[Poll[F] => F[GroupHandle]] = None
   ) extends GroupMembership[F]:
     override def handle: Option[Backend[F]] = Some(this)
+
+    /** The handle, taken with `poll` cancelling what may wait. */
+    private[xkafka] def acquireWith(poll: Poll[F]): F[GroupHandle] = acquiring.fold(poll(acquire))(_(poll))
 
     override def mapK[G[_]](fk: FunctionK[F, G]): GroupMembership[G] =
       new Backend(key, fk(acquire), handle => fk(release(handle)), onCommitted.map(notify => offsets => fk(notify(offsets))))

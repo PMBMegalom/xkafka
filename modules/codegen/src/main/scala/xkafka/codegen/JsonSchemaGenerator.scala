@@ -36,20 +36,31 @@ final case class JsonSchemaOptions(packageName: Option[String] = None, bigDecima
   * a `oneOf` or `anyOf` of objects, with codecs that register each file's schema as it is.
   */
 object JsonSchemaGenerator:
-  /** The sources of the types that `files`, JSON Schema files, describe, or why they cannot be generated. */
-  def generate(files: List[Path], options: JsonSchemaOptions): Either[NonEmptyList[String], List[GeneratedFile]] =
+  /** The sources of the types that `files`, JSON Schema files, describe, or why they cannot be generated. `others` are the names of each package's
+    * types generated from other files, which a type of the same package must not be hidden by.
+    */
+  def generate(
+      files: List[Path],
+      options: JsonSchemaOptions,
+      others: Map[String, Set[String]] = Map.empty
+  ): Either[NonEmptyList[String], List[GeneratedFile]] =
     files.traverse(file => root(file, options).toValidatedNel).toEither.flatMap: roots =>
       roots.groupBy(found => s"${found.packageName}.${found.name}").toList.sortBy(_._1).collectFirst {
         case (name, copies) if copies.size > 1 => s"$name is generated from both ${copies.map(_.file).mkString(" and ")}"
       } match
         case Some(problem) => Left(NonEmptyList.one(problem))
         case None          =>
-          val packages = roots.groupMap(_.packageName)(_.name).view.mapValues(_.toSet).toMap
+          val own      = roots.groupMap(_.packageName)(_.name).view.mapValues(_.toSet).toMap
+          val packages = own ++ others.map((space, names) => space -> (own.getOrElse(space, Set.empty) ++ names))
           roots.traverse: found =>
             JsonScala(found, options.bigDecimals, packages.getOrElse(found.packageName, Set.empty)).source
               .bimap(reason => s"${found.file}: $reason", GeneratedFile(Path.of(found.packageName.replace('.', '/'), s"${found.name}.scala"), _))
               .toValidatedNel
           .toEither
+
+  /** The names of the types `files` describe, by package. */
+  private[codegen] def names(files: List[Path], options: JsonSchemaOptions): Map[String, Set[String]] =
+    files.flatMap(root(_, options).toOption).groupMap(_.packageName)(_.name).view.mapValues(_.toSet).toMap
 
   /** A file's schema, and the package and name of the type generated from it. */
   private[codegen] final case class Root(file: Path, packageName: String, name: String, schema: Json)

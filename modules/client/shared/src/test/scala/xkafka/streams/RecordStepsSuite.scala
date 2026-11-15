@@ -22,8 +22,10 @@
 package xkafka
 package streams
 
+import cats.Show
 import cats.arrow.FunctionK
 import cats.effect.{IO, Ref}
+import cats.effect.std.Console
 import fs2.Chunk
 import munit.CatsEffectSuite
 import xkafka.internal.streams.{Task, TaskInput, TaskOutput, TaskState}
@@ -168,6 +170,29 @@ final class RecordStepsSuite extends CatsEffectSuite:
     assert(compileErrors("mapped.groupByKey(text, text)").nonEmpty)
     assert(compileErrors("flat.groupByKey(text, text)").nonEmpty)
     assert(compileErrors("effected.groupByKey(text, text)").nonEmpty)
+
+  test("a step that can change the record's key is followed by the repartition it needs, which is not refused as unused"):
+    def grouped(stream: KStream.Of[IO, String, String, KeyState.Changed]) =
+      Topology.of(
+        stream.groupByKey(Repartition("r"), text, text).count(Named("c"), Store("s")).toStream(Named("t")).to(Named("w"), out, text, Serde.long[IO])
+      )
+    List(
+      read.mapRecord(Named("a"))(record => record.withKey(record.value)),
+      read.flatMapRecord(Named("a"))(record => List(record.withKey(record.value))),
+      read.evalMapRecord(Named("a"))(record => IO.pure(record.withKey(record.value)))
+    ).foreach(stream => assertEquals(grouped(stream).map(_ => ()).left.map(_.toList), Right(())))
+
+  test("a stream printed in a split branch is labelled by the branch, as Java names the branch's stream"):
+    IO.ref(Vector.empty[String]).flatMap: lines =>
+      given Console[IO] =
+        new Console[IO]:
+          def readLineWithCharset(charset: java.nio.charset.Charset): IO[String] = IO.raiseError(new UnsupportedOperationException("no input"))
+          def print[A](a: A)(using S: Show[A]): IO[Unit]                         = IO.unit
+          def println[A](a: A)(using S: Show[A]): IO[Unit]                       = lines.update(_ :+ S.show(a))
+          def error[A](a: A)(using S: Show[A]): IO[Unit]                         = IO.unit
+          def errorln[A](a: A)(using S: Show[A]): IO[Unit]                       = IO.unit
+      val split = read.split(Named("s-")).branch(Named("a"))((_, _) => true)(_.print(Named("p"))).noDefaultBranch
+      written(split, input("k", "v")) *> lines.get.map(printed => assertEquals(printed, Vector("[s-a]: k, v")))
 
   test("a record given to the step that keeps the key has no way to change it"):
     assertEquals(compileErrors("""read.mapRecordValue(Named("m"))(record => record.withValue("other"))"""), "")

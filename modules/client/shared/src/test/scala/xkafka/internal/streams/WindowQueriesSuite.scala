@@ -23,6 +23,7 @@ package xkafka
 package internal
 package streams
 
+import scala.collection.immutable.TreeMap
 import scala.concurrent.duration.*
 
 import cats.effect.{IO, Ref}
@@ -94,7 +95,14 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       Nil
     )
 
-  private def member(name: String, partitions: Set[Int], everyone: List[StreamsGroup.EndpointPartitions], forward: Forward[IO], at: Endpoint) =
+  private def member(
+      name: String,
+      partitions: Set[Int],
+      everyone: List[StreamsGroup.EndpointPartitions],
+      forward: Forward[IO],
+      at: Endpoint,
+      pending: Map[TaskId, Map[String, StoreChanges]] = Map.empty
+  ) =
     val identity = MemberIdentity("app", name, name, Declaration("app", topology), 300000, None, Nil, None)
     val tasks    = partitions.flatMap(partition => Set(TaskId("0", partition), TaskId("1", partition)))
     for
@@ -107,6 +115,7 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       topology.numbered.map((id, s) => id.toString -> s).toMap,
       Map.empty,
       holding,
+      IO.pure(pending),
       signal,
       phased,
       _ => IO.pure(counted),
@@ -162,6 +171,31 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       (querying.query(sessions.fetch(keys(1)), false), querying.query(sessions.fetch(keys(2)), false)).tupled.map: (local, remote) =>
         val both = Vector(Window(0L, 1000L) -> 4L, Window(30000L, 31000L) -> 5L)
         assertEquals((local, remote), (Right(both), Right(both)))
+
+  test("a task's window and session changes since it last committed are read with what its stores hold, and a longer key's are not"):
+    def changes(entries: (Chunk[Byte], Option[Stored])*): StoreChanges = TreeMap.from(entries)(using StoreContents.keys)
+    val (key, other)                                                   = (keys(0), keys(1))
+    val pending                                                        =
+      Map(
+        TaskId("0", 0) -> Map(
+          "windows" -> changes(
+            WindowStore.key(bytes(key), 10000L)        -> Some(count(7L)),
+            WindowStore.key(bytes(key), 20000L)        -> None,
+            WindowStore.key(bytes(key), 30000L)        -> Some(count(8L)),
+            WindowStore.key(bytes(s"${key}x"), 30000L) -> Some(count(9L))
+          )
+        ),
+        TaskId("1", 1) -> Map(
+          "sessions" -> changes(SessionStore.key(bytes(other), 0L, 1000L) -> None, SessionStore.key(bytes(other), 40000L, 41000L) -> Some(count(6L)))
+        )
+      )
+    member("a", Set(0, 1), Nil, Forward.none[IO], here, pending).flatMap: querying =>
+      (
+        querying.query(windows.fetch(key, Timestamp.fromEpochMillis(0L), Timestamp.fromEpochMillis(40000L)), false),
+        querying.query(sessions.fetch(other), false)
+      ).tupled.map: (windowed, sessioned) =>
+        assertEquals(windowed, Right(Vector(0L -> 1L, 10000L -> 7L, 30000L -> 8L)))
+        assertEquals(sessioned, Right(Vector(Window(30000L, 31000L) -> 5L, Window(40000L, 41000L) -> 6L)))
 
   test("a query of another kind than its store's names the store as unknown"):
     asking.flatMap: querying =>

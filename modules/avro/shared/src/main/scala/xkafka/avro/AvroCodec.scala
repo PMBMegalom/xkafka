@@ -132,9 +132,16 @@ object AvroCodec:
         case AvroSchema.Array(items)                                        => AvroSchema.Array(inside(items))
         case AvroSchema.Map(values)                                         => AvroSchema.Map(inside(values))
         case other                                                          => other
+    // Defaults are left out, and with them the order a default gives its union's branches, since they depend on which types are complete when the
+    // type is built, which differs between its first build and a later one.
+    def unordered(schema: AvroSchema): AvroSchema =
+      schema match
+        case AvroSchema.Union(branches) => AvroSchema.Union(branches.sortBy(AvroSchemaJson.render))
+        case other                      => other
     schema match
-      case record: AvroSchema.Record => record.copy(fields = record.fields.map(field => field.copy(schema = inside(field.schema))))
-      case other                     => other
+      case record: AvroSchema.Record => record
+          .copy(fields = record.fields.map(field => field.copy(schema = unordered(inside(field.schema)), default = None)))
+      case other => other
 
   /** A codec of `schema`, writing with `encode` and reading with `decode`. */
   def instance[A](avro: AvroSchema, encode: A => Either[String, AvroValue], decode: AvroValue => Either[String, A]): AvroCodec[A] =
@@ -331,13 +338,22 @@ private[avro] final class RecordCodec[A, T <: Tuple](
       (fields.building, State.get[AvroCodec.Defining]).mapN: (schemas, sofar) =>
         // A default its field's codec cannot write, as an instant past the largest timestamp, is left out, and so is one no branch of its union is
         // known to take yet, as one of the record it is in.
+        // One whose value holds a union's later branch inside it is left out too, as Avro takes a nested union's default from its first branch.
         val avro =
-          infos.lazyZip(schemas).lazyZip(defaults).map: (info, schema, default) =>
+          infos.lazyZip(schemas).lazyZip(evaluated).map: (info, schema, default) =>
             val placed =
-              default.filterNot(_ => info.noDefault).flatMap(_().toOption).flatMap(kept => first(schema, kept, sofar.complete).map(_ -> kept))
+              default.flatMap: kept =>
+                first(schema, kept, sofar.complete)
+                  .filter(reordered => AvroBinary.placeable(reordered, kept, sofar.complete ++ AvroSchema.definitions(reordered))).map(_ -> kept)
             AvroField(info.name, placed.fold(schema)(_._1), placed.map(_._2), info.doc, info.aliases)
         AvroSchema.Record(name, avro, named.doc, named.aliases.map(FullName.from(_, name.namespace)))
     )
+
+  /** Each field's default, evaluated once, so that every build of the schema gives a field the same one: none where it is marked `SchemaNoDefault`,
+    * or where its codec cannot write it.
+    */
+  private lazy val evaluated: List[Option[AvroValue]] =
+    infos.lazyZip(defaults).map((info, default) => default.filterNot(_ => info.noDefault).flatMap(_().toOption)).toList
 
   /** The schema with the union branch `default` is a value of first, as Avro writes a union field's default in its first branch, if a branch is known
     * to take it.

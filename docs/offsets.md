@@ -153,7 +153,9 @@ nothing is committed for that partition. This holds even if the partition later
 comes back to the same consumer.
 
 `IllegalGeneration` is not retriable. Read the records again after the rebalance,
-and commit those offsets.
+and commit those offsets. Records fetched before the move but not yet read are
+not handed out at all after it, since their offsets could not be committed, and
+`partitionedRecords` drops those still waiting in a revoked partition's stream.
 
 How many offsets a rebalance affects depends on the partition assignment strategy:
 
@@ -221,9 +223,7 @@ The record stream then fails with `KafkaException.UncommittedRevocation`, whose
 A consumer that has already been removed from its group, for instance because
 it went longer than `maxPollInterval` without fetching, gives up its partitions
 without waiting. Committing a record it read before it was removed fails with
-`ErrorCode.UnknownMemberId`. If it was the group's only member, the broker may
-already have removed the empty group, and the commit fails with
-`ErrorCode.GroupIdNotFound` instead.
+`ErrorCode.UnknownMemberId`, whether or not the group has other members.
 
 ## Starting from offsets you keep
 

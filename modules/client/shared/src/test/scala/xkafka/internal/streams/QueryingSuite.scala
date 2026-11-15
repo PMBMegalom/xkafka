@@ -23,6 +23,8 @@ package xkafka
 package internal
 package streams
 
+import scala.collection.immutable.TreeMap
+
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import fs2.Chunk
@@ -65,7 +67,14 @@ final class QueryingSuite extends CatsEffectSuite:
   /** One member holding a store for each partition of `active` and `standby`, each holding its keys valued by the member's name and the key. */
   private final case class Holder(name: String, active: Set[Int], standby: Set[Int] = Set.empty, closed: Boolean = false)
 
-  private def member(holder: Holder, everyone: List[StreamsGroup.EndpointPartitions], phase: StreamsPhase, forward: Forward[IO], at: Endpoint) =
+  private def member(
+      holder: Holder,
+      everyone: List[StreamsGroup.EndpointPartitions],
+      phase: StreamsPhase,
+      forward: Forward[IO],
+      at: Endpoint,
+      pending: Map[TaskId, Map[String, StoreChanges]] = Map.empty
+  ) =
     val identity =
       MemberIdentity("app", holder.name, holder.name, Declaration("app", topology), 300000, None, Nil, Some(StreamsGroup.Endpoint(at.host, at.port)))
     val joined =
@@ -84,6 +93,7 @@ final class QueryingSuite extends CatsEffectSuite:
       topology.numbered.map((id, s) => id.toString -> s).toMap,
       Map.empty,
       holding,
+      IO.pure(pending),
       signal,
       phased,
       _ => IO.pure(counted),
@@ -92,12 +102,18 @@ final class QueryingSuite extends CatsEffectSuite:
     )
 
   /** Two members, the first asked, the second answering what it forwards through its own `answer`. */
-  private def pair(first: Holder, second: Holder, phase: StreamsPhase = StreamsPhase.Running, broken: Option[Forward[IO]] = None) =
+  private def pair(
+      first: Holder,
+      second: Holder,
+      phase: StreamsPhase = StreamsPhase.Running,
+      broken: Option[Forward[IO]] = None,
+      pending: Map[TaskId, Map[String, StoreChanges]] = Map.empty
+  ) =
     val everyone = List(endpointOf(here, first.active, first.standby), endpointOf(there, second.active, second.standby))
     member(second, everyone, StreamsPhase.Running, Forward.none[IO], there).flatMap: answering =>
       val forward: Forward[IO] =
         broken.getOrElse((to, request) => if to == there then answering.answer(request) else IO.raiseError(new RuntimeException(s"no $to")))
-      member(first, everyone, phase, forward, here)
+      member(first, everyone, phase, forward, here, pending)
 
   test("a key whose partition this member holds is read here, and one another member holds is asked of it"):
     val (mine, theirs) = (keys(0).head, keys(3).head)
@@ -185,6 +201,7 @@ final class QueryingSuite extends CatsEffectSuite:
           Map.empty,
           Map("users-store" -> store),
           held,
+          IO.pure(Map.empty),
           member,
           phase,
           _ => IO.pure(counted),
@@ -194,6 +211,26 @@ final class QueryingSuite extends CatsEffectSuite:
         )
       found <- querying.query(users.get("k"), false)
     yield assertEquals(found, Right(Some("v")))
+
+  test("a task's changes since it last committed are read, as Java's queries read each update at once"):
+    val List(changed, removed) = keys(0): @unchecked
+    val added                  = (500 until 2000).map(n => s"key-$n").find(partitionOf(_) == 0).get
+    val pending                =
+      Map(
+        TaskId("0", 0) -> Map(
+          "latest" ->
+            TreeMap(bytes(changed) -> Some(Stored(bytes("new"), 2L)), bytes(removed) -> None, bytes(added) -> Some(Stored(bytes("added"), 2L)))(using
+              StoreContents.keys
+            )
+        )
+      )
+    val all = List(changed, removed, added).sortBy(bytes)(using StoreContents.keys)
+    pair(Holder("a", Set(0, 1)), Holder("b", Set(2, 3)), pending = pending).flatMap: asking =>
+      (asking.query(latest.get(changed), false), asking.query(latest.get(removed), false), asking.query(latest.range(all.head, all.last), false))
+        .tupled.map: (now, gone, ranged) =>
+          assertEquals(now, Right(Some("new")))
+          assertEquals(gone, Right(None))
+          assertEquals(ranged.map(_.toMap.view.filterKeys(all.toSet).toMap), Right(Map(changed -> "new", added -> "added")))
 
   test("a store closed as its task is given up is rebalancing, not read"):
     val key = keys(0).head
@@ -231,7 +268,19 @@ final class QueryingSuite extends CatsEffectSuite:
       identity = MemberIdentity("app", "m", "m", Declaration("app", topology), 300000, None, Nil, None)
       signal <- SignallingRef[IO].of(Member(identity).copy(owned = Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
       phased <- SignallingRef[IO].of[StreamsPhase](StreamsPhase.Running)
-      asking = Querying[IO]("app", subtopologies, Map("gs" -> global), holding, signal, phased, _ => IO.pure(counted), None, Forward.none[IO])
+      asking =
+        Querying[IO](
+          "app",
+          subtopologies,
+          Map("gs" -> global),
+          holding,
+          IO.pure(Map.empty),
+          signal,
+          phased,
+          _ => IO.pure(counted),
+          None,
+          Forward.none[IO]
+        )
       fromGlobal <- asking.query(QueryableStore.keyValue(Store("gs"), text, text).get("k"), false)
       fromTally  <- asking.query(QueryableStore.keyValue(Store("tally"), text, numbers).get(key), false)
     yield

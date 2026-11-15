@@ -38,11 +38,19 @@ final case class GeneratedFile(path: Path, text: String)
   * type, each in the package of its namespace, with its codec in its companion. Each codec must have the schema its type was generated from.
   */
 object AvroGenerator:
-  /** The sources of the named types that `files`, .avsc and .avdl files, declare, or why they cannot be generated. */
-  def generate(files: List[Path]): Either[NonEmptyList[String], List[GeneratedFile]] =
+  /** The sources of the named types that `files`, .avsc and .avdl files, declare, or why they cannot be generated. `others` are the names of each
+    * package's types generated from other files, which a type of the same package must not be hidden by.
+    */
+  def generate(files: List[Path], others: Map[String, Set[String]] = Map.empty): Either[NonEmptyList[String], List[GeneratedFile]] =
     read(files).leftMap(NonEmptyList.one).flatMap: schemas =>
-      val packages = schemas.groupMap(schema => Option(schema.getNamespace).filter(_.nonEmpty))(_.getName).view.mapValues(_.toSet).toMap
+      val own      = schemas.groupMap(schema => Option(schema.getNamespace).filter(_.nonEmpty))(_.getName).view.mapValues(_.toSet).toMap
+      val packages = own ++ others.map((space, names) => Some(space) -> (own.getOrElse(Some(space), Set.empty) ++ names))
       schemas.traverse(schema => file(schema, packages).toValidatedNel).toEither
+
+  /** The names of the types `files` declare, by package. */
+  private[codegen] def names(files: List[Path]): Map[String, Set[String]] =
+    read(files).toOption.toList.flatten.flatMap(schema => Option(schema.getNamespace).filter(_.nonEmpty).map(_ -> schema.getName))
+      .groupMap(_._1)(_._2).view.mapValues(_.toSet).toMap
 
   private def read(files: List[Path]): Either[String, List[JavaSchema]] =
     val (idl, json) = files.partition(_.toString.endsWith(".avdl"))

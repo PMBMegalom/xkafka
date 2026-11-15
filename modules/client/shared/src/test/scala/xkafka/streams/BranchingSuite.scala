@@ -273,6 +273,24 @@ final class BranchingSuite extends CatsEffectSuite:
       .process(TaskState.empty, TaskInput(bytes("k"), bytes("a"), 0L, Headers.empty, "in"), 0L).map: (_, written) =>
         assertEquals(written.map(_.topic), Vector(out))
 
+  test("a stream's repartition named with '-repartition' already has that name as its topic, as Java names it, and a grouped table's has it added"):
+    val streamed =
+      read("in").selectKey(Named("key"))((_, v) => v).groupByKey(Repartition("orders-repartition"), text, text).count(Named("c"), Store("s"))
+        .toStream(Named("t")).to(Named("w"), topic("out"), text, Serde.long[IO])
+    val declared = internal.streams.Declaration("app", Topology.of(streamed).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name))
+    assertEquals(declared, List("app-orders-repartition"))
+    val nodes = Topology.of(streamed).orFail.describe.toString
+    List("orders-repartition-sink", "orders-repartition-source", "orders-repartition-filter")
+      .foreach(node => assert(nodes.contains(s"$node ("), nodes))
+    assert(!nodes.contains("orders-repartition-repartition"), nodes)
+    val grouped =
+      KTable(Named("t"), topic("t"), text, text, Store("ts")).groupBy(Repartition("by-repartition"), text, text)((k, v) => (v, k))
+        .count(Named("gc"), Store("gs")).toStream(Named("gt")).to(Named("gw"), topic("out"), text, Serde.long[IO].option)
+    assertEquals(
+      internal.streams.Declaration("app", Topology.of(grouped).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name)),
+      List("app-by-repartition-repartition")
+    )
+
   test("a program a flow prints in, labelled by its own name with no step before it, and by the step before where there is one"):
     given Console[IO] = Console.make[IO]
     val named         = Flow.asRead[IO, String, String].print(Named("shown"))

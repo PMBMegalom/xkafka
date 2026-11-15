@@ -28,7 +28,7 @@ import cats.syntax.all.*
 import fs2.Chunk
 import io.circe.{jawn, Json}
 import xkafka.{Deserializer, Serde}
-import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Utf8, Writing}
+import xkafka.schemaregistry.{Part, RegistryException, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Utf8, Writing}
 
 /** A record as it was written: the schema its writer registered, and its JSON. */
 final case class JsonSchemaWritten(schema: Json, value: Json)
@@ -46,10 +46,11 @@ object JsonSchemaFormat:
       override val recordName: Option[String] = codec.name
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        json(target).map(_ => value => codec.encode(value).map(written => Chunk.array(written.noSpaces.getBytes(StandardCharsets.UTF_8))))
+        codec.refusal.toLeft(()) *> json(target)
+          .map(_ => value => codec.encode(value).map(written => Chunk.array(written.noSpaces.getBytes(StandardCharsets.UTF_8))))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        json(writer).map(_ => bytes => read(bytes).flatMap(codec.decode))
+        codec.refusal.toLeft(()) *> json(writer).map(_ => bytes => read(bytes).flatMap(codec.decode))
 
   private[jsonschema] def json(schema: Schema): Either[String, Json] =
     if schema.schemaType != SchemaType.Json then Left(s"the schema is ${schema.schemaType.name}, not JSON Schema")
@@ -84,7 +85,9 @@ object JsonSchemaSerde:
       part: Part,
       naming: SubjectNaming = SubjectNaming.TopicName,
       writing: Writing = Writing.Register
-  ): F[Serde[F, A]] = RegistrySerde.of(registry, JsonSchemaFormat[A], part, naming, writing)
+  ): F[Serde[F, A]] =
+    Concurrent[F].fromEither(JsonSchemaCodec[A].refusal.map(new RegistryException.NoSchema(_)).toLeft(())) *>
+      RegistrySerde.of(registry, JsonSchemaFormat[A], part, naming, writing)
 
   /** Serdes of JSON values of `schema`, a schema known only as the program runs. Values are written as they are, without checking them against it. */
   def generic[F[_]: Concurrent](

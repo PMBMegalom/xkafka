@@ -94,6 +94,12 @@ class JsonSchemaGeneratorSuite extends FunSuite:
       ).head.text
     assert(text.contains("d: Option[R.D]"), text)
 
+  directory.test("a required name no property declares is refused, since no value the class writes would have it"): in =>
+    assertEquals(
+      refused(in, "r.json" -> record(""""id": {"type": "string"}""", """, "required": ["id", "tenant"]""")),
+      List("r.json: # requires tenant, which it declares no property of")
+    )
+
   directory.test("keywords that combine schemas, and references to other files, are refused"): in =>
     assertEquals(
       refused(

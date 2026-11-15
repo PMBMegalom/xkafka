@@ -165,10 +165,19 @@ private[protobuf] final class Dynamic(pool: Pool):
           val byNumber = read.groupMap(_._1)(_._2)
           val numbers  = message.fields.map(_.number).toSet
           val unknown  = read.collect { case (number, raw) if !numbers.contains(number) => UnknownField(number, ProtobufWire.field(number, raw)) }
+          // Of a oneof's fields written, the one written last is the oneof's, as protobuf reads it.
+          val numberOf = message.fields.map(field => field.name -> field.number).toMap
+          val position = read.zipWithIndex.map((written, at) => written._1 -> at).toMap
           message.fields.flatTraverse: field =>
             readField(full, field, byNumber.getOrElse(field.number, Vector.empty), depth + 1)
-              .bimap(reason => s"field ${field.name} of $full: $reason", _.map(field.name -> _).toList)
-          .map(fields => ProtobufValue.Message(full, fields.toVector, unknown))
+              .bimap(reason => s"field ${field.name} of $full: $reason", _.map(field -> _).toList)
+          .map: fields =>
+            val chosen =
+              fields.groupBy(_._1.oneof).flatMap:
+                case (Some(_), members) => members.maxByOption((field, _) => position.getOrElse(numberOf(field.name), -1)).toList
+                case (None, plain)      => plain
+              .toSet
+            ProtobufValue.Message(full, fields.filter(chosen).map((field, value) => field.name -> value).toVector, unknown)
 
   /** A field's value from what was written under its number; none where it is absent and records presence. */
   private def readField(scope: String, field: Field, found: Vector[Raw], depth: Int): Either[String, Option[ProtobufValue]] =
@@ -176,7 +185,9 @@ private[protobuf] final class Dynamic(pool: Pool):
       case FieldType.Map(key, item) => found.traverse:
           case Raw.Bytes(entry) => ProtobufWire.fields(entry).flatMap: fields =>
               def at(number: Int): Option[Raw] = fields.collect { case (`number`, raw) => raw }.lastOption
-              (at(1).fold(zeroOf(scope, key))(take(scope, key, _, depth)), at(2).fold(zeroOf(scope, item))(take(scope, item, _, depth))).tupled
+              // A value left out is its type's zero, and for a message, the message with nothing written, as protobuf reads it.
+              val absent = if message(scope, item) then take(scope, item, Raw.Bytes(Chunk.empty), depth) else zeroOf(scope, item)
+              (at(1).fold(zeroOf(scope, key))(take(scope, key, _, depth)), at(2).fold(absent)(take(scope, item, _, depth))).tupled
           case _ => Left("expected a map's entry")
         // Of two entries with one key, the later is read, in its place.
         .map(entries => Some(ProtobufValue.Map(entries.reverse.distinctBy(_._1).reverse)))
@@ -186,7 +197,7 @@ private[protobuf] final class Dynamic(pool: Pool):
             ProtobufWire.packed(packed, wireOf(fieldType)).flatMap(_.traverse(take(scope, fieldType, _, depth)))
           case raw => take(scope, fieldType, raw, depth).map(Vector(_))
         .map(values => Some(ProtobufValue.List(values)))
-      case fieldType => found.lastOption match
+      case fieldType => ProtobufWire.last(found, message(scope, fieldType)) match
           case Some(raw) => take(scope, fieldType, raw, depth).map(Some(_))
           // A message has presence of its own, even in a field without a label.
           case None if field.label == Label.Implicit && !message(scope, fieldType) => zeroOf(scope, fieldType).map(Some(_))

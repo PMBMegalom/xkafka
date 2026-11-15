@@ -90,8 +90,11 @@ object ProtobufSchemaText:
       case FieldType.Map(key, value) => s"map<${typeName(key)}, ${typeName(value)}>"
       case scalar                    => scalar.toString.toLowerCase
 
+  // protoc refuses two values of one number unless the enum allows aliases, which it says where it has them.
   private def enumeration(declared: Enum, indent: String): String =
-    s"${indent}enum ${declared.name} {\n${declared.values.map((name, number) => s"$indent  $name = $number;\n").mkString}$indent}"
+    val aliased = declared.values.map(_._2).distinct.size < declared.values.size
+    val option  = if aliased then s"$indent  option allow_alias = true;\n" else ""
+    s"${indent}enum ${declared.name} {\n$option${declared.values.map((name, number) => s"$indent  $name = $number;\n").mkString}$indent}"
 
   private[protobuf] def escape(text: String): String =
     text.flatMap:
@@ -283,7 +286,7 @@ object ProtobufSchemaText:
             val start = if peek(at + 1).exists(token => token == Token.Word("public") || token == Token.Word("weak")) then at + 2 else at + 1
             (text <* symbol(';')).run(start).map((name, next) => (file.copy(imports = name :: file.imports), next))
           case Some(Token.Word("option"))  => skipPast(';').run(at).map((_, next) => (file, next))
-          case Some(Token.Word("message")) => message(file.syntax).run(at).map((read, next) => (file.copy(messages = read :: file.messages), next))
+          case Some(Token.Word("message")) => message(file.syntax, 1).run(at).map((read, next) => (file.copy(messages = read :: file.messages), next))
           case Some(Token.Word("enum"))    => enumeration.run(at).map((read, next) => (file.copy(enums = read :: file.enums), next))
           case Some(Token.Word("service")) => (word >> word >> symbol('{') >> skipPast('}')).run(at).map((_, next) => (file, next))
           case Some(Token.Word("extend"))  => Left("the file extends a message, and xkafka does not read extensions")
@@ -295,12 +298,17 @@ object ProtobufSchemaText:
       case Nested(message: Message)
       case NestedEnum(declared: Enum)
 
-    private def message(syntax: Syntax): Step[Message] =
+    // Nesting is bounded as records' is, so a file nested past it is refused, not read until the stack runs out.
+    private def message(syntax: Syntax, depth: Int): Step[Message] =
       for
+        _ <-
+          Step(at =>
+            if depth > ProtobufWire.MaxDepth then Left(s"the file's messages are nested more than ${ProtobufWire.MaxDepth} deep") else Right(((), at))
+          )
         _    <- word
         name <- word
         _    <- symbol('{')
-        read <- items(messageItem(syntax))
+        read <- items(messageItem(syntax, depth))
       yield Message(
         name,
         read.flatMap { case Item.Fields(fields) => fields; case _ => Nil },
@@ -308,10 +316,10 @@ object ProtobufSchemaText:
         read.collect { case Item.NestedEnum(nested) => nested }
       )
 
-    private def messageItem(syntax: Syntax): Step[Option[Item]] =
+    private def messageItem(syntax: Syntax, depth: Int): Step[Option[Item]] =
       Step: at =>
         peek(at) match
-          case Some(Token.Word("message"))                            => message(syntax).map(read => Some(Item.Nested(read))).run(at)
+          case Some(Token.Word("message"))                            => message(syntax, depth + 1).map(read => Some(Item.Nested(read))).run(at)
           case Some(Token.Word("enum"))                               => enumeration.map(read => Some(Item.NestedEnum(read))).run(at)
           case Some(Token.Word("oneof"))                              => oneof(syntax).map(read => Some(Item.Fields(read))).run(at)
           case Some(Token.Word("option" | "reserved" | "extensions")) => skipPast(';').run(at).map((_, next) => (None, next))
@@ -377,7 +385,8 @@ object ProtobufSchemaText:
               value <- fieldType
               _     <- symbol('>')
             yield (key, value)).run(at).flatMap:
-              case ((key, value), next) => ProtobufSchema.scalars.get(key)
+              case ((_, FieldType.Map(_, _)), _) => Left("a map's values are a map, which Protobuf does not allow")
+              case ((key, value), next)          => ProtobufSchema.scalars.get(key)
                   .filterNot(scalar => scalar == FieldType.Double || scalar == FieldType.Float || scalar == FieldType.Bytes) match
                   case Some(scalar) => Right((FieldType.Map(scalar, value), next))
                   case None         => Left(s"a map's keys are $key, which Protobuf does not allow")
@@ -393,11 +402,12 @@ object ProtobufSchemaText:
           def go(at: Int, packed: Option[Boolean], default: Option[String]): Either[String, ((Option[Boolean], Option[String]), Int)] =
             val option =
               peek(at) match
+                // Of the options named plainly, `packed` and `default` are kept, and any other's value, which may be an aggregate, is skipped.
                 case Some(Token.Word(name)) => (for
                     _     <- word
                     _     <- symbol('=')
-                    value <- constant
-                  yield (name, value)).run(at).map((pair, next) => (Some(pair), next))
+                    value <- if name == "packed" || name == "default" then constant.map(Some(_)) else Step(skipOptionValue).map(_ => None)
+                  yield value.map(name -> _)).run(at)
                 // A custom option, named in parentheses, is skipped.
                 case _ => skipPast('=').flatMap(_ => Step(skipOptionValue)).run(at).map((_, next) => (None, next))
             option match
@@ -416,7 +426,15 @@ object ProtobufSchemaText:
 
     /** Skips an option's value: a constant, or a message's value in braces. */
     private def skipOptionValue(at: Int): Either[String, (Unit, Int)] =
-      if peek(at).contains(Token.Symbol('{')) then skipPast('}').run(at + 1) else constant.run(at).map((_, next) => ((), next))
+      // An aggregate's braces may hold others, so they are counted to its end.
+      @tailrec
+      def closing(at: Int, open: Int): Either[String, (Unit, Int)] =
+        peek(at) match
+          case None                    => Left("an option's value is not closed")
+          case Some(Token.Symbol('{')) => closing(at + 1, open + 1)
+          case Some(Token.Symbol('}')) => if open == 1 then Right(((), at + 1)) else closing(at + 1, open - 1)
+          case _                       => closing(at + 1, open)
+      if peek(at).contains(Token.Symbol('{')) then closing(at + 1, 1) else constant.run(at).map((_, next) => ((), next))
 
     private val enumeration: Step[Enum] =
       for

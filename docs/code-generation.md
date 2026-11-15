@@ -276,6 +276,8 @@ file, and why:
 - a `$ref` to another file, and a `$ref` beside
   keywords that give its value a type;
 - an object of both `properties` and a schema for other properties;
+- an object that requires a name none of its `properties` declares, since no
+  value its class writes would have it;
 - a `const` that is not text, or not of a required property, and an `enum` of
   values other than text without a `type`;
 - a union with two branches of one Scala class, such as two kinds of text or

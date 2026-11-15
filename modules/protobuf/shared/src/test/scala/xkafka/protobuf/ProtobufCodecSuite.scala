@@ -160,6 +160,37 @@ final case class Both(
     other: OtherLine
 ) derives ProtobufCodec
 
+/** Derived once for every type argument, so each use is named alike though they differ. */
+final case class Page[A](
+    @ProtobufField(1)
+    items: List[A]
+) derives ProtobufCodec
+
+final case class Feed(
+    @ProtobufField(1)
+    users: Page[String],
+    @ProtobufField(2)
+    counts: Page[Int]
+) derives ProtobufCodec
+
+final case class Pages(
+    @ProtobufField(1)
+    first: Page[String],
+    @ProtobufField(2)
+    second: Page[String]
+) derives ProtobufCodec
+
+final case class Piece(
+    @ProtobufField(1)
+    a: Int,
+    @ProtobufField(2)
+    b: Int
+) derives ProtobufCodec
+final case class Whole(
+    @ProtobufField(1)
+    piece: Piece
+) derives ProtobufCodec
+
 object Zigzag:
   given ProtobufCodec[Int] = ProtobufCodec.sint32
 
@@ -274,7 +305,7 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         |// An order
         |message Order {
         |  string id = 1;
-        |  google.protobuf.Timestamp placed_at = 2;
+        |  .google.protobuf.Timestamp placed_at = 2;
         |  string day = 3;
         |  repeated Line lines = 4;
         |  Status status = 5;
@@ -315,7 +346,7 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         |message Transfer {
         |  string iban = 1;
         |  // When it cleared
-        |  google.protobuf.Timestamp cleared = 2;
+        |  .google.protobuf.Timestamp cleared = 2;
         |}
         |""".stripMargin
     )
@@ -368,6 +399,13 @@ class ProtobufCodecSuite extends CatsEffectSuite:
     )
     assertEquals(ProtobufCodec[Int].schema, Left("int32 is not a message, and a Protobuf record is one"))
     assertEquals(ProtobufCodec[Both].schema, Left("xkafka.protobuf.Line and com.other.Line would both be declared as Line"))
+
+  test("two types given one name are refused, since one declaration cannot say what each is, and one type used twice is declared once"):
+    assert(ProtobufCodec[Feed].schema.left.exists(_.contains("two types are named xkafka.protobuf.Page__A")), ProtobufCodec[Feed].schema)
+    assert(ProtobufCodec[Pages].schema.isRight, ProtobufCodec[Pages].schema)
+
+  test("a message field written twice is read as the two merged, as protobuf merges them"):
+    assertEquals(ProtobufCodec[Whole].decode(Chunk[Byte](0x0a, 0x02, 0x08, 0x01, 0x0a, 0x02, 0x10, 0x02)), Right(Whole(Piece(1, 2))))
 
   test("an instant outside the years a Timestamp holds is refused"):
     final case class When(

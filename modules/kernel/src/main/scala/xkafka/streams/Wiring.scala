@@ -500,7 +500,7 @@ private[xkafka] object Wiring:
     val readAnswer  = Made(s"$named-subscription-response-source", Kind.Reads(List(response)), Nil)
     val resolve = Made(s"$named-subscription-response-resolver", Kind.Processor(join.left.view.fold(Nil)(Describing.stores)), List(readAnswer.name))
     val result  = Made(s"$named-result", Kind.Processor(join.store.toList.map(_._1.value)), List(resolve.name))
-    val unkept  = Option.when(join.store.isEmpty && join.next.requests)(TopologyError.UnkeptForeignKeyJoin(named)).toList
+    val unkept  = Option.when(join.store.isEmpty && join.next.needs)(TopologyError.UnkeptForeignKeyJoin(named)).toList
     val placed  =
       walk.writing(left.unwritten ++ right.unwritten ++ List(subscription, response)).united(subscription, right.home).united(response, left.home)
         .copy(

@@ -206,6 +206,21 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       assertEquals(made.toSet, Set(firstPartition, secondPartition))
       assertEquals(ended.left.map(_.getMessage), Left("resume failed"))
 
+  test("records waiting for a partition's reader when it is revoked are dropped, since the group has given them to another member"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      gate       <- Deferred[IO, Unit]
+      reading    <-
+        testConsumer(assignment, input).partitionedRecords(10).take(1)
+          .flatMap(partition => Stream.exec(gate.get) ++ partition.records.map(_.record.value)).compile.toList.start
+      _    <- IO.sleep(100.millis)
+      _    <- input.send(record(firstPartition, 0L, "a")) *> input.send(record(firstPartition, 1L, "b")) *> IO.sleep(100.millis)
+      _    <- assignment.set(Set.empty) *> IO.sleep(100.millis)
+      _    <- gate.complete(())
+      read <- reading.joinWithNever.timeout(5.seconds)
+    yield assertEquals(read, Nil)
+
   test("cancelling before a counted record is sent rolls the count back"):
     for
       assignment   <- Ref[IO].of(Set(firstPartition))
@@ -225,6 +240,29 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _ <- reading.cancel.timeout(5.seconds)
       _ <- resumed.get.timeout(5.seconds)
     yield ()
+
+  test("consumeChunk goes on past a chunk whose commit is refused as its partition was given to another member"):
+    def refusedOnce(refused: Ref[IO, Boolean], offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
+      val offset      = Offset.from(offsetValue).toOption.get
+      val committable =
+        new CommittableOffset[IO]:
+          override val topicPartition: TopicPartition = firstPartition
+          override val nextOffset: Offset             = offset.next.toOption.get
+          override val committer: OffsetCommitter[IO] =
+            new OffsetCommitter[IO]:
+              override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] =
+                refused.getAndSet(false).flatMap(first => IO.raiseWhen(first)(AssignmentLeases.revokedAssignment))
+      CommittableConsumerRecord(ConsumerRecord(firstPartition, offset, None, "key", value, Headers.empty), committable)
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      refused    <- Ref[IO].of(true)
+      processed  <- SignallingRef[IO].of(Vector.empty[String])
+      _          <- input.send(refusedOnce(refused, 0L, "a")) *> IO.sleep(50.millis) *> input.send(refusedOnce(refused, 1L, "b"))
+      outcome    <-
+        testConsumer(assignment, input).consumeChunk(chunk => processed.update(_ ++ chunk.toList.map(_.value)).as(CommitNow)).attempt
+          .race(processed.waitUntil(_.contains("b"))).timeout(10.seconds)
+    yield assert(outcome.isRight, s"consumeChunk stopped: $outcome")
 
   test("consumeChunk hands over every record and commits what it processed"):
     val expected = List(firstPartition -> "a", firstPartition -> "b", secondPartition -> "c")

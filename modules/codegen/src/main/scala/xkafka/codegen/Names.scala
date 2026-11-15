@@ -56,6 +56,7 @@ private[codegen] object Names:
       "sealed",
       "super",
       "then",
+      "this",
       "throw",
       "trait",
       "true",

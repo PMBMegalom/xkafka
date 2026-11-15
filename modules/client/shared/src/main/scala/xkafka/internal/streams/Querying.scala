@@ -122,6 +122,8 @@ private[xkafka] final class Querying[F[_]](
     subtopologies: Map[String, Subtopology[F]],
     globals: Map[String, TaskStore[F]],
     holding: Ref[F, Map[TaskId, Map[String, TaskStore[F]]]],
+    // What each active task has written since it last committed, read over its stores as the task itself reads them.
+    unstored: F[Map[TaskId, Map[String, StoreChanges]]],
     member: Signal[F, Member],
     phase: Signal[F, StreamsPhase],
     partitions: Topic => F[Int],
@@ -156,7 +158,7 @@ private[xkafka] final class Querying[F[_]](
       query.request(topic).flatMap: request =>
         val found =
           globalFor(request) match
-            case Some(global) => read(global, request).map(_.asRight[QueryProblem])
+            case Some(global) => readStore(global, request).map(_.asRight[QueryProblem])
             case None         => keptFor(request)
                 .fold(F.pure(QueryProblem.UnknownStore(store).asLeft[Vector[(Chunk[Byte], Chunk[Byte])]]))(routed(request, allowStandby, _))
         found.flatMap(_.traverse(query.answer(Answering(topic, kept.get(store).flatMap(_._4)), _)))
@@ -166,7 +168,7 @@ private[xkafka] final class Querying[F[_]](
       val store = asked.request.storeName
       val found =
         globalFor(asked.request) match
-          case Some(global) => read(global, asked.request).map(Answered.Found(_))
+          case Some(global) => readStore(global, asked.request).map(Answered.Found(_))
           case None         => keptFor(asked.request).fold(F.pure(Answered.Refused(QueryProblem.UnknownStore(store)))): (subtopology, topic) =>
               misrouted(asked, topic).ifM(
                 F.pure(Answered.Refused(QueryProblem.Rebalancing)),
@@ -175,8 +177,25 @@ private[xkafka] final class Querying[F[_]](
               )
       found.map(QueryWire.encode)
 
-  /** The entries `request` finds in `store`: what a key holds, or the keys of a range, `to` included. */
-  private def read(store: TaskStore[F], request: QueryRequest): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
+  /** The entries `request` finds in `store` with `changes` over it: what a key holds, or the keys of a range, `to` included. */
+  private def read(store: TaskStore[F], changes: StoreChanges, request: QueryRequest): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
+    // A changed key is read as it is now, and a key removed is not read; the rest as the store holds them. Each answer is sorted by key after.
+    def over(held: Vector[(Chunk[Byte], Chunk[Byte])], wanted: Chunk[Byte] => Boolean): Vector[(Chunk[Byte], Chunk[Byte])] =
+      if changes.isEmpty then held
+      else held.filterNot((key, _) => changes.contains(key)) ++ changes.toVector.collect { case (key, Some(now)) if wanted(key) => key -> now.value }
+    def under(prefix: Chunk[Byte])(key: Chunk[Byte]): Boolean = key.size >= prefix.size && key.take(prefix.size) == prefix
+    readStore(store, request).map: held =>
+      request match
+        case QueryRequest.Get(_, key)        => changes.get(key).fold(held)(_.toVector.map(now => key -> now.value))
+        case QueryRequest.Range(_, from, to) =>
+          over(held, key => from.forall(StoreContents.keys.gteq(key, _)) && to.forall(StoreContents.keys.lteq(key, _)))
+        case QueryRequest.Windows(_, Some(key), from, to) =>
+          over(held, stored => under(key)(stored) && stored.size == key.size + 12 && between(stored, from, to))
+        case QueryRequest.Windows(_, None, from, to) => over(held, stored => stored.size > 12 && between(stored, from, to))
+        case QueryRequest.Sessions(_, key)           => over(held, stored => under(key)(stored) && stored.size == key.size + 16)
+
+  /** The entries `request` finds in `store`, as the store holds them. */
+  private def readStore(store: TaskStore[F], request: QueryRequest): F[Vector[(Chunk[Byte], Chunk[Byte])]] =
     request match
       case QueryRequest.Get(_, key)        => store.get(key).map(_.toVector.map(held => key -> held.value))
       case QueryRequest.Range(_, from, to) => store.range(from, to.map(_ ++ Chunk.singleton(0.toByte))).map(_.map((key, held) => key -> held.value))
@@ -204,15 +223,16 @@ private[xkafka] final class Querying[F[_]](
       request: QueryRequest,
       allowStandby: Boolean
   ): F[Option[Vector[(Chunk[Byte], Chunk[Byte])]]] =
-    (phase.get, member.get, holding.get).tupled.flatMap: (now, joined, held) =>
+    (phase.get, member.get, holding.get, unstored).tupled.flatMap: (now, joined, held, written) =>
       val tasks  = joined.owned.active ++ (if allowStandby then joined.owned.standby else Set.empty)
       val stores =
-        wanted.traverse(partition =>
-          Option.when(tasks(TaskId(subtopology, partition)))(()).flatMap(_ => held.get(TaskId(subtopology, partition)).flatMap(_.get(store)))
-        )
+        wanted.traverse: partition =>
+          val id = TaskId(subtopology, partition)
+          Option.when(tasks(id))(()).flatMap(_ => held.get(id).flatMap(_.get(store)))
+            .map(_ -> written.get(id).flatMap(_.get(store)).getOrElse(StoreContents.unchanged))
       // A store its task gives up meanwhile closes, which is rebalancing too.
       stores.filter(_ => now == StreamsPhase.Running)
-        .traverse(_.traverse(read(_, request)).map(_.flatten.toVector.sortBy(_._1)(using StoreContents.keys))).recover { case TaskStore.Closed =>
+        .traverse(_.traverse(read(_, _, request)).map(_.flatten.toVector.sortBy(_._1)(using StoreContents.keys))).recover { case TaskStore.Closed =>
           None
         }
 

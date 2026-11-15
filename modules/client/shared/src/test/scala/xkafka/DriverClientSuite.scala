@@ -266,6 +266,25 @@ final class DriverClientSuite extends CatsEffectSuite:
           assertEquals(current, Right(()))
           assertEquals(committed, 1, "only the offset read under the current assignment should reach the client")
 
+  test("a rebalance raised after one the client failed to apply is still applied as the consumer is released"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake)(_ => fake.unappliable *> IO.sleep(200.millis) *> fake.revoke *> IO.sleep(200.millis)).attempt *> fake.calls
+    .map(calls => assert(calls.contains("unassign"), calls))
+
+  test("with fencing, a record read before its partition was revoked is not handed out after, since no commit of it could be taken"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake): consumer =>
+        for
+          _     <- fake.assign *> fake.until(_.contains("assign"))
+          _     <- fake.deliver(0L) *> IO.sleep(200.millis)
+          _     <- fake.revoke *> fake.until(_.contains("unassign"))
+          stale <- consumer.records.take(1).compile.last.timeout(500.millis).attempt
+          _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
+          fresh <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError.map(_.record.offset.value)
+        yield
+          assert(stale.isLeft, s"a record read under the revoked assignment was handed out: $stale")
+          assertEquals(fresh, 1L)
+
   test("a revocation waits for a plain commit the client has not reported yet"):
     FakeDriver(holdCommits = true).flatMap: fake =>
       consuming(fake): consumer =>
@@ -300,20 +319,33 @@ final class DriverClientSuite extends CatsEffectSuite:
           assert(!early, "the partition was unassigned while a transaction was still recording its offset")
           assertEquals(outcome, Right(()))
 
-  test("a revocation during a poll leaves the records it returns unable to be recorded in a transaction"):
+  test("a rebalance that clears the assignment waits for a transaction recording one of its offsets, as a lost assignment does"):
+    FakeDriver(holdOffsets = true).flatMap: fake =>
+      transactional(fake, consumerSettings): (producer, consumer) =>
+        for
+          _         <- fake.assign *> fake.until(_.contains("assign"))
+          held      <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          recording <- recorded(producer, held).start
+          _         <- fake.until(_.contains("send"))
+          _         <- fake.resynchronise *> IO.sleep(200.millis)
+          early     <- fake.calls.map(_.contains("resynchronise"))
+          _         <- fake.release
+          _         <- recording.joinWithNever
+          _         <- fake.until(_.contains("resynchronise"))
+        yield assert(!early, "the assignment was cleared while a transaction was still recording its offset")
+
+  test("a record from a poll a revocation interrupted is not handed out, and the next, read under the new assignment, is and can be recorded"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
         for
-          _       <- fake.assign *> fake.until(_.contains("assign"))
-          spanned <-
-          fake.duringNextPoll(fake.revoke *> fake.assign *> IO.sleep(100.millis) *> fake.deliver(0L)) *> consumer.records.take(1).compile.lastOrError
-          _      <- fake.until(_.count(_ == "assign") == 2)
-          after  <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError
-          first  <- recorded(producer, spanned)
-          second <- recorded(producer, after)
+          _     <- fake.assign *> fake.until(_.contains("assign"))
+          _     <- fake.duringNextPoll(fake.revoke *> fake.assign *> IO.sleep(100.millis) *> fake.deliver(0L))
+          _     <- fake.until(_.count(_ == "assign") == 2)
+          after <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError
+          made  <- recorded(producer, after)
         yield
-          assert(illegalGeneration(first), s"a record from a poll the revocation interrupted should be rejected, got $first")
-          assertEquals(second, Right(()))
+          assertEquals(after.record.offset.value, 1L)
+          assertEquals(made, Right(()))
 
   test("a group handle from one client is recorded by a transactional producer from another"):
     FakeDriver().flatMap: fake =>
@@ -713,6 +745,12 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     def lose: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(2, 2, List(partition)))
 
+    /** Raises a rebalance of another kind, which librdkafka raises to clear the assignment and resynchronise. */
+    def resynchronise: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(3, 3, Nil))
+
+    /** Raises an assignment the client fails to apply. */
+    def unappliable: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(9, 1, List(partition)))
+
     /** Completes once every delivered record has been polled. */
     def drained: IO[Unit] = queued.get.map(_.isEmpty).flatMap(done => if done then IO.unit else IO.sleep(5.millis) *> drained)
 
@@ -863,7 +901,8 @@ final class DriverClientSuite extends CatsEffectSuite:
     def pauseNextTake(taken: Deferred[IO, Unit]): IO[Unit] = pauseTake.set(Some(taken))
 
     override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): IO[Unit] =
-      starts.traverse_(started) *> record(if event == 1 then "assign" else "unassign")
+      if event == 9 then IO.raiseError(new RuntimeException("cannot apply"))
+      else starts.traverse_(started) *> record(if event == 1 then "assign" else if event == 3 then "resynchronise" else "unassign")
 
     private def started(start: StartAt): IO[Unit] =
       record(s"start ${start.partition.topic.value}-${start.partition.partition.value} at ${start.offset} in epoch ${start.leaderEpoch}")

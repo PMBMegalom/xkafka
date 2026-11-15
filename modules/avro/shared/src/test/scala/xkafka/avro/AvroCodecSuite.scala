@@ -113,6 +113,19 @@ final case class Shipment(billing: Dock, shipping: Option[Dock] = Some(Dock("doc
 
 final case class Chain(v: Int, next: Option[Chain] = Some(Chain(0, None))) derives AvroCodec
 
+/** A default that differs each time it is evaluated. */
+final case class Stamp(at: Long = System.nanoTime()) derives AvroCodec
+final case class Stamped(created: Stamp, updated: Stamp) derives AvroCodec
+final case class TwoChains(a: Chain, b: Chain) derives AvroCodec
+
+object Workpackage:
+  final case class Item(x: Int) derives AvroCodec
+
+final case class Inner(x: Option[Int] = None) derives AvroCodec
+
+/** Defaults whose values hold a union's later branch inside them, where no reordering of the field's own union can place them. */
+final case class Outer(inner: Inner = Inner(Some(5)), counts: List[Option[Int]] = List(Some(1)), plain: Inner = Inner()) derives AvroCodec
+
 final case class Charged(
     @SchemaDecimal(10, 4)
     price: BigDecimal,
@@ -294,6 +307,22 @@ class AvroCodecSuite extends FunSuite:
     val boxes = AvroSchemaJson.render(AvroCodec[Boxes].schema)
     assert(boxes.contains("Crate__List__Int") && boxes.contains("Crate__List__String"), boxes)
     assertEquals(roundTrip(Boxes(Crate(List(1)), Crate(List("a")))), Right(Boxes(Crate(List(1)), Crate(List("a")))))
+
+  test("an object whose name ends in 'package' is in its types' namespace, as only the object Scala makes around a file's definitions is left out"):
+    assertEquals(AvroCodec[Workpackage.Item].schema.fullName.map(_.value), Some("xkafka.avro.Workpackage.Item"))
+
+  test("a type used twice is one type, though its default differs between builds or is placed only once the type is complete"):
+    assertEquals(AvroCodec[Stamped].refusal, None)
+    assertEquals(AvroCodec[TwoChains].refusal, None)
+
+  test("a default holding a union's later branch inside it is left out, as Avro takes a nested union's default from its first branch"):
+    val schema = AvroCodec[Outer].schema
+    val fields =
+      schema match
+        case AvroSchema.Record(_, fields, _, _) => fields.map(field => field.name -> field.default.isDefined).toMap;
+        case _                                  => Map.empty
+    assertEquals(fields, Map("inner" -> false, "counts" -> false, "plain" -> true))
+    assertEquals(AvroSchemaJson.parse(AvroSchemaJson.render(schema)), Right(schema))
 
   test("two types given one name are refused, since one schema cannot say what each is"):
     assert(AvroFormat[Clashing].writer(AvroFormat[Clashing].schema).left.exists(_.contains("Same")))

@@ -5,6 +5,9 @@ balance in a table, the count of a page's views, and so on. Each member holds on
 part of each store, so the member you ask may not hold the key. xkafka finds the
 member that does and asks it, through a connection your application provides.
 
+A query sees each update as soon as the member applies it, before the update is
+committed.
+
 ## Setting up
 
 Every member of the application needs:

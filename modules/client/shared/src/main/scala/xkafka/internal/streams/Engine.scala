@@ -176,8 +176,8 @@ private[xkafka] object Engine:
             (TransactionalId.from(s"$application-$processId-1"), ConsumerGroup.from(application)).tupled.leftMap(new KafkaException.InvalidValue(_))
               .liftTo[Resource[F, *]].flatMap: (id, group) =>
                 TransactionalProducerSettings.from(settings, id, bytes, bytes, TransactionTimeout, ClientProperties.producer).toEither
-                  .leftMap(new KafkaException.InvalidSettings(_)).liftTo[Resource[F, *]].flatMap(client.transactionalProducer)
-                  .map(producer => Some(transactional(driver, producer, group, memberId)))
+                  .leftMap(new KafkaException.InvalidSettings(_)).liftTo[Resource[F, *]].flatMap: transactional =>
+                    transactions(driver, client.transactionalProducer(transactional), group, memberId).map(Some(_))
       plane =
         new Plane[F]:
           def read(starts: Vector[StartAt]): F[Unit] = driver.assign(input, starts.map(_.partition), starts)
@@ -220,33 +220,52 @@ private[xkafka] object Engine:
       state.filterNot(_ => inMemory(name)).fold(TaskStore.memory[F].apply(name, time, held))(_.open(StateDirectory.Global, name, time))
 
   /** Transactions of `producer` that record offsets for `group` under the member's id and the epoch each is given, its tasks' epoch. */
-  private def transactional[F[_]](
+  private type Producing[F[_]] = KafkaTransactionalProducer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]]
+
+  /** Transactions through the producer `made` makes, which is made anew once another producer of its transactional id has fenced it: the fenced one
+    * is released first, and the new one, made with the same id, starts its transactions where the coordinator fenced the old.
+    */
+  private def transactions[F[_]](driver: KafkaDriver[F], made: Resource[F, Producing[F]], group: ConsumerGroup, memberId: String)(using
+      F: Async[F]
+  ): Resource[F, Transactions[F]] =
+    Resource.make(made.allocated.flatMap(Ref.of[F, (Producing[F], F[Unit])]))(_.get.flatMap(_._2)).map: current =>
+      new Transactions[F]:
+        def apply[A](epoch: Int)(body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A] =
+          current.get.flatMap((producer, _) => transactional(driver, producer, group, memberId, epoch, body))
+
+        // The release is taken as it runs, so a renewal that fails to make the new producer, and is tried again, does not release the old one twice.
+        def renew: F[Unit] =
+          F.uncancelable(_ =>
+            current.modify((producer, release) => ((producer, F.unit), release)).flatMap(_.attempt) *> made.allocated.flatMap(current.set)
+          )
+
+  private def transactional[F[_], A](
       driver: KafkaDriver[F],
-      producer: KafkaTransactionalProducer[F, Option[Chunk[Byte]], Option[Chunk[Byte]]],
+      producer: Producing[F],
       group: ConsumerGroup,
-      memberId: String
-  )(using F: Async[F]): Transactions[F] =
-    new Transactions[F]:
-      def apply[A](epoch: Int)(body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A] =
-        producer.transactionally: transaction =>
-          body(records => transaction.produce(records).void).flatMap: (result, offsets) =>
-            if offsets.isEmpty then F.pure(result)
-            else
-              val named =
-                GroupMembership.Backend[F](
-                  driver.groupMetadataFor(group, epoch, memberId).widen[GroupHandle],
-                  handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
-                )
-              val committable =
-                offsets.toList.map: (partition, offset) =>
-                  new CommittableOffset[F]:
-                    override val topicPartition: TopicPartition                 = partition
-                    override val nextOffset: Offset                             = offset.offset
-                    override val leaderEpoch: Option[LeaderEpoch]               = offset.leaderEpoch
-                    override val metadata: String                               = offset.metadata
-                    override val committer: OffsetCommitter[F]                  = InTransaction[F]
-                    override private[xkafka] def membership: GroupMembership[F] = named
-              transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(committable)).as(result)
+      memberId: String,
+      epoch: Int,
+      body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]
+  )(using F: Async[F]): F[A] =
+    producer.transactionally: transaction =>
+      body(records => transaction.produce(records).void).flatMap: (result, offsets) =>
+        if offsets.isEmpty then F.pure(result)
+        else
+          val named =
+            GroupMembership.Backend[F](
+              driver.groupMetadataFor(group, epoch, memberId).widen[GroupHandle],
+              handle => driver.asGroupMetadata(handle).traverse_(driver.destroyGroupMetadata)
+            )
+          val committable =
+            offsets.toList.map: (partition, offset) =>
+              new CommittableOffset[F]:
+                override val topicPartition: TopicPartition                 = partition
+                override val nextOffset: Offset                             = offset.offset
+                override val leaderEpoch: Option[LeaderEpoch]               = offset.leaderEpoch
+                override val metadata: String                               = offset.metadata
+                override val committer: OffsetCommitter[F]                  = InTransaction[F]
+                override private[xkafka] def membership: GroupMembership[F] = named
+          transaction.commitOffsets(CommittableOffsetBatch.fromFoldable(committable)).as(result)
 
   /** Offsets the engine records only in its transactions. */
   private final class InTransaction[F[_]](using F: Async[F]) extends OffsetCommitter[F]:
@@ -261,6 +280,9 @@ private[xkafka] object Engine:
     */
   trait Transactions[F[_]]:
     def apply[A](epoch: Int)(body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]): F[A]
+
+    /** Makes the producer anew, as Java does once another producer of the same transactional id has fenced it. */
+    def renew: F[Unit]
 
   /** The engine of `application` running `topology` as `member`, reading and writing through `plane`. Released, it gives back its tasks through the
     * member, committing them, waiting at most `closeTimeout`.
@@ -327,6 +349,8 @@ private[xkafka] object Engine:
       opened <- Resource.eval(F.ref(Map.empty[TaskId, Task[F]]))
       kept   <- Resource.eval(state.fold(F.pure(Map.empty[TaskId, Map[String, Long]]))(_.held.map(Engine.heldTasks)))
       stores <- Resource.eval(F.ref(Map.empty[TaskId, Map[String, TaskStore[F]]]))
+      // What each active task has written since it last committed, which its stores hold only after the commit, for queries to read meanwhile.
+      unstored <- Resource.eval(F.ref(Map.empty[TaskId, Map[String, StoreChanges]]))
       loop =
         Loop(
           application,
@@ -348,6 +372,7 @@ private[xkafka] object Engine:
           opened,
           state,
           stores,
+          unstored,
           taskTimeout
         )
       running <-
@@ -364,6 +389,7 @@ private[xkafka] object Engine:
           subtopologies,
           globals.fold(Map.empty[String, TaskStore[F]])(_.stores),
           stores,
+          unstored.get,
           member.reports,
           phase,
           partitions,
@@ -496,7 +522,9 @@ private[xkafka] object Engine:
       standbys: Map[TaskId, Standby[F]] = Map.empty[TaskId, Standby[F]],
       kept: Map[TaskId, (Standby[F], FiniteDuration)] = Map.empty[TaskId, (Standby[F], FiniteDuration)],
       // The member's epoch when it gave the tasks, which their commits carry.
-      epoch: Int = 0
+      epoch: Int = 0,
+      // Since when transactions have failed in ways Java recovers from, which the task timeout bounds.
+      failing: Option[FiniteDuration] = None
   )
 
   private final class Loop[F[_]](
@@ -519,6 +547,7 @@ private[xkafka] object Engine:
       opened: Ref[F, Map[TaskId, Task[F]]],
       state: Option[StateDirectory[F]],
       holding: Ref[F, Map[TaskId, Map[String, TaskStore[F]]]],
+      unstored: Ref[F, Map[TaskId, Map[String, StoreChanges]]],
       taskTimeout: FiniteDuration
   )(using F: Async[F]):
     import MemberAction.*
@@ -526,9 +555,20 @@ private[xkafka] object Engine:
     /** Closes the tasks given, which no longer run here, and with them their processors' instances, as Java closes a task it gives up, answering
       * those whose stores stay on disk, kept as given up.
       */
-    private def closed(tasks: Iterable[(TaskId, Live[F])]): F[Map[TaskId, Standby[F]]] =
-      tasks.toList.traverse((id, live) => live.task.close *> released(id, live.stores, settled = false).map(_.map(id -> _))).map(_.flatten.toMap) <*
-        opened.update(_ -- tasks.map(_._1))
+    private def closed(tasks: Iterable[(TaskId, Live[F])]): F[Map[TaskId, Standby[F]]] = givingUp(tasks.toList, settled = false).map(_.toMap)
+
+    /** Closes each task given and releases its stores, though one fails to, answering those kept as given up, and then fails with the first failure,
+      * the others suppressed in it.
+      */
+    private def givingUp(tasks: List[(TaskId, Live[F])], settled: Boolean): F[List[(TaskId, Standby[F])]] =
+      tasks.traverse: (id, live) =>
+        (live.task.close.attempt, released(id, live.stores, settled).attempt).tupled
+      .flatMap: outcomes =>
+        val failures = outcomes.flatMap((closing, releasing) => closing.left.toOption ++ releasing.left.toOption)
+        opened.update(_ -- tasks.map(_._1)) *>
+          (failures match
+            case first :: rest => F.delay(rest.foreach(first.addSuppressed)) *> F.raiseError(first)
+            case Nil           => F.pure(tasks.map(_._1).zip(outcomes).flatMap((id, outcome) => outcome._2.toOption.flatten.map(id -> _))))
 
     /** Closes the stores of a task given up here. `settled`, where the task has just committed, so that its stores hold all it wrote to their
       * changelogs, each store records the end of its changelog partition first. Where stores are kept on disk, the task's are then recorded as given
@@ -540,7 +580,8 @@ private[xkafka] object Engine:
         changelogsOf(id).flatMap: changelogs =>
           val settling =
             if settled then
-              plane.ends(changelogs.keys.toVector).flatMap(_.toList.traverse_((partition, end) =>
+              // Asked again while a changelog's leader moves, as the restore asks, so a broker restarting does not stop the application.
+              Restore.whileMoving(plane.ends(changelogs.keys.toVector)).flatMap(_.toList.traverse_((partition, end) =>
                 stores(changelogs(partition)).write(StoreContents.unchanged, Map(partition.partition.value -> end))
               ))
             else F.unit
@@ -556,7 +597,11 @@ private[xkafka] object Engine:
     /** Carries out the changes the member told of since the last batch, reads, processes and writes until the next commit, then purges what is due.
       */
     def run(running: Running[F]): F[Unit] =
-      changes.tryTakeN(None).flatMap(_.foldLeftM(running)(change)).flatMap(window).flatMap(purge).flatMap(follow).flatMap(run)
+      changes.tryTakeN(None).flatMap(_.foldLeftM(running)(change)).flatMap(window).flatTap(published).flatMap(purge).flatMap(follow).flatMap(run)
+
+    /** Publishes what each active task has written since it last committed, for queries to read over its stores. */
+    private def published(running: Running[F]): F[Unit] =
+      unstored.set(running.tasks.collect { case (id, live) if live.state.pending.nonEmpty => id -> live.state.pending })
 
     /** Applies the changelog records read since the last batch to the standby tasks' stores. */
     private def follow(running: Running[F]): F[Running[F]] =
@@ -607,9 +652,19 @@ private[xkafka] object Engine:
                 process(running, polled, write).flatMap(more(_, write)).flatMap(flushed(_, write)).map(after => (after, offsetsOf(after)))
               ).flatMap(after =>
                 (after.tasks.toList.traverse((id, live) => live.stored.map(id -> _.settled)), F.monotonic)
-                  .mapN((tasks, now) => after.copy(tasks = tasks.toMap, committed = now))
+                  .mapN((tasks, now) => after.copy(tasks = tasks.toMap, committed = now, failing = None))
               ).recoverWith:
                 case refused: KafkaException.BackendFailure if refused.code.exists(Refused) => restart(running)
+                // Another producer of its transactional id fenced this one, which Java takes as its tasks having moved: the producer is made anew, and
+                // the tasks start again from what the group committed.
+                case fenced: KafkaException.BackendFailure if fenced.code.contains(ErrorCode.Fenced) => transaction.renew *> restart(running)
+                case fatal: KafkaException.BackendFailure if fatal.fatal.contains(true)              => F.raiseError(fatal)
+                // Any other, as a commit that timed out or a write that failed, Java takes as its tasks corrupted: what the producer left unfinished is
+                // finished, by a transaction of nothing, and the tasks start again from what the group committed, until the task timeout has passed.
+                case failure: KafkaException.BackendFailure => F.monotonic.flatMap: now =>
+                    val since = running.failing.getOrElse(now)
+                    if now - since >= taskTimeout then F.raiseError(failure)
+                    else transaction(running.epoch)(_ => F.pure(((), Map.empty))).attempt *> restart(running).map(_.copy(failing = Some(since)))
 
     /** Once the purge interval has passed since the last purge, deletes the records of each repartition topic partition before where its task last
       * committed, where that moved since. Java Streams only logs a purge that fails, and tries those records again at the next.
@@ -658,7 +713,8 @@ private[xkafka] object Engine:
 
     private def change(running: Running[F], told: Either[Throwable, MemberAction]): F[Running[F]] =
       told.liftTo[F].flatMap:
-        case Revoke(round, tasks) => commit(running, tasks).flatMap(gaveUp(_, tasks))
+        // A task whose commit the group did not take may already be another member's, writing to its changelogs, so its stores keep their own place.
+        case Revoke(round, tasks) => committing(running, tasks).flatMap((after, taken) => gaveUp(after, tasks, settled = taken))
             .flatTap(after => reassign(after) *> report(after) *> member.revoked(round))
         case Assign(round, assignment, epoch) =>
           val kept  = running.tasks.view.filterKeys(assignment.active).toMap
@@ -666,17 +722,19 @@ private[xkafka] object Engine:
           closed(running.tasks.view.filterKeys(id => !assignment.active(id)).toList).product(F.monotonic).flatMap: (closedHere, now) =>
             val stillKept = running.kept.filter((_, held) => now - held._2 < StateCleanupDelay)
             val available = running.standbys ++ stillKept.view.mapValues(_._1)
-            phase.set(StreamsPhase.Restoring).whenA(added.exists(id => subtopologies(id.subtopology).stores.nonEmpty)) *>
-              start(added, available).flatMap: started =>
-                standby((assignment.standby ++ assignment.warmup) -- assignment.active, available).flatMap: standbys =>
-                  val gone = running.standbys.view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toList
-                  dropped(gone).flatMap: left =>
-                    val keeping = (stillKept ++ (closedHere ++ left).view.mapValues(_ -> now)).view
-                      .filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toMap
-                    val after = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping, epoch = epoch)
-                    val owned = (after.tasks.keySet ++ after.standbys.keySet).map(ownerOf)
-                    reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running) *>
-                      state.traverse_(_.cleaned(owned, StateCleanupDelay)).as(after)
+            // A task kept past the delay is forgotten, and where its stores are in memory they are closed and no longer held for queries.
+            val expired = (running.kept -- stillKept.keySet).toList.map((id, held) => id -> held._1.stores)
+            expired.traverse_((id, stores) => released(id, stores, settled = false)) *> phase.set(StreamsPhase.Restoring)
+              .whenA(added.exists(id => subtopologies(id.subtopology).stores.nonEmpty)) *> start(added, available).flatMap: started =>
+              standby((assignment.standby ++ assignment.warmup) -- assignment.active, available).flatMap: standbys =>
+                val gone = running.standbys.view.filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toList
+                dropped(gone).flatMap: left =>
+                  val keeping = (stillKept ++ (closedHere ++ left).view.mapValues(_ -> now)).view
+                    .filterKeys(id => !standbys.contains(id) && !assignment.active(id)).toMap
+                  val after = running.copy(tasks = kept ++ started, standbys = standbys, kept = keeping, epoch = epoch)
+                  val owned = (after.tasks.keySet ++ after.standbys.keySet).map(ownerOf)
+                  reassign(after) *> refollow(running, after) *> member.assigned(round) *> phase.set(StreamsPhase.Running) *>
+                    state.traverse_(_.cleaned(owned, StateCleanupDelay)).as(after)
         // Standby tasks are kept as those no longer wanted are, their stores on disk closed, so that a later open of them finds them free.
         // Active tasks are kept too where their stores stay on disk, so that the coordinator hears of them when the member joins again.
         case LoseAll => (closed(running.tasks.toList), dropped(running.standbys.toList), F.monotonic).tupled.flatMap: (gone, left, now) =>
@@ -686,12 +744,10 @@ private[xkafka] object Engine:
         case _ => F.pure(running)
 
     /** `running` without `tasks`, which have just committed and are given up: closed, and where their stores are on disk, kept as they are there. */
-    private def gaveUp(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
+    private def gaveUp(running: Running[F], tasks: Set[TaskId], settled: Boolean): F[Running[F]] =
       val giving = running.tasks.view.filterKeys(tasks).toList
-      (giving.traverse((id, live) => live.task.close *> released(id, live.stores, settled = true).map(_.map(id -> _))), F.monotonic).tupled.flatMap:
-        (held, now) =>
-          opened.update(_ -- tasks)
-            .as(running.copy(tasks = running.tasks -- tasks, kept = running.kept ++ held.flatten.map((id, kept) => id -> (kept, now))))
+      (givingUp(giving, settled), F.monotonic).tupled.map: (held, now) =>
+        running.copy(tasks = running.tasks -- tasks, kept = running.kept ++ held.map((id, kept) => id -> (kept, now)))
 
     /** The standby tasks no longer wanted, as they are kept: those whose stores are in memory as they are, and the others with their stores, on disk,
       * closed and recorded as given up.
@@ -812,7 +868,11 @@ private[xkafka] object Engine:
     /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready. A member the group no
       * longer counts commits nothing: its tasks go to others, which read again from the group's last commit.
       */
-    private def commit(running: Running[F], tasks: Set[TaskId]): F[Running[F]] = flushed(running, tasks, plane.write).flatMap(committed(_, tasks))
+    private def commit(running: Running[F], tasks: Set[TaskId]): F[Running[F]] = committing(running, tasks).map(_._1)
+
+    /** Commits these tasks, answering whether the group took the commit. */
+    private def committing(running: Running[F], tasks: Set[TaskId]): F[(Running[F], Boolean)] =
+      flushed(running, tasks, plane.write).flatMap(committed(_, tasks))
 
     /** Writes what these tasks' suppression buffers log at a commit, before the commit, as Java's buffers log before the producer flushes. */
     private def flushed(running: Running[F], tasks: Set[TaskId], write: Writer[F]): F[Running[F]] =
@@ -823,7 +883,7 @@ private[xkafka] object Engine:
 
     private def flushed(running: Running[F], write: Writer[F]): F[Running[F]] = flushed(running, running.tasks.keySet, write)
 
-    private def committed(running: Running[F], tasks: Set[TaskId]): F[Running[F]] =
+    private def committed(running: Running[F], tasks: Set[TaskId]): F[(Running[F], Boolean)] =
       val named = running.tasks.view.filterKeys(tasks).toList
       val due   = named.filter(_._2.read)
       // A task that only punctuated has no offsets to commit, but what it wrote has gone to its changelogs.
@@ -845,7 +905,7 @@ private[xkafka] object Engine:
       // A commit the group did not take leaves the inputs committed where it last took one, so that no purge passes what the task's next owner reads.
       (if topics.nonEmpty then sent else F.pure(true)).flatMap: taken =>
         wrote.traverse((id, live) => live.stored.map(stored => id -> (if taken then stored.settled else stored.dropped)))
-          .map(done => running.copy(tasks = running.tasks ++ done))
+          .map(done => (running.copy(tasks = running.tasks ++ done), taken))
 
     /** The next records, or none after a wait while no task runs, since the Java consumer refuses to poll with nothing assigned. */
     private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll

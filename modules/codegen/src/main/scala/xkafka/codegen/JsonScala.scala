@@ -256,6 +256,11 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
         )
       properties <- schema("properties").fold(Right(Nil))(_.asObject.map(_.toList).toRight(s"$where has properties that are not an object"))
       required = schema("required").flatMap(_.asArray).toList.flatten.flatMap(_.asString).toSet
+      // A name required of a value but of no property would be missing from every value the class writes, which the schema then refuses.
+      _ <-
+        required.diff(properties.map(_._1).toSet).toList.sorted match
+          case Nil     => Right(())
+          case missing => Left(s"$where requires ${missing.mkString(", ")}, which it declares no property of")
       fields <- properties.traverse((name, node) => field(name, node, required(name), s"$where/properties/$name", path, inlining))
       _      <-
         fields.map(_._1).filterNot(_.presence.isInstanceOf[Presence.Constant]).map(_.scala).groupBy(identity).collectFirst {

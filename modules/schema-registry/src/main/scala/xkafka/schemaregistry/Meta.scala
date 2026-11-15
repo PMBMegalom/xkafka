@@ -120,7 +120,7 @@ private[xkafka] object Meta:
     // around a file's top-level definitions is left out.
     val packages =
       Iterator.iterate(symbol.owner)(_.owner).takeWhile(owner => !owner.isNoSymbol && owner != defn.RootClass)
-        .filter(owner => owner.isPackageDef || owner.flags.is(Flags.Module) && !owner.name.stripSuffix("$").endsWith("package"))
+        .filter(owner => owner.isPackageDef || owner.flags.is(Flags.Module) && !owner.name.stripSuffix("$").endsWith("$package"))
         .map(_.name.stripSuffix("$")).toList.reverse.filterNot(_ == "<empty>")
     val name: String              = text(annotations, "SchemaName").headOption.getOrElse(scalaName)
     val namespace: Option[String] = text(annotations, "SchemaNamespace").headOption.orElse(Option.when(packages.nonEmpty)(packages.mkString(".")))

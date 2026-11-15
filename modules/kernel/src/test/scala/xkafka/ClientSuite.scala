@@ -896,6 +896,15 @@ final class ClientSuite extends FunSuite:
     // Under the consumer protocol the broker decides the session, so the poll interval is not held to the default one there.
     val consumerProtocol = settings.withProperty("group.protocol", "CONSUMER").toOption.get
     assert(consumerProtocol.withMaxPollInterval(10.seconds).isValid)
+    // Set for the whole client, the protocol counts as well.
+    val clientWide = clientSettings.withProperty("group.protocol", "consumer").toOption.get
+    assert(ConsumerSettings.from(clientWide, group, deserializer, deserializer, maxPollInterval = 10.seconds).isValid)
+    // Moving settings to another client checks them against it.
+    val consumerWide = ConsumerSettings.from(clientWide, group, deserializer, deserializer, maxPollInterval = 10.seconds).toOption.get
+    assertEquals(
+      consumerWide.withClient(clientSettings).toEither,
+      Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(10.seconds, ConsumerSettings.DefaultSessionTimeout)))
+    )
     assertEquals(
       settings.withMaxPollInterval(10.seconds).toEither,
       Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(10.seconds, ConsumerSettings.DefaultSessionTimeout)))

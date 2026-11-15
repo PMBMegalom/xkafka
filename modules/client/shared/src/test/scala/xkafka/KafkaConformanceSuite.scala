@@ -2057,6 +2057,25 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           case other => fail(s"the commit of the record held through the loss should have failed as an unknown member, got $other")
         assertEquals(stored.get(partition).flatten, None, "the refused commit stored an offset")
 
+  test(conformance("a group's only member, removed from it, cannot commit what it read before")):
+    withBroker: server =>
+      val topic   = uniqueTopic("sole-lost")
+      val records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(index => record(topic, None, Some(s"record $index"), validPartition(0))))
+      for
+        _      <- createPartitioned(server, topic, 1)
+        _      <- produce(server, records)
+        plain  <- consumerSettings(server, uniqueGroup("sole-lost"))
+        member <- plain.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds)).liftTo[IO]
+        commit <-
+          PlatformKafkaClient().consumer(member, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            // The first record stays in hand for longer than the poll interval, which takes the member out of its group, and is then committed.
+            consumer.records.head.evalMap(handed => IO.sleep(15.seconds) *> handed.offset.commit.attempt).compile.lastOrError
+          .timeout(120.seconds)
+      yield
+        // With no other member in the group, the commit is refused for the member as it is where others stay.
+        val code = commit.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten
+        assertEquals(code, Some(ErrorCode.UnknownMemberId), commit)
+
   /** A first member with a limit of four seconds hands out one record of each partition and commits neither. A second member then joins, and `check`
     * gets the first member's record stream, what each member has read, and how long the second one waited for its partition.
     */

@@ -47,6 +47,21 @@ final case class Strict(
 object Here:
   final case class Spot(x: Int) derives JsonSchemaCodec
 
+/** Derived once for every type argument, so a page of pages names its inner page alike, whatever that holds. */
+final case class Page[A](items: List[A]) derives JsonSchemaCodec
+
+final case class Doc(a: Page[Page[Int]], b: Page[Page[String]]) derives JsonSchemaCodec
+
+final case class Twice(note: Option[Option[String]]) derives JsonSchemaCodec
+
+/** Two versions of one event, whose cases share a simple name. */
+sealed trait Event derives JsonSchemaCodec
+object Event:
+  object V1:
+    final case class Created(id: String) extends Event
+  object V2:
+    final case class Created(id: String, at: Long) extends Event
+
 enum Status derives JsonSchemaCodec:
   case Open, Paid
 
@@ -112,6 +127,18 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
   test("a time of day is ISO-8601 text that leaves out seconds that are zero"):
     assertEquals(JsonSchemaCodec[java.time.LocalTime].encode(java.time.LocalTime.of(7, 0)), Right(Json.fromString("07:00")))
     assertEquals(JsonSchemaCodec[java.time.LocalTime].encode(java.time.LocalTime.of(7, 0, 5)), Right(Json.fromString("07:00:05")))
+
+  test("two cases whose names would both tell the case apart are refused, since a value of one would read as the other"):
+    assert(JsonSchemaCodec[Event].refusal.exists(_.contains("'Created'")), JsonSchemaCodec[Event].refusal)
+
+  test("an option holding an option is refused, since null would be a value of both and Some(None) would read back as None"):
+    assert(JsonSchemaCodec[Twice].refusal.exists(_.contains("an option holding an option")), JsonSchemaCodec[Twice].refusal)
+    assertEquals(JsonSchemaCodec[Maybe].refusal, None)
+
+  test("two types given one name are refused, since one definition cannot say what each is"):
+    assert(JsonSchemaCodec[Doc].refusal.exists(_.contains("two types are named xkafka.jsonschema.Page__A")), JsonSchemaCodec[Doc].refusal)
+    assert(JsonSchemaFormat[Doc].writer(JsonSchemaFormat[Doc].schema).isLeft)
+    assertEquals(JsonSchemaCodec[Page[Page[Int]]].refusal, None)
 
   test("a type in an object has the object in its title's namespace"):
     assertEquals(JsonSchemaCodec[Here.Spot].schema.hcursor.get[String]("title"), Right("xkafka.jsonschema.Here.Spot"))

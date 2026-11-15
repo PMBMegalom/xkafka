@@ -81,18 +81,32 @@ private[avro] object VulcanBinary:
       case ApacheSchema.Type.RECORD | ApacheSchema.Type.ENUM | ApacheSchema.Type.FIXED => Some(schema.getFullName)
       case _                                                                           => None
 
+  /** Bytes on their own are written after the header as they are, with no length before them, as Confluent's serializers write them. */
   def write(schema: ApacheSchema, value: Any): Either[String, Chunk[Byte]] =
     Either.catchNonFatal:
       val out     = new ByteArrayOutputStream
       val encoder = EncoderFactory.get.binaryEncoder(out, null)
       new GenericDatumWriter[Any](schema).write(value, encoder)
       encoder.flush()
-      Chunk.array(out.toByteArray)
+      if schema.getType == ApacheSchema.Type.BYTES then
+        val read = DecoderFactory.get.binaryDecoder(out.toByteArray, null).readBytes(null)
+        Chunk.array(java.util.Arrays.copyOfRange(read.array, read.arrayOffset + read.position, read.arrayOffset + read.limit))
+      else Chunk.array(out.toByteArray)
     .leftMap(error => s"the value cannot be written: ${error.getMessage}")
+
+  /** The Avro bytes of a payload written with `writer`: bytes on their own come with no length before them, which Avro reads them by. */
+  private def framed(writer: ApacheSchema, bytes: Chunk[Byte]): Array[Byte] =
+    if writer.getType == ApacheSchema.Type.BYTES then
+      val out     = new ByteArrayOutputStream
+      val encoder = EncoderFactory.get.binaryEncoder(out, null)
+      encoder.writeBytes(bytes.toArray)
+      encoder.flush()
+      out.toByteArray
+    else bytes.toArray
 
   /** The value `bytes` hold, written with `writer`, as `reader` describes it. */
   def read(writer: ApacheSchema, reader: ApacheSchema, bytes: Chunk[Byte]): Either[String, Any] =
-    val decoder = DecoderFactory.get.binaryDecoder(bytes.toArray, null)
+    val decoder = DecoderFactory.get.binaryDecoder(framed(writer, bytes), null)
     Either.catchNonFatal((new GenericDatumReader[Any](writer, reader).read(null, decoder), decoder.inputStream.available))
       .leftMap(error => s"the record cannot be read: ${error.getMessage}")
       .flatMap((value, left) => Either.cond(left == 0, value, s"$left bytes are left after the value"))

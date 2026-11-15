@@ -107,6 +107,17 @@ class VulcanSerdeSuite extends CatsEffectSuite:
       yield back
     assertEquals(read, Left("2 bytes are left after the value"))
 
+  test("bytes on their own are written after the header as they are, and Confluent's are read so, as Confluent's serializers write them"):
+    val mock = new MockSchemaRegistryClient()
+    for
+      serde  <- VulcanSerde.of[IO, Array[Byte]](ConfluentRegistry.bridged(mock), Part.Value)
+      ours   <- serde.serializer.serialize(topic, Headers.empty, Array[Byte](1, 2, 3)).map(_.get)
+      theirs <- IO.blocking(Chunk.array(ConfluentRegistry.serializer(mock).serialize("visits", Array[Byte](5, 6, 7))))
+      back   <- serde.deserializer.deserialize(topic, Headers.empty, Some(theirs))
+    yield
+      assertEquals(ours.drop(5), Chunk[Byte](1, 2, 3))
+      assertEquals(back.toList, List[Byte](5, 6, 7))
+
   test("the serde writes the bytes Confluent's serializer writes, and each reads what the other writes"):
     val mock   = new MockSchemaRegistryClient()
     val record = vulcan.Codec[Visit].encode(visit).fold(error => fail(error.message), identity)

@@ -14,6 +14,13 @@ its progress together in one transaction, every 100ms. Each record then counts
 exactly once in the application's stores and output topics, even when work
 moves between members. Input is read with `IsolationLevel.ReadCommitted`.
 
+A transaction that fails, as one whose commit times out, is aborted, and the
+member's tasks start again from what the group last committed, as Java's do.
+It keeps trying for up to `taskTimeout` before the application stops with the
+failure. A producer fenced by another with its transactional id is made anew,
+and the tasks start again the same way. A fatal failure, such as one the broker
+refuses for authorization, stops the application.
+
 Change these intervals with `withCommitInterval`. Every setting and its default
 is listed in [Streams settings](../settings.md#streams-settings).
 

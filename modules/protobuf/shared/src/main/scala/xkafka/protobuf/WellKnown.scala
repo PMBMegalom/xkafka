@@ -21,7 +21,7 @@
 
 package xkafka.protobuf
 
-/** The files of Protobuf's well-known types, which every Protobuf library and the registry know, so a schema imports them without references. */
+/** The files of Protobuf's well-known types, and the others Confluent's serializers know, which a schema imports without references. */
 private[protobuf] object WellKnown:
   private def file(body: String): String = s"syntax = \"proto3\";\npackage google.protobuf;\n$body"
 
@@ -51,7 +51,7 @@ private[protobuf] object WellKnown:
         |message ListValue { repeated Value values = 1; }""".stripMargin),
       "google/protobuf/timestamp.proto" -> file("message Timestamp { int64 seconds = 1; int32 nanos = 2; }"),
       "google/protobuf/wrappers.proto"  -> file(wrappers)
-    )
+    ) ++ KnownFiles.texts
 
   /** The files, read once. */
   lazy val files: Map[String, ProtobufSchema.File] =

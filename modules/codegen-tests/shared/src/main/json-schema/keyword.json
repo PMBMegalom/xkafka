@@ -1,0 +1,1 @@
+{"title": "example.json.Keyed", "description": "A property named as a Scala keyword", "type": "object", "properties": {"this": {"type": "integer"}}, "required": ["this"]}

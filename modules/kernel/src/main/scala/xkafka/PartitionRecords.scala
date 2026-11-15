@@ -57,7 +57,9 @@ object PartitionRecords:
       channel: Channel[F, CommittableConsumerRecord[F, K, V]],
       queued: Ref[F, Int],
       paused: Ref[F, Boolean],
-      mutex: Mutex[F]
+      mutex: Mutex[F],
+      // Set when the partition is revoked, after which its records are no longer handed out: the group has given them to another member.
+      revoked: Ref[F, Boolean]
   )
 
   private final class Runtime[F[_], K, V](
@@ -91,15 +93,19 @@ object PartitionRecords:
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
       stateFor(record.record.topicPartition).flatMap: state =>
         state.mutex.lock.surround:
-          F.uncancelable: poll =>
-            state.queued.updateAndGet(_ + 1).flatMap: queued =>
-              F.guaranteeCase(poll(pauseWhenFull(state, queued))):
-                case Outcome.Succeeded(_) => F.unit
-                case _                    => rollback(state)
-              .flatMap: _ =>
-                state.channel.send(record).onError(_ => rollback(state)).flatMap:
-                  case Right(()) => F.unit
-                  case Left(_)   => rollback(state)
+          // One revoked while the record waited for the lock is not paused for it, which librdkafka would keep through the revocation.
+          state.revoked.get.ifM(F.unit, delivered(state, record))
+
+    private def delivered(state: PartitionState[F, K, V], record: CommittableConsumerRecord[F, K, V]): F[Unit] =
+      F.uncancelable: poll =>
+        state.queued.updateAndGet(_ + 1).flatMap: queued =>
+          F.guaranteeCase(poll(pauseWhenFull(state, queued))):
+            case Outcome.Succeeded(_) => F.unit
+            case _                    => rollback(state)
+          .flatMap: _ =>
+            state.channel.send(record).onError(_ => rollback(state)).flatMap:
+              case Right(()) => F.unit
+              case Left(_)   => rollback(state)
 
     private def rollback(state: PartitionState[F, K, V]): F[Unit] =
       state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued))
@@ -120,9 +126,10 @@ object PartitionRecords:
     private def readable(state: PartitionState[F, K, V]): PartitionRecords[F, K, V] =
       PartitionRecords(
         state.topicPartition,
-        state.channel.stream.evalTap: _ =>
+        // A record queued when the partition was revoked is not handed out: the group gave it to another member, and a commit of it is refused.
+        state.channel.stream.evalFilter: _ =>
           state.mutex.lock.surround:
-            state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued))
+            state.queued.updateAndGet(_ - 1).flatMap(queued => resumeWhenDrained(state, queued)) *> state.revoked.get.map(!_)
       )
 
     private def stateFor(topicPartition: TopicPartition): F[PartitionState[F, K, V]] =
@@ -137,7 +144,8 @@ object PartitionRecords:
                 queued  <- Ref.of[F, Int](0)
                 paused  <- Ref.of[F, Boolean](false)
                 mutex   <- Mutex[F]
-                state = PartitionState(topicPartition, channel, queued, paused, mutex)
+                revoked <- Ref.of[F, Boolean](false)
+                state = PartitionState(topicPartition, channel, queued, paused, mutex, revoked)
                 _ <- states.set(current.updated(topicPartition, state))
                 _ <- output.send(readable(state)).void
               yield state
@@ -152,7 +160,7 @@ object PartitionRecords:
             // raised.
             states.set(current.removedAll(revoked.keySet)) >> revoked.values.toList.traverse: state =>
               state.mutex.lock.surround:
-                state.channel.close.void >> state.paused.getAndSet(false)
+                state.revoked.set(true) >> state.channel.close.void >> state.paused.getAndSet(false)
                   .flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition))))
               .attempt
             .flatMap: outcomes =>

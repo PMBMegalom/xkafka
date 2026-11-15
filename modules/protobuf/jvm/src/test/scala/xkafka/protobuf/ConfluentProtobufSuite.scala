@@ -58,6 +58,13 @@ final case class Retyped(
 ) derives ProtobufCodec
 
 /** xkafka's Protobuf schemas, records and serdes against Confluent's Protobuf support and protobuf-java. */
+/** A message in a package with a `google` part, where a name starting `google.` would be looked for in that part. */
+@xkafka.schemaregistry.SchemaNamespace("com.acme.google.ads")
+final case class Placed(
+    @ProtobufField(1)
+    at: Instant
+) derives ProtobufCodec
+
 class ConfluentProtobufSuite extends CatsEffectSuite:
   private val topic = Topic.from("orders").toOption.get
 
@@ -123,6 +130,10 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
         counts = List(7)
       ))
     )
+
+  test("a well-known type is named from the root, so a package with a google part does not hide it from protobuf-java"):
+    val descriptor = confluent(ProtobufCodec[Placed]).toDescriptor
+    assertEquals(descriptor.findFieldByName("at").getMessageType.getFullName, "google.protobuf.Timestamp")
 
   test("adding a field is a compatible change under Confluent's rules, and changing a field's type is not"):
     val older = confluent(ProtobufCodec[Line])

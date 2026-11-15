@@ -119,7 +119,10 @@ partition it came from.
 
 `consumeChunk` runs until it is cancelled, until something fails, or until
 `stopConsuming` has been called and everything already fetched has been
-processed.
+processed. A chunk whose commit fails with `ErrorCode.IllegalGeneration`,
+because the group moved its partition while it was being processed, is left
+uncommitted, and `consumeChunk` goes on: the member that has the partition now
+reads those records again.
 
 ## A stream per partition
 

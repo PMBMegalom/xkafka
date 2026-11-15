@@ -106,7 +106,7 @@ class Smithy4sProtobufSuite extends FunSuite:
         |
         |message Payment {
         |  string id = 1;
-        |  google.protobuf.Timestamp at = 2;
+        |  .google.protobuf.Timestamp at = 2;
         |  double amount = 3;
         |  int64 cents = 4;
         |  sint64 delta = 5;
@@ -121,8 +121,8 @@ class Smithy4sProtobufSuite extends FunSuite:
         |  string huge = 14;
         |  bytes receipt = 15;
         |  string day = 16;
-        |  google.protobuf.Value extra = 17;
-        |  google.protobuf.Int64Value tip = 18;
+        |  .google.protobuf.Value extra = 17;
+        |  .google.protobuf.Int64Value tip = 18;
         |  Method method = 19;
         |  Tender tender = 20;
         |  Status status = 21;
@@ -133,7 +133,7 @@ class Smithy4sProtobufSuite extends FunSuite:
         |  sfixed64 offset = 26;
         |  string opens = 27;
         |  string when = 28;
-        |  google.protobuf.Duration wait = 29;
+        |  .google.protobuf.Duration wait = 29;
         |}
         |
         |message Card {

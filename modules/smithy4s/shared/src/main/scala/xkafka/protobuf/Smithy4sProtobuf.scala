@@ -116,18 +116,18 @@ object Smithy4sProtobufSchema:
 
   private val wellKnown: Map[String, String] =
     Map(
-      "google.protobuf.Timestamp"   -> "google/protobuf/timestamp.proto",
-      "google.protobuf.Duration"    -> "google/protobuf/duration.proto",
-      "google.protobuf.Value"       -> "google/protobuf/struct.proto",
-      "google.protobuf.Int64Value"  -> "google/protobuf/wrappers.proto",
-      "google.protobuf.Int32Value"  -> "google/protobuf/wrappers.proto",
-      "google.protobuf.UInt64Value" -> "google/protobuf/wrappers.proto",
-      "google.protobuf.UInt32Value" -> "google/protobuf/wrappers.proto",
-      "google.protobuf.DoubleValue" -> "google/protobuf/wrappers.proto",
-      "google.protobuf.FloatValue"  -> "google/protobuf/wrappers.proto",
-      "google.protobuf.BoolValue"   -> "google/protobuf/wrappers.proto",
-      "google.protobuf.StringValue" -> "google/protobuf/wrappers.proto",
-      "google.protobuf.BytesValue"  -> "google/protobuf/wrappers.proto"
+      ".google.protobuf.Timestamp"   -> "google/protobuf/timestamp.proto",
+      ".google.protobuf.Duration"    -> "google/protobuf/duration.proto",
+      ".google.protobuf.Value"       -> "google/protobuf/struct.proto",
+      ".google.protobuf.Int64Value"  -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.Int32Value"  -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.UInt64Value" -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.UInt32Value" -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.DoubleValue" -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.FloatValue"  -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.BoolValue"   -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.StringValue" -> "google/protobuf/wrappers.proto",
+      ".google.protobuf.BytesValue"  -> "google/protobuf/wrappers.proto"
     )
 
   private def show(id: ShapeId): String = s"${id.namespace}#${id.name}"
@@ -264,8 +264,8 @@ object Smithy4sProtobufSchema:
         case Primitive.PFloat                                              => Right(FieldType.Float)
         case Primitive.PString | Primitive.PBigDecimal | Primitive.PBigInt => Right(FieldType.String)
         case Primitive.PBlob                                               => Right(FieldType.Bytes)
-        case Primitive.PDocument                                           => Right(FieldType.Named("google.protobuf.Value"))
-        case Primitive.PDuration                                           => Right(FieldType.Named("google.protobuf.Duration"))
+        case Primitive.PDocument                                           => Right(FieldType.Named(".google.protobuf.Value"))
+        case Primitive.PDuration                                           => Right(FieldType.Named(".google.protobuf.Duration"))
         case Primitive.PUUID if hints.has(ProtoCompactUUID) => Left(s"$where is a UUID with @protoCompactUUID, which xkafka does not declare yet")
         case Primitive.PLocalDate if hints.has(ProtoCompactLocalDate) =>
           Left(s"$where is a date with @protoCompactLocalDate, which xkafka does not declare yet")
@@ -276,17 +276,17 @@ object Smithy4sProtobufSchema:
         case Primitive.PUUID | Primitive.PLocalDate | Primitive.PLocalTime | Primitive.POffsetDateTime           => Right(FieldType.String)
         case Primitive.PTimestamp if hints.get(ProtoTimestampFormat).contains(ProtoTimestampFormat.EPOCH_MILLIS) =>
           Left(s"$where is a timestamp in epoch milliseconds, which xkafka does not declare yet")
-        case Primitive.PTimestamp => Right(FieldType.Named("google.protobuf.Timestamp"))
+        case Primitive.PTimestamp => Right(FieldType.Named(".google.protobuf.Timestamp"))
     if !hints.has(ProtoWrapped) then plain
     else
       plain.flatMap:
-        case FieldType.Int64  => Right(FieldType.Named("google.protobuf.Int64Value"))
-        case FieldType.Int32  => Right(FieldType.Named("google.protobuf.Int32Value"))
-        case FieldType.UInt64 => Right(FieldType.Named("google.protobuf.UInt64Value"))
-        case FieldType.UInt32 => Right(FieldType.Named("google.protobuf.UInt32Value"))
-        case FieldType.Double => Right(FieldType.Named("google.protobuf.DoubleValue"))
-        case FieldType.Float  => Right(FieldType.Named("google.protobuf.FloatValue"))
-        case FieldType.Bool   => Right(FieldType.Named("google.protobuf.BoolValue"))
-        case FieldType.String => Right(FieldType.Named("google.protobuf.StringValue"))
-        case FieldType.Bytes  => Right(FieldType.Named("google.protobuf.BytesValue"))
+        case FieldType.Int64  => Right(FieldType.Named(".google.protobuf.Int64Value"))
+        case FieldType.Int32  => Right(FieldType.Named(".google.protobuf.Int32Value"))
+        case FieldType.UInt64 => Right(FieldType.Named(".google.protobuf.UInt64Value"))
+        case FieldType.UInt32 => Right(FieldType.Named(".google.protobuf.UInt32Value"))
+        case FieldType.Double => Right(FieldType.Named(".google.protobuf.DoubleValue"))
+        case FieldType.Float  => Right(FieldType.Named(".google.protobuf.FloatValue"))
+        case FieldType.Bool   => Right(FieldType.Named(".google.protobuf.BoolValue"))
+        case FieldType.String => Right(FieldType.Named(".google.protobuf.StringValue"))
+        case FieldType.Bytes  => Right(FieldType.Named(".google.protobuf.BytesValue"))
         case _                => Left(s"$where has @protoWrapped on a type without a well-known wrapper, which xkafka does not declare yet")

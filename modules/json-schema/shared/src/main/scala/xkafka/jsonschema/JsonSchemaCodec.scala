@@ -35,7 +35,7 @@ import io.circe.Json
 import xkafka.schemaregistry.{Decimals, DefaultOf, Meta, Shown}
 
 /** A schema as it is described inside another: its JSON, and the types it names by reference, by name, with how to describe each. */
-private[jsonschema] final case class Described(json: Json, definitions: Map[String, () => Described])
+private[jsonschema] final case class Described(json: Json, definitions: List[(String, () => Described)], problems: List[String] = Nil)
 
 /** How values of `A` are written as JSON, and read back, with the JSON Schema that describes them.
   *
@@ -62,7 +62,14 @@ trait JsonSchemaCodec[A]:
   def name: Option[String] = None
 
   /** The schema, as a JSON Schema document of draft 7, the draft Confluent's serializers use by default. */
-  final def schema: Json = JsonSchemaCodec.document(describe(Set.empty))
+  final def schema: Json = documented._1
+
+  /** Why no serde of this codec can be made: two of the types it describes by reference given one name, or two cases of a sealed trait or enum named
+    * alike.
+    */
+  private[jsonschema] final def refusal: Option[String] = documented._2.headOption
+
+  private lazy val documented: (Json, List[String]) = JsonSchemaCodec.document(describe(Set.empty))
 
   def encode(value: A): Either[String, Json]
 
@@ -87,7 +94,7 @@ object JsonSchemaCodec:
   def instance[A](described: Json, encode: A => Either[String, Json], decode: Json => Either[String, A]): JsonSchemaCodec[A] =
     val (write, read) = (encode, decode)
     new JsonSchemaCodec[A]:
-      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Map.empty)
+      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil)
       override def encode(value: A): Either[String, Json]                     = write(value)
       override def decode(json: Json): Either[String, A]                      = read(json)
 
@@ -98,7 +105,7 @@ object JsonSchemaCodec:
   /** JSON values of `schema` as they are, for schemas known only as the program runs; its `title` names it, as Confluent's tools name a schema. */
   def generic(described: Json): JsonSchemaCodec[Json] =
     new JsonSchemaCodec[Json]:
-      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Map.empty)
+      override private[jsonschema] def describe(seen: Set[String]): Described = Described(described, Nil)
       override def name: Option[String]                                       = described.hcursor.get[String]("title").toOption
       override def encode(value: Json): Either[String, Json]                  = Right(value)
       override def decode(json: Json): Either[String, Json]                   = Right(json)
@@ -106,22 +113,25 @@ object JsonSchemaCodec:
   private val draft7 = "http://json-schema.org/draft-07/schema#"
 
   /** The schema `root` describes, with the definitions of the types it names by reference. */
-  private def document(root: Described): Json =
-    def close(pending: List[(String, () => Described)], done: Map[String, Json]): Map[String, Json] =
+  private def document(root: Described): (Json, List[String]) =
+    // A definition met again is compared with the first of its name, each naming the types inside it by reference, and two that differ are two types
+    // given one name, as a generic class derived once for every type argument gives each.
+    def close(pending: List[(String, () => Described)], done: Map[String, Json], differing: List[String]): (Map[String, Json], List[String]) =
       pending match
-        case Nil                                      => done
-        case (name, _) :: rest if done.contains(name) => close(rest, done)
-        case (name, describe) :: rest                 =>
-          val described = describe()
-          close(rest ++ described.definitions.toList, done.updated(name, described.json))
-    val definitions = close(root.definitions.toList, Map.empty)
-    val fields      = root.json.asObject.fold(List("allOf" -> Json.arr(root.json)))(_.toList)
+        case Nil                      => (done, differing)
+        case (name, describe) :: rest => done.get(name) match
+            case Some(first) => close(rest, done, if describe().json == first then differing else differing :+ s"two types are named $name")
+            case None        =>
+              val described = describe()
+              close(rest ++ described.definitions, done.updated(name, described.json), differing ++ described.problems)
+    val (definitions, differing) = close(root.definitions, Map.empty, root.problems)
+    val fields                   = root.json.asObject.fold(List("allOf" -> Json.arr(root.json)))(_.toList)
     // A schema written by hand keeps the draft it names.
     val draft = fields.collectFirst { case ("$schema", named) => named }.getOrElse(Json.fromString(draft7))
     Json.fromFields(
       ("$schema" -> draft) ::
         fields.filterNot(_._1 == "$schema") ++ Option.when(definitions.nonEmpty)("definitions" -> Json.fromFields(definitions.toList.sortBy(_._1)))
-    )
+    ) -> differing.distinct
 
   private def typed(name: String): Json = Json.obj("type" -> Json.fromString(name))
 
@@ -180,7 +190,9 @@ object JsonSchemaCodec:
   given [A](using inner: JsonSchemaCodec[A]): JsonSchemaCodec[Option[A]] with
     override private[jsonschema] def describe(seen: Set[String]): Described =
       val described = inner.describe(seen)
-      described.copy(json = Json.obj("oneOf" -> Json.arr(typed("null"), described.json)))
+      // Null is a value of both an option and the option inside it, so no value could match exactly one branch of the `oneOf`.
+      val twice = Option.when(inner.optional)("an option holding an option cannot be told from none, as null is a value of both")
+      described.copy(json = Json.obj("oneOf" -> Json.arr(typed("null"), described.json)), problems = described.problems ++ twice)
     override private[jsonschema] def optional: Boolean          = true
     override def encode(value: Option[A]): Either[String, Json] = value.fold(Right(Json.Null))(inner.encode)
     override def decode(json: Json): Either[String, Option[A]]  = if json.isNull then Right(None) else inner.decode(json).map(Some(_))
@@ -251,7 +263,7 @@ private[jsonschema] final class ObjectCodec[A, T <: Tuple](
   override def name: Option[String] = Some(full)
 
   override private[jsonschema] def describe(seen: Set[String]): Described =
-    if seen.contains(full) then Described(Json.obj("$ref" -> Json.fromString(s"#/definitions/$full")), Map(full -> (() => body(Set(full)))))
+    if seen.contains(full) then Described(Json.obj("$ref" -> Json.fromString(s"#/definitions/$full")), List(full -> (() => body(Set(full)))))
     else body(seen + full)
 
   private def body(inside: Set[String]): Described =
@@ -272,7 +284,7 @@ private[jsonschema] final class ObjectCodec[A, T <: Tuple](
         List("type" -> Json.fromString("object"), "title" -> Json.fromString(full)) ++ named.doc.map("description" -> Json.fromString(_)) ++
           List("properties" -> Json.fromFields(properties), "required" -> Json.fromValues(required), "additionalProperties" -> Json.False)
       )
-    Described(json, described.map(_.definitions).foldLeft(Map.empty[String, () => Described])(_ ++ _))
+    Described(json, described.map(_.definitions).foldLeft(List.empty[(String, () => Described)])(_ ++ _), described.flatMap(_.problems))
 
   override def encode(value: A): Either[String, Json] =
     fields.encode(toTuple(value)).bimap(reason => s"$full: $reason", values => Json.fromFields(infos.map(_.name).zip(values)))
@@ -299,6 +311,13 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
   override def name: Option[String]                          = Some(full)
   override private[jsonschema] def tags: Option[Set[String]] = Some(tagged.flatMap(_._2).toSet)
 
+  /** The names two cases share where they tell the cases apart, as two cases of one simple name in different objects do: a value of the second would
+    * be read as the first.
+    */
+  private val duplicated: List[String] =
+    tagged.flatMap(_._2.toList).groupBy(identity).collect { case (tag, all) if all.size > 1 => tag }.toList.sorted
+      .map(tag => s"two cases of $full are named '$tag', which is what tells the cases apart")
+
   override private[jsonschema] def objects: Option[List[(String, Json)]] =
     singletons.map(_ => cases.map(known => known.tag -> known.codec.describe(Set.empty).json))
 
@@ -309,10 +328,12 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
             List("type" -> Json.fromString("string"), "title" -> Json.fromString(full)) ++ named.doc.map("description" -> Json.fromString(_)) ++
               List("enum" -> Json.fromValues(cases.map(known => Json.fromString(known.tag))))
           ),
-          Map.empty
+          Nil,
+          duplicated
         )
-      case None if seen.contains(full) => Described(Json.obj("$ref" -> Json.fromString(s"#/definitions/$full")), Map(full -> (() => body(Set(full)))))
-      case None                        => body(seen + full)
+      case None if seen.contains(full) =>
+        Described(Json.obj("$ref" -> Json.fromString(s"#/definitions/$full")), List(full -> (() => body(Set(full)))))
+      case None => body(seen + full)
 
   private def body(inside: Set[String]): Described =
     // A case is described here in full, even inside itself, since a reference to it could not take the property `type` its object refuses.
@@ -329,7 +350,8 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
       Json.fromFields(
         List("title" -> Json.fromString(full)) ++ named.doc.map("description" -> Json.fromString(_)) ++ List("oneOf" -> Json.fromValues(branches))
       ),
-      described.map(_._2.definitions).foldLeft(Map.empty[String, () => Described])(_ ++ _)
+      described.map(_._2.definitions).foldLeft(List.empty[(String, () => Described)])(_ ++ _),
+      duplicated ++ described.flatMap(_._2.problems)
     )
 
   /** A case's object with its tag in the property `type`, required; a case described by reference is wrapped. */

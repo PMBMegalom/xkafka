@@ -1,0 +1,2 @@
+{"type": "record", "name": "Keyed", "namespace": "example.shop", "doc": "A field and an enum symbol named as a Scala keyword",
+ "fields": [{"name": "this", "type": "long"}, {"name": "pointing", "type": {"type": "enum", "name": "Pointing", "symbols": ["this", "that"]}}]}

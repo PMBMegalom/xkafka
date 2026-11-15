@@ -177,6 +177,24 @@ final class ForeignKeySuite extends CatsEffectSuite:
     assertEquals(Topology.of(rejoined(unkept)).left.toOption.map(_.toList), Some(List(TopologyError.WindowedJoin)))
     assert(Topology.of(grouped(kept)).isRight)
     assert(Topology.of(rejoined(kept)).isRight)
+    // A step after the result that keeps a store of its own is joined through that store, as Java's is.
+    assert(Topology.of(rejoined(unkept.mapValues(Named("m"), Store("mapped"), text)(_ + "!"))).isRight)
+    assert(Topology.of(rejoined(unkept.filter(Named("f"), Store("filtered"), text)((_, _) => true))).isRight)
+
+  test("a filter after a result kept in no store runs without old values, as Java's, a value it drops becoming a delete whatever came before"):
+    val filtered                             = joined.filter(Named("f"))((_, value) => value.startsWith("a"))
+    val topology                             = program(filtered)
+    val hashOf                               = (value: String) => Some(Murmur3.hash128(bytes(value)))
+    def answer(hash: Option[Hash], at: Long) = input("app-fk-subscription-response-topic", "k1", Some(Response(hash, Some(bytes("A"))).encoded), at)
+    for
+      task    <- taskReading(topology, "left", 0)
+      first   <- task.process(TaskState.empty, input("left", "k1", Some(bytes("a"))), 0L)
+      kept    <- task.process(first._1, answer(hashOf("a"), 2000L), 0L)
+      second  <- task.process(kept._1, input("left", "k1", Some(bytes("b"))), 0L)
+      dropped <- task.process(second._1, answer(hashOf("b"), 3000L), 0L)
+    yield
+      assertEquals(to(kept._2, "out").map(_.value), Vector(Some(bytes("a+A"))))
+      assertEquals(to(dropped._2, "out").map(_.value), Vector(None))
 
   test("a windowed table cannot join on a foreign key, on either side"):
     val windowed =

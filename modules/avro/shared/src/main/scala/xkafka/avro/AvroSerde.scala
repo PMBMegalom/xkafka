@@ -46,13 +46,17 @@ object AvroFormat:
           // A value is written as its codec gives it. Where the schema is another, it is read into that schema as Avro resolves the codec's into it,
           // as Java's serializer and the vulcan and avro4s serdes do: through aliases, widening numbers, leaving out the fields it lacks and taking
           // the defaults of those it adds.
-          if written == own then Right(value => codec.encode(value).flatMap(AvroBinary.encode(own, _)))
-          else
-            AvroBinary.decoder(own, written).map: resolved =>
-              value => codec.encode(value).flatMap(AvroBinary.encode(own, _)).flatMap(resolved).flatMap(AvroBinary.encode(written, _))
+          // Bytes on their own are written as Confluent's serializers write them, with no length before them.
+          val framed =
+            if written == own then Right((value: A) => codec.encode(value).flatMap(AvroBinary.encode(own, _)))
+            else
+              AvroBinary.decoder(own, written).map: resolved =>
+                (value: A) => codec.encode(value).flatMap(AvroBinary.encode(own, _)).flatMap(resolved).flatMap(AvroBinary.encode(written, _))
+          framed.map(write => value => write(value).flatMap(AvroBinary.toPayload(written, _)))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        codec.refusal.toLeft(()) *> avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
+        codec.refusal.toLeft(()) *> avro(writer).flatMap: written =>
+          AvroBinary.decoder(written, own).map(decode => bytes => AvroBinary.fromPayload(written, bytes).flatMap(decode).flatMap(codec.decode))
 
   private[avro] def avro(schema: Schema): Either[String, AvroSchema] =
     if schema.schemaType != SchemaType.Avro then Left(s"the schema is ${schema.schemaType.name}, not Avro")
@@ -82,5 +86,7 @@ object AvroSerde:
     RegistrySerde.deserializer(
       registry,
       schema =>
-        AvroFormat.avro(schema).flatMap(writer => AvroBinary.decoder(writer, writer).map(read => bytes => read(bytes).map(AvroWritten(writer, _))))
+        AvroFormat.avro(schema).flatMap(writer =>
+          AvroBinary.decoder(writer, writer).map(read => bytes => AvroBinary.fromPayload(writer, bytes).flatMap(read).map(AvroWritten(writer, _)))
+        )
     )
