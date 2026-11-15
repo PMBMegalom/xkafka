@@ -143,6 +143,8 @@ ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
 )
 // Linking the Native tests takes more than sbt's default heap of 1 GB.
 ThisBuild / githubWorkflowEnv += "SBT_OPTS" -> "-Xmx4g"
+// Each Native link holds its whole program in memory, so at most two run at once, which keeps the links of every test project within that heap.
+Global / concurrentRestrictions += Tags.limit(NativeTags.Link, 2)
 
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
