@@ -26,6 +26,10 @@ import munit.ScalaCheckSuite
 import org.scalacheck.Prop.forAll
 
 class AvroBinarySuite extends ScalaCheckSuite:
+  // The record of many fields takes about 2 seconds on the JVM and a minute on Native on a busy CI runner; searching for each field instead takes
+  // past 15 minutes on the JVM, so this still tells the two apart.
+  override val munitTimeout: scala.concurrent.duration.Duration = scala.concurrent.duration.Duration(3, "minutes")
+
   private def parsed(text: String): AvroSchema = AvroSchemaJson.parse(text).fold(reason => fail(reason), identity)
 
   private def bytes(values: Int*): Chunk[Byte] = Chunk.from(values.map(_.toByte))
