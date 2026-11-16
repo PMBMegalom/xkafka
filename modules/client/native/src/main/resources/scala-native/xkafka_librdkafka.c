@@ -1295,13 +1295,23 @@ int32_t xkafka_metadata_partition_at(const void *metadata,
 /* librdkafka's admin calls are asynchronous: the request goes on a queue and the outcome arrives as
  * an event. Each helper below submits, waits for its event, and reports the first failure it finds,
  * because the portable API reports one failure rather than an outcome for each topic. */
+/* Bounds a request, and the broker's work on it, by the call's timeout, as the Java client bounds the same requests. The timeout is the
+ * client's own, always one librdkafka takes, so the setters' answers need no checking. */
+static void xkafka_admin_timeouts(rd_kafka_AdminOptions_t *options, int timeout_ms) {
+        char ignored[128];
+
+        rd_kafka_AdminOptions_set_request_timeout(options, timeout_ms, ignored, sizeof(ignored));
+        rd_kafka_AdminOptions_set_operation_timeout(options, timeout_ms, ignored, sizeof(ignored));
+}
+
 static int xkafka_admin_await(rd_kafka_queue_t *queue,
                               rd_kafka_event_type_t expected,
                               int timeout_ms,
                               char *error,
                               size_t error_size,
                               int32_t *error_code) {
-        rd_kafka_event_t *event = rd_kafka_queue_poll(queue, timeout_ms);
+        /* librdkafka ends the request with its own timed out result, so this waits a little longer than the request may take. */
+        rd_kafka_event_t *event = rd_kafka_queue_poll(queue, timeout_ms + timeout_ms / 2);
         const rd_kafka_topic_result_t **results = NULL;
         size_t count = 0, index;
         int outcome = 0;
@@ -1396,6 +1406,8 @@ int xkafka_admin_create_topics(rd_kafka_t *client,
         rd_kafka_queue_t *queue = rd_kafka_queue_new(client);
         rd_kafka_AdminOptions_t *options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_CREATETOPICS);
         size_t index, configured = 0;
+
+        xkafka_admin_timeouts(options, timeout_ms);
         int outcome = 0;
 
         if (topics == NULL) {
@@ -1456,6 +1468,8 @@ int xkafka_admin_delete_topics(rd_kafka_t *client,
         size_t index;
         int outcome;
 
+        xkafka_admin_timeouts(options, timeout_ms);
+
         if (topics == NULL) {
                 xkafka_set_error(error, error_size, error_code, "could not allocate the topics to delete");
                 rd_kafka_AdminOptions_destroy(options);
@@ -1499,6 +1513,7 @@ int xkafka_admin_create_partitions(rd_kafka_t *client,
 
         queue = rd_kafka_queue_new(client);
         options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_CREATEPARTITIONS);
+        xkafka_admin_timeouts(options, timeout_ms);
         rd_kafka_CreatePartitions(client, &request, 1, options, queue);
         outcome = xkafka_admin_await(queue, RD_KAFKA_EVENT_CREATEPARTITIONS_RESULT, timeout_ms, error, error_size, error_code);
 

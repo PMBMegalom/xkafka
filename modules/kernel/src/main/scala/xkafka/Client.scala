@@ -1586,11 +1586,16 @@ object CommittableOffsetBatch:
   given FunctorK[CommittableOffsetBatch] with
     override def mapK[F[_], G[_]](batch: CommittableOffsetBatch[F])(fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.mapK(fk)
 
-  /** Keeps the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the earlier. */
+  /** Keeps the offset of the later assignment, where both were read under leases of different assignments, since only the current one can be
+    * committed, and else the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the
+    * earlier.
+    */
   private def include[F[_]](entries: Map[TopicPartition, Entry[F]], topicPartition: TopicPartition, entry: Entry[F]): Map[TopicPartition, Entry[F]] =
+    // Ordered by the assignment, then the offset, so that batches still merge in any order and grouping to one batch.
+    def rank(of: Entry[F]) = (of.lease.fold(Long.MinValue)(_.number), of.offset.offset.value)
     entries.updatedWith(topicPartition):
-      case current @ Some(existing) if existing.offset.offset.value > entry.offset.offset.value => current
-      case Some(_) | None                                                                       => Some(entry)
+      case current @ Some(existing) if Ordering[(Long, Long)].gt(rank(existing), rank(entry)) => current
+      case Some(_) | None                                                                     => Some(entry)
 
 /** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
 def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =
@@ -1772,6 +1777,11 @@ trait KafkaConsumer[F[_], K, V]:
     */
   private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] = assignmentChanges.map(_.map(_ -> 0L).toMap)
 
+  /** Whether `assignmentNumbers` counts the assignments, as the numbers its records carry do: a consumer that wraps another, and does not, has its
+    * records' numbers ignored, so that they are not taken for assignments its partitions' streams have not seen.
+    */
+  private[xkafka] def numbersAssignments: Boolean = false
+
   /** The records, not yet counted as handed out, for a reader that hands each out later through its offset's `handingOut`: a record it drops then, as
     * one fetched before a seek, is not waited for by rebalance-safe commits.
     */
@@ -1875,6 +1885,8 @@ trait KafkaConsumer[F[_], K, V]:
       override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
 
       override private[xkafka] def assignmentNumbers: Stream[G, Map[TopicPartition, Long]] = self.assignmentNumbers.translate(fk)
+
+      override private[xkafka] def numbersAssignments: Boolean = self.numbersAssignments
 
       override private[xkafka] def routedRecords: Stream[G, CommittableConsumerRecord[G, K, V]] = self.routedRecords.map(_.mapK(fk)).translate(fk)
 

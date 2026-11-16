@@ -87,7 +87,7 @@ Three codes cover failures around transactional producers:
 
 | code | raised when |
 | --- | --- |
-| `ErrorCode.Fenced` | a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way |
+| `ErrorCode.Fenced` | a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way; for a consumer, another with the same `groupInstanceId` has taken its place in the group |
 | `ErrorCode.InvalidProducerEpoch` | the broker refuses the producer's epoch as out of date |
 | `ErrorCode.Purged` | the client discarded a record before sending it, for example one still waiting when its transaction aborted |
 

@@ -105,6 +105,15 @@ final class DriverClientSuite extends CatsEffectSuite:
         .use(producer => producer.produce(values("a", "never")).timeout(500.millis).attempt <* producer.flush).timeout(10.seconds)
     .map(outcome => assert(outcome.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"the wait should be cancelled, got $outcome"))
 
+  test("a produce waiting for room when its producer is released fails, as the client is closed, and does not wait for ever"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).allocated.flatMap: (producer, release) =>
+        for
+          waiting <- producer.produce(values("never")).start
+          _       <- IO.sleep(200.millis) *> release
+          outcome <- waiting.joinWithNever.attempt.timeout(5.seconds)
+        yield assert(outcome.left.exists(_.isInstanceOf[IllegalStateException]), s"the wait should fail, got $outcome")
+
   test("where the client gives up waiting for room for a record, the records after it time out without waiting again"):
     FakeDriver().flatMap: fake =>
       new DriverClient[IO](fake).producer(producerSettings).use(_.produceAttemptEachAndAwait(values("a", "given up", "b", "c"))).timeout(5.seconds)
@@ -207,6 +216,17 @@ final class DriverClientSuite extends CatsEffectSuite:
     .map: (searched, written) =>
       assert(searched.left.exists(_.isInstanceOf[IllegalArgumentException]), searched)
       assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+
+  test("a record timed at 1970-01-01T00:00:00Z itself is refused, which librdkafka would write as the time it sends it, unless streams write it"):
+    def producing(client: DriverClient[IO], fake: FakeDriver) =
+      val records = values("a").map(_.copy(timestamp = Some(Timestamp.fromEpochMillis(0L))))
+      (client.producer(producerSettings).use(_.produceAndAwait(records).attempt).timeout(10.seconds), fake.enqueued).tupled
+    FakeDriver().flatMap(fake => producing(new DriverClient[IO](fake), fake)).map: (written, enqueued) =>
+      assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+      assertEquals(enqueued, Vector.empty, "nothing reached the driver")
+    *> FakeDriver().flatMap(fake => producing(new DriverClient[IO](fake, forStreams = true), fake)).map: (written, enqueued) =>
+      assert(written.isRight, written)
+      assertEquals(enqueued.size, 1)
 
   test("a header name holding NUL, which librdkafka cuts there, is refused before it reaches the client"):
     FakeDriver().flatMap: fake =>

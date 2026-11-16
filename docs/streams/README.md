@@ -199,7 +199,10 @@ def tenantOrders(orders: Topic, output: Topic): Pipeline[IO] =
 
 Each is given a `Record`, or a `FixedKeyRecord` if the key cannot change, as a
 [processor](processors.md) is. `withValue` and `withKey` keep the record's time and
-headers, and `withTimestamp` and `withHeaders` change them. `record.origin` gives the
+headers, and `withTimestamp` and `withHeaders` change them. A record written at
+1970-01-01T00:00:00Z, as one read with that time is, carries that time on the JVM,
+as Java's Kafka Streams writes it; on Scala.js and Scala Native librdkafka cannot
+write that time, and the record carries the time it was sent at. `record.origin` gives the
 topic, partition and offset the record was read from. See
 [Headers](../headers.md) for reading and changing headers.
 

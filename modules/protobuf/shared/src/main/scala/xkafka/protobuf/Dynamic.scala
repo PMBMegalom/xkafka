@@ -173,21 +173,23 @@ private[protobuf] final class Dynamic(pool: Pool):
         case Nil                                                 => Right(())
         case (_, _, depth) :: _ if depth > ProtobufWire.MaxDepth => tooDeep
         case (scope, written, depth) :: rest                     =>
-          val inner =
-            (pool.message(scope), ProtobufWire.fields(written).toOption).tupled.toList.flatMap: (described, read) =>
-              val types = described._1.fields.map(field => field.number -> field.fieldType).toMap
-              read.toList.flatMap:
-                case (number, Raw.Bytes(value)) => types.get(number).toList.flatMap(nested(scope, _, value, depth + 1))
-                case _                          => Nil
-          within(inner ++ rest)
-    def nested(scope: String, fieldType: FieldType, value: Chunk[Byte], depth: Int): List[(String, Chunk[Byte], Int)] =
+          val types = pool.message(scope).toList.flatMap(_._1.fields.map(field => field.number -> field.fieldType)).toMap
+          // Bytes that are no message are refused here, since a library reading them would read the fields before them first, however deep.
+          ProtobufWire.fields(written).flatMap(_.toList.flatTraverse {
+            case (number, Raw.Bytes(value)) => types.get(number).fold(Right(Nil))(nested(scope, _, value, depth + 1))
+            case _                          => Right(Nil)
+          }) match
+            case Left(reason) => Left(s"the record is not a message $scope can be read from: $reason")
+            case Right(inner) => within(inner ++ rest)
+    def nested(scope: String, fieldType: FieldType, value: Chunk[Byte], depth: Int): Either[String, List[(String, Chunk[Byte], Int)]] =
       fieldType match
-        case FieldType.Named(name) => pool.resolve(scope, name).toOption.flatMap(_.toOption).map(full => (full, value, depth)).toList
+        case FieldType.Named(name) => Right(pool.resolve(scope, name).toOption.flatMap(_.toOption).map(full => (full, value, depth)).toList)
         // An entry is a message of its own, holding its value a level deeper.
         case FieldType.Map(_, item) =>
-          val values = ProtobufWire.fields(value).toOption.toList.flatten.collect { case (2, Raw.Bytes(held)) => held }
-          if depth > ProtobufWire.MaxDepth then List(("", Chunk.empty, depth)) else values.flatMap(nested(scope, item, _, depth + 1))
-        case _ => Nil
+          if depth > ProtobufWire.MaxDepth then Right(List(("", Chunk.empty, depth)))
+          else
+            ProtobufWire.fields(value).flatMap(_.toList.collect { case (2, Raw.Bytes(held)) => held }.flatTraverse(nested(scope, item, _, depth + 1)))
+        case _ => Right(Nil)
     within(List((full, bytes, 0)))
 
   def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] = decode(full, bytes, 0)

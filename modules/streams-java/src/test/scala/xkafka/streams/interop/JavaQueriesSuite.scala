@@ -113,3 +113,7 @@ final class JavaQueriesSuite extends FunSuite:
     // A topic of the user's whose name starts with the application id is not taken for one of the application's own.
     assertEquals(JavaQuerying.brokerNames("shop", Set("orders"), Set("orders", "shop-orders")), Set("orders"))
     assertEquals(JavaQuerying.brokerNames("shop", Set("orders"), Set.empty), Set("orders"))
+
+  test("a window ends its size after its start, or at the largest time where that would pass it, as Java ends one"):
+    assertEquals(JavaQuerying.windowEnd(1000L, 60000L), 61000L)
+    assertEquals(JavaQuerying.windowEnd(Long.MaxValue - 10, 60000L), Long.MaxValue)

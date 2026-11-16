@@ -108,7 +108,8 @@ object PartitionRecords:
       * under the lock the revocation takes, which it takes once the lease has ended.
       */
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
-      stateFor(record.record.topicPartition, record.offset.assignment, held(record), assigned = false).flatMap(_.traverse_(routedTo(_, record)))
+      val number = record.offset.assignment.filter(_ => consumer.numbersAssignments)
+      stateFor(record.record.topicPartition, number, held(record), assigned = false).flatMap(_.traverse_(routedTo(_, record)))
 
     private def held(record: CommittableConsumerRecord[F, K, V]): F[Boolean] = record.offset.stillHeld.getOrElse(F.pure(true))
 

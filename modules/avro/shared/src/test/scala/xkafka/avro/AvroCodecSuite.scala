@@ -149,6 +149,22 @@ final case class Renamed(
 @SchemaName("Unspaced")
 final case class Shadowing(first: Unspaced, second: Unspaced) derives AvroCodec
 
+/** A record whose union default moves a type's definition ahead of where its schema first defines it, with a field renamed and its name taken. */
+sealed trait Figured derives AvroCodec
+final case class Grouped(first: Ringed) extends Figured
+final case class Ringed(r: Int)         extends Figured
+final case class Outlined(
+    @SchemaAlias("name")
+    fullName: String,
+    name: String = "",
+    shape: Figured = Ringed(1)
+) derives AvroCodec
+
+/** A record that mentions a record in no namespace twice before a record of the same name in its own namespace is defined. */
+@SchemaName("Unspaced")
+final case class Later(note: String) derives AvroCodec
+final case class ShadowedLater(first: Unspaced, second: Unspaced, later: Later) derives AvroCodec
+
 /** Constants annotations take, in place of literals. */
 object Constants:
   final val Name      = "Order"
@@ -412,12 +428,39 @@ class AvroCodecSuite extends FunSuite:
     assertEquals(AvroBinary.writable(schema, schema), Right(()))
     assertEquals(AvroBinary.encode(schema, value).flatMap(bytes => AvroBinary.decoder(schema, schema).flatMap(_(bytes))), Right(value))
 
+  test("a schema read as the text it is registered as renames nothing, wherever that text first defines a type"):
+    val own    = AvroCodec[Outlined].schema
+    val parsed = AvroSchemaJson.parse(AvroSchemaJson.render(own)).fold(fail(_), identity)
+    val value  = AvroCodec[Outlined].encode(Outlined("Ada", "A")).fold(fail(_), identity)
+    assertEquals(AvroBinary.writable(own, parsed), Right(()))
+    assertEquals(AvroBinary.encode(own, value).flatMap(bytes => AvroBinary.decoder(own, parsed).flatMap(_(bytes))).isRight, true)
+
   test("a type given an empty namespace has none, so its schema matches a file that names none"):
     val file = """{"type":"record","name":"Unspaced","fields":[{"name":"id","type":"int"}]}"""
     assertEquals(AvroSchemaJson.render(AvroCodec[Unspaced].schema), file)
     assertEquals(AvroFormat(using AvroCodec[Unspaced]).recordName, Some("Unspaced"))
     assertEquals(AvroCodec[Unspaced].matching(file).refusal, None)
-    assertEquals(AvroCodec[Shadowing].refusal, Some("'Unspaced', in no namespace, would be read as 'xkafka.avro.Unspaced' where it is named again"))
+    assertEquals(
+      AvroCodec[Shadowing].renderedRefusal,
+      Some("'Unspaced', in no namespace, would be read as 'xkafka.avro.Unspaced' where it is named again")
+    )
+    // A type of the same name defined only after the second mention takes nothing from it, as Java reads names in order.
+    assertEquals(AvroCodec[ShadowedLater].renderedRefusal, None)
+    // Text registered as it is names the type in no namespace as Java reads it, by a leading dot.
+    val text =
+      """{"type":"record","name":"R","namespace":"a","fields":[{"name":"t","type":{"type":"record","name":"T","fields":[]}},{"name":"x","type":{"type":"record","name":"T","namespace":"","fields":[]}},{"name":"y","type":".T"}]}"""
+    val generic = AvroCodec.generic(AvroSchemaJson.parse(text).fold(fail(_), identity))
+    val format  = AvroFormat.registering(text)(using generic)
+    val value   =
+      AvroValue.Record(
+        FullName(Some("a"), "R"),
+        Vector(
+          "t" -> AvroValue.Record(FullName(Some("a"), "T"), Vector.empty),
+          "x" -> AvroValue.Record(FullName(None, "T"), Vector.empty),
+          "y" -> AvroValue.Record(FullName(None, "T"), Vector.empty)
+        )
+      )
+    assertEquals(format.writer(format.schema).flatMap(_(value)).flatMap(bytes => format.reader(format.schema).flatMap(_(bytes))), Right(value))
 
   test("annotations take any constant the compiler folds, such as a final val or joined literals"):
     assertEquals(

@@ -49,12 +49,12 @@ private object Reads:
     new ThreadLocal[Kept]:
       override def initialValue(): Kept = new Kept
 
-  /** `reading`, run with what the readings inside it keep, forgotten once the outermost is done. */
+  /** `reading`, run with what the readings inside it keep, all of it let go once the outermost is done, so that no thread holds a large record's. */
   def within[A](reading: => A): A =
     val here = kept.get
     here.within.incrementAndGet()
     try reading
-    finally if here.within.decrementAndGet() == 0 then here.read.clear()
+    finally if here.within.decrementAndGet() == 0 then kept.remove()
 
   def of[A](read: (Json, Boolean) => Either[String, A], json: Json, strict: Boolean): Either[String, A] =
     val here = kept.get
@@ -183,5 +183,5 @@ object Generated:
         case Nil                            => Left(s"expected a value of $name, found ${Shown(json.noSpaces)}, which none of its branches reads")
         case (_, value) :: Nil              => Right(value)
         case (_, value) :: _ if !exactlyOne => Right(value)
-        case several                        =>
-          Left(s"expected a value of exactly one branch of $name, found ${Shown(json.noSpaces)}, which ${several.map(_._1).mkString(", ")} all read")
+        case several => Left(s"expected a value of exactly one branch of $name, found ${Shown(json.noSpaces)}, which ${several.map(_._1)
+              .mkString(" and ")} both read")

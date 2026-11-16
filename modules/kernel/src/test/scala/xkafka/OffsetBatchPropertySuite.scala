@@ -56,6 +56,17 @@ final class OffsetBatchPropertySuite extends ScalaCheckSuite, ModelGenerators:
   private def flattened(batch: CommittableOffsetBatch[Id]): Map[(OffsetCommitter[Id], TopicPartition), Offset] =
     batch.offsets.flatMap((owner, offsets) => offsets.map((topicPartition, offset) => (owner, topicPartition) -> offset))
 
+  test("a batch keeps the offset read under the later assignment of a partition, which alone can be committed, though another is higher"):
+    val partition                                              = TopicPartition(Topic.from("t").toOption.get, Partition.from(0).toOption.get)
+    def under(next: Long, number: Long): CommittableOffset[Id] =
+      new CommittableOffset[Id]:
+        override val topicPartition: TopicPartition       = partition
+        override val nextOffset: Offset                   = Offset.from(next).toOption.get
+        override val committer: OffsetCommitter[Id]       = OffsetBatchPropertySuite.this.committer
+        override private[xkafka] def lease: Option[Lease] = Some(Lease(LeaseKey("t", 0), number))
+    List(List(under(100, 1), under(60, 2)), List(under(60, 2), under(100, 1))).foreach: offsets =>
+      assertEquals(flattened(batchOf(offsets)), Map((committer, partition) -> Offset.from(60).toOption.get), offsets.map(_.nextOffset))
+
   property("a batch keeps the greatest offset for each committer and topic-partition"):
     forAll: (offsets: List[CommittableOffset[Id]]) =>
       val expected =

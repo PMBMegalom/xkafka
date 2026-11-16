@@ -228,8 +228,9 @@ A Java member asks with `JavaQuerying`, giving it the instance, its topology, th
 application's id, a Kafka `Admin` (used to look up each topic's partition count),
 and a function that posts a query to another member's internal route. It finds the
 member holding each key, xkafka or Java, and asks it, even when that member is
-itself. While a partition moves between members, a query that needs it fails with
-`Rebalancing`:
+itself. A global table's store, which every member holds whole, it answers from
+its own. While a partition moves between members, a query that needs it fails
+with `Rebalancing`:
 
 ```java
 // Let a Java member ask for a page's view count, wherever it is held

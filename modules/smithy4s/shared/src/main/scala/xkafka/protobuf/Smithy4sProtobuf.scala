@@ -57,8 +57,10 @@ object Smithy4sProtobufFormat:
             val written = if target.text == text then Right(file) else ProtobufSchemaText.parse(target.text)
             written.flatMap(_.message(message).map(_._2).toRight(s"the schema declares no message $message")).map: path =>
               value =>
-                Either.catchNonFatal(ProtobufWire.indexes(path) ++ Chunk.array(codec.writeBlob(value).toArray))
+                // What is written is held to the depth reading takes, so that nothing is written that reading refuses.
+                Either.catchNonFatal(Chunk.array(codec.writeBlob(value).toArray))
                   .leftMap(error => s"the value cannot be written: ${error.getMessage}")
+                  .flatMap(written => depth.shallow(message, written).as(ProtobufWire.indexes(path) ++ written))
 
         override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
           ProtobufFormat.protobuf(writer).map: _ =>

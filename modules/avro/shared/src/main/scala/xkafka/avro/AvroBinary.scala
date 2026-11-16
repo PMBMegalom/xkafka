@@ -60,7 +60,9 @@ object AvroBinary:
   /** Whether the reader's aliases rename the writer's fields: not where the two schemas are one, as Java compares them, aliases and documentation
     * left out, and an enum's default too, so that a schema reads its own records as they are.
     */
-  private def renaming(writer: AvroSchema, reader: AvroSchema): Boolean = bare(writer) != bare(reader)
+  // Compared as written, where each named type is defined where it is first met, as Java compares schemas whatever place defines a type, and a
+  // default of NaN is one value.
+  private def renaming(writer: AvroSchema, reader: AvroSchema): Boolean = AvroSchemaJson.render(bare(writer)) != AvroSchemaJson.render(bare(reader))
 
   private def bare(schema: AvroSchema): AvroSchema =
     schema match

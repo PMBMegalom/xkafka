@@ -26,8 +26,9 @@ package kafkaclients
 import munit.FunSuite
 import org.apache.kafka.common.KafkaException as JavaKafkaException
 import org.apache.kafka.common.errors.{
-  ClusterAuthorizationException, GroupAuthorizationException, NotEnoughReplicasException, ProducerFencedException, RecordTooLargeException,
-  TimeoutException, TopicAuthorizationException, TransactionAbortableException, TransactionalIdAuthorizationException, UnsupportedVersionException
+  ClusterAuthorizationException, GroupAuthorizationException, InvalidTxnStateException, NotEnoughReplicasException, ProducerFencedException,
+  RecordTooLargeException, TimeoutException, TopicAuthorizationException, TransactionAbortableException, TransactionalIdAuthorizationException,
+  UnsupportedVersionException
 }
 
 /** Whether the Java client's failures are fatal: true for those it holds fatal, false for those it retries, and unknown for the rest. */
@@ -72,6 +73,32 @@ final class JavaFailuresSuite extends FunSuite:
     assertEquals((unexpected.retriable, unexpected.fatal, unexpected.transactionAbortRequired), (Some(false), Some(true), Some(false)))
     val abort = produced(new JavaKafkaException("Failed to abort transaction", new TransactionAbortableException("x")))
     assertEquals((abort.retriable, abort.fatal, abort.transactionAbortRequired), (Some(false), Some(true), Some(false)))
+
+  /** A transactional producer the Java client has made, connected to nothing, whose transaction manager the test can make fatal. */
+  private def transactionalProducer: org.apache.kafka.clients.producer.KafkaProducer[Array[Byte], Array[Byte]] =
+    val properties = new java.util.Properties()
+    properties.put("bootstrap.servers", "localhost:1")
+    properties.put("transactional.id", "failures")
+    val bytes = new org.apache.kafka.common.serialization.ByteArraySerializer()
+    new org.apache.kafka.clients.producer.KafkaProducer(properties, bytes, bytes)
+
+  test("a producer's failure is fatal exactly where the producer holds a fatal error, as the Java client says, whatever the failure's class"):
+    val producer = transactionalProducer
+    try
+      assertEquals(JavaFailures.fatalHeld(producer), Some(false), "the Java client's transaction manager could not be asked")
+      // An error state Java leaves by an abort, which it reports with a plain client exception as its cause.
+      val abortable = errorState(new JavaKafkaException("Could not add partitions to transaction due to errors: {t-0=UNKNOWN_SERVER_ERROR}"))
+      val held      = JavaFailures.producedBy(producer)(abortable).asInstanceOf[KafkaException.BackendFailure]
+      assertEquals((held.retriable, held.fatal, held.transactionAbortRequired), (Some(false), Some(false), Some(true)))
+      val field = producer.getClass.getDeclaredField("transactionManager")
+      field.setAccessible(true)
+      val manager = field.get(producer)
+      val fatal   = manager.getClass.getDeclaredMethod("transitionToFatalError", classOf[RuntimeException])
+      fatal.setAccessible(true)
+      fatal.invoke(manager, new InvalidTxnStateException("refused"))
+      val invalid = JavaFailures.producedBy(producer)(new InvalidTxnStateException("refused")).asInstanceOf[KafkaException.BackendFailure]
+      assertEquals((invalid.retriable, invalid.fatal, invalid.transactionAbortRequired), (Some(false), Some(true), Some(false)))
+    finally producer.close(java.time.Duration.ZERO)
 
   test("the error state a retriable failure left the producer in cannot be retried, only aborted, as librdkafka says of the same state"):
     val wrapped = produced(errorState(new TimeoutException("expired")))

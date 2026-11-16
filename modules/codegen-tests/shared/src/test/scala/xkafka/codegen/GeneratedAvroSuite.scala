@@ -25,6 +25,7 @@ import java.time.{Instant, LocalDate, LocalDateTime, LocalTime}
 import java.util.UUID
 
 import example.audit.{Entry, Level}
+import example.avro.{Mark, Underscored}
 import example.chain.Link
 import example.shop.*
 import fs2.Chunk
@@ -58,6 +59,10 @@ class GeneratedAvroSuite extends FunSuite:
       `type` = "kind",
       copy_ = 9
     )
+
+  test("a field or symbol named _, which Scala takes for no name, is renamed in Scala and keeps its name in the schema"):
+    assert(AvroSchemaJson.render(AvroCodec[Underscored].schema).contains("\"name\":\"_\""))
+    assertEquals(roundTrip(Underscored(1, Mark.__)), Right(Underscored(1, Mark.__)))
 
   test("a schema longer than the JVM holds in one constant is generated, and its codec has it"):
     registers[Large](Large.avroSchema)

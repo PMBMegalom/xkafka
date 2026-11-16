@@ -143,8 +143,9 @@ that limit.
 
 The per-partition streams, and `consumeChunk`, rely on the consumer xkafka
 makes, or one made from it with `mapK`. A `KafkaConsumer` of your own, even one
-that wraps xkafka's, gets no pausing, and with rebalance-safe commits counts each
-record as handed out when it is routed to its partition's stream.
+that wraps xkafka's, gets no pausing; with rebalance-safe commits it counts each
+record as handed out when it is routed to its partition's stream; and a record
+read before its partition was revoked can open a stream of that partition again.
 
 ## Stopping without losing records
 
@@ -243,7 +244,8 @@ Within the consumer resource:
 - `beginningOffsets` and `endOffsets` query the available offset range.
 - `offsetsForTimes` finds the earliest available offsets at or after timestamps.
   A time before 1970 raises `IllegalArgumentException`, as does writing a record
-  with one, since Kafka holds none.
+  with one, since Kafka holds none, or with 1970-01-01T00:00:00Z itself, which
+  librdkafka would write as the time it sends the record at.
 - `partitionsFor` returns a topic's partitions. For a topic the cluster does
   not have, it fails with `ErrorCode.UnknownTopicOrPartition` and creates
   nothing.

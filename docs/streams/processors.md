@@ -334,8 +334,10 @@ The processor runs as it would in Java Kafka Streams:
   between.
 - `forward` sends records on, with the times and headers they are given.
 - `schedule` runs punctuators by stream time or by the clock, from the start time
-  given if there is one, and `cancel` stops them. Each task's instance schedules
-  its own.
+  given if there is one, and `cancel` stops them. A start time already past runs
+  first at the next time on its grid, a whole number of intervals after it, as
+  Java schedules it, and one before 1970 is refused. Each task's instance
+  schedules its own.
 - `recordMetadata` gives the topic, partition and offset of the record being read,
   and `taskId`, `applicationId`, `currentStreamTimeMs` and `currentSystemTimeMs`
   give what they do in Java.

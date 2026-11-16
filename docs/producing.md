@@ -122,7 +122,10 @@ producer.produceAttemptEachAndAwait(batch).flatMap: attempts =>
 ## Records
 
 A `ProducerRecord` names its topic, key, and value, and optionally a partition,
-a timestamp, and [headers](headers.md). A key or value of `None`, through the `.option`
+a timestamp, and [headers](headers.md). A timestamp before 1970, or of
+1970-01-01T00:00:00Z itself, raises `IllegalArgumentException`: Kafka holds none
+before, and librdkafka writes that time as the time it sends the record at, so on
+Scala.js and Scala Native the record would carry another. A key or value of `None`, through the `.option`
 codecs, represents a Kafka null. Tombstones are produced this way; see
 [Nulls and tombstones](serialization.md#nulls-and-tombstones).
 
@@ -215,7 +218,9 @@ def batched[F[_], K, V](settings: ProducerSettings[F, K, V]): IO[ProducerSetting
 
 `withLinger` returns a `ValidatedNel`, because a negative linger, or one of
 `ProducerSettings.LingerLimit` or longer, is rejected, and so is one not less
-than a `message.timeout.ms` or `delivery.timeout.ms` the properties set.
+than a `message.timeout.ms` or `delivery.timeout.ms` the properties set, or one
+that with the request timeout passes a `delivery.timeout.ms` the properties set.
+See [Validation](settings.md#validation) for every rule.
 
 A batch is sent as soon as it is full or its linger has passed, whichever comes
 first. `batchSize` sets how many bytes of records make a batch full. Unless it is

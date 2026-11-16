@@ -1281,8 +1281,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             assertEquals(failure.code, Some(ErrorCode.Fenced), failure.getMessage)
             assertEquals(failure.retriable, Some(false), failure.getMessage)
             assertEquals(failure.fatal, Some(true), failure.getMessage)
-            if backend == "jvm" then assertEquals(failure.transactionAbortRequired, None, failure.getMessage)
-            else assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
+            assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
           case other => fail(s"a fenced producer should report a backend failure, got $other")
         next match
           case Left(failure: KafkaException.BackendFailure) =>

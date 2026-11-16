@@ -541,7 +541,9 @@ private[xkafka] object Engine:
       // The member's epoch when it gave the tasks, which their commits carry.
       epoch: Int = 0,
       // Since when transactions have failed in ways Java recovers from, which the task timeout bounds.
-      failing: Option[FiniteDuration] = None
+      failing: Option[FiniteDuration] = None,
+      // Since when writes at the commit have failed one after another, at least once, which records processed between them do not end.
+      flushFailing: Option[FiniteDuration] = None
   )
 
   private final class Loop[F[_]](
@@ -666,10 +668,10 @@ private[xkafka] object Engine:
     private def window(running: Running[F]): F[Running[F]] =
       transactions match
         // A write that fails in a way worth retrying starts the tasks again from what the group committed, as Java revives them, whether it was made
-        // processing records or writing a buffer at the commit. Records processed end the time a failure counts against, as Java clears a task's
-        // timeout once it processes a record, but not where the window's write at the commit then fails again, so that a buffer that can never be
-        // written stops the application once the task timeout has passed. A poll that brings nothing, or a commit of nothing, is no progress. The
-        // offsets' commit after has its own way of asking again.
+        // processing records or writing a buffer at the commit. Records processed end the time a failure in processing counts against, as Java
+        // clears a task's timeout once it processes a record. Writes at the commit that fail one after another count from the first, until a commit
+        // is made, so that a buffer that can never be written stops the application once the task timeout has passed. The offsets' commit after
+        // has its own way of asking again.
         case None =>
           def recovering(from: Running[F])(attempt: F[Running[F]]): F[Running[F]] =
             attempt.recoverWith:
@@ -684,9 +686,10 @@ private[xkafka] object Engine:
               else
                 flushed(after, after.tasks.keySet, plane.write).map(Right(_)).recoverWith {
                   case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
-                    recovered(after.copy(failing = running.failing), failure, F.unit).map(Left(_))
+                    recovered(after.copy(failing = after.flushFailing), failure, F.unit)
+                      .map(restarted => Left(restarted.copy(flushFailing = restarted.failing)))
                 }.flatMap:
-                  case Right(written)  => committed(written, after.tasks.keySet).map(_._1.copy(committed = now))
+                  case Right(written)  => committed(written, after.tasks.keySet).map(_._1.copy(committed = now, flushFailing = None))
                   case Left(restarted) => F.pure(restarted)
         case Some(transaction) => (poll(running), F.realTime).tupled.flatMap: (polled, clock) =>
             // A punctuator that is due runs without records, in a transaction of its own that records no offsets.
@@ -771,7 +774,8 @@ private[xkafka] object Engine:
 
     // Recovering from failures is bounded per set of tasks, as Java bounds it per task: tasks that change start their time afresh.
     private def change(running: Running[F], told: Either[Throwable, MemberAction]): F[Running[F]] =
-      changed(running, told).map(after => if after.tasks.keySet == running.tasks.keySet then after else after.copy(failing = None))
+      changed(running, told)
+        .map(after => if after.tasks.keySet == running.tasks.keySet then after else after.copy(failing = None, flushFailing = None))
 
     private def changed(running: Running[F], told: Either[Throwable, MemberAction]): F[Running[F]] =
       told.liftTo[F].flatMap:

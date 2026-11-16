@@ -34,12 +34,15 @@ final case class AvroWritten(schema: AvroSchema, value: AvroValue)
   * resolved to the codec's. A schema that names schemas registered under other subjects is not read.
   */
 object AvroFormat:
-  def apply[A](using codec: AvroCodec[A]): SchemaFormat[A] = registering(AvroSchemaJson.render(codec.schema))
+  def apply[A](using codec: AvroCodec[A]): SchemaFormat[A] = registering(AvroSchemaJson.render(codec.schema), rendered = true)
 
-  /** The format of `codec`, registering `text` as its schema, the text `codec`'s schema was read from. */
-  private[avro] def registering[A](text: String)(using codec: AvroCodec[A]): SchemaFormat[A] =
+  /** The format of `codec`, registering `text` as its schema: the text `codec`'s schema was read from, or, `rendered`, the text xkafka writes of it,
+    * which must name each of its types as itself.
+    */
+  private[avro] def registering[A](text: String, rendered: Boolean = false)(using codec: AvroCodec[A]): SchemaFormat[A] =
     new SchemaFormat[A]:
-      private val own = codec.schema
+      private val own     = codec.schema
+      private val refusal = if rendered then codec.renderedRefusal else codec.refusal
 
       override val schema: Schema = Schema(text, SchemaType.Avro)
       // Confluent's strategies that name subjects by record take no other named type.
@@ -49,7 +52,7 @@ object AvroFormat:
           case _                                => None
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        codec.refusal.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).flatMap: written =>
+        refusal.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).flatMap: written =>
           // A value is written as its codec gives it. Where the schema is another, it is read into that schema as Avro resolves the codec's into it,
           // as Java's serializer and the vulcan and avro4s serdes do: through aliases, widening numbers, leaving out the fields it lacks and taking
           // the defaults of those it adds.
@@ -62,7 +65,7 @@ object AvroFormat:
           framed.map(write => value => write(value).flatMap(AvroBinary.toPayload(written, _)))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        codec.refusal.toLeft(()) *> avro(writer).flatMap: written =>
+        refusal.toLeft(()) *> avro(writer).flatMap: written =>
           AvroBinary.decoder(written, own).map(decode => bytes => AvroBinary.fromPayload(written, bytes).flatMap(decode).flatMap(codec.decode))
 
   private[avro] def avro(schema: Schema): Either[String, AvroSchema] =
@@ -77,7 +80,8 @@ object AvroSerde:
       F: Concurrent[F],
       codec: AvroCodec[A]
   ): F[Serde[F, A]] =
-    F.fromEither(codec.refusal.map(new RegistryException.NoSchema(_)).toLeft(())) *> RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
+    F.fromEither(codec.renderedRefusal.map(new RegistryException.NoSchema(_)).toLeft(())) *>
+      RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
 
   /** Serdes of values of `schema`, a schema known only as the program runs: values are written with it, and records read as it describes them. */
   def generic[F[_]: Concurrent](

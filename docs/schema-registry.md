@@ -843,8 +843,10 @@ So are:
 - a JSON or Protobuf record whose text is not UTF-8. An Avro record's text is
   read with such bytes replaced.
 
-The serdes of vulcan, avro4s, ScalaPB and smithy4s write and read nested records
-as their libraries do.
+The serdes of vulcan and avro4s write and read nested records as their libraries
+do. Those of ScalaPB and smithy4s hold what they write to the same limits as what
+they read, so they write nothing that reading refuses, and refuse bytes that are
+not a message of their type before their libraries read them.
 
 A value an error names is cut short after 200 characters, with its full
 length.

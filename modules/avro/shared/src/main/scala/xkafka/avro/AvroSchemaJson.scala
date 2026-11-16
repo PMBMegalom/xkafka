@@ -87,22 +87,31 @@ object AvroSchemaJson:
     else twice(branches).map(kind => s"a union holds '$kind' twice").toLeft(AvroSchema.Union(branches))
 
   /** The type two branches of a union are of, where two are: a named type by its full name, which a primitive of the same name is not. */
-  /** A type in no namespace named again inside a record of a namespace that holds a type of the same name: its name there is read as that type's, by
-    * Java as by xkafka, so the schema would mean another.
+  /** A type in no namespace named again, where `render` writes it, inside a record of a namespace whose type of the same name is defined before: Java
+    * and xkafka read that name as the type before, so the schema written would mean another.
     */
   private[avro] def shadowed(schema: AvroSchema): Option[String] =
-    val defined                                                                          = AvroSchema.definitions(schema)
-    def walk(at: AvroSchema, space: Option[String], seen: Set[FullName]): Option[String] =
+    val defined = AvroSchema.definitions(schema)
+    // The types written so far, as `write` defines each where it is first met.
+    def walk(at: AvroSchema, space: Option[String], written: Set[FullName]): (Option[String], Set[FullName]) =
+      def all(schemas: List[AvroSchema], inside: Option[String], seen: Set[FullName]) =
+        schemas.foldLeft((Option.empty[String], seen)) { case ((found, sofar), next) =>
+          if found.isDefined then (found, sofar) else walk(next, inside, sofar)
+        }
       at match
-        case AvroSchema.Named(full) if full.namespace.isEmpty && space.exists(inside => defined.contains(FullName(Some(inside), full.name))) =>
-          Some(s"'${full.name}', in no namespace, would be read as '${space.getOrElse("")}.${full.name}' where it is named again")
-        case AvroSchema.Named(full) if !seen(full) => defined.get(full).flatMap(walk(_, space, seen + full))
-        case AvroSchema.Record(name, fields, _, _) => fields.iterator.flatMap(field => walk(field.schema, name.namespace, seen + name)).nextOption()
-        case AvroSchema.Array(items)               => walk(items, space, seen)
-        case AvroSchema.Map(values)                => walk(values, space, seen)
-        case AvroSchema.Union(branches)            => branches.iterator.flatMap(walk(_, space, seen)).nextOption()
-        case _                                     => None
-    walk(schema, None, Set.empty)
+        case AvroSchema.Named(full) if written(full) =>
+          val shadow = space.map(inside => FullName(Some(inside), full.name)).filter(other => full.namespace.isEmpty && written(other))
+          (shadow.map(other => s"'${full.name}', in no namespace, would be read as '${other.value}' where it is named again"), written)
+        case AvroSchema.Named(full)                => defined.get(full).fold((None, written))(walk(_, space, written))
+        case AvroSchema.Record(name, fields, _, _) => all(fields.map(_.schema), name.namespace, written + name)
+        case AvroSchema.Enum(name, _, _, _, _)     => (None, written + name)
+        case AvroSchema.Fixed(name, _, _)          => (None, written + name)
+        case AvroSchema.Logical(logicalType)       => walk(logicalType.underlying, space, written)
+        case AvroSchema.Array(items)               => walk(items, space, written)
+        case AvroSchema.Map(values)                => walk(values, space, written)
+        case AvroSchema.Union(branches)            => all(branches, space, written)
+        case _                                     => (None, written)
+    walk(schema, None, Set.empty)._1
 
   private[avro] def twice(branches: List[AvroSchema]): Option[String] =
     def kind(schema: AvroSchema): (Boolean, String) =

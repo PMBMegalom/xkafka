@@ -41,7 +41,10 @@ private def isolationLevel(value: IsolationLevel): String =
     case IsolationLevel.ReadCommitted   => "read_committed"
 
 /** The client every backend shares, over the driver of the platform it runs on. */
-private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using F: Async[F]) extends KafkaClient[F]:
+/** The client of `driver`. `forStreams` is the streams engine's own, whose producers write the times its records carry, 1970-01-01T00:00:00Z itself
+  * among them, as Java's Kafka Streams writes them, though librdkafka writes that time as the time it sends the record at.
+  */
+private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forStreams: Boolean = false)(using F: Async[F]) extends KafkaClient[F]:
   // Records the poll loop has read but nothing has taken yet. The loop stops polling when this fills, which is
   // also when Kafka would consider the consumer stalled.
   private val RecordQueueSize = 256
@@ -130,7 +133,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     */
   private def serveDeliveries(client: NativeClient, deliveries: Deliveries): F[Unit] =
     (deliveries.waiting.waitUntil(_ > 0) *> client(driver.serveDeliveries(client.handle, DeliveryPollTimeoutMillis)) *>
-      deliveries.served.update(_ + 1)).foreverM[Unit].onError(deliveries.failure.complete(_).void)
+      deliveries.served.update(_ + 1)).foreverM[Unit].guaranteeCase:
+      // Serving stops with the producer too, when it is released, so whoever waits for room or reports is told the client is closed.
+      case Outcome.Errored(error) => deliveries.failure.complete(error).void
+      case _                      => deliveries.failure.complete(new IllegalStateException("the client is closed")).void
 
   /** How many batches are waiting for their reports, how many times the shared queue has been served, and why serving it stopped, if it has. */
   private final case class Deliveries(waiting: SignallingRef[F, Int], served: SignallingRef[F, Long], failure: Deferred[F, Throwable])
@@ -218,7 +224,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   override def streams(settings: StreamsSettings, topology: Topology[F], forward: Forward[F]): Resource[F, KafkaStreams[F]] =
     internal.streams.Engine(
-      this,
+      new DriverClient[F](driver, forStreams = true),
       driver,
       settings.client,
       settings.applicationId.value,
@@ -465,6 +471,13 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
   private def before1970(times: List[Timestamp]): F[Unit] =
     times.find(_.epochMillis < 0L).traverse_(time => F.raiseError(new IllegalArgumentException(s"Kafka holds no time before 1970, was $time")))
 
+  /** Refuses a record's time of 1970-01-01T00:00:00Z itself, which librdkafka takes for none and writes as the time it sends the record at, so no
+    * backend writes a time another would write otherwise. The streams engine's producers write it, as the time a record of their input carried.
+    */
+  private def atEpoch(time: Option[Timestamp]): F[Unit] =
+    time.filter(_.epochMillis == 0L && !forStreams).traverse_ : at =>
+      F.raiseError(new IllegalArgumentException(s"a record's time must be after 1970-01-01T00:00:00Z, was $at"))
+
   /** Refuses a header name holding NUL, since librdkafka gives names back only up to it, so no backend writes one. */
   private def nulInHeaderName(headers: Headers): F[Unit] =
     F.defer:
@@ -662,7 +675,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       else client(driver.awaitDeliveries(batch, DeliveryPollTimeoutMillis)).flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
-      before1970(record.timestamp.toList) *> nulInHeaderName(record.headers) *>
+      before1970(record.timestamp.toList) *> atEpoch(record.timestamp) *> nulInHeaderName(record.headers) *>
         (
           settings.keySerializer.serialize(record.topic, record.headers, record.key),
           settings.valueSerializer.serialize(record.topic, record.headers, record.value)
@@ -876,6 +889,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
     // Told apart by their numbers, not by the partitions alone: a partition revoked and assigned again between two looks shows only its later
     // number, in an assignment of the same partitions.
+    override private[xkafka] def numbersAssignments: Boolean = true
+
     override private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] =
       assignments.discrete
         .evalMap(assignment => numbers.get.map(held => assignment.map(partition => partition -> held.getOrElse(leaseKey(partition), 0L)).toMap))

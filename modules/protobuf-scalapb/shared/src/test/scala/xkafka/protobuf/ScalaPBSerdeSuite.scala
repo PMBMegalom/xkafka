@@ -106,6 +106,17 @@ class ScalaPBSerdeSuite extends CatsEffectSuite:
     assert(reader(Chunk(0.toByte) ++ nested(5000)).left.exists(_.endsWith("the record is nested more than 100 deep")))
     assertEquals(reader(Chunk(0.toByte) ++ nested(3)), Right(Node(Some(Node(Some(Node(Some(Node()))))))))
 
+  test("a deep record that ends in bytes no message holds is refused, not read by ScalaPB as far as those bytes, and nothing too deep is written"):
+    def nested(levels: Int) = (0 until levels).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
+    val format              = ScalaPBFormat[Node].fold(fail(_), identity)
+    val reader              = format.reader(format.schema).fold(fail(_), identity)
+    // A group's start tag, which ScalaPB would come to only after reading the levels before it.
+    assert(reader(Chunk(0.toByte) ++ nested(5000) ++ Chunk(0x0b.toByte)).isLeft)
+    val writer            = format.writer(format.schema).fold(fail(_), identity)
+    def node(levels: Int) = (0 until levels).foldLeft(Node())((inner, _) => Node(Some(inner)))
+    assert(writer(node(101)).left.exists(_.endsWith("the record is nested more than 100 deep")))
+    assertEquals(writer(node(100)).flatMap(reader), Right(node(100)))
+
   test("a message's schema is the file it was generated from: its maps, oneofs, optional fields and imports of the well-known types"):
     assertEquals(schemaOf[Order], shop)
     assertEquals(ScalaPBFormat[Order].map(_.recordName), Right(Some("example.shop.Order")))

@@ -346,6 +346,18 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _     <- reading.cancel
     yield assertEquals(count, 2)
 
+  test("a consumer that does not number its assignments, as one that wraps xkafka's, has its records' numbers ignored, one stream a partition"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened     <- Ref[IO].of(0)
+      reading    <- testConsumer(assignment, input).partitionedRecords(10).evalMap(_ => opened.update(_ + 1)).compile.drain.start
+      _     <- IO.sleep(100.millis) *> input.send(record(firstPartition, 0L, "a", Some(1L))) *> input.send(record(firstPartition, 1L, "b", Some(2L)))
+      _     <- IO.sleep(100.millis)
+      count <- opened.get
+      _     <- reading.cancel
+    yield assertEquals(count, 1)
+
   test("consumeChunk hands over the records waiting for a partition together, not one at a time"):
     for
       assignment <- Ref[IO].of(Set(firstPartition))
@@ -390,6 +402,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
     new KafkaConsumer[IO, String, String]:
       override private[xkafka] def assignmentNumbers: Stream[IO, Map[TopicPartition, Long]] =
         numbers.fold(assignmentChanges.map(_.map(_ -> 0L).toMap))(_.discrete)
+      override private[xkafka] def numbersAssignments: Boolean                        = numbers.isDefined
       override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = input.stream
       override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
       override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes

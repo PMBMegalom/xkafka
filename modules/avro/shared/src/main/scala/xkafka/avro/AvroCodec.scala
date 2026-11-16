@@ -51,10 +51,13 @@ trait AvroCodec[A]:
   /** The schema values are written with. */
   final def schema: AvroSchema = built._2
 
-  /** Why no serde of this codec can be made: two of the types it writes given one name, a type in no namespace that its schema could only name as
-    * another, or a schema it must match and does not.
+  /** Why no serde of this codec can be made: two of the types it writes given one name, or a schema it must match and does not. */
+  private[avro] final def refusal: Option[String] = built._1.clashes.headOption.orElse(mismatch)
+
+  /** Why no serde registering this codec's schema as `AvroSchemaJson.render` writes it can be made: as [[refusal]] says, or a type in no namespace
+    * that the text could only name as another.
     */
-  private[avro] final def refusal: Option[String] = built._1.clashes.headOption.orElse(AvroSchemaJson.shadowed(schema)).orElse(mismatch)
+  private[avro] final def renderedRefusal: Option[String] = refusal.orElse(AvroSchemaJson.shadowed(schema))
 
   def encode(value: A): Either[String, AvroValue]
 

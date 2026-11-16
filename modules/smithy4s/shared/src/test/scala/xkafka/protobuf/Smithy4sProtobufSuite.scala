@@ -244,6 +244,18 @@ class Smithy4sProtobufSuite extends FunSuite:
         .exists(_.endsWith("the record is nested more than 100 deep"))
     )
 
+  test("a deep record that ends in bytes no message holds is refused before smithy4s reads it, and nothing too deep is written"):
+    val (message, path) = file[Payment].message("example.proto.Payment").getOrElse(fail("no Payment"))
+    val extra           = message.fields.find(_.name == "extra").getOrElse(fail("no extra")).number
+    val value           = (0 until 2500)
+      .foldLeft(ProtobufWire.field(1, Raw.Varint(0)))((inner, _) => ProtobufWire.field(6, Raw.Bytes(ProtobufWire.field(1, Raw.Bytes(inner)))))
+    val format = Smithy4sProtobufFormat[Payment].fold(fail(_), identity)
+    val reader = format.reader(format.schema).fold(fail(_), identity)
+    assert(reader(ProtobufWire.indexes(path) ++ ProtobufWire.field(extra, Raw.Bytes(value)) ++ Chunk(0x0b.toByte)).isLeft)
+    val writer                       = format.writer(format.schema).fold(fail(_), identity)
+    def lists(levels: Int): Document = (0 until levels).foldLeft(Document.nullDoc)((inner, _) => Document.array(inner))
+    assert(writer(least.copy(extra = Some(lists(150)))).left.exists(_.endsWith("the record is nested more than 100 deep")))
+
   test("the format names the message by its full name"):
     assertEquals(Smithy4sProtobufFormat[Payment].map(_.recordName), Right(Some("example.proto.Payment")))
 

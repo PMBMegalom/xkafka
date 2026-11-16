@@ -423,6 +423,16 @@ static int xkafka_socket_handshake(xkafka_socket_t *connection, SSL_CTX *context
         connection->incoming = BIO_new(BIO_s_mem());
         connection->outgoing = BIO_new(BIO_s_mem());
         if (connection->ssl == NULL || connection->incoming == NULL || connection->outgoing == NULL) {
+                /* The session owns the buffers only once they are set on it, so ones made before it failed are freed here, where freeing the
+                 * session would leave them. */
+                if (connection->ssl != NULL) {
+                        if (connection->incoming != NULL)
+                                BIO_free(connection->incoming);
+                        if (connection->outgoing != NULL)
+                                BIO_free(connection->outgoing);
+                        connection->incoming = NULL;
+                        connection->outgoing = NULL;
+                }
                 xkafka_socket_fail_ssl(error, error_size, error_code, RD_KAFKA_RESP_ERR__SSL, "could not start TLS");
                 return -1;
         }

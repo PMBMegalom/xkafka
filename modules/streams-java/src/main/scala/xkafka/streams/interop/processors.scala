@@ -85,6 +85,8 @@ private final class Session[F[_], K2, V2](task: HostedTask, stores: List[JavaSto
 
   def schedule(start: Option[Instant], interval: Duration, kind: PunctuationType, punctuator: Punctuator): Cancellable =
     if interval.toMillis < 1 then throw new IllegalArgumentException(s"a punctuator's interval must be at least a millisecond, was $interval")
+    if start.exists(_.isBefore(Instant.EPOCH)) then
+      throw new IllegalArgumentException(s"a punctuator's start must not be before 1970, was ${start.get}")
     val every  = FiniteDuration(interval.toMillis, MILLISECONDS)
     val number = numbers.incrementAndGet
     val wanted = if kind == PunctuationType.WALL_CLOCK_TIME then Punctuation.wallClock(every) else Punctuation.streamTime(every)

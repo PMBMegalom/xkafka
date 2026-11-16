@@ -179,11 +179,12 @@ class GeneratedJsonSuite extends FunSuite:
       payment("""{"amount":1,"last4":"4242","extra":true}""")
     )
     def with_(property: String, text: String) = read[Order](least.replace("\"note\":null", s"\"note\":null,\"$property\":$text"))
-    assert(with_("size", """{"n":1}""").left.exists(_.contains("Order.Small, Order.Large")), with_("size", """{"n":1}"""))
+    assert(with_("size", """{"n":1}""").left.exists(_.contains("Order.Small and Order.Large")), with_("size", """{"n":1}"""))
     assertEquals(with_("measure", "5").map(_.measure), Right(Some(5L)))
     assertEquals(with_("measure", "5.5").map(_.measure), Right(Some(5.5)))
     def exact(text: String) = read[Order](least.replace("\"street\":\"s\"", s"\"street\":\"s\",\"exact\":$text")).map(_.shipping.exact)
     assert(exact("5").left.exists(_.contains("exactly one branch")), exact("5"))
+    assert(exact("5").left.exists(_.endsWith("both read")), exact("5"))
     assertEquals(exact("5.5"), Right(Some(5.5)))
     assertEquals((with_("code", "\"x\"").map(_.code), with_("code", "7").map(_.code)), (Right(Some("x")), Right(Some(7L))))
 

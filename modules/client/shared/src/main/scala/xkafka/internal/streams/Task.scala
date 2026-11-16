@@ -226,7 +226,14 @@ private[xkafka] final class Task[F[_]](
         added.toList.sortBy(_._1).foldLeft(state.punctuations): (queues, entry) =>
           val (id, scheduled) = entry
           val schedule        = scheduled.punctuation
-          val first           = scheduled.start.getOrElse(if schedule.wallClock then now + schedule.millis else 0L)
+          // A start already past runs first at the next time on its grid after now, as Java schedules it, now being the clock or the stream time.
+          val reference = if schedule.wallClock then now else streamTime(state).getOrElse(-1L)
+          val first     =
+            scheduled.start.fold(if schedule.wallClock then now + schedule.millis else 0L): start =>
+              if start >= reference then start
+              else
+                val missed = (reference - start) / schedule.millis + 1
+                if missed > (Long.MaxValue - start) / schedule.millis then Long.MaxValue else start + missed * schedule.millis
           queues.updated(schedule.wallClock, queues.getOrElse(schedule.wallClock, PunctuationQueue(Vector.empty)).added((node.named, id) -> first))
       val kept =
         state.hostedSchedules.filter((id, _) => id._1 != node.named) ++ live.map((id, scheduled) => (node.named, id) -> scheduled.punctuation)

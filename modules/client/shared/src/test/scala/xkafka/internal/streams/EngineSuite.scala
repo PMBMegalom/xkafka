@@ -976,6 +976,18 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(ended, None)
         assert(log.contains(Event.Revoked(2)), log)
 
+  test(
+    "at least once, a suppression's buffer that cannot be written at any commit stops the engine after the task timeout, though records processed between are written"
+  ):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing, taskTimeout = 2.seconds): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _     <- world.failWritesTo(_.endsWith("final-store-changelog"), timedOut)
+        _     <- (0L until 60L).toList.traverse_(offset => world.records(record(1, offset, s"k$offset", 1000L)) *> IO.sleep(100.millis))
+        ended <- world.ended
+      yield assertEquals(ended, Some(Left(timedOut)))
+
   test("a suppression's buffer logs what it changed before the offsets are committed"):
     run(topology = suppressing, commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 1, 29)))): world =>
       world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis) *> world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(1500.millis) *>
@@ -1646,7 +1658,8 @@ object EngineSuite:
       transacted: Ref[IO, Int],
       outcome: Ref[IO, Option[Either[Throwable, Unit]]],
       val wroteAt: Ref[IO, List[(Long, List[String])]],
-      purging: Ref[IO, (IO[Unit], IO[Unit])],
+      // A purge's outcome, the next write's, and a failure of every write to a topic a test names.
+      purging: Ref[IO, (IO[Unit], IO[Unit], Option[(String => Boolean, Throwable)])],
       reported: SignallingRef[IO, Member],
       restoring: Ref[IO, FiniteDuration],
       val states: Ref[IO, List[StreamsState]],
@@ -1680,6 +1693,9 @@ object EngineSuite:
 
     /** Makes the next write fail with `failure`, once. */
     def failWrite(failure: Throwable): IO[Unit] = purging.update(_.copy(_2 = IO.raiseError(failure)))
+
+    /** Fails every write to a topic `to` takes from now on, the others written. */
+    def failWritesTo(to: String => Boolean, failure: Throwable): IO[Unit] = purging.update(_.copy(_3 = Some(to -> failure)))
 
     /** Fails every write from now on, each failure arming the next. */
     def failWrites(failure: Throwable): IO[Unit] = purging.update(_.copy(_2 = failWrites(failure) *> IO.raiseError(failure)))
@@ -1751,7 +1767,9 @@ object EngineSuite:
             else ending.get.map(_._1.view.filterKeys(partitions.toSet).toMap)
         def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] =
           val values = records.toList.flatMap(_.value).map(value => new String(value.toArray))
-          purging.getAndUpdate(_.copy(_2 = IO.unit)).flatMap(_._2) *> written.update(_ ++ records.toList) *>
+          purging.get
+            .flatMap(_._3.filter((to, _) => records.exists(record => to(record.topic.value))).traverse_((_, failure) => IO.raiseError(failure))) *>
+            purging.getAndUpdate(_.copy(_2 = IO.unit)).flatMap(_._2) *> written.update(_ ++ records.toList) *>
             now.flatMap(at => wroteAt.update(_ :+ (at, values)))
         def purge(before: Map[TopicPartition, Offset]): IO[Unit] = logged(Event.Purged(before)) *> purging.get.flatMap(_._1)
 
@@ -1772,7 +1790,7 @@ object EngineSuite:
         IO.ref(0),
         IO.ref(Option.empty[Either[Throwable, Unit]]),
         IO.ref(List.empty[(Long, List[String])]),
-        IO.ref((IO.unit, IO.unit)),
+        IO.ref((IO.unit, IO.unit, Option.empty[(String => Boolean, Throwable)])),
         SignallingRef[IO].of(Member(identity)),
         IO.ref(Duration.Zero: FiniteDuration),
         IO.ref(List.empty[StreamsState]),

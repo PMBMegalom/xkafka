@@ -149,8 +149,9 @@ When the group moves a partition to another consumer, offsets read from it befor
 the move can no longer be committed, whether on their own, in a batch, or in a
 [transaction](transactions.md). The commit fails with a
 `KafkaException.BackendFailure` whose code is `ErrorCode.IllegalGeneration`, and
-nothing is committed for that partition. This holds even if the partition later
-comes back to the same consumer.
+nothing in that commit is committed, though it holds other partitions too. This
+holds even if the partition later comes back to the same consumer. A batch that
+also holds an offset read since the partition came back keeps only that one.
 
 `IllegalGeneration` is not retriable. Read the records again after the rebalance,
 and commit those offsets. Records fetched before the move but not yet read are

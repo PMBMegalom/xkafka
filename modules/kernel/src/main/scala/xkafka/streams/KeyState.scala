@@ -33,8 +33,8 @@ object KeyState:
   /** Records keyed as they were read, which can be grouped or joined by key where they are. */
   sealed trait AsRead extends KeyState
 
-  /** Records `map`, `flatMap`, `selectKey` or `evalMap` may have given a new key, which go through a repartition topic before they are grouped or
-    * joined by key.
+  /** Records `map`, `flatMap`, `selectKey`, `evalMap`, `mapRecord`, `flatMapRecord` or `evalMapRecord` may have given a new key, which go through a
+    * repartition topic before they are grouped or joined by key.
     */
   sealed trait Changed extends KeyState
 

@@ -123,11 +123,13 @@ private[codegen] object Names:
 
   def typeName(name: String): String = term(name)
 
-  /** A field's Scala name, and the Avro name it is renamed from where that name is one of a case class's own. */
-  def field(name: String): (String, Option[String]) = if members.contains(name) then (s"${name}_", Some(name)) else (term(name), None)
+  /** A field's Scala name, and the Avro name it is renamed from where that name is one of a case class's own, or `_`, which Scala takes for no name.
+    */
+  def field(name: String): (String, Option[String]) = if members.contains(name) || name == "_" then (s"${name}_", Some(name)) else (term(name), None)
 
-  /** An enum case's Scala name, and the symbol it is renamed from where that symbol is one of an enum's own members. */
-  def symbol(name: String): (String, Option[String]) = if enumMembers.contains(name) then (s"${name}_", Some(name)) else (term(name), None)
+  /** An enum case's Scala name, and the symbol it is renamed from where that symbol is one of an enum's own members, or `_`. */
+  def symbol(name: String): (String, Option[String]) =
+    if enumMembers.contains(name) || name == "_" then (s"${name}_", Some(name)) else (term(name), None)
 
   /** What goes between a parameter's name and its type: a name ending in an underscore would take a colon right after it as part of itself. */
   def colon(name: String): String = if name.endsWith("_") then " : " else ": "

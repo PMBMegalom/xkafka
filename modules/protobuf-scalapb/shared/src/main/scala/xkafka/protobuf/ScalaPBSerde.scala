@@ -57,13 +57,18 @@ object ScalaPBFormat:
             val at =
               if target.text == text then Right(path)
               else ProtobufSchemaText.parse(target.text).flatMap(_.message(message).map(_._2).toRight(s"the schema declares no message $message"))
-            at.map(indexes => value => Right(ProtobufWire.indexes(indexes) ++ Chunk.array(value.toByteArray)))
+            // What is written is held to the depth reading takes, so that nothing is written that reading refuses.
+            at.map(indexes =>
+              value =>
+                val written = Chunk.array(value.toByteArray)
+                depth.shallow(message, written).as(ProtobufWire.indexes(indexes) ++ written)
+            )
 
         override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, M]] =
           ProtobufFormat.protobuf(writer).map: _ =>
             bytes =>
               ProtobufWire.readIndexes(bytes).flatMap: (_, written) =>
-                depth.shallow(message, written).flatMap(_ =>
+                depth.shallow(message, written).leftMap(reason => s"$message could not be read: $reason").flatMap(_ =>
                   Either.catchNonFatal(companion.parseFrom(written.toArray)).leftMap(failure => s"$message could not be read: ${failure.getMessage}")
                 )
 

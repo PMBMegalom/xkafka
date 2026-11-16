@@ -165,6 +165,26 @@ final class ProcessorFromJavaSuite extends CatsEffectSuite:
       assert(reasons.head.contains("in memory"), reasons.toString)
       assert(reasons.tail.forall(_.contains("no default serdes")), reasons.toString)
 
+  test("a punctuator whose start time has passed runs first at the next time on its grid, as Java schedules it, and none starts before 1970"):
+    def scheduling(start: java.time.Instant) =
+      processor(
+        opened =>
+          opened
+            .schedule(start, Duration.ofSeconds(1), PunctuationType.WALL_CLOCK_TIME, at => opened.forward(new JavaRecord("tick", s"$at", at))): Unit,
+        (_, _) => ()
+      )
+    task(pipeline(Processor.fromJava[IO](scheduling(java.time.Instant.EPOCH))), 0).flatMap: t =>
+      for
+        opened <- t.opened(TaskState.empty, 10500L)
+        early  <- t.punctuate(opened, 10600L)
+        first  <- t.punctuate(early._1, 11000L)
+      yield
+        assertEquals(values(early._2), Vector.empty)
+        assertEquals(values(first._2), Vector("11000"))
+    *>
+      task(pipeline(Processor.fromJava[IO](scheduling(java.time.Instant.ofEpochMilli(-1)))), 0).flatMap(_.opened(TaskState.empty, 0L)).attempt
+        .map(opened => assert(opened.left.exists(_.isInstanceOf[IllegalArgumentException]), opened))
+
   test("a punctuator scheduled with a start time runs first at that time, and then each interval after it"):
     val starting =
       processor(
@@ -188,6 +208,28 @@ final class ProcessorFromJavaSuite extends CatsEffectSuite:
         assertEquals(values(before._2), Vector.empty)
         assertEquals(values(first._2), Vector("2600"))
         assertEquals(values(next._2), Vector("3500"))
+
+  test("a Java processor's prefix scan serializes its prefix for no topic, as Java's stores do"):
+    val counts = JavaStore.keyValue(Store("counts"), text, text)
+    val topics = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val prefix =
+      new org.apache.kafka.common.serialization.Serializer[String]:
+        override def serialize(topic: String, data: String): Array[Byte] =
+          topics.add(String.valueOf(topic)): Unit
+          data.getBytes("UTF-8")
+    val scanning =
+      processor(
+        _ => (),
+        (context, record) =>
+          val store = context.getStateStore[JavaKeyValueStore[String, String]]("counts")
+          store.put(record.key, record.value)
+          val found = scala.jdk.CollectionConverters.IteratorHasAsScala(store.prefixScan("a", prefix)).asScala.map(_.key).mkString(",")
+          context.forward(record.withValue(found))
+      )
+    task(pipeline(Processor.fromJava[IO](scanning, counts)), 0).flatMap: t =>
+      t.opened(TaskState.empty, 0L).flatMap(t.process(_, input("ab", "v", 10L, 0L), 0L)).map: (_, written) =>
+        assertEquals(values(written), Vector("ab"))
+        assertEquals(topics.toArray.toList, List("null"))
 
   test("a Java processor reads what an earlier record wrote, and finds keys by range in the order Java's stores keep them"):
     val counts  = JavaStore.keyValue(Store("counts"), text, text)

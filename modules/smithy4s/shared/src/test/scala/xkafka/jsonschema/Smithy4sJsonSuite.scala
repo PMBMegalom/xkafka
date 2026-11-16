@@ -96,6 +96,12 @@ class Smithy4sJsonSuite extends FunSuite:
     val past = s"""{"meta":${"[" * 150}${"]" * 150}}"""
     assertEquals(reader(fs2.Chunk.array(past.getBytes("UTF-8"))).left.toOption, Some("the record is nested more than 100 deep"))
 
+  test("nothing nested deeper than reading takes is written"):
+    val writer                       = Smithy4sJsonFormat[Order].writer(Smithy4sJsonFormat[Order].schema).fold(fail(_), identity)
+    def lists(levels: Int): Document = (0 until levels).foldLeft(Document.nullDoc)((inner, _) => Document.array(inner))
+    assertEquals(writer(least.copy(meta = Some(lists(150)))).left.toOption, Some("the record is nested more than 100 deep"))
+    assert(writer(least.copy(meta = Some(lists(50)))).isRight)
+
   test("the format registers the schema of smithy4s's JSON, titled by the shape's full name"):
     assertEquals(Smithy4sJsonFormat[Order].schema.text, schema[Order].noSpaces)
     assertEquals(Smithy4sJsonFormat[Order].recordName, Some("example.shop.Order"))

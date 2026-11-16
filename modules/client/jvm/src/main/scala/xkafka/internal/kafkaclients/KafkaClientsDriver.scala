@@ -225,7 +225,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             if metadata.hasOffset then metadata.offset else -1L,
             if metadata.hasTimestamp then metadata.timestamp else -1L
           ))
-        case Left(error) => Left(JavaFailures.delivery(error))
+        case Left(error) => Left(JavaFailures.delivery(error, producerOf(producer)))
 
   override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] =
     producing(producer)(value => withinTimeout(timeoutMillis)(value.initTransactions()))
@@ -704,8 +704,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def producing[A](client: Client)(use: JavaProducer[Array[Byte], Array[Byte]] => F[A]): F[A] =
     client match
-      case JavaClient.Producer(value) => F.defer(use(value)).adaptError(JavaFailures.produced)
+      case JavaClient.Producer(value) => F.defer(use(value)).adaptError(JavaFailures.producedBy(value))
       case other                      => F.raiseError(new IllegalArgumentException(s"not a producer: $other"))
+
+  private def producerOf(client: Client): AnyRef =
+    client match
+      case JavaClient.Producer(value) => value
+      case other                      => other
 
   private def administering[A](client: Client)(use: Admin => F[A]): F[A] =
     client match

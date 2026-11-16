@@ -102,12 +102,16 @@ private[xkafka] object RocksdbStore:
     val cursor = db.newIterator(meta)
     try
       cursor.seek(Position.getBytes)
-      Iterator.continually(cursor).takeWhile(at => at.isValid && new String(at.key).startsWith(Position)).map: at =>
-        val partition = new String(at.key).drop(Position.length).toIntOption
-        val offset    = ByteBuffer.wrap(at.value).getLong
-        at.next()
-        partition.map(_ -> offset)
-      .toList.flatten.toMap
+      val positions =
+        Iterator.continually(cursor).takeWhile(at => at.isValid && new String(at.key).startsWith(Position)).map: at =>
+          val partition = new String(at.key).drop(Position.length).toIntOption
+          val offset    = ByteBuffer.wrap(at.value).getLong
+          at.next()
+          partition.map(_ -> offset)
+        .toList.flatten.toMap
+      // An iterator that stops being valid has reached the end, or failed, which `status` raises.
+      cursor.status()
+      positions
     finally cursor.close()
 
   /** A time as eight bytes that order as the times do: big-endian, with the sign bit flipped. */
@@ -210,7 +214,10 @@ private[xkafka] object RocksdbStore:
       val cursor  = db.newIterator(family, reading)
       try
         from.fold(cursor.seekToFirst())(cursor.seek)
-        Vector.unfold(())(_ => Option.when(cursor.isValid)((read(cursor.key, cursor.value), cursor.next())))
+        val entries = Vector.unfold(())(_ => Option.when(cursor.isValid)((read(cursor.key, cursor.value), cursor.next())))
+        // A scan that stops early has failed, which `status` raises, so that no store is read as holding less than it does.
+        cursor.status()
+        entries
       finally
         cursor.close()
         reading.close()

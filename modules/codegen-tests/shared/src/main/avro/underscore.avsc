@@ -1,0 +1,9 @@
+{
+  "type": "record",
+  "name": "Underscored",
+  "namespace": "example.avro",
+  "fields": [
+    { "name": "_", "type": "int" },
+    { "name": "mark", "type": { "type": "enum", "name": "Mark", "symbols": ["_", "X"] } }
+  ]
+}

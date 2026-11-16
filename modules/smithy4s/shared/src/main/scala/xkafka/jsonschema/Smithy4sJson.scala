@@ -47,7 +47,9 @@ object Smithy4sJsonFormat:
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
         JsonSchemaFormat.json(target).map: _ =>
           value =>
+            // What is written is held to the depth reading takes, so that nothing is written that reading refuses.
             Either.catchNonFatal(Chunk.array(encoder.encode(value).toArray)).leftMap(error => s"the value cannot be written: ${error.getMessage}")
+              .flatTap(JsonSchemaFormat.read)
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
         // smithy4s-json counts no depth, so a record too deep is refused before it is read, as xkafka's own JSON reading refuses it.

@@ -24,6 +24,8 @@ package internal
 package kafkaclients
 
 import org.apache.kafka.clients.consumer.{CommitFailedException, InvalidOffsetException}
+import org.apache.kafka.clients.producer.KafkaProducer as JavaProducer
+import org.apache.kafka.clients.producer.internals.TransactionManager
 import org.apache.kafka.common.KafkaException as JavaKafkaException
 import org.apache.kafka.common.config.ConfigException
 import org.apache.kafka.common.errors.{
@@ -39,6 +41,45 @@ private[kafkaclients] object JavaFailures:
 
   /** A producer's failure, of which the Java client holds some fatal, and whose error state only an abort leaves. */
   val produced: PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException => failure(error, producer = true) }
+
+  /** A failure of `producer`, fatal exactly where the producer itself holds a fatal error, as the Java client knows best whether one is: a failure it
+    * is not held fatal for, as an error state, is left by an abort. Where the producer cannot say, as `produced` classifies it.
+    */
+  def producedBy(producer: AnyRef): PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException =>
+    held(failure(error, producer = true), producer)
+  }
+
+  private def held(classified: KafkaException.BackendFailure, producer: AnyRef): KafkaException.BackendFailure =
+    fatalHeld(producer) match
+      case Some(true) =>
+        new KafkaException.BackendFailure(classified.detail, classified.code, Some(false), Some(true), Some(false), classified.getCause)
+      case Some(false) =>
+        val abortable = classified.transactionAbortRequired.isDefined
+        new KafkaException.BackendFailure(
+          classified.detail,
+          classified.code,
+          if abortable then Some(false) else classified.retriable,
+          Some(false),
+          if abortable then Some(true) else classified.transactionAbortRequired,
+          classified.getCause
+        )
+      case None => classified
+
+  /** The producer's transaction manager and whether it holds a fatal error, which the Java client keeps to itself; none where it cannot be asked. */
+  private lazy val asking: Option[(java.lang.reflect.Field, java.lang.reflect.Method)] =
+    scala.util.Try {
+      val manager = classOf[JavaProducer[?, ?]].getDeclaredField("transactionManager")
+      val fatal   = classOf[TransactionManager].getDeclaredMethod("hasFatalError")
+      manager.setAccessible(true)
+      fatal.setAccessible(true)
+      (manager, fatal)
+    }.toOption
+
+  private[kafkaclients] def fatalHeld(producer: AnyRef): Option[Boolean] =
+    producer match
+      case client: JavaProducer[?, ?] => asking
+          .flatMap((manager, fatal) => scala.util.Try(Option(manager.get(client)).map(fatal.invoke(_).asInstanceOf[Boolean])).toOption.flatten)
+      case _ => None
 
   private def failure(error: JavaKafkaException, producer: Boolean): KafkaException.BackendFailure =
     val message = Option(error.getMessage).getOrElse(error.getClass.getName)
@@ -92,8 +133,8 @@ private[kafkaclients] object JavaFailures:
       case _ => None
 
   /** Why one record was not delivered. The Java client reports its own exceptions there, and anything else is kept as the cause. */
-  def delivery(error: Throwable): KafkaException =
-    produced.lift(error).collect { case failure: KafkaException => failure }
+  def delivery(error: Throwable, producer: AnyRef): KafkaException =
+    producedBy(producer).lift(error).collect { case failure: KafkaException => failure }
       .getOrElse(new KafkaException.BackendFailure(Option(error.getMessage).getOrElse(error.getClass.getName), cause = error))
 
   /** Kafka maps its own exceptions back to the protocol error table, which is the same table librdkafka reports.
