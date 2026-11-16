@@ -418,6 +418,18 @@ final class DriverClientSuite extends CatsEffectSuite:
       calls <- fake.calls
     yield assert(calls.contains("unassign"), s"the revocation was taken from the driver but never applied: $calls")
 
+  test("a commit refused because the group is gone, as the broker answers its only member once it is removed, says the member is unknown"):
+    val gone = new KafkaException.BackendFailure("Broker: The group id does not exist", Some(ErrorCode.GroupIdNotFound), Some(false))
+    FakeDriver(offsetCommitFailure = Some(gone)).flatMap: fake =>
+      consuming(fake): consumer =>
+        for
+          _      <- fake.assign *> fake.until(_.contains("assign"))
+          record <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          commit <- record.offset.commit.attempt
+        yield
+          val code = commit.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten
+          assertEquals(code, Some(ErrorCode.UnknownMemberId), commit)
+
   test("with rebalance-safe commits, a revocation waits for the records handed out to be committed, with their partition paused meanwhile"):
     FakeDriver().flatMap: fake =>
       consuming(fake, safe(10.seconds)): consumer =>
@@ -783,7 +795,8 @@ final class DriverClientSuite extends CatsEffectSuite:
       holdOffsets: Boolean,
       commitFailures: Ref[IO, List[Throwable]],
       beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])],
-      abortFailures: Ref[IO, List[Throwable]]
+      abortFailures: Ref[IO, List[Throwable]],
+      offsetCommitFailure: Option[Throwable]
   ) extends KafkaDriver[IO]:
     type Client        = String
     type Batch         = Int
@@ -974,7 +987,7 @@ final class DriverClientSuite extends CatsEffectSuite:
       calls.map(log => if log.lastIndexOf("assign") > log.lastIndexOf("unassign") then Vector("events" -> 0) else Vector.empty)
 
     override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
-      record("commit") *> held(holdCommits)
+      record("commit") *> held(holdCommits) *> offsetCommitFailure.traverse_(IO.raiseError)
 
     override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = record("pause")
 
@@ -1078,7 +1091,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         servingTakes: FiniteDuration = 5.millis,
         commitFailures: List[Throwable] = Nil,
         beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])] = None,
-        abortFailures: List[Throwable] = Nil
+        abortFailures: List[Throwable] = Nil,
+        offsetCommitFailure: Option[Throwable] = None
     ): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
@@ -1108,6 +1122,7 @@ final class DriverClientSuite extends CatsEffectSuite:
           holdOffsets,
           failures,
           beginGate,
-          aborts
+          aborts,
+          offsetCommitFailure
         )
       )

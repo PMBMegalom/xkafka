@@ -996,8 +996,21 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
 
         CommittableConsumerRecord(record, committable)
 
+    // A member removed from a group it alone was in may find the group gone, which the broker answers as GROUP_ID_NOT_FOUND; it is a member of no
+    // group, as where others stay, so it is reported as UNKNOWN_MEMBER_ID, as the Java client reports it on every backend.
     private def commitOffsets(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
-      if offsets.isEmpty then F.unit else client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis)) *> committedElsewhere(offsets)
+      if offsets.isEmpty then F.unit
+      else
+        client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis)).adaptError {
+          case gone: KafkaException.BackendFailure if gone.code.contains(ErrorCode.GroupIdNotFound) =>
+            new KafkaException.BackendFailure(
+              gone.detail,
+              Some(ErrorCode.UnknownMemberId),
+              Some(ErrorCode.UnknownMemberId.retriable),
+              gone.fatal,
+              cause = gone
+            )
+        } *> committedElsewhere(offsets)
 
     override val pausing: PartitionPausing[F] =
       new PartitionPausing.Backend[F]:
