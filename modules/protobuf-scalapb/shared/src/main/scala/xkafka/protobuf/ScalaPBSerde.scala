@@ -39,12 +39,14 @@ object ScalaPBFormat:
     val message = companion.scalaDescriptor.fullName
     for
       file <- ScalaPBDescriptors.file(companion.scalaDescriptor.file.asProto)
-      _    <-
+      pool <-
         Pool.of(file, Map.empty)
           .leftMap(reason => s"$reason; a ScalaPB message is registered with a file that imports only the files Confluent's serializers know")
       path <- file.message(message).map(_._2).toRight(s"the file declares no message $message")
     yield
       val text = ProtobufSchemaText.render(file)
+      // ScalaPB reads a message inside another by recursion, counting no depth, so a record too deep is refused before it is read.
+      val depth = new Dynamic(pool)
       new SchemaFormat[M]:
         override val schema: Schema             = Schema(text, SchemaType.Protobuf)
         override val recordName: Option[String] = Some(message)
@@ -61,7 +63,9 @@ object ScalaPBFormat:
           ProtobufFormat.protobuf(writer).map: _ =>
             bytes =>
               ProtobufWire.readIndexes(bytes).flatMap: (_, written) =>
-                Either.catchNonFatal(companion.parseFrom(written.toArray)).leftMap(failure => s"$message could not be read: ${failure.getMessage}")
+                depth.shallow(message, written).flatMap(_ =>
+                  Either.catchNonFatal(companion.parseFrom(written.toArray)).leftMap(failure => s"$message could not be read: ${failure.getMessage}")
+                )
 
 /** Serdes of Protobuf messages that ScalaPB generated, with the schemas the registry keeps, in Confluent's wire format, as Confluent's
   * `KafkaProtobufSerializer` writes them.

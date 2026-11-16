@@ -48,9 +48,8 @@ def movements(orders: Topic, refunds: Topic, output: Topic): Pipeline[IO] =
     .to(Named("write"), output, text, text)
 ```
 
-`split` sends each record down the first branch that takes it. A branch's node is named by the split's name followed by the branch's, here
-`route-large`. `defaultBranch` takes what no branch took; with `noDefaultBranch`,
-those records go no further:
+`split` sends each record down the first branch that takes it. `defaultBranch`
+takes what no branch took; with `noDefaultBranch`, those records go no further:
 
 ```scala mdoc:compile-only
 // Send large orders to one topic, and the rest to another

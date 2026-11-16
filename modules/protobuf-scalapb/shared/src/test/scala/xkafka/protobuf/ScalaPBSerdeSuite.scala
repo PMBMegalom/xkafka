@@ -28,6 +28,7 @@ import com.google.protobuf.ByteString
 import com.google.protobuf.timestamp.Timestamp
 import example.dated.dated.Delivery
 import example.legacy.legacy.{Item, Kind}
+import example.node.node.Node
 import example.open.open.Open
 import example.refused.refused.Basket
 import example.shop.shop.{Cash, Order, Status}
@@ -98,6 +99,12 @@ class ScalaPBSerdeSuite extends CatsEffectSuite:
       |  STATUS_PAID = 1;
       |}
       |""".stripMargin
+
+  test("a record nested deeper than protobuf-java reads is refused before ScalaPB reads it, which counts no depth and would run the stack out"):
+    def nested(levels: Int) = (0 until levels).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
+    val reader              = ScalaPBFormat[Node].flatMap(format => format.reader(format.schema)).fold(fail(_), identity)
+    assert(reader(Chunk(0.toByte) ++ nested(5000)).left.exists(_.endsWith("the record is nested more than 100 deep")))
+    assertEquals(reader(Chunk(0.toByte) ++ nested(3)), Right(Node(Some(Node(Some(Node(Some(Node()))))))))
 
   test("a message's schema is the file it was generated from: its maps, oneofs, optional fields and imports of the well-known types"):
     assertEquals(schemaOf[Order], shop)

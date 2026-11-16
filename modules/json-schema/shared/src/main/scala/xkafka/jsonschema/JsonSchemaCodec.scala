@@ -156,12 +156,14 @@ object JsonSchemaCodec:
     */
   private[jsonschema] def takesNull(schema: Json): Boolean = schema.asBoolean.getOrElse(schema.asObject.forall(!rulesOutNull(_)))
 
-  /** Whether `schema` takes null whatever else it is given, which a `not` of it then rules out. */
+  /** Whether `schema` takes null whatever else it is given, which a `not` of it then rules out. A condition, `if` with `then` or `else`, may rule
+    * null out, so a schema holding one is not sure to take it.
+    */
   private def surelyNull(schema: Json): Boolean =
     schema.asBoolean.getOrElse(
       schema.asObject.exists: fields =>
         !rulesOutNull(fields) && fields("anyOf").forall(_.asArray.exists(_.exists(surelyNull))) && fields("oneOf").isEmpty && fields("allOf")
-          .forall(_.asArray.exists(_.forall(surelyNull)))
+          .forall(_.asArray.exists(_.forall(surelyNull))) && List("if", "then", "else").forall(key => !fields.contains(key))
     )
 
   private def rulesOutNull(fields: io.circe.JsonObject): Boolean =

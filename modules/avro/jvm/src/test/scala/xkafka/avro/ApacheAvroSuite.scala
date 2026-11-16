@@ -178,6 +178,24 @@ class ApacheAvroSuite extends ScalaCheckSuite:
         AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
       ),
       (
+        "a schema read as itself, a field renamed and its old name taken again",
+        record("R", """{"name":"fullName","type":"string","aliases":["name"]},{"name":"name","type":"string","default":""}"""),
+        record("R", """{"name":"fullName","type":"string","aliases":["name"]},{"name":"name","type":"string","default":""}"""),
+        AvroValue.Record(FullName(None, "R"), Vector("fullName" -> AvroValue.String("Ada"), "name" -> AvroValue.String("A")))
+      ),
+      (
+        "a schema read as itself, two fields aliased to each other",
+        record("R", """{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}"""),
+        record("R", """{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}"""),
+        AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
+      ),
+      (
+        "schemas that differ only in documentation",
+        record("R", """{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}"""),
+        """{"type":"record","name":"R","doc":"Two numbers.","fields":[{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}]}""",
+        AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
+      ),
+      (
         "a record read by its simple name alone",
         """{"type":"record","name":"R","namespace":"old","fields":[{"name":"b","type":"int"}]}""",
         """{"type":"record","name":"R","namespace":"new","fields":[{"name":"c","type":"int","default":0,"aliases":["b"]}]}""",

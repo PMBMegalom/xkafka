@@ -166,6 +166,18 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(committed.size, 1)
         assertEquals(ended, None)
 
+  test("a commit of tasks handed back that the coordinator is never ready for gives the tasks up, and the engine answers the revocation and goes on"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 14))), taskTimeout = 1.second): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _     <- world.records(record(0, 0L, "k", 1000L)) *> IO.sleep(100.millis)
+        _     <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 0)))) *> IO.sleep(3.seconds)
+        log   <- world.log.get
+        ended <- world.ended
+      yield
+        assertEquals(ended, None)
+        assert(log.contains(Event.Revoked(2)), log)
+
   test("a commit from a member the group no longer counts is dropped, and the engine goes on"):
     run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 25)))): world =>
       for
@@ -503,6 +515,29 @@ final class EngineSuite extends CatsEffectSuite:
         fetches <- world.fetches.get
         ended   <- world.ended
       yield assertEquals((fetches.size, ended), (2, None))
+
+  test("at least once, records processed between two failures end the first one's time, though no commit came between, as Java clears it"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), taskTimeout = 500.millis): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _     <- world.failWrite(timedOut) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(100.millis)
+        _     <- (6L to 12L).toList.traverse_(offset => world.records(record(0, offset, "k", 1000L)) *> IO.sleep(100.millis))
+        _     <- world.failWrite(timedOut) *> world.records(record(0, 13L, "k", 1000L)) *> IO.sleep(200.millis)
+        ended <- world.ended
+      yield assertEquals(ended, None)
+
+  test("at least once, a write that fails for every record stops the engine after the task timeout, though commits of nothing come between"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), taskTimeout = 2.seconds): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _     <- world.failWrites(timedOut)
+        _     <- (0 until 5).toList.traverse_(_ => world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis))
+        ended <- world.ended
+      yield assertEquals(ended, Some(Left(timedOut)))
 
   test("at least once, a failure recovered from counts no longer once the tasks commit again, so a later one starts its own task timeout"):
     val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)

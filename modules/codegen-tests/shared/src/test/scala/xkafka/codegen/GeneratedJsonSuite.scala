@@ -24,7 +24,7 @@ package xkafka.codegen
 import java.time.{Instant, LocalDate, OffsetTime, ZoneOffset}
 import java.util.UUID
 
-import example.json.{Catalogue, Note_, Order, Payment, Scope, Shade_}
+import example.json.{Catalogue, Links, Note_, Order, Payment, Ping, Scope, Shade_}
 import example.json.decimal.Price
 import example.json.untitled.{Level, Tree}
 import fs2.Chunk
@@ -115,6 +115,15 @@ class GeneratedJsonSuite extends FunSuite:
     assertEquals(roundTrip[Payment](Payment.Cash(3)), Right(Payment.Cash(3)))
     assertEquals(roundTrip(Tree(1, List(Tree(2), Tree(3, List(Tree(4)))))), Right(Tree(1, List(Tree(2), Tree(3, List(Tree(4)))))))
     Level.values.foreach(level => assertEquals(roundTrip(level), Right(level)))
+
+  test("a record of constants alone writes them and reads them back, and compiles where unused parameters fail the build"):
+    assertEquals(summon[JsonSchemaCodec[Ping]].encode(Ping()), Right(json("""{"kind":"ping"}""")))
+    assertEquals(roundTrip(Ping()), Right(Ping()))
+
+  test("a union whose branches both read a value nested in it reads each level once, not again for every branch above"):
+    val nested = (0 until 40).foldLeft("{}")((inner, _) => s"""{"next":$inner}""")
+    val read   = summon[JsonSchemaCodec[Links]].decode(json(nested))
+    assert(read.isRight, read)
 
   test("a generated type that holds itself is refused nested past the limit as a derived record is, however deep, and written up to it"):
     def nested(depth: Int) = (1 until depth).foldLeft(Tree(0))((inner, level) => Tree(level, List(inner)))

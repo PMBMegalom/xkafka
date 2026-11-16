@@ -1,0 +1,8 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "example.json.Ping",
+  "type": "object",
+  "properties": { "kind": { "const": "ping" } },
+  "required": ["kind"],
+  "additionalProperties": false
+}

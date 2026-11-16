@@ -190,7 +190,9 @@ A record without a value, such as a tombstone, fails to read with
   `Box__List__Int`, where the class is derived for those arguments.
 - Two types given one name, for example with `@SchemaName`, make no schema,
   so making a serde of them fails with `RegistryException.NoSchema`. So do two
-  cases of a sealed trait given one name, which would be one union branch twice.
+  cases of a sealed trait given one name, which would be one union branch twice,
+  and a type in no namespace that the schema names again inside a namespace
+  holding a type of the same name, where Avro reads the name as that type's.
 - A field's Scala default is its default in the schema. An optional field whose
   default is a value has that value's branch first in its union, since Avro takes
   a union's default from its first branch. A default the schema cannot place is
@@ -721,9 +723,9 @@ declare groups or extensions, or are written in an edition of Protobuf.
 ## Names and documentation
 
 These annotations, in `xkafka.schemaregistry`, change what a derived schema
-calls things, for every format. Each takes a constant, a literal or a value the
-compiler folds to one, such as a `final val`; any other argument fails to
-compile:
+calls things, for every format. Each that takes an argument takes a constant, a
+literal or a value the compiler folds to one, such as a `final val`; any other
+argument fails to compile:
 
 | Annotation | On | Effect |
 | --- | --- | --- |
@@ -828,10 +830,12 @@ Failures are `RegistryException`s:
 | `NoSchema` | your type has no schema in the serde's format, such as a list of lists in Protobuf |
 
 A record nested more than 100 deep, such as a list of 101 nodes that each hold
-the next, is also `Unserializable`, written or read, in every format with
+the next, is also `Unserializable`, written or read, in Avro and JSON Schema with
 xkafka's own codecs. A Protobuf record may hold 100 messages below its own, as
 protobuf-java reads it, counting a oneof's message and each map entry as one, so
-a list of 102 nodes is refused there. So are:
+a list of 102 nodes is refused there. A record read through ScalaPB or smithy4s,
+whose readers count no depth, is held to the same limits before they read it.
+So are:
 
 - an Avro record whose arrays or maps claim more items than its bytes can hold,
   or that has bytes left after its value, with xkafka's codecs or with vulcan's

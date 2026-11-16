@@ -274,7 +274,7 @@ final class JavaQuerying private (
     val described = sourcesOf(store)
     val metadata  = settled(streams.streamsMetadataForStore(store)).asScala.toList
     val held      = metadata.flatMap(_.topicPartitions.asScala.map(_.topic)).toSet
-    val topics    = described.map(topic => Some(s"$application-$topic").filter(held).getOrElse(topic))
+    val topics    = JavaQuerying.brokerNames(application, described, held)
     val holders   =
       metadata
         .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(partition => topics(partition.topic)).map(_.partition).toList.sorted.distinct)
@@ -333,6 +333,12 @@ object JavaQuerying:
       )
 
   /** The member holding `partition`, of `holders` each with the partitions it holds. */
+  /** The topics a store is filled from, as the brokers name them: each by its own name where the members hold that topic, or else by the application
+    * id and its name, as Java names a topic of the application's own, such as a repartition topic, that its topology describes without the id.
+    */
+  private[interop] def brokerNames(application: String, described: Set[String], held: Set[String]): Set[String] =
+    described.map(topic => Some(topic).filter(held).orElse(Some(s"$application-$topic").filter(held)).getOrElse(topic))
+
   private[interop] def holderOf(partition: Int, holders: List[(HostInfo, List[Int])]): Option[HostInfo] =
     holders.collectFirst { case (at, held) if held.contains(partition) => at }
 

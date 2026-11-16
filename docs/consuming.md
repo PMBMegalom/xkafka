@@ -141,6 +141,11 @@ Read every partition's stream at the same time, for example with
 its records are waiting. Records already being fetched can briefly take it past
 that limit.
 
+The per-partition streams, and `consumeChunk`, rely on the consumer xkafka
+makes, or one made from it with `mapK`. A `KafkaConsumer` of your own, even one
+that wraps xkafka's, gets no pausing, and with rebalance-safe commits counts each
+record as handed out when it is routed to its partition's stream.
+
 ## Stopping without losing records
 
 `stopConsuming` stops fetching. The record streams then end once the records

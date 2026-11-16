@@ -329,6 +329,23 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _      <- reading.cancel
     yield assertEquals(counts, (Vector(0L -> 0L, 1L -> 5L), Vector(0L)))
 
+  test("a record read before its partition was revoked opens no stream for it after, though nothing fences it, and the stream ended stays ended"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      numbers    <- SignallingRef[IO].of(Map(firstPartition -> 1L))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened     <- Ref[IO].of(0)
+      reading    <-
+        testConsumer(assignment, input, numbers = Some(numbers)).partitionedRecords(10).evalMap(_ => opened.update(_ + 1)).compile.drain.start
+      _ <- input.send(record(firstPartition, 0L, "a", Some(1L))) *> IO.sleep(100.millis)
+      _ <- numbers.set(Map.empty) *> IO.sleep(100.millis)
+      _ <- input.send(record(firstPartition, 1L, "late", Some(1L))) *> IO.sleep(100.millis)
+      // Assigned again, it opens a stream of its own.
+      _     <- numbers.set(Map(firstPartition -> 2L)) *> IO.sleep(100.millis)
+      count <- opened.get
+      _     <- reading.cancel
+    yield assertEquals(count, 2)
+
   test("consumeChunk hands over the records waiting for a partition together, not one at a time"):
     for
       assignment <- Ref[IO].of(Set(firstPartition))

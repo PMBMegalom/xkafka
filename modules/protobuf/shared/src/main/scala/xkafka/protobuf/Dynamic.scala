@@ -161,6 +161,35 @@ private[protobuf] final class Dynamic(pool: Pool):
               case other                            => Left(s"expected a value of $full, found ${Shown(other)}")
       case (expected, other) => Left(s"expected a value of ${expected.toString.toLowerCase}, found ${Shown(other)}")
 
+  /** Whether no message in a record of the message `full` is more than `ProtobufWire.MaxDepth` below its own, as protobuf-java counts them, a map's
+    * entries among them: found without recursion, so that a library that reads messages by recursion and counts no depth, such as ScalaPB, is given
+    * no record that would run the stack out. Bytes that are no message are left for that library to refuse.
+    */
+  def shallow(full: String, bytes: Chunk[Byte]): Either[String, Unit] =
+    val tooDeep = Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    @scala.annotation.tailrec
+    def within(pending: List[(String, Chunk[Byte], Int)]): Either[String, Unit] =
+      pending match
+        case Nil                                                 => Right(())
+        case (_, _, depth) :: _ if depth > ProtobufWire.MaxDepth => tooDeep
+        case (scope, written, depth) :: rest                     =>
+          val inner =
+            (pool.message(scope), ProtobufWire.fields(written).toOption).tupled.toList.flatMap: (described, read) =>
+              val types = described._1.fields.map(field => field.number -> field.fieldType).toMap
+              read.toList.flatMap:
+                case (number, Raw.Bytes(value)) => types.get(number).toList.flatMap(nested(scope, _, value, depth + 1))
+                case _                          => Nil
+          within(inner ++ rest)
+    def nested(scope: String, fieldType: FieldType, value: Chunk[Byte], depth: Int): List[(String, Chunk[Byte], Int)] =
+      fieldType match
+        case FieldType.Named(name) => pool.resolve(scope, name).toOption.flatMap(_.toOption).map(full => (full, value, depth)).toList
+        // An entry is a message of its own, holding its value a level deeper.
+        case FieldType.Map(_, item) =>
+          val values = ProtobufWire.fields(value).toOption.toList.flatten.collect { case (2, Raw.Bytes(held)) => held }
+          if depth > ProtobufWire.MaxDepth then List(("", Chunk.empty, depth)) else values.flatMap(nested(scope, item, _, depth + 1))
+        case _ => Nil
+    within(List((full, bytes, 0)))
+
   def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] = decode(full, bytes, 0)
 
   /** A message inside as many others as `depth` says, refused past `ProtobufWire.MaxDepth`, so that no record runs the stack out. */
@@ -194,7 +223,8 @@ private[protobuf] final class Dynamic(pool: Pool):
           case Raw.Bytes(entry)                              => ProtobufWire.fields(entry).flatMap: fields =>
               def at(number: Int): Option[Raw] = fields.collect { case (`number`, raw) => raw }.lastOption
               // A value left out is its type's zero, and for a message, the message with nothing written, as protobuf reads it.
-              val absent = if message(scope, item) then take(scope, item, Raw.Bytes(Chunk.empty), depth + 1) else zeroOf(scope, item)
+              // One left out is no message on the wire, so it is no level deeper, as protobuf-java counts it.
+              val absent = if message(scope, item) then take(scope, item, Raw.Bytes(Chunk.empty), depth) else zeroOf(scope, item)
               (at(1).fold(zeroOf(scope, key))(take(scope, key, _, depth + 1)), at(2).fold(absent)(take(scope, item, _, depth + 1))).tupled
           case _ => Left("expected a map's entry")
         // Of two entries with one key, the later is read, in its place.

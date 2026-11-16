@@ -72,6 +72,8 @@ object PartitionRecords:
       pausing: PartitionPausing.Backend[F],
       output: Channel[F, PartitionRecords[F, K, V]],
       states: Ref[F, Map[TopicPartition, PartitionState[F, K, V]]],
+      // The assignment each partition's last stream ended at, so a record read under it, routed after, opens no stream of a partition revoked.
+      retired: Ref[F, Map[TopicPartition, Long]],
       mutex: Mutex[F]
   )(using F: Async[F]):
     /** A record source that ends carries the partition streams with it, so a graceful stop reaches whoever is reading partitions. */
@@ -96,7 +98,8 @@ object PartitionRecords:
       * those assigned again since their stream was opened, which may have been revoked between two looks at the assignment.
       */
     private def reconcile(assignment: Map[TopicPartition, Long]): F[Unit] =
-      assignment.toList.traverse_((partition, number) => stateFor(partition, Some(number), F.pure(true)).void) >> revokeMissing(assignment.keySet)
+      assignment.toList.traverse_((partition, number) => stateFor(partition, Some(number), F.pure(true), assigned = true).void) >>
+        revokeMissing(assignment.keySet)
 
     /** Routes a record, opening the partition's stream first if the assignment has not reported it yet.
       *
@@ -105,7 +108,7 @@ object PartitionRecords:
       * under the lock the revocation takes, which it takes once the lease has ended.
       */
     private def route(record: CommittableConsumerRecord[F, K, V]): F[Unit] =
-      stateFor(record.record.topicPartition, record.offset.assignment, held(record)).flatMap(_.traverse_(routedTo(_, record)))
+      stateFor(record.record.topicPartition, record.offset.assignment, held(record), assigned = false).flatMap(_.traverse_(routedTo(_, record)))
 
     private def held(record: CommittableConsumerRecord[F, K, V]): F[Boolean] = record.offset.stillHeld.getOrElse(F.pure(true))
 
@@ -159,7 +162,12 @@ object PartitionRecords:
     /** The state of the partition's `assignment`, where it is not one the stream has moved past. A later one ends the stream of an earlier, as the
       * partition was revoked in between, and a record of an earlier one is not handed out, its partition having been revoked since.
       */
-    private def stateFor(topicPartition: TopicPartition, assignment: Option[Long], held: F[Boolean]): F[Option[PartitionState[F, K, V]]] =
+    private def stateFor(
+        topicPartition: TopicPartition,
+        assignment: Option[Long],
+        held: F[Boolean],
+        assigned: Boolean
+    ): F[Option[PartitionState[F, K, V]]] =
       mutex.lock.surround:
         held.ifM(
           states.get.map(_.get(topicPartition)).flatMap:
@@ -168,7 +176,10 @@ object PartitionRecords:
                   F.uncancelable(_ => ended(List(state))) *> stateOf(topicPartition, number).map(Some(_))
                 case Some(number) if number < state.assignment => F.pure(None)
                 case _                                         => F.pure(Some(state))
-            case None => stateOf(topicPartition, assignment.getOrElse(0L)).map(Some(_))
+            // A record of an assignment whose stream has ended opens none: its partition was revoked. The assignment itself opens one.
+            case None => retired.get.flatMap: ended =>
+                val past = !assigned && assignment.exists(number => ended.get(topicPartition).exists(_ >= number))
+                if past then F.pure(None) else stateOf(topicPartition, assignment.getOrElse(0L)).map(Some(_))
           ,
           F.pure(None)
         )
@@ -200,7 +211,8 @@ object PartitionRecords:
       * all are, though one fails, before the first failure is raised.
       */
     private def ended(revoked: List[PartitionState[F, K, V]]): F[Unit] =
-      states.update(_.removedAll(revoked.map(_.topicPartition))) >> revoked.traverse: state =>
+      val revokedAt = revoked.map(state => state.topicPartition -> state.assignment)
+      retired.update(_ ++ revokedAt) >> states.update(_.removedAll(revoked.map(_.topicPartition))) >> revoked.traverse: state =>
         state.mutex.lock.surround:
           state.revoked.set(true) >> state.channel.close.void >> state.paused.getAndSet(false)
             .flatMap(wasPaused => F.whenA(wasPaused)(pausing.resume(Set(state.topicPartition))))
@@ -218,7 +230,8 @@ object PartitionRecords:
         pausing: PartitionPausing[F]
     ): F[Runtime[F, K, V]] =
       for
-        output <- Channel.unbounded[F, PartitionRecords[F, K, V]]
-        states <- Ref.of[F, Map[TopicPartition, PartitionState[F, K, V]]](Map.empty)
-        mutex  <- Mutex[F]
-      yield Runtime(consumer, assignments, maxQueuedRecords, pausing.orNoop, output, states, mutex)
+        output  <- Channel.unbounded[F, PartitionRecords[F, K, V]]
+        states  <- Ref.of[F, Map[TopicPartition, PartitionState[F, K, V]]](Map.empty)
+        retired <- Ref.of[F, Map[TopicPartition, Long]](Map.empty)
+        mutex   <- Mutex[F]
+      yield Runtime(consumer, assignments, maxQueuedRecords, pausing.orNoop, output, states, retired, mutex)

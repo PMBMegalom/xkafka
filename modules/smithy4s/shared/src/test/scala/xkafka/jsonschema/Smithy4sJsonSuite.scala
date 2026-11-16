@@ -87,6 +87,15 @@ class Smithy4sJsonSuite extends FunSuite:
       back  <- read(bytes)
     yield back
 
+  test("a record nested deeper than xkafka reads JSON is refused before smithy4s reads it, which counts no depth and would run the stack out"):
+    val reader = Smithy4sJsonFormat[Order].reader(Smithy4sJsonFormat[Order].schema).fold(fail(_), identity)
+    val text   = s"""{"meta":${"[" * 100000}${"]" * 100000}}"""
+    // The JSON parser refuses depths far past the limit itself, and xkafka the rest.
+    val refused = reader(fs2.Chunk.array(text.getBytes("UTF-8")))
+    assert(refused.left.exists(reason => reason.contains("nested more than 100 deep") || reason.contains("max depth")), refused)
+    val past = s"""{"meta":${"[" * 150}${"]" * 150}}"""
+    assertEquals(reader(fs2.Chunk.array(past.getBytes("UTF-8"))).left.toOption, Some("the record is nested more than 100 deep"))
+
   test("the format registers the schema of smithy4s's JSON, titled by the shape's full name"):
     assertEquals(Smithy4sJsonFormat[Order].schema.text, schema[Order].noSpaces)
     assertEquals(Smithy4sJsonFormat[Order].recordName, Some("example.shop.Order"))

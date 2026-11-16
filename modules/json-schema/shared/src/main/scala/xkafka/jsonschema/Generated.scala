@@ -30,6 +30,42 @@ import cats.syntax.all.*
 import io.circe.{Json, JsonObject}
 import xkafka.schemaregistry.Shown
 
+/** What each branch of a union reads of each value, kept while a value is read, so that a value nested in the branches of unions is read once by each
+  * branch, not again by every branch above it. A value is read without waiting, so what one reading keeps is its own.
+  */
+private object Reads:
+  private final class Key(val read: AnyRef, val json: Json, val strict: Boolean):
+    override def equals(other: Any): Boolean =
+      other match
+        case key: Key => (key.read eq read) && (key.json eq json) && key.strict == strict
+        case _        => false
+    override def hashCode: Int = (System.identityHashCode(read) * 31 + System.identityHashCode(json)) * 2 + (if strict then 1 else 0)
+
+  private final class Kept:
+    val read   = new java.util.HashMap[Key, Either[String, Any]]
+    val within = new java.util.concurrent.atomic.AtomicInteger(0)
+
+  private val kept =
+    new ThreadLocal[Kept]:
+      override def initialValue(): Kept = new Kept
+
+  /** `reading`, run with what the readings inside it keep, forgotten once the outermost is done. */
+  def within[A](reading: => A): A =
+    val here = kept.get
+    here.within.incrementAndGet()
+    try reading
+    finally if here.within.decrementAndGet() == 0 then here.read.clear()
+
+  def of[A](read: (Json, Boolean) => Either[String, A], json: Json, strict: Boolean): Either[String, A] =
+    val here = kept.get
+    val key  = new Key(read, json, strict)
+    Option(here.read.get(key)) match
+      case Some(done) => done.asInstanceOf[Either[String, A]]
+      case None       =>
+        val done = read(json, strict)
+        here.read.put(key, done)
+        done
+
 /** What the classes xkafka-codegen generates from JSON Schema files call: codecs of their schemas, and the writing and reading of their properties.
   */
 object Generated:
@@ -138,7 +174,11 @@ object Generated:
     */
   def union[A](name: String, exactlyOne: Boolean, branches: List[(String, (Json, Boolean) => Either[String, A])]): Json => Either[String, A] =
     json =>
-      def reading(strict: Boolean) = branches.flatMap((branch, read) => read(json, strict).toOption.map(branch -> _))
+      // An `anyOf` takes the first branch that reads the value, and a `oneOf` needs to know only whether a second does.
+      def reading(strict: Boolean) =
+        Reads.within(
+          branches.iterator.flatMap((branch, read) => Reads.of(read, json, strict).toOption.map(branch -> _)).take(if exactlyOne then 2 else 1).toList
+        )
       reading(strict = true).some.filter(_.nonEmpty).getOrElse(reading(strict = false)) match
         case Nil                            => Left(s"expected a value of $name, found ${Shown(json.noSpaces)}, which none of its branches reads")
         case (_, value) :: Nil              => Right(value)

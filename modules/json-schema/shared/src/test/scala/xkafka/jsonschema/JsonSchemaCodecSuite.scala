@@ -184,7 +184,8 @@ class JsonSchemaCodecSuite extends CatsEffectSuite:
       """{"format":"email"}""",
       """{"const":null}""",
       """{"not":{"type":"string"}}""",
-      """{"allOf":[{"type":"null"}]}"""
+      """{"allOf":[{"type":"null"}]}""",
+      """{"not":{"if":{"type":"null"},"then":{"type":"string"}}}"""
     ).foreach(schema => assert(refusal(schema).isDefined, schema))
     List(
       """{"type":"string"}""",

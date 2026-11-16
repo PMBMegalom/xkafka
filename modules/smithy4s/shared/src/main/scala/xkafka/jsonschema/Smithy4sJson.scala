@@ -50,7 +50,11 @@ object Smithy4sJsonFormat:
             Either.catchNonFatal(Chunk.array(encoder.encode(value).toArray)).leftMap(error => s"the value cannot be written: ${error.getMessage}")
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        JsonSchemaFormat.json(writer).map(_ => bytes => decoder.decode(Blob(bytes.toArray)).leftMap(error => s"the record cannot be read: $error"))
+        // smithy4s-json counts no depth, so a record too deep is refused before it is read, as xkafka's own JSON reading refuses it.
+        JsonSchemaFormat.json(writer).map(_ =>
+          bytes =>
+            JsonSchemaFormat.read(bytes).flatMap(_ => decoder.decode(Blob(bytes.toArray)).leftMap(error => s"the record cannot be read: $error"))
+        )
 
 /** Serdes of types smithy4s generates, written and read as smithy4s-json writes and reads them, with the registry's schemas, in Confluent's wire
   * format, as Confluent's `KafkaJsonSchemaSerializer` writes JSON.

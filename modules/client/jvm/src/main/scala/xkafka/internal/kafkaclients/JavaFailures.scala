@@ -44,20 +44,17 @@ private[kafkaclients] object JavaFailures:
     val message = Option(error.getMessage).getOrElse(error.getClass.getName)
     error.getCause match
       // The error state a failure leaves the producer in, which the Java client reports by that failure as its cause. Retrying a call cannot leave
-      // that state: only aborting the transaction does, unless the failure is fatal.
+      // that state: only aborting the transaction does, unless the failure is fatal. Java's abortable failures are each of a class of their own, so
+      // one that is a plain client exception, as an answer the client did not expect, is fatal; so is an abort that failed.
+      case cause: JavaKafkaException if producer && error.getClass == classOf[JavaKafkaException] && message == ErrorState =>
+        val inner = failure(cause, producer)
+        val fatal = inner.fatal.contains(true) || cause.getClass == classOf[JavaKafkaException]
+        terminal(message, inner, fatal, error)
+      case cause: JavaKafkaException if producer && error.getClass == classOf[JavaKafkaException] && message == AbortFailed =>
+        terminal(message, failure(cause, producer), fatal = true, error)
       case cause: JavaKafkaException if error.getClass == classOf[JavaKafkaException] =>
         val inner = failure(cause, producer)
-        if producer then
-          val fatal = inner.fatal.contains(true)
-          new KafkaException.BackendFailure(
-            message,
-            inner.code,
-            retriable = Some(false),
-            fatal = inner.fatal,
-            transactionAbortRequired = Some(!fatal),
-            cause = error
-          )
-        else new KafkaException.BackendFailure(message, inner.code, inner.retriable, inner.fatal, cause = error)
+        new KafkaException.BackendFailure(message, inner.code, inner.retriable, inner.fatal, cause = error)
       case _ =>
         val code = protocolCode(error)
         new KafkaException.BackendFailure(
@@ -68,6 +65,21 @@ private[kafkaclients] object JavaFailures:
           fatal = fatality(error, producer),
           cause = error
         )
+
+  /** A transactional producer's failure that retrying cannot leave: fatal, or else left only by an abort. */
+  private def terminal(message: String, inner: KafkaException.BackendFailure, fatal: Boolean, error: JavaKafkaException) =
+    new KafkaException.BackendFailure(
+      message,
+      inner.code,
+      retriable = Some(false),
+      fatal = Some(fatal).filter(identity).orElse(inner.fatal),
+      transactionAbortRequired = Some(!fatal),
+      cause = error
+    )
+
+  /** How the Java client words the failure of a transactional call made in an error state, and of an abort that failed, which it holds fatal. */
+  private val ErrorState  = "Cannot execute transactional method because we are in an error state"
+  private val AbortFailed = "Failed to abort transaction"
 
   /** Whether the Java client cannot recover: true for the failures its producer holds fatal, false for those it retries, and not known for others. An
     * administration client and a consumer recover from every failure, so none of theirs is known fatal.

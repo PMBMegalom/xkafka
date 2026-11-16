@@ -262,7 +262,6 @@ object StreamsSettings:
   /** The transaction timeout of an exactly-once application's producers, Java Streams' `transaction.timeout.ms`. */
   val TransactionTimeout: FiniteDuration = 10.seconds
 
-  /** Exactly-once keeps a transaction open until it commits, so the broker would abort every one that waits past its timeout, as Java refuses. */
   /** The settings the application's producers are made with from the client, as the engine makes them: under exactly-once, a transactional producer
     * with the transaction timeout, which refuses more of the client's properties.
     */
@@ -281,12 +280,13 @@ object StreamsSettings:
           )
     made.leftMap(_.map(StreamsSettingsError.ProducerSetting(_)))
 
+  /** Exactly-once keeps a transaction open until it commits, so the broker would abort every one that waits past its timeout, as Java refuses. */
   private def committing(guarantee: ProcessingGuarantee, interval: Option[FiniteDuration]): ValidatedNel[StreamsSettingsError, Unit] =
     interval.filter(value => guarantee == ProcessingGuarantee.ExactlyOnce && value > TransactionTimeout) match
       case Some(value) => StreamsSettingsError.CommitIntervalAboveTransactionTimeout(value, TransactionTimeout).invalidNel
       case None        => ().validNel
 
-  // 0.7.0's signature, before the fetch wait, which code compiled against 0.7.0 calls.
+  // 0.7.x's signature, before the fetch wait, which code compiled against 0.7.x calls.
   private[streams] def from(
       client: ClientSettings,
       applicationId: ApplicationId,

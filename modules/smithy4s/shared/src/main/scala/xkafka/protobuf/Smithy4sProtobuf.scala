@@ -41,8 +41,10 @@ import xkafka.schemaregistry.{Part, RegistryException, RegistrySerde, Schema, Sc
 object Smithy4sProtobufFormat:
   /** The format of `A`, or why its messages cannot be declared in a .proto file. */
   def apply[A](using schema: SmithySchema[A]): Either[String, SchemaFormat[A]] =
-    Smithy4sProtobufSchema.of(schema).map: file =>
-      val codec   = smithy4s.protobuf.Protobuf.codecs.fromSchema(schema)
+    Smithy4sProtobufSchema.of(schema).flatMap(file => Pool.of(file, Map.empty).map(file -> _)).map: (file, pool) =>
+      val codec = smithy4s.protobuf.Protobuf.codecs.fromSchema(schema)
+      // smithy4s-protobuf reads a message inside another by recursion, counting no depth, so a record too deep is refused before it is read.
+      val depth   = new Dynamic(pool)
       val text    = ProtobufSchemaText.render(file)
       val message = Smithy4sProtobufSchema.name(schema.shapeId, file)
       new SchemaFormat[A]:
@@ -61,8 +63,10 @@ object Smithy4sProtobufFormat:
         override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
           ProtobufFormat.protobuf(writer).map: _ =>
             bytes =>
-              ProtobufWire.readIndexes(bytes)
-                .flatMap((_, written) => codec.readBlob(Blob(written.toArray)).leftMap(error => s"the record cannot be read: ${error.getMessage}"))
+              ProtobufWire.readIndexes(bytes).flatMap((_, written) =>
+                depth.shallow(message, written)
+                  .flatMap(_ => codec.readBlob(Blob(written.toArray)).leftMap(error => s"the record cannot be read: ${error.getMessage}"))
+              )
 
 /** Serdes of types smithy4s generates, written and read as smithy4s-protobuf writes and reads them, with the registry's schemas, in Confluent's wire
   * format, as Confluent's `KafkaProtobufSerializer` writes them.

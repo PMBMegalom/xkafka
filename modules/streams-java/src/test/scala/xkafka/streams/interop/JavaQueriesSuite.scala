@@ -107,3 +107,9 @@ final class JavaQueriesSuite extends FunSuite:
     assertEquals(JavaQuerying.covers(4, List(a -> List(0, 1), b -> List(2, 3))), true)
     assertEquals(JavaQuerying.covers(4, List(a -> List(0, 1, 2), b -> List(2, 3))), false)
     assertEquals(JavaQuerying.covers(4, Nil), false)
+
+  test("a store's topics are named as the members hold them: by their own name, or by the application id and it for the application's own topics"):
+    assertEquals(JavaQuerying.brokerNames("shop", Set("by-key-repartition"), Set("shop-by-key-repartition")), Set("shop-by-key-repartition"))
+    // A topic of the user's whose name starts with the application id is not taken for one of the application's own.
+    assertEquals(JavaQuerying.brokerNames("shop", Set("orders"), Set("orders", "shop-orders")), Set("orders"))
+    assertEquals(JavaQuerying.brokerNames("shop", Set("orders"), Set.empty), Set("orders"))

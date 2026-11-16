@@ -67,7 +67,7 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(settings.withFetchWait(5.minutes + 1.milli), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange(5.minutes + 1.milli)))
     assertEquals(settings.withFetchWait((-1).milli), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange((-1).milli)))
     assertEquals(StreamsSettings.from(client, app, fetchWait = 6.minutes), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange(6.minutes)))
-    // The signature code compiled against 0.7.0 calls.
+    // The signature code compiled against 0.7.x calls.
     val earlier = StreamsSettings.from(client, app, ProcessingGuarantee.AtLeastOnce, None, 1, 30.seconds, true, None, None).orFail
     assertEquals(earlier.fetchWait, ConsumerSettings.DefaultFetchWait)
     assertEquals(StreamsSettingsError.FetchWaitOutOfRange((-1).milli).message, "fetch wait must be from 0 to 5 minutes, was -1 milliseconds")

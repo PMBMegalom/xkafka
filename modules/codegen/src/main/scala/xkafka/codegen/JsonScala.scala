@@ -443,6 +443,8 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
           val docs   = scaladoc(record.doc, fields.flatMap(field => field.doc.map(field.scala -> _)))
           s"${docs}final case class $name$shown$extend\n\n"
         writes = record.fields.map(write)
+        // A record whose properties are all constants writes nothing of the value.
+        unused = if record.fields.forall(_.presence.isInstanceOf[Presence.Constant]) then "@_root_.scala.annotation.unused " else ""
         known  = record.fields.map(field => Names.quote(field.json)).mkString(", ")
         made   = record.fields.zipWithIndex.collect { case (field, index) if !field.presence.isInstanceOf[Presence.Constant] => s"value${index + 1}" }
         decoding =
@@ -454,7 +456,7 @@ private[codegen] final class JsonScala(root: JsonSchemaGenerator.Root, bigDecima
         needed <- givens(record.path, fields.map(_.shape))
         members =
           needed ++ List(
-            s"$access def encodeJson(value: ${scalaPath(record.path)}, depth: ${builtin("Int")} = 0): ${result(
+            s"$access def encodeJson(${unused}value: ${scalaPath(record.path)}, depth: ${builtin("Int")} = 0): ${result(
                 jsonType
               )} =\n  $helpers.within(depth)(\n    $helpers.write(${writes.map("\n      " + _).mkString(",")}\n    )\n  )",
             s"$access def decodeJson(json: $jsonType, strict: ${builtin("Boolean")}): ${result(

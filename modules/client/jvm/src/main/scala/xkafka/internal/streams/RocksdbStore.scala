@@ -176,12 +176,18 @@ private[xkafka] object RocksdbStore:
 
     /** A family's first key and the key just past its last, its last with a zero byte after it. */
     private def bounds(family: ColumnFamilyHandle): Option[(Array[Byte], Array[Byte])] =
+      // An iterator that is not valid has reached the end, or failed, which `status` raises, so a failure is not taken for an empty family.
       val cursor = db.newIterator(family)
       try
         cursor.seekToFirst()
-        Option.when(cursor.isValid)(cursor.key).map: first =>
+        if !cursor.isValid then
+          cursor.status()
+          None
+        else
+          val first = cursor.key
           cursor.seekToLast()
-          first -> (cursor.key :+ 0.toByte)
+          cursor.status()
+          Some(first -> (cursor.key :+ 0.toByte))
       finally cursor.close()
 
     def close: F[Unit] =

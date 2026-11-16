@@ -27,7 +27,7 @@ import munit.FunSuite
 import org.apache.kafka.common.KafkaException as JavaKafkaException
 import org.apache.kafka.common.errors.{
   ClusterAuthorizationException, GroupAuthorizationException, NotEnoughReplicasException, ProducerFencedException, RecordTooLargeException,
-  TimeoutException, TopicAuthorizationException, TransactionalIdAuthorizationException, UnsupportedVersionException
+  TimeoutException, TopicAuthorizationException, TransactionAbortableException, TransactionalIdAuthorizationException, UnsupportedVersionException
 }
 
 /** Whether the Java client's failures are fatal: true for those it holds fatal, false for those it retries, and unknown for the rest. */
@@ -66,6 +66,12 @@ final class JavaFailuresSuite extends FunSuite:
       (wrapped.code, wrapped.retriable, wrapped.fatal, wrapped.transactionAbortRequired),
       (Some(ErrorCode.Other(53)), Some(false), Some(true), Some(false))
     )
+
+  test("an error state the Java client entered for an answer it did not expect, and an abort that failed, are fatal, as it holds them"):
+    val unexpected = produced(errorState(new JavaKafkaException("Unhandled error in EndTxnResponse: x")))
+    assertEquals((unexpected.retriable, unexpected.fatal, unexpected.transactionAbortRequired), (Some(false), Some(true), Some(false)))
+    val abort = produced(new JavaKafkaException("Failed to abort transaction", new TransactionAbortableException("x")))
+    assertEquals((abort.retriable, abort.fatal, abort.transactionAbortRequired), (Some(false), Some(true), Some(false)))
 
   test("the error state a retriable failure left the producer in cannot be retried, only aborted, as librdkafka says of the same state"):
     val wrapped = produced(errorState(new TimeoutException("expired")))

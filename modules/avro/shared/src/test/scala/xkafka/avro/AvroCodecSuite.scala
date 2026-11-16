@@ -138,6 +138,17 @@ final case class SecondCreated(id: Int) extends Recorded
 @SchemaNamespace("")
 final case class Unspaced(id: Int) derives AvroCodec
 
+/** A record whose field was renamed, its old name taken by a field added since. */
+final case class Renamed(
+    @SchemaAlias("name")
+    fullName: String,
+    name: String = ""
+) derives AvroCodec
+
+/** A record named as a record in no namespace that it holds twice, whose second mention would name the record itself. */
+@SchemaName("Unspaced")
+final case class Shadowing(first: Unspaced, second: Unspaced) derives AvroCodec
+
 /** Constants annotations take, in place of literals. */
 object Constants:
   final val Name      = "Order"
@@ -395,11 +406,18 @@ class AvroCodecSuite extends FunSuite:
         .contains("@SchemaDoc takes constant text")
     )
 
+  test("a record whose field was renamed and its old name taken again writes and reads its own records, as Java reads a schema as itself"):
+    val schema = AvroCodec[Renamed].schema
+    val value  = AvroCodec[Renamed].encode(Renamed("Ada", "A")).fold(fail(_), identity)
+    assertEquals(AvroBinary.writable(schema, schema), Right(()))
+    assertEquals(AvroBinary.encode(schema, value).flatMap(bytes => AvroBinary.decoder(schema, schema).flatMap(_(bytes))), Right(value))
+
   test("a type given an empty namespace has none, so its schema matches a file that names none"):
     val file = """{"type":"record","name":"Unspaced","fields":[{"name":"id","type":"int"}]}"""
     assertEquals(AvroSchemaJson.render(AvroCodec[Unspaced].schema), file)
     assertEquals(AvroFormat(using AvroCodec[Unspaced]).recordName, Some("Unspaced"))
     assertEquals(AvroCodec[Unspaced].matching(file).refusal, None)
+    assertEquals(AvroCodec[Shadowing].refusal, Some("'Unspaced', in no namespace, would be read as 'xkafka.avro.Unspaced' where it is named again"))
 
   test("annotations take any constant the compiler folds, such as a final val or joined literals"):
     assertEquals(

@@ -1272,6 +1272,8 @@ lazy val sbtCodegen = project
     crossScalaVersions            := Seq("2.12.21", "3.8.4"),
     pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.0.12"),
     tlVersionIntroduced           := Map("2.12" -> "0.8.0", "3" -> "0.8.0"),
+    // The plugin takes none of the other modules' common settings, so it carries the licence as their jars do.
+    Compile / packageBin / mappings += (repositoryRoot / "LICENSE" -> "META-INF/LICENSE"),
     // The scripted builds run on the newest sbt of each major version, with this build's xkafka-codegen and format modules published locally.
     scriptedSbt := (if (scalaBinaryVersion.value == "2.12") "1.13.1" else "2.0.12"),
     scriptedLaunchOpts ++= Seq("-Xmx2g", s"-Dplugin.version=${version.value}"),

@@ -87,6 +87,23 @@ object AvroSchemaJson:
     else twice(branches).map(kind => s"a union holds '$kind' twice").toLeft(AvroSchema.Union(branches))
 
   /** The type two branches of a union are of, where two are: a named type by its full name, which a primitive of the same name is not. */
+  /** A type in no namespace named again inside a record of a namespace that holds a type of the same name: its name there is read as that type's, by
+    * Java as by xkafka, so the schema would mean another.
+    */
+  private[avro] def shadowed(schema: AvroSchema): Option[String] =
+    val defined                                                                          = AvroSchema.definitions(schema)
+    def walk(at: AvroSchema, space: Option[String], seen: Set[FullName]): Option[String] =
+      at match
+        case AvroSchema.Named(full) if full.namespace.isEmpty && space.exists(inside => defined.contains(FullName(Some(inside), full.name))) =>
+          Some(s"'${full.name}', in no namespace, would be read as '${space.getOrElse("")}.${full.name}' where it is named again")
+        case AvroSchema.Named(full) if !seen(full) => defined.get(full).flatMap(walk(_, space, seen + full))
+        case AvroSchema.Record(name, fields, _, _) => fields.iterator.flatMap(field => walk(field.schema, name.namespace, seen + name)).nextOption()
+        case AvroSchema.Array(items)               => walk(items, space, seen)
+        case AvroSchema.Map(values)                => walk(values, space, seen)
+        case AvroSchema.Union(branches)            => branches.iterator.flatMap(walk(_, space, seen)).nextOption()
+        case _                                     => None
+    walk(schema, None, Set.empty)
+
   private[avro] def twice(branches: List[AvroSchema]): Option[String] =
     def kind(schema: AvroSchema): (Boolean, String) =
       schema match

@@ -303,6 +303,11 @@ object ProtobufCodec:
               else Try(Instant.ofEpochSecond(seconds, nanos.toLong)).toEither.leftMap(_ => s"a Timestamp of $seconds seconds is no instant")
           case other => Left(s"expected a Timestamp, found ${kind(other)}")
       override def absent: Either[String, Instant] = Right(Instant.EPOCH)
+      // A Timestamp is a message of its own, a level that protobuf-java counts.
+      override def putWithin(value: Instant, depth: Int): Either[String, Raw] =
+        if depth > ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep") else put(value)
+      override def takeWithin(raw: Raw, depth: Int): Either[String, Instant] =
+        if depth > ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep") else take(raw)
 
   /** The problem with `held` holding `inner`'s values where they are lists, maps or options, which Protobuf has no field for. */
   private def unheld[A](inner: ProtobufCodec[A], held: String): List[String] =

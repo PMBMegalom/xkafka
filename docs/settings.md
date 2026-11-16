@@ -133,11 +133,11 @@ that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `withClientCertificate`, `SaslSettings`' `withCredentials`, and the
 `withClient` of `ConsumerSettings`, `ProducerSettings` and
 `TransactionalProducerSettings`, which check the settings again under the new
-client's properties. `StreamsSettings`
-works the same way: its methods
-that set a duration, the concurrency, the guarantee, the client or the state
-directory return `ValidatedNel[StreamsSettingsError, *]`. The others, such as
-`withCompression` or `withIsolationLevel`, return the settings directly.
+client's properties. The others, such as `withCompression` or
+`withIsolationLevel`, return the settings directly. `StreamsSettings` works the
+same way: its methods that set a duration, the concurrency, the guarantee, the
+client or the state directory return `ValidatedNel[StreamsSettingsError, *]`,
+and the others, such as `withApplicationId`, return the settings directly.
 
 ```scala mdoc:compile-only
 // Change two settings, each of which validates the result again

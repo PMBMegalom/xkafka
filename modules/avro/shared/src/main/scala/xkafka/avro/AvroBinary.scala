@@ -45,7 +45,7 @@ object AvroBinary:
     * the reader cannot take fails only a value that has it.
     */
   def decoder(writer: AvroSchema, reader: AvroSchema): Either[String, Chunk[Byte] => Either[String, AvroValue]] =
-    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).plan(writer, reader).map: step =>
+    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader), renaming(writer, reader)).plan(writer, reader).map: step =>
       bytes =>
         val array = bytes.toArray
         step(array, 0, 0).flatMap: (value, end) =>
@@ -55,7 +55,25 @@ object AvroBinary:
     * scale or fewer digits, or a time of another unit, since the value is written as its own logical type gives it.
     */
   def writable(writer: AvroSchema, reader: AvroSchema): Either[String, Unit] =
-    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader)).clash(writer, reader).toLeft(())
+    Resolution(AvroSchema.definitions(writer), AvroSchema.definitions(reader), renaming(writer, reader)).clash(writer, reader).toLeft(())
+
+  /** Whether the reader's aliases rename the writer's fields: not where the two schemas are one, as Java compares them, aliases and documentation
+    * left out, and an enum's default too, so that a schema reads its own records as they are.
+    */
+  private def renaming(writer: AvroSchema, reader: AvroSchema): Boolean = bare(writer) != bare(reader)
+
+  private def bare(schema: AvroSchema): AvroSchema =
+    schema match
+      case AvroSchema.Record(name, fields, _, _) => AvroSchema
+          .Record(name, fields.map(field => field.copy(schema = bare(field.schema), doc = None, aliases = Nil)))
+      case AvroSchema.Enum(name, symbols, _, _, _)                                       => AvroSchema.Enum(name, symbols)
+      case AvroSchema.Fixed(name, size, _)                                               => AvroSchema.Fixed(name, size)
+      case AvroSchema.Logical(LogicalType.FixedDecimal(name, size, precision, scale, _)) => AvroSchema
+          .Logical(LogicalType.FixedDecimal(name, size, precision, scale))
+      case AvroSchema.Array(items)    => AvroSchema.Array(bare(items))
+      case AvroSchema.Map(values)     => AvroSchema.Map(bare(values))
+      case AvroSchema.Union(branches) => AvroSchema.Union(branches.map(bare))
+      case other                      => other
 
   /** `writable` for schemas given as text, checked where xkafka reads both. */
   private[avro] def writableText(writer: String, reader: String): Either[String, Unit] =
@@ -256,7 +274,7 @@ object AvroBinary:
   /** The plans for reading one schema's values as another's, for the named types of each. Each pair of records is planned once, however often the
     * schemas use it.
     */
-  private final case class Resolution(writers: Defined, readers: Defined):
+  private final case class Resolution(writers: Defined, readers: Defined, renamed: Boolean):
     /** How what `writer` wrote is read as `reader`. */
     def plan(writer: AvroSchema, reader: AvroSchema): Either[String, Step] = planning(writer, reader).value.runA(Planned(Map.empty, Map.empty)).value
 
@@ -307,7 +325,7 @@ object AvroBinary:
       */
     private def matched(written: AvroSchema.Record, read: AvroSchema.Record): Either[String, AvroField => Option[AvroField]] =
       val renames =
-        if written.name != read.name && !read.aliases.contains(written.name) then Map.empty[String, String]
+        if !renamed || written.name != read.name && !read.aliases.contains(written.name) then Map.empty[String, String]
         else read.fields.flatMap(field => field.aliases.map(_ -> field.name)).toMap
       val names = written.fields.map(field => renames.getOrElse(field.name, field.name))
       names.diff(names.distinct).headOption match
@@ -429,7 +447,7 @@ object AvroBinary:
 
     private def fields(written: AvroSchema.Record, read: AvroSchema.Record, readerField: AvroField => Option[AvroField]): Planning[Step] =
       // A field the reader lacks is read only to be skipped, as the writer's own schema reads it, whatever the reader names the same.
-      def skipped(field: AvroField) = found(Resolution(writers, writers).plan(field.schema, field.schema))
+      def skipped(field: AvroField) = found(Resolution(writers, writers, renamed = false).plan(field.schema, field.schema))
       val planned                   =
         written.fields.traverse(field =>
           readerField(field).fold(skipped(field))(target => planning(field.schema, target.schema)).map(step => (readerField(field).map(_.name), step))
