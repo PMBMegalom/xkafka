@@ -28,7 +28,7 @@ ThisBuild / tlJdkRelease    := Some(17)
 ThisBuild / tlFatalWarnings := true
 
 val catsEffectVersion      = "3.7.1"
-val catsTaglessVersion     = "0.16.5"
+val catsTaglessVersion     = "0.16.6"
 val fs2Version             = "3.14.0"
 val circeVersion           = "0.14.17"
 val http4sVersion          = "0.23.38"
