@@ -90,6 +90,9 @@ final class JavaFailuresSuite extends FunSuite:
       val abortable = errorState(new JavaKafkaException("Could not add partitions to transaction due to errors: {t-0=UNKNOWN_SERVER_ERROR}"))
       val held      = JavaFailures.producedBy(producer)(abortable).asInstanceOf[KafkaException.BackendFailure]
       assertEquals((held.retriable, held.fatal, held.transactionAbortRequired), (Some(false), Some(false), Some(true)))
+      // A failure Java always holds fatal is fatal though the producer has not marked itself yet, as it may not have when it reports one.
+      val fenced = JavaFailures.producedBy(producer)(new ProducerFencedException("fenced")).asInstanceOf[KafkaException.BackendFailure]
+      assertEquals((fenced.retriable, fenced.fatal, fenced.transactionAbortRequired), (Some(false), Some(true), Some(false)))
       val field = producer.getClass.getDeclaredField("transactionManager")
       field.setAccessible(true)
       val manager = field.get(producer)

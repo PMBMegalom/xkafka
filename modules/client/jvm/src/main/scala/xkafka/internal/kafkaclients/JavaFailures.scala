@@ -46,11 +46,21 @@ private[kafkaclients] object JavaFailures:
     * is not held fatal for, as an error state, is left by an abort. Where the producer cannot say, as `produced` classifies it.
     */
   def producedBy(producer: AnyRef): PartialFunction[Throwable, Throwable] = { case error: JavaKafkaException =>
-    held(failure(error, producer = true), producer)
+    held(failure(error, producer = true), producer, alwaysFatal(error))
   }
 
-  private def held(classified: KafkaException.BackendFailure, producer: AnyRef): KafkaException.BackendFailure =
-    fatalHeld(producer) match
+  /** Whether the Java client holds the failure fatal whatever its producer says yet: one of the classes it always does, an error state such a failure
+    * caused, or an abort that failed. The producer may report a failure before it marks itself, so it is asked only to tell the others.
+    */
+  private def alwaysFatal(error: JavaKafkaException): Boolean =
+    val message = Option(error.getMessage).getOrElse("")
+    error.getCause match
+      case cause: JavaKafkaException if error.getClass == classOf[JavaKafkaException] && message == ErrorState => alwaysFatal(cause)
+      case _: JavaKafkaException if error.getClass == classOf[JavaKafkaException] && message == AbortFailed    => true
+      case _ => fatality(error, producer = true).contains(true)
+
+  private def held(classified: KafkaException.BackendFailure, producer: AnyRef, known: Boolean): KafkaException.BackendFailure =
+    fatalHeld(producer).map(_ || known) match
       case Some(true) =>
         new KafkaException.BackendFailure(classified.detail, classified.code, Some(false), Some(true), Some(false), classified.getCause)
       case Some(false) =>
