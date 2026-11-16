@@ -15,8 +15,8 @@ their respective licenses and are not relicensed as part of xkafka.
 | [OpenSSL](https://www.openssl.org) | 3.5.8 | Apache-2.0 | TLS and SASL in the prebuilt Scala.js libraries |
 | [Zstandard](https://github.com/facebook/zstd) | 1.5.7 | BSD-3-Clause | Compression in the prebuilt Scala.js libraries |
 | [zlib](https://zlib.net) | 1.3.2 | Zlib | Compression in the prebuilt Scala.js libraries |
-| [RocksDB](https://rocksdb.org) (`rocksdbjni`) | 10.1.3 | Apache-2.0 or GPL-2.0 | State store engine on every platform |
-| [Snappy](https://github.com/google/snappy), [LZ4](https://github.com/lz4/lz4), [Zstandard](https://github.com/facebook/zstd), [zlib](https://zlib.net), [bzip2](https://sourceware.org/bzip2/) | 1.2.1, 1.9.4, 1.5.5, 1.3.1, 1.0.8 | BSD-3-Clause, BSD-2-Clause, BSD-3-Clause, Zlib, bzip2-1.0.6 | Compression inside the RocksDB libraries `rocksdbjni` carries |
+| [RocksDB](https://rocksdb.org) (`rocksdbjni`) | 10.10.1 (`rocksdbjni` 10.10.1.1) | Apache-2.0 or GPL-2.0 | State store engine on every platform |
+| [Snappy](https://github.com/google/snappy), [LZ4](https://github.com/lz4/lz4), [Zstandard](https://github.com/facebook/zstd), [zlib](https://zlib.net), [bzip2](https://sourceware.org/bzip2/) | 1.2.2, 1.10.0, 1.5.7, 1.3.1, 1.0.8 | BSD-3-Clause, BSD-2-Clause, BSD-3-Clause, Zlib, bzip2-1.0.6 | Compression inside the RocksDB libraries `rocksdbjni` carries |
 
 The `@xkafka/librdkafka-*` npm packages hold librdkafka with OpenSSL, zlib and
 zstd linked in. Each package's `LICENSES.txt` carries the notices of everything

@@ -34,8 +34,8 @@ final class JsRocksdbSuite extends FunSuite:
     assert(clue(JsRocksdb.loaded).isRight)
 
   test("a shim reporting another identity is refused"):
-    val refused = JsRocksdb.load(PrebuiltRocksdb.shim.nn, PrebuiltRocksdb.library.nn, "10.1.3-000000000000", BuildInfo.rocksdb)
+    val refused = JsRocksdb.load(PrebuiltRocksdb.shim.nn, PrebuiltRocksdb.library.nn, "10.10.1-000000000000", BuildInfo.rocksdb)
     assertEquals(
       refused.left.map(_.getMessage),
-      Left(s"the RocksDB shim at ${PrebuiltRocksdb.shim} is ${BuildInfo.rocksdbShim}, but this xkafka needs 10.1.3-000000000000")
+      Left(s"the RocksDB shim at ${PrebuiltRocksdb.shim} is ${BuildInfo.rocksdbShim}, but this xkafka needs 10.10.1-000000000000")
     )

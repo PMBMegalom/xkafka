@@ -114,13 +114,13 @@ goes for work that moves to another member and comes back. Give each running
 member a directory of its own: a second member started over a directory already
 in use fails to start.
 
-Stores on disk are kept by RocksDB 10.1.3. What each platform needs:
+Stores on disk are kept by RocksDB 10.10.1. What each platform needs:
 
 - **JVM:** add RocksDB to the application's dependencies. Without it, an
   application given a state directory fails to start, saying what to add.
   ```scala
   // In build.sbt
-  libraryDependencies += "org.rocksdb" % "rocksdbjni" % "10.1.3"
+  libraryDependencies += "org.rocksdb" % "rocksdbjni" % "10.10.1.1"
   ```
 - **Scala.js:** nothing; RocksDB comes from npm with xkafka.
 - **Scala Native:** the RocksDB library file where the application runs, as

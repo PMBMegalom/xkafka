@@ -17,7 +17,7 @@
  *
  *   Opens the RocksDB library at `path` once for the process, finds its
  *   functions, and checks that it is the RocksDB release `expected` names,
- *   such as "10.1.3". With no path, it tries in turn the file the
+ *   such as "10.10.1". With no path, it tries in turn the file the
  *   XKAFKA_ROCKSDB_LIBRARY environment variable names, where one is set and
  *   nothing else; the platform's file from the rocksdbjni jar, such as
  *   librocksdbjni-linux64.so, in the directory of the running executable; and
@@ -32,7 +32,7 @@
  *   const char *xkafka_rocksdb_identity(void)
  *
  *   The RocksDB release and the shim's identity the build gave it, such as
- *   "10.1.3-0123456789ab", which the JavaScript backend compares with its own
+ *   "10.10.1-0123456789ab", which the JavaScript backend compares with its own
  *   so it refuses a library built from other sources. Empty where the build
  *   gave none, as Scala Native's does.
  *

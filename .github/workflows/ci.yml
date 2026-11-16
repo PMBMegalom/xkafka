@@ -105,8 +105,8 @@ jobs:
         if: matrix.project == 'rootJS' || matrix.project == 'rootNative'
         uses: actions/cache@v6
         with:
-          path: target/rocksdb-10.1.3
-          key: rocksdbjni-e7f925287d9fe257
+          path: target/rocksdb-10.10.1.1
+          key: rocksdbjni-e862cc37a22df8f1
 
       - name: Check that workflows are up to date
         run: sbt githubWorkflowCheck
@@ -478,8 +478,8 @@ jobs:
       - name: Cache the rocksdbjni jar
         uses: actions/cache@v6
         with:
-          path: target/rocksdb-10.1.3
-          key: rocksdbjni-e7f925287d9fe257
+          path: target/rocksdb-10.10.1.1
+          key: rocksdbjni-e862cc37a22df8f1
 
       - name: Install gdb
         if: runner.os == 'Linux'
@@ -616,8 +616,8 @@ jobs:
         if: matrix.platform != 'jvm'
         uses: actions/cache@v6
         with:
-          path: target/rocksdb-10.1.3
-          key: rocksdbjni-e7f925287d9fe257
+          path: target/rocksdb-10.10.1.1
+          key: rocksdbjni-e862cc37a22df8f1
 
       - name: Test the backend against Kafka, including TLS and SASL
         run: scripts/integration-test.sh ${{ matrix.platform }}
@@ -700,8 +700,8 @@ jobs:
         if: matrix.platform != 'jvm'
         uses: actions/cache@v6
         with:
-          path: target/rocksdb-10.1.3
-          key: rocksdbjni-e7f925287d9fe257
+          path: target/rocksdb-10.10.1.1
+          key: rocksdbjni-e862cc37a22df8f1
 
       - name: Test the streams engine against each supported Kafka release, beside Java Streams
         run: scripts/integration-test.sh --streams ${{ matrix.platform }}

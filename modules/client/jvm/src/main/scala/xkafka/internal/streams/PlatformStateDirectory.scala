@@ -50,7 +50,7 @@ private[xkafka] object PlatformStateDirectory:
       .as(new Directory(base))
 
   /** Why a state directory cannot be kept without RocksDB on the classpath. */
-  val missing: String = s"keeping stores on disk needs org.rocksdb:rocksdbjni:${BuildInfo.rocksdb} among the application's dependencies"
+  val missing: String = s"keeping stores on disk needs org.rocksdb:rocksdbjni:${BuildInfo.rocksdbjni} among the application's dependencies"
 
   /** Why RocksDB of release `found` cannot keep stores, if it cannot: any release other than the one xkafka is built with. */
   def refused(found: String): Option[String] =

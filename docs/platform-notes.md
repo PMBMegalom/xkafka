@@ -79,7 +79,7 @@ the directories to use, without the `/lib`, if Homebrew is installed elsewhere.
 
 An application that keeps its streams stores on disk, with a
 [state directory](streams/running.md#keeping-stores-on-disk), also needs RocksDB
-10.1.3 when it runs. Take it from the `org.rocksdb:rocksdbjni:10.1.3` jar on
+10.10.1 when it runs. Take it from the `org.rocksdb:rocksdbjni:10.10.1.1` jar on
 Maven Central, which carries it for each platform:
 
 | Platform | File in the jar |
@@ -93,7 +93,7 @@ Maven Central, which carries it for each platform:
 
 ```sh
 # Put this platform's RocksDB next to the application, here for Linux x64 with glibc
-unzip -j rocksdbjni-10.1.3.jar librocksdbjni-linux64.so -d path/to/app/bin
+unzip -j rocksdbjni-10.10.1.1.jar librocksdbjni-linux64.so -d path/to/app/bin
 ```
 
 The application looks for the file in the directory of its executable, then

@@ -52,8 +52,8 @@ final class StateDirectorySuite extends CatsEffectSuite:
       PlatformStateDirectory.refused("9.10.0"),
       Some(s"keeping stores on disk needs RocksDB ${BuildInfo.rocksdb}, but org.rocksdb:rocksdbjni is 9.10.0")
     )
-    assertEquals(BuildInfo.rocksdb, "10.1.3")
-    assert(PlatformStateDirectory.missing.contains("org.rocksdb:rocksdbjni:10.1.3"), PlatformStateDirectory.missing)
+    assertEquals((BuildInfo.rocksdb, BuildInfo.rocksdbjni), ("10.10.1", "10.10.1.1"))
+    assert(PlatformStateDirectory.missing.contains("org.rocksdb:rocksdbjni:10.10.1.1"), PlatformStateDirectory.missing)
 
   test("the process id is the first run's in every later run"):
     root.flatMap: at =>

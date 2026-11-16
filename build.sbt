@@ -45,8 +45,10 @@ val snappyJavaVersion      = "1.1.10.12" // kafka-clients asks for 1.1.10.7, whi
 val nodeVersion            = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
 val librdkafkaVersion      = "2.16.0"
 val librdkafkaSha256       = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
-val rocksdbVersion         = "10.1.3"    // rocksdbjni on the JVM, and the libraries its jar carries on the others
-val rocksdbSha256          = "e7f925287d9fe2574fb7c7a86f7facaa9b8ab602a2eed0e598bf633528121498"
+val rocksdbVersion         = "10.10.1.1" // rocksdbjni on the JVM, and the libraries its jar carries on the others
+val rocksdbSha256          = "e862cc37a22df8f1e7c12556f5141ce65d782af77e30aee1bd7d488d7c554fde"
+// The RocksDB release that jar carries, which the library reports of itself: a jar's version may add a fourth number for a build of one release.
+val rocksdbRelease = rocksdbVersion.split('.').take(3).mkString(".")
 val munitVersion           = "1.3.6"
 val munitCatsEffectVersion = "2.2.1"
 val munitScalacheckVersion = "1.3.1"
@@ -695,7 +697,9 @@ val rocksdbShimId = {
     repositoryRoot / "modules" / "client" / "js" / "npm" / "rocksdb" / "LICENSES.txt"
   )
   inputs.foreach(source => digest.update(IO.readBytes(source)))
-  s"$rocksdbVersion-${digest.digest().iterator.map(byte => f"${byte & 0xff}%02x").mkString.take(12)}"
+  // The jar the libraries are taken from, so that another build of the same release makes other packages. npm takes a release's three numbers only.
+  digest.update(rocksdbSha256.getBytes("UTF-8"))
+  s"$rocksdbRelease-${digest.digest().iterator.map(byte => f"${byte & 0xff}%02x").mkString.take(12)}"
 }
 
 /** The command that builds the RocksDB shim into the shared library the npm packages carry. */
@@ -722,7 +726,7 @@ def writeRocksdbPlatformPackage(root: File, platform: String, shim: File, librar
     npmPackageJson(
       s"@xkafka/rocksdb-$platform",
       rocksdbShimId,
-      s"RocksDB $rocksdbVersion from rocksdbjni, with the shim xkafka opens it through, on $label",
+      s"RocksDB $rocksdbRelease from rocksdbjni $rocksdbVersion, with the shim xkafka opens it through, on $label",
       "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-2-Clause AND Zlib AND bzip2-1.0.6",
       Seq("os" -> JSON.arr(JSON.str(os)), "cpu" -> JSON.arr(JSON.str(cpu))) ++
         libc.map(value => "libc" -> JSON.arr(JSON.str(value))) :+
@@ -742,7 +746,7 @@ def writeRocksdbUmbrellaPackage(directory: File, clientBase: File, platforms: Se
     npmPackageJson(
       "@xkafka/rocksdb",
       rocksdbShimId,
-      s"RocksDB $rocksdbVersion for xkafka on Node.js, prebuilt for each supported platform",
+      s"RocksDB $rocksdbRelease for xkafka on Node.js, prebuilt for each supported platform",
       "MIT",
       "main"                 -> JSON.str("index.js"),
       "files"                -> JSON.arr(JSON.str("index.js")),
@@ -973,7 +977,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
     // The release the group connection names to the broker.
     buildInfoPackage := "xkafka.internal",
-    buildInfoKeys    := Seq[BuildInfoKey](version, "rocksdb" -> rocksdbVersion),
+    buildInfoKeys    := Seq[BuildInfoKey](version, "rocksdb" -> rocksdbRelease, "rocksdbjni" -> rocksdbVersion),
     buildInfoOptions ++= Seq(BuildInfoOption.PackagePrivate, BuildInfoOption.ConstantValue)
   )
   .jsConfigure(
@@ -1078,7 +1082,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       val check    =
         s"mkdir -p /tmp/koffi && npm install --silent --no-audit --no-fund --prefix /tmp/koffi koffi@$koffiVersion && " +
           s"node ${(repositoryRoot / "scripts" / "check-rocksdb-library.cjs").getAbsolutePath} /tmp/koffi ${output.getAbsolutePath} " +
-          s"${library.getAbsolutePath} $rocksdbShimId $rocksdbVersion"
+          s"${library.getAbsolutePath} $rocksdbShimId $rocksdbRelease"
       runCommand(
         log,
         Seq(
@@ -1103,7 +1107,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       val script = (repositoryRoot / "scripts" / "rocksdb-shim-test.sh").getAbsolutePath
       runCommand(
         streams.value.log,
-        Seq(script, sharedRocksdb.value.getAbsolutePath, prepareRocksdb.value.getAbsolutePath, rocksdbVersion, rocksdbShimId),
+        Seq(script, sharedRocksdb.value.getAbsolutePath, prepareRocksdb.value.getAbsolutePath, rocksdbRelease, rocksdbShimId),
         repositoryRoot
       )
     },
