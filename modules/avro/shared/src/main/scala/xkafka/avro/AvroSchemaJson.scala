@@ -69,9 +69,9 @@ object AvroSchemaJson:
       _ => Left("a schema cannot be a number"),
       name => named(name, namespace, defined).map((_, defined)),
       branches =>
-        branches.toList.foldM((List.empty[AvroSchema], defined)) { case ((sofar, known), branch) =>
+        branches.toList.foldM((Vector.empty[AvroSchema], defined)) { case ((sofar, known), branch) =>
           read(branch, namespace, known).map((schema, more) => (sofar :+ schema, more))
-        }.flatMap((schemas, known) => union(schemas).map((_, known))),
+        }.flatMap((schemas, known) => union(schemas.toList).map((_, known))),
       fields => complex(fields, namespace, defined)
     )
 
@@ -139,9 +139,10 @@ object AvroSchemaJson:
               val placeholder = AvroSchema.Record(name, Nil)
               define(name, placeholder, defined).flatMap: known =>
                 fields("fields").flatMap(_.asArray).toRight(s"record '${name.value}' needs 'fields'").flatMap: list =>
-                  list.toList.foldM((List.empty[AvroField], known)) { case ((sofar, known), json) =>
+                  list.toList.foldM((Vector.empty[AvroField], known)) { case ((sofar, known), json) =>
                     field(json, name.namespace, known).map((read, more) => (sofar :+ read, more))
-                  }.flatMap: (read, known) =>
+                  }.flatMap: (fields, known) =>
+                    val read  = fields.toList
                     val names = read.map(_.name)
                     if names.distinct.size != names.size then Left(s"record '${name.value}' names a field twice")
                     else
@@ -288,7 +289,7 @@ object AvroSchemaJson:
       case named if named.fullName.exists(written.contains) => (named.fullName.fold(Json.Null)(full => Json.fromString(name(full))), written)
       case AvroSchema.Record(full, fields, doc, names)      =>
         val (rendered, after) =
-          fields.foldLeft((List.empty[Json], written + full)) { case ((sofar, seen), field) =>
+          fields.foldLeft((Vector.empty[Json], written + full)) { case ((sofar, seen), field) =>
             val (schema, more) = write(field.schema, full.namespace, defined, seen)
             val json           =
               Json.fromFields(
@@ -318,7 +319,7 @@ object AvroSchemaJson:
           .leftMap(items => Json.obj("type" -> Json.fromString("array"), "items" -> items))
       case AvroSchema.Map(values) => write(values, namespace, defined, written)
           .leftMap(values => Json.obj("type" -> Json.fromString("map"), "values" -> values))
-      case AvroSchema.Union(branches) => branches.foldLeft((List.empty[Json], written)) { case ((sofar, seen), branch) =>
+      case AvroSchema.Union(branches) => branches.foldLeft((Vector.empty[Json], written)) { case ((sofar, seen), branch) =>
           write(branch, namespace, defined, seen).leftMap(sofar :+ _)
         }.leftMap(Json.fromValues)
       case AvroSchema.Logical(LogicalType.FixedDecimal(full, size, precision, scale, names)) =>
