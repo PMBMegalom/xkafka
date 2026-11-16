@@ -376,6 +376,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
   test("an offset read under a revoked assignment cannot be recorded in a transaction, one not yet handed out is not, and one read after can"):
     val (consumer, partition) = subscribedMock()
+    val handedOut             = new CountDownLatch(1)
     val reassigned            = new CountDownLatch(1)
     // MockConsumer runs one task at the start of each poll, so the first poll returns two records and the second revokes the partition and
     // assigns it again before its own record.
@@ -385,7 +386,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       addRecord(consumer, 0L)
       addRecord(consumer, 1L)
     )
+    // This poll waits until the first record is handed out: revoking before then would drop both records, and the stream would wait for a second.
     consumer.schedulePollTask(() =>
+      handedOut.await(5, TimeUnit.SECONDS)
       consumer.rebalance(JavaList.of())
       consumer.rebalance(JavaList.of(partition))
       addRecord(consumer, 2L)
@@ -396,12 +399,13 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     withMocks(consumer, producer): (transactional, reading) =>
       // Nothing after the first record is taken until the partition has been assigned again, so a record that took the lease current when it
       // was taken would carry the new one. The second, read under the revoked assignment and not yet handed out, is dropped.
-      reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(2).compile.toList.flatMap: records =>
-        records.traverse(record => transactional.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(record.offset))).attempt)
-          .map: outcomes =>
-            assertEquals(records.map(_.record.offset.value), List(0L, 2L))
-            assert(outcomes.headOption.exists(illegalGeneration), s"an offset read before the revocation should be rejected, got $outcomes")
-            assertEquals(outcomes.lift(1), Some(Right(())))
+      reading.records.evalTap(_ => IO(handedOut.countDown()) *> IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(2).compile.toList.flatMap:
+        records =>
+          records.traverse(record => transactional.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(record.offset))).attempt)
+            .map: outcomes =>
+              assertEquals(records.map(_.record.offset.value), List(0L, 2L))
+              assert(outcomes.headOption.exists(illegalGeneration), s"an offset read before the revocation should be rejected, got $outcomes")
+              assertEquals(outcomes.lift(1), Some(Right(())))
 
   test("a transactional producer reaches the Java client with its close timeout, every replica acknowledging, and idempotence"):
     val properties = new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
@@ -427,6 +431,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
   test("a plain commit of an offset read under a revoked assignment is refused before it reaches the consumer"):
     val (consumer, partition) = subscribedMock()
+    val handedOut             = new CountDownLatch(1)
     val reassigned            = new CountDownLatch(1)
     consumer.schedulePollTask(() =>
       consumer.rebalance(JavaList.of(partition))
@@ -434,7 +439,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       addRecord(consumer, 0L)
       addRecord(consumer, 1L)
     )
+    // This poll waits until the first record is handed out: revoking before then would drop both records, and the stream would wait for a second.
     consumer.schedulePollTask(() =>
+      handedOut.await(5, TimeUnit.SECONDS)
       consumer.rebalance(JavaList.of())
       consumer.rebalance(JavaList.of(partition))
       addRecord(consumer, 2L)
@@ -444,17 +451,18 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
     withMocks(consumer, producer): (_, reading) =>
       // The first record is handed out under the assignment the poll then revokes; the second, not yet handed out then, is dropped.
-      reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(2).compile.toList.flatMap: records =>
-        for
-          stale     <- records(0).offset.commit.attempt
-          untouched <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)))
-          current   <- records(1).offset.commit.attempt
-          moved     <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)).map(_.offset))
-        yield
-          assert(illegalGeneration(stale), s"a plain commit from a revoked assignment should be refused, got $stale")
-          assertEquals(untouched, None, "the refused commit should not have reached the consumer")
-          assertEquals(current, Right(()))
-          assertEquals(moved, Some(3L))
+      reading.records.evalTap(_ => IO(handedOut.countDown()) *> IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(2).compile.toList.flatMap:
+        records =>
+          for
+            stale     <- records(0).offset.commit.attempt
+            untouched <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)))
+            current   <- records(1).offset.commit.attempt
+            moved     <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)).map(_.offset))
+          yield
+            assert(illegalGeneration(stale), s"a plain commit from a revoked assignment should be refused, got $stale")
+            assertEquals(untouched, None, "the refused commit should not have reached the consumer")
+            assertEquals(current, Right(()))
+            assertEquals(moved, Some(3L))
 
   test("a revocation waits for a transaction recording one of its offsets before the group hears of it"):
     val (consumer, partition) = subscribedMock()
