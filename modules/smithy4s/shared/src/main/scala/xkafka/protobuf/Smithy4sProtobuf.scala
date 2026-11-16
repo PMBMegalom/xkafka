@@ -152,7 +152,7 @@ object Smithy4sProtobufSchema:
       case struct: StructSchema[?] if !found.contains(struct.shapeId) =>
         struct.fields.foldLeft(found.updated(struct.shapeId, struct))((all, field) => collect(field.schema, all))
       case union: UnionSchema[?] if !found.contains(union.shapeId) =>
-        val inlined = union.hints.has(ProtoInlinedOneOf)
+        val inlined = union.hints.has[ProtoInlinedOneOf]
         union.alternatives.foldLeft(if inlined then found else found.updated(union.shapeId, union))((all, alt) => collect(alt.schema, all))
       case enumeration @ EnumerationSchema(_, _, EnumTag.StringEnum(_, None) | EnumTag.IntEnum(_, None), _) => found
           .updated(enumeration.shapeId, enumeration)
@@ -188,7 +188,7 @@ object Smithy4sProtobufSchema:
           Left(Message(union.shapeId.name, members.map((name, at, fieldType) => Field(name, at, fieldType, Label.Optional, Some("definition")))))
         )
       case enumeration: EnumerationSchema[?] =>
-        val indexed = enumeration.values.map(_.hints.get(ProtoIndex).map(_.value))
+        val indexed = enumeration.values.map(_.hints.get[ProtoIndex].map(_.value))
         val values  =
           if indexed.forall(_.isDefined) then enumeration.values.zip(indexed.flatten).map((value, number) => (value.name, number))
           else enumeration.values.zipWithIndex.map((value, number) => (value.name, number))
@@ -218,13 +218,13 @@ object Smithy4sProtobufSchema:
     schema match
       case PrimitiveSchema(_, hints, tag)        => primitive(tag, hints, where).map(Kind.Single(_))
       case CollectionSchema(_, hints, _, member) =>
-        if hints.has(ProtoWrapped) then Left(s"$where is a list with @protoWrapped, which xkafka does not declare yet")
+        if hints.has[ProtoWrapped] then Left(s"$where is a list with @protoWrapped, which xkafka does not declare yet")
         else
           kind(member, where).flatMap:
             case Kind.Single(fieldType) if !member.isOption => Right(Kind.Repeated(fieldType))
             case _ => Left(s"$where is a list of lists, maps, inlined unions or nulls, which a repeated field cannot hold")
       case MapSchema(_, hints, _, key, value) =>
-        if hints.has(ProtoWrapped) then Left(s"$where is a map with @protoWrapped, which xkafka does not declare yet")
+        if hints.has[ProtoWrapped] then Left(s"$where is a map with @protoWrapped, which xkafka does not declare yet")
         else
           (kind(key, where), kind(value, where)).tupled.flatMap:
             case (Kind.Single(keyType), Kind.Single(valueType)) if mapKeys(keyType) => Right(Kind.Keyed(keyType, valueType))
@@ -234,7 +234,7 @@ object Smithy4sProtobufSchema:
       case EnumerationSchema(_, _, _, _)                                                       => Right(Kind.Single(FieldType.Int32))
       case struct: StructSchema[?] => Right(Kind.Single(FieldType.Named(struct.shapeId.name)))
       case union: UnionSchema[?]   =>
-        if union.hints.has(ProtoInlinedOneOf) then alternatives(union).map(Kind.Inlined(_))
+        if union.hints.has[ProtoInlinedOneOf] then alternatives(union).map(Kind.Inlined(_))
         else Right(Kind.Single(FieldType.Named(union.shapeId.name)))
       case OptionSchema(_, underlying)     => kind(underlying, where)
       case BijectionSchema(underlying, _)  => kind(underlying, where)
@@ -246,7 +246,7 @@ object Smithy4sProtobufSchema:
       .union(Set(FieldType.Fixed32, FieldType.Fixed64, FieldType.SFixed32, FieldType.SFixed64))
 
   private def primitive(tag: Primitive[?], hints: Hints, where: String): Either[String, FieldType] =
-    val numbers = hints.get(ProtoNumType)
+    val numbers = hints.get[ProtoNumType]
     val plain   =
       tag match
         case Primitive.PLong => Right(
@@ -273,18 +273,18 @@ object Smithy4sProtobufSchema:
         case Primitive.PBlob                                               => Right(FieldType.Bytes)
         case Primitive.PDocument                                           => Right(FieldType.Named(".google.protobuf.Value"))
         case Primitive.PDuration                                           => Right(FieldType.Named(".google.protobuf.Duration"))
-        case Primitive.PUUID if hints.has(ProtoCompactUUID) => Left(s"$where is a UUID with @protoCompactUUID, which xkafka does not declare yet")
-        case Primitive.PLocalDate if hints.has(ProtoCompactLocalDate) =>
+        case Primitive.PUUID if hints.has[ProtoCompactUUID] => Left(s"$where is a UUID with @protoCompactUUID, which xkafka does not declare yet")
+        case Primitive.PLocalDate if hints.has[ProtoCompactLocalDate] =>
           Left(s"$where is a date with @protoCompactLocalDate, which xkafka does not declare yet")
-        case Primitive.PLocalTime if hints.has(ProtoCompactLocalTime) =>
+        case Primitive.PLocalTime if hints.has[ProtoCompactLocalTime] =>
           Left(s"$where is a time with @protoCompactLocalTime, which xkafka does not declare yet")
-        case Primitive.POffsetDateTime if hints.get(ProtoOffsetDateTimeFormat).contains(ProtoOffsetDateTimeFormat.PROTOBUF) =>
+        case Primitive.POffsetDateTime if hints.get[ProtoOffsetDateTimeFormat].contains(ProtoOffsetDateTimeFormat.PROTOBUF) =>
           Left(s"$where is a date and time in the Protobuf format, which xkafka does not declare yet")
         case Primitive.PUUID | Primitive.PLocalDate | Primitive.PLocalTime | Primitive.POffsetDateTime           => Right(FieldType.String)
-        case Primitive.PTimestamp if hints.get(ProtoTimestampFormat).contains(ProtoTimestampFormat.EPOCH_MILLIS) =>
+        case Primitive.PTimestamp if hints.get[ProtoTimestampFormat].contains(ProtoTimestampFormat.EPOCH_MILLIS) =>
           Left(s"$where is a timestamp in epoch milliseconds, which xkafka does not declare yet")
         case Primitive.PTimestamp => Right(FieldType.Named(".google.protobuf.Timestamp"))
-    if !hints.has(ProtoWrapped) then plain
+    if !hints.has[ProtoWrapped] then plain
     else
       plain.flatMap:
         case FieldType.Int64  => Right(FieldType.Named(".google.protobuf.Int64Value"))

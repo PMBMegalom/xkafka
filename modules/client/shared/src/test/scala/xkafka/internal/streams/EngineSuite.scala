@@ -933,7 +933,7 @@ final class EngineSuite extends CatsEffectSuite:
         // The window [0, 10000) has gone on, and [20000, 30000) is held.
         assertEquals(
           logged.drop(1).map(r => (r.key.map(k => java.nio.ByteBuffer.wrap(k.toArray).getLong(k.size - 8)), r.value.isEmpty)).toSet,
-          Set((Some(0L), true), (Some(20000L), false))
+          Set[(Option[Long], Boolean)]((Some(0L), true), (Some(20000L), false))
         )
         assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => java.nio.ByteBuffer.wrap(v.toArray).getLong), List(2L))
 

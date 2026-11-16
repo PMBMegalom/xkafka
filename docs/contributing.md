@@ -151,7 +151,7 @@ the code, so commit what it changes; continuous integration checks all three.
 The rest runs the tests, the binary compatibility check, the API docs and the
 site, whose examples are compiled, as continuous integration does. Continuous
 integration also tests the sbt plugin on sbt 1 and sbt 2; to do the same, run
-`sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'`.
+`sbt sbtCodegen/scripted '++3.9.0 sbtCodegen/scripted'`.
 
 ## Changes to the build
 

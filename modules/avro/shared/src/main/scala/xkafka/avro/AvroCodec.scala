@@ -343,10 +343,10 @@ object AvroCodec:
   given [A](using resolved: Resolved[A]): DefaultOf[AvroCodec, AvroValue, A] = value => resolved.codec.encode(value)
 
 /** The values of a case class's fields, as a tuple of their types. */
-private[avro] trait Elements[A, T <: Tuple]:
+trait Elements[A, T <: Tuple]:
   def apply(value: A): T
 
-private[avro] object Elements:
+object Elements:
   given [A <: Product](using product: Mirror.ProductOf[A]): Elements[A, product.MirroredElemTypes] = value => Tuple.fromProductTyped(value)
 
 /** A case class's codec, writing its fields in order as a record's. */
@@ -456,13 +456,13 @@ private[avro] final class UnionCodec[U](branches: List[Branch[U]]) extends AvroC
       .toRight(s"${Shown(value)} is of none of the union's types").flatMap(branch => branch.codec.decode(value).map(branch.widen))
 
 /** One type of a union type `U`: its codec, and how a value of `U` is told to be of it. */
-private[avro] trait Branch[U]:
+trait Branch[U]:
   type Of
   def codec: AvroCodec[Of]
   def tag: ClassTag[Of]
   def widen: Of => U
 
-private[avro] object Branch:
+object Branch:
   inline def all[U, T <: Tuple]: List[Branch[U]] =
     inline erasedValue[T] match
       case _: EmptyTuple     => Nil
@@ -591,24 +591,24 @@ private[avro] final class SumCodec[A](name: FullName, named: Meta.Named, default
       case other                        => Left(s"expected a case of '${name.value}', found ${Shown(other)}")
 
 /** A codec found for a type where one is given, and derived where none is, made once it is first needed so that a type can hold itself. */
-private[avro] final class Resolved[A](make: => AvroCodec[A]):
+final class Resolved[A](make: => AvroCodec[A]):
   lazy val codec: AvroCodec[A] = make
 
-private[avro] object Resolved extends DerivedResolved:
+object Resolved extends DerivedResolved:
   given found[A](using codec: => AvroCodec[A]): Resolved[A] = Resolved(codec)
 
-private[avro] trait DerivedResolved:
+trait DerivedResolved:
   inline given derived[A](using mirror: Mirror.Of[A]): Resolved[A] = Resolved(AvroCodec.derived[A](using mirror))
 
 /** The codecs of a case class's fields, whose types are `T`. */
-private[avro] trait Fields[T <: Tuple]:
+trait Fields[T <: Tuple]:
   def building: AvroCodec.Building[List[AvroSchema]]
 
   /** The fields' values encoded inside `depth` records. */
   def encode(values: T, depth: Int): Either[String, List[AvroValue]]
   def decode(values: List[AvroValue]): Either[String, T]
 
-private[avro] object Fields:
+object Fields:
   /** The codecs of `A`'s fields, whose types are `T`, where the `BigDecimal`s of a field marked `SchemaDecimal` are decimals of its precision. */
   inline def of[A, T <: Tuple]: Fields[T] = ${ fieldsOf[A, T] }
 
@@ -642,7 +642,7 @@ private[avro] object Fields:
         case Nil           => Left("fewer values than fields")
 
 /** One case of a sealed trait or enum `A`: its codec, how a value of `A` is told to be of it, and its value where it is an object. */
-private[avro] trait Case[A]:
+trait Case[A]:
   type Of
   def codec: AvroCodec[Of]
   def test: TypeTest[A, Of]
@@ -650,9 +650,9 @@ private[avro] trait Case[A]:
   def singleton: Option[A]
 
 /** The cases of `A`, whose types are `T`. */
-private[avro] final case class Cases[A, T <: Tuple](cases: List[Case[A]])
+final case class Cases[A, T <: Tuple](cases: List[Case[A]])
 
-private[avro] object Cases:
+object Cases:
   given [A]: Cases[A, EmptyTuple] = Cases(Nil)
 
   given [A, H, T <: Tuple](using resolved: Resolved[H], tested: TypeTest[A, H], up: H <:< A, single: Single[H], tail: Cases[A, T]): Cases[A, H *: T] =
@@ -666,10 +666,10 @@ private[avro] object Cases:
     Cases(known :: tail.cases)
 
 /** A type's only value, where it has one. */
-private[avro] final case class Single[A](value: Option[A])
+final case class Single[A](value: Option[A])
 
-private[avro] object Single extends NotSingle:
+object Single extends NotSingle:
   given [A](using only: ValueOf[A]): Single[A] = Single(Some(only.value))
 
-private[avro] trait NotSingle:
+trait NotSingle:
   given [A]: Single[A] = Single(None)

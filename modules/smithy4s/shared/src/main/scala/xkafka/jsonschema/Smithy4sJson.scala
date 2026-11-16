@@ -86,7 +86,7 @@ object Smithy4sJsonSchema:
     val fields      = described.json.asObject.fold(List("allOf" -> Json.arr(described.json)))(_.toList)
     Json.fromFields(
       List("$schema" -> Json.fromString("http://json-schema.org/draft-07/schema#"), "title" -> Json.fromString(name(root))) ++
-        schema.hints.get(Documentation).map(doc => "description" -> Json.fromString(doc.value)) ++ fields ++
+        schema.hints.get[Documentation].map(doc => "description" -> Json.fromString(doc.value)) ++ fields ++
         Option.when(definitions.nonEmpty)("definitions" -> Json.fromFields(definitions.toList.sortBy(_._1)))
     )
 
@@ -158,7 +158,7 @@ object Smithy4sJsonSchema:
       case Primitive.POffsetDateTime => typed("string", "format" -> Json.fromString("date-time"))
       case Primitive.PBlob           => typed("string", "contentEncoding" -> Json.fromString("base64"))
       case Primitive.PDocument       => Json.obj()
-      case Primitive.PTimestamp      => hints.get(TimestampFormat).getOrElse(TimestampFormat.EPOCH_SECONDS) match
+      case Primitive.PTimestamp      => hints.get[TimestampFormat].getOrElse(TimestampFormat.EPOCH_SECONDS) match
           case TimestampFormat.DATE_TIME => typed("string", "format" -> Json.fromString("date-time"))
           case TimestampFormat.HTTP_DATE => typed("string")
           case _                         => typed("number")
@@ -194,21 +194,21 @@ object Smithy4sJsonSchema:
 
   private def structure(struct: StructSchema[?], inside: Set[ShapeId], root: ShapeId): Described =
     val fields =
-      struct.fields.filterNot(_.hints.has(alloy.JsonUnknown)).map: field =>
-        val label     = field.hints.get(JsonName).fold(field.label)(_.value)
-        val required  = field.hints.has(Required)
+      struct.fields.filterNot(_.hints.has[alloy.JsonUnknown]).map: field =>
+        val label     = field.hints.get[JsonName].fold(field.label)(_.value)
+        val required  = field.hints.has[Required]
         val described = describe(field.schema, inside, root)
-        val default   = field.hints.get(Default).map(found => json(found.value))
+        val default   = field.hints.get[Default].map(found => json(found.value))
         // A field that is not required may be left out, or null, which smithy4s reads as its default or as none.
         val value = if required then described.json else orNull(described.json)
         val full  =
           value.deepMerge(Json.fromFields(
-            field.hints.get(Documentation).map(doc => "description" -> Json.fromString(doc.value)).toList ++ default.map("default" -> _)
+            field.hints.get[Documentation].map(doc => "description" -> Json.fromString(doc.value)).toList ++ default.map("default" -> _)
           ))
         (label, required, full, described.definitions)
     Described(
       Json.fromFields(
-        List("type" -> Json.fromString("object")) ++ struct.hints.get(Documentation).map(doc => "description" -> Json.fromString(doc.value)) ++ List(
+        List("type" -> Json.fromString("object")) ++ struct.hints.get[Documentation].map(doc => "description" -> Json.fromString(doc.value)) ++ List(
           "properties" -> Json.fromFields(fields.map(field => field._1 -> field._3)),
           "required"   -> Json.fromValues(fields.collect { case (label, true, _, _) => Json.fromString(label) })
         )
@@ -218,11 +218,11 @@ object Smithy4sJsonSchema:
 
   private def alternatives(union: UnionSchema[?], inside: Set[ShapeId], root: ShapeId): Described =
     val alts =
-      union.alternatives.filterNot(_.hints.has(alloy.JsonUnknown)).map: alt =>
-        (alt.hints.get(JsonName).fold(alt.label)(_.value), describe(alt.schema, inside, root))
+      union.alternatives.filterNot(_.hints.has[alloy.JsonUnknown]).map: alt =>
+        (alt.hints.get[JsonName].fold(alt.label)(_.value), describe(alt.schema, inside, root))
     val definitions = alts.map(_._2.definitions).foldLeft(Map.empty[String, () => Described])(_ ++ _)
     val branches    =
-      union.hints.get(alloy.Discriminated) match
+      union.hints.get[alloy.Discriminated] match
         case Some(property) => alts.map: (label, described) =>
             val tag =
               Json.obj(
@@ -231,7 +231,7 @@ object Smithy4sJsonSchema:
                 "required"   -> Json.arr(Json.fromString(property.value))
               )
             Json.obj("allOf" -> Json.arr(described.json, tag))
-        case None if union.hints.has(alloy.Untagged) => alts.map(_._2.json)
+        case None if union.hints.has[alloy.Untagged] => alts.map(_._2.json)
         case None                                    => alts.map: (label, described) =>
             Json.obj(
               "type"                 -> Json.fromString("object"),
@@ -239,10 +239,10 @@ object Smithy4sJsonSchema:
               "required"             -> Json.arr(Json.fromString(label)),
               "additionalProperties" -> Json.False
             )
-    val keyword = if union.hints.has(alloy.Untagged) then "anyOf" else "oneOf"
+    val keyword = if union.hints.has[alloy.Untagged] then "anyOf" else "oneOf"
     Described(
       Json.fromFields(
-        union.hints.get(Documentation).map(doc => "description" -> Json.fromString(doc.value)).toList :+ (keyword -> Json.fromValues(branches))
+        union.hints.get[Documentation].map(doc => "description" -> Json.fromString(doc.value)).toList :+ (keyword -> Json.fromValues(branches))
       ),
       definitions
     )

@@ -48,7 +48,7 @@ final class ModelSuite extends FunSuite:
     val second = TopicPartition(Topic.from("a").toOption.get, Partition.from(10).toOption.get)
     val third  = TopicPartition(Topic.from("b").toOption.get, Partition.from(0).toOption.get)
 
-    assertEquals(List(third, second, first).sorted(Order[TopicPartition].toOrdering), List(first, second, third))
+    assertEquals(List(third, second, first).sorted(using Order[TopicPartition].toOrdering), List(first, second, third))
     assertEquals(third.show, "b-0")
     assertEquals(Offset.from(7L).toOption.get.show, "7")
     assertEquals(ValidationError.OffsetOverflow.show, "offset cannot be advanced past Long.MaxValue")

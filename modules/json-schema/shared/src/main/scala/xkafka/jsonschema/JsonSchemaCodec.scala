@@ -472,30 +472,30 @@ private[jsonschema] final class SumCodec[A](named: Meta.Named, cases: List[Case[
           }.getOrElse(Left(s"'$tag' is not a case of $full"))
 
 /** A codec found for a type where one is given, and derived where none is, made once it is first needed so that a type can hold itself. */
-private[jsonschema] final class Resolved[A](make: => JsonSchemaCodec[A]):
+final class Resolved[A](make: => JsonSchemaCodec[A]):
   lazy val codec: JsonSchemaCodec[A] = make
 
-private[jsonschema] object Resolved extends DerivedResolved:
+object Resolved extends DerivedResolved:
   given found[A](using codec: => JsonSchemaCodec[A]): Resolved[A] = Resolved(codec)
 
-private[jsonschema] trait DerivedResolved:
+trait DerivedResolved:
   inline given derived[A](using mirror: Mirror.Of[A]): Resolved[A] = Resolved(JsonSchemaCodec.derived[A](using mirror))
 
 /** The values of a case class's fields, as a tuple of their types. */
-private[jsonschema] trait Elements[A, T <: Tuple]:
+trait Elements[A, T <: Tuple]:
   def apply(value: A): T
 
-private[jsonschema] object Elements:
+object Elements:
   given [A <: Product](using product: Mirror.ProductOf[A]): Elements[A, product.MirroredElemTypes] = value => Tuple.fromProductTyped(value)
 
 /** The codecs of a case class's fields, whose types are `T`. */
-private[jsonschema] trait Fields[T <: Tuple]:
+trait Fields[T <: Tuple]:
   def describe(seen: Set[String]): List[Described]
   def optional: List[Boolean]
   def encode(values: T, depth: Int): Either[String, List[Json]]
   def decode(values: List[Json]): Either[String, T]
 
-private[jsonschema] object Fields:
+object Fields:
   given Fields[EmptyTuple] with
     override def describe(seen: Set[String]): List[Described]                       = Nil
     override def optional: List[Boolean]                                            = Nil
@@ -513,7 +513,7 @@ private[jsonschema] object Fields:
         case Nil           => Left("fewer values than fields")
 
 /** One case of a sealed trait or enum `A`: its codec and name, how a value of `A` is told to be of it, and its value where it is an object. */
-private[jsonschema] trait Case[A]:
+trait Case[A]:
   type Of
   def codec: JsonSchemaCodec[Of]
   def tag: String
@@ -522,9 +522,9 @@ private[jsonschema] trait Case[A]:
   def singleton: Option[A]
 
 /** The cases of `A`, whose types are `T`. */
-private[jsonschema] final case class Cases[A, T <: Tuple](cases: List[Case[A]])
+final case class Cases[A, T <: Tuple](cases: List[Case[A]])
 
-private[jsonschema] object Cases:
+object Cases:
   given [A]: Cases[A, EmptyTuple] = Cases(Nil)
 
   inline given [A, H, T <: Tuple](using
@@ -536,8 +536,7 @@ private[jsonschema] object Cases:
   ): Cases[A, H *: T] = Cases(KnownCase(Meta.named[H].name, resolved, tested, up, single) :: tail.cases)
 
 /** A case named `tag`, whose type is `H`. */
-private[jsonschema] final class KnownCase[A, H](val tag: String, resolved: Resolved[H], tested: TypeTest[A, H], up: H <:< A, single: Single[H])
-    extends Case[A]:
+final class KnownCase[A, H](val tag: String, resolved: Resolved[H], tested: TypeTest[A, H], up: H <:< A, single: Single[H]) extends Case[A]:
   type Of = H
   override def codec: JsonSchemaCodec[H] = resolved.codec
   override def test: TypeTest[A, H]      = tested
@@ -545,10 +544,10 @@ private[jsonschema] final class KnownCase[A, H](val tag: String, resolved: Resol
   override def singleton: Option[A]      = single.value.map(up)
 
 /** A type's only value, where it has one. */
-private[jsonschema] final case class Single[A](value: Option[A])
+final case class Single[A](value: Option[A])
 
-private[jsonschema] object Single extends NotSingle:
+object Single extends NotSingle:
   given [A](using only: ValueOf[A]): Single[A] = Single(Some(only.value))
 
-private[jsonschema] trait NotSingle:
+trait NotSingle:
   given [A]: Single[A] = Single(None)

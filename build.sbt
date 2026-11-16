@@ -7,7 +7,7 @@ import scala.sys.process.ProcessLogger
 import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
-ThisBuild / scalaVersion     := "3.3.9"
+ThisBuild / scalaVersion     := "3.9.0"
 ThisBuild / tlBaseVersion    := "0.8"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
@@ -27,28 +27,28 @@ ThisBuild / licenses        := Seq("MIT" -> url("https://opensource.org/license/
 ThisBuild / tlJdkRelease    := Some(17)
 ThisBuild / tlFatalWarnings := true
 
-val catsEffectVersion      = "3.7.1"
-val catsTaglessVersion     = "0.16.6"
-val fs2Version             = "3.14.0"
-val circeVersion           = "0.14.17"
-val http4sVersion          = "0.23.38"
-val apacheAvroVersion      = "1.12.2"
-val confluentVersion       = "8.4.1"
-val scalapbVersion         = "0.11.21"
-val vulcanVersion          = "1.14.1"
-val avro4sVersion          = "5.0.15"
-val scalaJavaTimeVersion   = "2.7.0"     // 2.8.0 and later are built with Scala 3.9, which xkafka on Scala 3.3 cannot read.
-val kafkaClientsVersion    = "4.4.0"
-val koffiVersion           = "3.3.3"
-val lz4JavaVersion         = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
-val snappyJavaVersion      = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which has security advisories fixed in 1.1.10.9.
-val nodeVersion            = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
-val librdkafkaVersion      = "2.16.0"
-val librdkafkaSha256       = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
-val rocksdbVersion         = "10.10.1.1" // rocksdbjni on the JVM, and the libraries its jar carries on the others
-val rocksdbSha256          = "e862cc37a22df8f1e7c12556f5141ce65d782af77e30aee1bd7d488d7c554fde"
+val catsEffectVersion    = "3.7.1"
+val catsTaglessVersion   = "0.16.6"
+val fs2Version           = "3.14.0"
+val circeVersion         = "0.14.17"
+val http4sVersion        = "0.23.38"
+val apacheAvroVersion    = "1.12.2"
+val confluentVersion     = "8.4.1"
+val scalapbVersion       = "0.11.21"
+val vulcanVersion        = "1.14.1"
+val avro4sVersion        = "5.0.15"
+val scalaJavaTimeVersion = "2.11.0"
+val kafkaClientsVersion  = "4.4.0"
+val koffiVersion         = "3.3.3"
+val lz4JavaVersion       = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
+val snappyJavaVersion    = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which has security advisories fixed in 1.1.10.9.
+val nodeVersion          = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
+val librdkafkaVersion    = "2.16.0"
+val librdkafkaSha256     = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
+val rocksdbVersion       = "10.10.1.1" // rocksdbjni on the JVM, and the libraries its jar carries on the others
+val rocksdbSha256        = "e862cc37a22df8f1e7c12556f5141ce65d782af77e30aee1bd7d488d7c554fde"
 // The RocksDB release that jar carries, which the library reports of itself: a jar's version may add a fourth number for a build of one release.
-val rocksdbRelease = rocksdbVersion.split('.').take(3).mkString(".")
+val rocksdbRelease         = rocksdbVersion.split('.').take(3).mkString(".")
 val munitVersion           = "1.3.6"
 val munitCatsEffectVersion = "2.2.1"
 val munitScalacheckVersion = "1.3.1"
@@ -387,7 +387,7 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   name = "sbt plugin",
   steps = githubWorkflowJobSetup.value.toList ++ List(
     WorkflowStep.Run(
-      List("sbt sbtCodegen/scripted '++3.8.4 sbtCodegen/scripted'"),
+      List("sbt sbtCodegen/scripted '++3.9.0 sbtCodegen/scripted'"),
       name = Some("Generate classes from schema files in a build on sbt 1 and on sbt 2")
     )
   ),
@@ -1273,13 +1273,13 @@ lazy val sbtCodegen = project
     description                   := "Scala classes generated from Avro and JSON Schema files by xkafka-codegen, where sbt compiles",
     headerLicense                 := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
     scalaVersion                  := "2.12.21",
-    crossScalaVersions            := Seq("2.12.21", "3.8.4"),
-    pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.0.12"),
+    crossScalaVersions            := Seq("2.12.21", "3.9.0"),
+    pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.1.0"),
     tlVersionIntroduced           := Map("2.12" -> "0.8.0", "3" -> "0.8.0"),
     // The plugin takes none of the other modules' common settings, so it carries the licence as their jars do.
     Compile / packageBin / mappings += (repositoryRoot / "LICENSE" -> "META-INF/LICENSE"),
     // The scripted builds run on the newest sbt of each major version, with this build's xkafka-codegen and format modules published locally.
-    scriptedSbt := (if (scalaBinaryVersion.value == "2.12") "1.13.1" else "2.0.12"),
+    scriptedSbt := (if (scalaBinaryVersion.value == "2.12") "1.13.1" else "2.1.0"),
     scriptedLaunchOpts ++= Seq("-Xmx2g", s"-Dplugin.version=${version.value}"),
     scriptedBufferLog    := false,
     scriptedDependencies := scriptedDependencies

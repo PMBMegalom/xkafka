@@ -186,4 +186,6 @@ private[xkafka] object Meta:
                 val value = (if arguments.isEmpty then call else call.appliedToTypes(arguments)).asExprOf[field]
                 '{ Some(() => scala.compiletime.summonInline[DefaultOf[C, Out, derived]].write($value.asInstanceOf[derived])) }
               case _ => '{ None }
+          // Every type matches a type pattern, which the compiler cannot see.
+          case _ => '{ None }
     )

@@ -628,24 +628,24 @@ private[protobuf] final class OneofCodec[A](named: Meta.Named, cases: List[Case[
   override def absent: Either[String, A] = take(Raw.Bytes(Chunk.empty))
 
 /** A codec found for a type where one is given, and derived where none is, made once it is first needed so that a type can hold itself. */
-private[protobuf] final class Resolved[A](make: => ProtobufCodec[A]):
+final class Resolved[A](make: => ProtobufCodec[A]):
   lazy val codec: ProtobufCodec[A] = make
 
-private[protobuf] object Resolved extends DerivedResolved:
+object Resolved extends DerivedResolved:
   given found[A](using codec: => ProtobufCodec[A]): Resolved[A] = Resolved(codec)
 
-private[protobuf] trait DerivedResolved:
+trait DerivedResolved:
   inline given derived[A](using mirror: Mirror.Of[A]): Resolved[A] = Resolved(ProtobufCodec.derived[A](using mirror))
 
 /** The values of a case class's fields, as a tuple of their types. */
-private[protobuf] trait Elements[A, T <: Tuple]:
+trait Elements[A, T <: Tuple]:
   def apply(value: A): T
 
-private[protobuf] object Elements:
+object Elements:
   given [A <: Product](using product: Mirror.ProductOf[A]): Elements[A, product.MirroredElemTypes] = value => Tuple.fromProductTyped(value)
 
 /** The codecs of a case class's fields, whose types are `T`. */
-private[protobuf] trait Fields[T <: Tuple]:
+trait Fields[T <: Tuple]:
   def describe: List[Described]
   def labels: List[Label]
 
@@ -658,7 +658,7 @@ private[protobuf] trait Fields[T <: Tuple]:
   /** The fields of a message inside as many others as `depth` says. */
   def readWithin(found: List[Vector[Raw]], depth: Int): Either[String, T]
 
-private[protobuf] object Fields:
+object Fields:
   given Fields[EmptyTuple] with
     override def describe: List[Described]                                                                                             = Nil
     override def labels: List[Label]                                                                                                   = Nil
@@ -680,7 +680,7 @@ private[protobuf] object Fields:
 
 /** One case of a sealed trait or enum `A`: its codec, name and number, how a value of `A` is told to be of it, and its value where it is an object.
   */
-private[protobuf] trait Case[A]:
+trait Case[A]:
   type Of
   def codec: ProtobufCodec[Of]
   def tag: String
@@ -690,9 +690,9 @@ private[protobuf] trait Case[A]:
   def singleton: Option[A]
 
 /** The cases of `A`, whose types are `T`. */
-private[protobuf] final case class Cases[A, T <: Tuple](cases: List[Case[A]])
+final case class Cases[A, T <: Tuple](cases: List[Case[A]])
 
-private[protobuf] object Cases:
+object Cases:
   given [A]: Cases[A, EmptyTuple] = Cases(Nil)
 
   inline given [A, H, T <: Tuple](using
@@ -704,14 +704,8 @@ private[protobuf] object Cases:
   ): Cases[A, H *: T] = Cases(KnownCase(Meta.named[H].name, Numbers.of[H], resolved, tested, up, only) :: tail.cases)
 
 /** A case named `tag` and numbered `number`, whose type is `H`. */
-private[protobuf] final class KnownCase[A, H](
-    val tag: String,
-    val number: Int,
-    resolved: Resolved[H],
-    tested: TypeTest[A, H],
-    up: H <:< A,
-    only: Only[H]
-) extends Case[A]:
+final class KnownCase[A, H](val tag: String, val number: Int, resolved: Resolved[H], tested: TypeTest[A, H], up: H <:< A, only: Only[H])
+    extends Case[A]:
   type Of = H
   override def codec: ProtobufCodec[H] = resolved.codec
   override def test: TypeTest[A, H]    = tested
@@ -719,10 +713,10 @@ private[protobuf] final class KnownCase[A, H](
   override def singleton: Option[A]    = only.value.map(up)
 
 /** A type's only value, where it has one. */
-private[protobuf] final case class Only[A](value: Option[A])
+final case class Only[A](value: Option[A])
 
-private[protobuf] object Only extends NotOnly:
+object Only extends NotOnly:
   given [A](using only: ValueOf[A]): Only[A] = Only(Some(only.value))
 
-private[protobuf] trait NotOnly:
+trait NotOnly:
   given [A]: Only[A] = Only(None)

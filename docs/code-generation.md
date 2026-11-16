@@ -7,7 +7,7 @@ need only `xkafka-avro` or `xkafka-json-schema` to compile.
 
 ## With sbt
 
-Add the plugin (it works with sbt 1.10 or newer and sbt 2) and the module for your schema
+Add the plugin (it works with sbt 1.10 or newer and sbt 2.1 or newer) and the module for your schema
 format:
 
 ```scala
