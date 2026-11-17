@@ -60,6 +60,21 @@ final class RestoreSuite extends CatsEffectSuite:
       _        <- PlatformKafkaClient().transactionalProducer(settings).use(_.transactionally(use))
     yield ()
 
+  /** Waits until no transaction is unfinished in the topics' partitions. A commit returns before the coordinator has written its markers, and until
+    * it has, a read under read_committed ends before the transaction's records.
+    */
+  private def settled(server: String, topics: Topic*): IO[Unit] =
+    def reading(isolation: String) =
+      Resource.make(driver.consumer(server, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> isolation), reportEnds = false))(
+        driver.destroyConsumer
+      )
+    (reading("read_committed"), reading("read_uncommitted")).tupled.use: (committed, all) =>
+      val partitions = topics.toList.flatMap(topic => List(partition(topic, 0), partition(topic, 1)))
+      def caughtUp   =
+        partitions.forallM(at => (driver.watermarks(committed, at, 5000), driver.watermarks(all, at, 5000)).mapN((stable, high) => stable._2 == high._2))
+      def wait: IO[Unit] = caughtUp.ifM(IO.unit, IO.sleep(50.millis) *> wait)
+      wait.timeout(10.seconds)
+
   private def create(server: String, topics: Topic*): IO[Unit] =
     for
       client <- ClientSettings.from(NonEmptyList.one(server)).liftTo[IO]
@@ -85,7 +100,7 @@ final class RestoreSuite extends CatsEffectSuite:
           )(driver.destroyConsumer)
         create(broker, table) *> transactionally(broker)(
           _.produce(NonEmptyList.fromListUnsafe(keys.zipWithIndex.map((key, n) => record(table, n % 2, key, Some("v"), 1000L)))).void
-        ) *> consumer.use: client =>
+        ) *> settled(broker, table) *> consumer.use: client =>
           GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
             held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, keys.toSet))
 
@@ -100,6 +115,7 @@ final class RestoreSuite extends CatsEffectSuite:
         for
           _     <- create(broker, changelog)
           _     <- transactionally(broker)(_.produce(NonEmptyList.of("k1", "k2").map(key => record(changelog, 0, key, Some("v"), 1000L))).void)
+          _     <- settled(broker, changelog)
           store <- TaskStore.memory[IO].apply("s", None, StoreContents.empty)
           _     <- store.write(StoreContents.unchanged.updated(text("gone"), Some(Stored(text("v"), 1L))), Map(0 -> 50L))
           _     <- consumer.use(Restore(driver, _, Map(partition(changelog, 0) -> "s"), Map(partition(changelog, 0) -> 50L), Map("s" -> store)))
@@ -121,7 +137,8 @@ final class RestoreSuite extends CatsEffectSuite:
           (name, time, held) =>
             TaskStore.memory[IO].apply(name, time, held).flatTap: store =>
               store.write(StoreContents.unchanged.updated(text("gone"), Some(Stored(text("v"), 1L))), Map(0 -> 50L, 1 -> 50L))
-        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k1", Some("v"), 1000L))).void) *> consumer.use:
+        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k1", Some("v"), 1000L))).void) *>
+          settled(broker, table) *> consumer.use:
           client =>
             GlobalStores(driver, client, List(read), _ => IO.pure(2), kept).use: held =>
               held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, Set("k1")))
@@ -227,7 +244,8 @@ final class RestoreSuite extends CatsEffectSuite:
           Resource.make(
             driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
           )(driver.destroyConsumer)
-        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k", Some("raw"), 1000L))).void) *> consumer.use:
+        create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k", Some("raw"), 1000L))).void) *>
+          settled(broker, table) *> consumer.use:
           client =>
             GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
               held.stores("gs").all
@@ -248,6 +266,7 @@ final class RestoreSuite extends CatsEffectSuite:
           def acquired                 = consumer.use(client => GlobalStores(driver, client, List(read), _ => IO.pure(2), open).use_)
           for
             _     <- create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k", Some("v"), 1000L))).void)
+            _     <- settled(broker, table)
             _     <- acquired
             first <- kept.positions
             // Read from the start again, the topic's record would overwrite this.
@@ -282,7 +301,7 @@ final class RestoreSuite extends CatsEffectSuite:
             driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
           )(driver.destroyConsumer)
         create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "done", Some("v"), 1000L))).void) *>
-          transactionally(broker): open =>
+          settled(broker, table) *> transactionally(broker): open =>
             open.produce(NonEmptyList.of(record(table, 0, "open", Some("v"), 1000L))).void *> consumer.use: client =>
               GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
                 held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, Set("done")))
@@ -325,6 +344,7 @@ final class RestoreSuite extends CatsEffectSuite:
                 record(changelog, 0, "k1", Some("a2"), now + 500)
               )).void
             )
+          _    <- settled(server, changelog)
           kept <- TaskStore.inMemory[IO](StoreContents.empty)
           none <- TaskStore.inMemory[IO](StoreContents.empty)
           _    <-
