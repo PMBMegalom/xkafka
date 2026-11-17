@@ -374,13 +374,27 @@ final class DriverClientSuite extends CatsEffectSuite:
         for
           gate    <- Deferred[IO, Unit]
           seen    <- Ref[IO].of(Vector.empty[Map[TopicPartition, Long]])
-          looking <- consumer.assignmentNumbers.evalMap(numbers => seen.update(_ :+ numbers) *> gate.get.whenA(numbers.nonEmpty)).compile.drain.start
+          looking <-
+            consumer.assignmentReports.map(report => report.assigned.map(partition => partition -> report.lease(partition)).toMap)
+              .evalMap(numbers => seen.update(_ :+ numbers) *> gate.get.whenA(numbers.nonEmpty)).compile.drain.start
           _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1) *> IO.sleep(100.millis)
           _       <- fake.revoke *> fake.assign *> fake.until(_.count(_ == "assign") == 2) *> IO.sleep(100.millis)
           _       <- gate.complete(()) *> IO.sleep(200.millis)
           numbers <- seen.get
           _       <- looking.cancel
         yield assertEquals(numbers.filter(_.nonEmpty).map(_.values.toList), Vector(List(1L), List(2L)))
+
+  test("a report taken after a revocation knows the assignment it revoked, so it ends the stream that assignment opened and no later one"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          seen    <- Ref[IO].of(Vector.empty[AssignmentReport])
+          looking <- consumer.assignmentReports.evalMap(report => seen.update(_ :+ report)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1) *> IO.sleep(100.millis)
+          _       <- fake.revoke *> fake.until(_.contains("unassign")) *> IO.sleep(100.millis)
+          reports <- seen.get
+          _       <- looking.cancel
+        yield assertEquals(reports.map(report => (report.assigned.size, report.leases.values.toList)), Vector((0, Nil), (1, List(1L)), (0, List(1L))))
 
   test("a record from a poll a revocation interrupted is not handed out, and the next, read under the new assignment, is and can be recorded"):
     FakeDriver().flatMap: fake =>
