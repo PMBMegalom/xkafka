@@ -1772,12 +1772,12 @@ trait KafkaConsumer[F[_], K, V]:
     */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
 
-  /** Each assignment, with how many times the group has assigned each of its partitions, so a partition revoked and assigned again between two looks
-    * is seen to have been, where the consumer counts them.
+  /** Each assignment, with how many times the group had assigned each partition when it was taken, so a partition revoked and assigned again between
+    * two looks is seen to have been, where the consumer counts them.
     */
-  private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] = assignmentChanges.map(_.map(_ -> 0L).toMap)
+  private[xkafka] def assignmentReports: Stream[F, AssignmentReport] = assignmentChanges.map(AssignmentReport(_, Map.empty))
 
-  /** Whether `assignmentNumbers` counts the assignments, as the numbers its records carry do: a consumer that wraps another, and does not, has its
+  /** Whether `assignmentReports` counts the assignments, as the numbers its records carry do: a consumer that wraps another, and does not, has its
     * records' numbers ignored, so that they are not taken for assignments its partitions' streams have not seen.
     */
   private[xkafka] def numbersAssignments: Boolean = false
@@ -1827,7 +1827,7 @@ trait KafkaConsumer[F[_], K, V]:
     *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
     */
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
-    PartitionRecords.fromConsumer(self, assignmentNumbers, maxQueuedRecords, pausing)
+    PartitionRecords.fromConsumer(self, assignmentReports, maxQueuedRecords, pausing)
 
   /** Returns the broker-stored next offset for each requested topic-partition, with its leader epoch and metadata, or `None` when no offset has been
     * committed.
@@ -1884,7 +1884,7 @@ trait KafkaConsumer[F[_], K, V]:
 
       override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
 
-      override private[xkafka] def assignmentNumbers: Stream[G, Map[TopicPartition, Long]] = self.assignmentNumbers.translate(fk)
+      override private[xkafka] def assignmentReports: Stream[G, AssignmentReport] = self.assignmentReports.translate(fk)
 
       override private[xkafka] def numbersAssignments: Boolean = self.numbersAssignments
 

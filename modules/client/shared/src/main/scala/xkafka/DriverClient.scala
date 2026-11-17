@@ -176,7 +176,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
         )
       polled      <- Resource.eval(Channel.bounded[F, ReadRecord](RecordQueueSize))
       rebalances  <- Resource.eval(Queue.unbounded[F, Rebalance[driver.Event]])
-      assignments <- Resource.eval(SignallingRef[F, Set[TopicPartition]](initialAssignment(selection)))
+      assignments <- Resource.eval(SignallingRef[F, AssignmentReport](AssignmentReport(initialAssignment(selection), Map.empty)))
       // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
       stopping <- Resource.eval(Deferred[F, Unit])
       // A poll that fails takes the rebalance callback down with it, so the failure is kept and reported to whoever
@@ -721,7 +721,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       hold: RevocationHold[F],
       polled: Channel[F, ReadRecord],
       rebalances: Queue[F, Rebalance[driver.Event]],
-      assignments: SignallingRef[F, Set[TopicPartition]],
+      assignments: SignallingRef[F, AssignmentReport],
       stopping: Deferred[F, Unit],
       random: Random[F],
       failure: Deferred[F, Throwable],
@@ -818,10 +818,15 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
             // offsets for them, which its timeout bounds.
             case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
             // Anything else clears the assignment to resynchronise, which loses what is assigned, as a lost assignment does, and ends every lease.
-            case _ => assignments.get.map(_.toList.map(leaseKey)).flatMap(all => hold.lose(all) *> leases.revoke(all)) *>
+            case _ => assignments.get.map(_.assigned.toList.map(leaseKey)).flatMap(all => hold.lose(all) *> leases.revoke(all)) *>
                 leases.assign(Nil, replacing = true)
         val applying = starts.get.flatMap(chosen => client(driver.applyRebalance(client.handle, taken.event, chosen)))
-        poll(leasing).guarantee(applying) *> poll(assignment.flatMap(assignments.set))
+        poll(leasing).guarantee(applying) *> poll(reported.flatMap(assignments.set))
+
+    /** The assignment with the numbers the rebalances applied gave its partitions, which change only here, so the two agree. */
+    private def reported: F[AssignmentReport] =
+      (assignment, numbers.get)
+        .mapN((partitions, held) => AssignmentReport(partitions, held.flatMap((key, number) => topicPartition(key).map(_ -> number))))
 
     /** Where the application starts the partitions just assigned. Where it fails, so does the record stream, and the partitions start where they
       * would.
@@ -885,16 +890,14 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
           .toSet
 
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
-      assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+      assignments.discrete.map(_.assigned).changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     // Told apart by their numbers, not by the partitions alone: a partition revoked and assigned again between two looks shows only its later
     // number, in an assignment of the same partitions.
     override private[xkafka] def numbersAssignments: Boolean = true
 
-    override private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] =
-      assignments.discrete
-        .evalMap(assignment => numbers.get.map(held => assignment.map(partition => partition -> held.getOrElse(leaseKey(partition), 0L)).toMap))
-        .changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+    override private[xkafka] def assignmentReports: Stream[F, AssignmentReport] =
+      assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)

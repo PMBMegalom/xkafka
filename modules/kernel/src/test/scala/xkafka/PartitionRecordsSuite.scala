@@ -25,6 +25,7 @@ import scala.concurrent.duration.*
 
 import cats.data.NonEmptySet
 import cats.effect.{Deferred, IO, Ref}
+import cats.effect.std.Queue
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
@@ -64,13 +65,13 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
 
   test("a record whose partition the assignment has not reported yet is still delivered"):
     for
-      // The assignment never reports the partition, so the old routing waited a poll for it and then discarded the record.
+      // The assignment never reports, so the old routing waited a poll for it and then discarded the record.
       assignment <- Ref[IO].of(Set.empty[TopicPartition])
       input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       early = record(firstPartition, 0L, "early")
       _        <- input.send(early).void
       observed <-
-        testConsumer(assignment, input).partitionedRecords(2)
+        testConsumer(assignment, input, reports = Some(Stream.never[IO])).partitionedRecords(2)
           .evalMap(partition => partition.records.take(1).compile.toList.map(partition.topicPartition -> _)).take(1).compile.toList
           .timeout(10.seconds)
     yield assertEquals(observed, List(firstPartition -> List(early)))
@@ -313,7 +314,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
   ):
     for
       assignment <- Ref[IO].of(Set(firstPartition))
-      numbers    <- SignallingRef[IO].of(Map(firstPartition -> 1L))
+      numbers    <- SignallingRef[IO].of(AssignmentReport(Set(firstPartition), Map(firstPartition -> 1L)))
       input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       seen       <- Ref[IO].of(Vector.empty[(Long, Long)])
       ended      <- Ref[IO].of(Vector.empty[Long])
@@ -323,7 +324,7 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
         ).parJoinUnbounded.compile.drain.start
       _ <- input.send(record(firstPartition, 0L, "a", Some(1L))) *> IO.sleep(100.millis)
       // Revoked and assigned again at once: the assignment never shows the partition missing.
-      _ <- numbers.set(Map(firstPartition -> 2L)) *> IO.sleep(100.millis)
+      _ <- numbers.set(AssignmentReport(Set(firstPartition), Map(firstPartition -> 2L))) *> IO.sleep(100.millis)
       _ <- input.send(record(firstPartition, 5L, "b", Some(2L))) *> input.send(record(firstPartition, 1L, "late", Some(1L))) *> IO.sleep(100.millis)
       counts <- (seen.get, ended.get).tupled
       _      <- reading.cancel
@@ -332,16 +333,16 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
   test("a record read before its partition was revoked opens no stream for it after, though nothing fences it, and the stream ended stays ended"):
     for
       assignment <- Ref[IO].of(Set(firstPartition))
-      numbers    <- SignallingRef[IO].of(Map(firstPartition -> 1L))
+      numbers    <- SignallingRef[IO].of(AssignmentReport(Set(firstPartition), Map(firstPartition -> 1L)))
       input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
       opened     <- Ref[IO].of(0)
       reading    <-
         testConsumer(assignment, input, numbers = Some(numbers)).partitionedRecords(10).evalMap(_ => opened.update(_ + 1)).compile.drain.start
       _ <- input.send(record(firstPartition, 0L, "a", Some(1L))) *> IO.sleep(100.millis)
-      _ <- numbers.set(Map.empty) *> IO.sleep(100.millis)
+      _ <- numbers.set(AssignmentReport(Set.empty, Map(firstPartition -> 1L))) *> IO.sleep(100.millis)
       _ <- input.send(record(firstPartition, 1L, "late", Some(1L))) *> IO.sleep(100.millis)
       // Assigned again, it opens a stream of its own.
-      _     <- numbers.set(Map(firstPartition -> 2L)) *> IO.sleep(100.millis)
+      _     <- numbers.set(AssignmentReport(Set(firstPartition), Map(firstPartition -> 2L))) *> IO.sleep(100.millis)
       count <- opened.get
       _     <- reading.cancel
     yield assertEquals(count, 2)
@@ -397,12 +398,13 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       currentAssignment: Ref[IO, Set[TopicPartition]],
       input: Channel[IO, CommittableConsumerRecord[IO, String, String]],
       partitionPausing: PartitionPausing[IO] = PartitionPausing.Absent(),
-      numbers: Option[SignallingRef[IO, Map[TopicPartition, Long]]] = None
+      numbers: Option[SignallingRef[IO, AssignmentReport]] = None,
+      reports: Option[Stream[IO, AssignmentReport]] = None
   ): KafkaConsumer[IO, String, String] =
     new KafkaConsumer[IO, String, String]:
-      override private[xkafka] def assignmentNumbers: Stream[IO, Map[TopicPartition, Long]] =
-        numbers.fold(assignmentChanges.map(_.map(_ -> 0L).toMap))(_.discrete)
-      override private[xkafka] def numbersAssignments: Boolean                        = numbers.isDefined
+      override private[xkafka] def assignmentReports: Stream[IO, AssignmentReport] =
+        reports.getOrElse(numbers.fold(assignmentChanges.map(AssignmentReport(_, Map.empty)))(_.discrete))
+      override private[xkafka] def numbersAssignments: Boolean                        = numbers.isDefined || reports.isDefined
       override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = input.stream
       override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
       override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes
@@ -427,6 +429,25 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
 
       override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] =
         IO(assertEquals(topicPartitions, Set(firstPartition))) >> resumed.complete(()).void
+
+  test("a report of the assignment from before a partition's lease, reconciled after a record of the lease, keeps its stream and the record"):
+    for
+      reported <- Queue.unbounded[IO, AssignmentReport]
+      input    <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      reader   <- Deferred[IO, Unit]
+      seen     <- Ref[IO].of(Vector.empty[String])
+      reading  <-
+        testConsumer(Ref.unsafe(Set.empty), input, reports = Some(Stream.fromQueueUnterminated(reported))).partitionedRecords(10)
+          .map(partition => Stream.exec(reader.get) ++ partition.records.evalMap(read => seen.update(_ :+ read.record.value))).parJoinUnbounded
+          .compile.drain.start
+      // The partition is assigned and its first record routed before the report taken when nothing was assigned is reconciled.
+      _    <- input.send(record(firstPartition, 0L, "early", Some(1L))) *> IO.sleep(100.millis)
+      _    <- reported.offer(AssignmentReport(Set.empty, Map.empty)) *> IO.sleep(100.millis)
+      _    <- reported.offer(AssignmentReport(Set(firstPartition), Map(firstPartition -> 1L))) *> IO.sleep(100.millis)
+      _    <- reader.complete(()) *> IO.sleep(100.millis)
+      read <- seen.get
+      _    <- reading.cancel
+    yield assertEquals(read, Vector("early"))
 
   private def record(
       topicPartition: TopicPartition,

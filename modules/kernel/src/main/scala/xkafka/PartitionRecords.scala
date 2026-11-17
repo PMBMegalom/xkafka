@@ -21,6 +21,7 @@
 
 package xkafka
 
+import cats.Eq
 import cats.arrow.FunctionK
 import cats.effect.{Async, Outcome, Ref}
 import cats.effect.std.Mutex
@@ -28,6 +29,15 @@ import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.{Chunk, Stream}
 import fs2.concurrent.Channel
+
+/** A consumer's assignment, and how many times the group had assigned each partition, assigned now or not, when it was taken. A consumer that does
+  * not count them knows none, and reads as having seen every partition at its first.
+  */
+private[xkafka] final case class AssignmentReport(assigned: Set[TopicPartition], leases: Map[TopicPartition, Long]):
+  def lease(partition: TopicPartition): Long = leases.getOrElse(partition, 0L)
+
+private[xkafka] object AssignmentReport:
+  given Eq[AssignmentReport] = Eq.fromUniversalEquals
 
 /** The records of one partition for as long as this consumer holds it. `records` ends once the partition is revoked. */
 final case class PartitionRecords[F[_], K, V](topicPartition: TopicPartition, records: Stream[F, CommittableConsumerRecord[F, K, V]]):
@@ -39,7 +49,7 @@ object PartitionRecords:
 
   private[xkafka] def fromConsumer[F[_]: Async, K, V](
       consumer: KafkaConsumer[F, K, V],
-      assignments: Stream[F, Map[TopicPartition, Long]],
+      assignments: Stream[F, AssignmentReport],
       maxQueuedRecords: Int,
       pausing: PartitionPausing[F]
   ): Stream[F, PartitionRecords[F, K, V]] =
@@ -67,7 +77,7 @@ object PartitionRecords:
 
   private final class Runtime[F[_], K, V](
       consumer: KafkaConsumer[F, K, V],
-      assignments: Stream[F, Map[TopicPartition, Long]],
+      assignments: Stream[F, AssignmentReport],
       maxQueuedRecords: Int,
       pausing: PartitionPausing.Backend[F],
       output: Channel[F, PartitionRecords[F, K, V]],
@@ -97,9 +107,9 @@ object PartitionRecords:
     /** Opens a stream for each assigned partition, so one appears as soon as the partition is owned, and ends the streams of revoked ones, and of
       * those assigned again since their stream was opened, which may have been revoked between two looks at the assignment.
       */
-    private def reconcile(assignment: Map[TopicPartition, Long]): F[Unit] =
-      assignment.toList.traverse_((partition, number) => stateFor(partition, Some(number), F.pure(true), assigned = true).void) >>
-        revokeMissing(assignment.keySet)
+    private def reconcile(report: AssignmentReport): F[Unit] =
+      report.assigned.toList.traverse_(partition => stateFor(partition, Some(report.lease(partition)), F.pure(true), assigned = true).void) >>
+        revokeMissing(report)
 
     /** Routes a record, opening the partition's stream first if the assignment has not reported it yet.
       *
@@ -202,10 +212,14 @@ object PartitionRecords:
               _ <- output.send(readable(state)).void
             yield state
 
-    private def revokeMissing(assignment: Set[TopicPartition]): F[Unit] =
+    /** Ends the streams of the partitions the assignment no longer has. A stream opened by a record of a later assignment than the report knew of is
+      * not one it can speak for: the report was taken before that assignment, and is reconciled late.
+      */
+    private def revokeMissing(report: AssignmentReport): F[Unit] =
       mutex.lock.surround:
         F.uncancelable: _ =>
-          states.get.flatMap(current => ended(current.removedAll(assignment).values.toList))
+          states.get.flatMap: current =>
+            ended(current.removedAll(report.assigned).values.toList.filter(state => state.assignment <= report.lease(state.topicPartition)))
 
     /** Ends the streams of partitions revoked, under the runtime's lock. librdkafka keeps a partition paused through its revocation, so one paused
       * for its reader is resumed, to be fetched once assigned again. Each is resumed under its own lock, after a pause being made for a record, and
@@ -226,7 +240,7 @@ object PartitionRecords:
   private object Runtime:
     def create[F[_]: Async, K, V](
         consumer: KafkaConsumer[F, K, V],
-        assignments: Stream[F, Map[TopicPartition, Long]],
+        assignments: Stream[F, AssignmentReport],
         maxQueuedRecords: Int,
         pausing: PartitionPausing[F]
     ): F[Runtime[F, K, V]] =
