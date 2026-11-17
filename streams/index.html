@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -104,7 +108,7 @@
   <ul class="nav-list">
     <li class="level1 nav-node"><a href="#programs">Programs</a></li>
     <li class="level2 nav-leaf"><a href="#steps-that-see-the-whole-record">Steps that see the whole record</a></li>
-    <li class="level2 nav-leaf"><a href="#choosing-partitions">Choosing partitions</a></li>
+    <li class="level2 nav-leaf"><a href="#writing-a-stream-s-type">Writing a stream&#39;s type</a></li>
     <li class="level2 nav-leaf"><a href="#describing-a-program">Describing a program</a></li>
   </ul>
 
@@ -117,8 +121,9 @@
         <h1 id="streams" class="title">Streams</h1>
         <p><code>KafkaClient.streams</code> runs a Kafka Streams program. Each running instance is one
         member of the application, and the application can mix xkafka members with Java
-        Kafka Streams instances running the same program. Members share the work and
-        take it over from each other as they start and stop.</p>
+        Kafka Streams instances running the same program (see
+        <a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a>). Members share the work
+        and take it over from each other as they start and stop.</p>
         <p>Streams applications need brokers of Kafka 4.2 or newer.</p>
         <pre><code class="nohighlight"><span class="comment">// Count each page&#39;s views across all users, and write every new count to a topic
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">NonEmptyList</span><span>
@@ -166,27 +171,27 @@
           <li><code>filterRecord</code>, <code>mapRecord</code>, <code>mapRecordValue</code> and others like them, which also
           see each record&#39;s time and headers (see <a href="#steps-that-see-the-whole-record">Steps that see the whole record</a>);</li>
           <li><code>repartition</code>, which sends records through a repartition topic you name, with as
-          many partitions as you choose (see <a href="#choosing-partitions">Choosing partitions</a>);</li>
+          many partitions as you choose (see <a href="partitioning.html">Choosing partitions</a>);</li>
           <li><code>groupByKey</code> or <code>groupBy</code>, followed by <code>count</code>, <code>reduce</code> or <code>aggregate</code> into a
           named <code>Store</code>. This gives a <code>KTable</code>, and its <code>toStream</code> is every change to it.
           A table can be grouped too (see <a href="tables.html#grouping-a-table">Grouping a table</a>),
           and several groups can be folded together
           (see <a href="tables.html#folding-streams-together">Folding streams together</a>);</li>
           <li><code>toTable</code>, which keeps each key&#39;s latest value as a <code>KTable</code>;</li>
-          <li><code>join</code>, <code>leftJoin</code> and <code>outerJoin</code>, which combine it with a table or a stream,
-          and <code>join</code> and <code>leftJoin</code> with a global table, and <code>joinOnForeignKey</code> and
-          <code>leftJoinOnForeignKey</code>, which join a table with the rows its values name (see <a href="joins.html">Joins</a>);</li>
+          <li><code>join</code>, <code>leftJoin</code> and <code>outerJoin</code>, which combine it with a table or another
+          stream. <code>join</code> and <code>leftJoin</code> also look up a global table, and a table can join
+          another table on a foreign key with <code>joinOnForeignKey</code> and
+          <code>leftJoinOnForeignKey</code> (see <a href="joins.html">Joins</a>);</li>
           <li><code>fork</code>, <code>forkMerge</code>, <code>merge</code>, <code>split</code> and <code>into</code>, which send records down
           several paths or bring them together (see <a href="branching.html">Branching</a>);</li>
           <li><code>to</code>, which ends a path at an output topic, or <code>foreach</code> and <code>print</code>, which end
           it by acting on each record or printing it.</li>
         </ul>
-        <p>A <code>KStream</code> can read several topics as one source, given as a <code>NonEmptyList</code>, as
-        Java&#39;s <code>stream</code> can given several topics. A record is read with the same serdes
-        whichever topic it came from, and each deserializer is told that topic. A topic
-        listed twice is read once. Partitions with the same number are processed together,
-        so to keep a key&#39;s records together for grouping or joining, give the topics the
-        same number of partitions.</p>
+        <p>A <code>KStream</code> can read several topics as one source: pass them as a <code>NonEmptyList</code>.
+        Every record is read with the same serdes, and each deserializer is told which
+        topic the record came from. A topic listed twice in that list is read once.
+        Partitions with the same number are processed together, so if you group or join
+        the records by key, give the topics the same number of partitions.</p>
         <p>Each topic and store is read and written with a <code>Serde</code>, which pairs a
         <a href="../serialization.html">serializer and a deserializer</a> of one type, since a streams
         application both reads and writes. <code>Serde(serializer, deserializer)</code> makes one.
@@ -195,16 +200,17 @@
         and <code>Serde.bytes</code> write the same bytes as Java&#39;s <code>Serdes.String()</code>,
         <code>Serdes.Long()</code> and <code>Serdes.ByteArray()</code>.</p>
         <p>Every step has a name, given as a <code>Named</code>: a pipeline&#39;s source, each step, and
-        its <code>to</code>. Names label the program&#39;s nodes in
-        <a href="#describing-a-program">its description</a>, as <code>Named</code>, <code>Consumed</code> and <code>Produced</code>
-        names do in Java Kafka Streams. A step that keeps a store also takes the store&#39;s
-        name, as Java takes a <code>Named</code> and a <code>Materialized</code> name. Two steps cannot share a
-        name.</p>
+        its <code>to</code>. Names label the program&#39;s steps in
+        <a href="#describing-a-program">its description</a>. A step that keeps a store also takes the
+        store&#39;s name, as a <code>Store</code>. Two steps cannot share a name, and no step can
+        take a name the program gives a node of its own: the source of the repartition
+        <code>orders</code> is <code>orders-repartition-source</code>, and a cogroup named <code>totals</code> merges in
+        <code>totals-cogroup-merge</code>. A join of two streams names no node by its own name, so
+        a step may take that name.</p>
         <p>Grouping records whose key may have changed, after <code>map</code>, <code>flatMap</code>, <code>selectKey</code>
         or <code>evalMap</code>, sends them through a repartition topic first. Name it with a
         <code>Repartition</code>: <code>groupBy</code> always takes one, and <code>groupByKey</code> takes one after such
-        a step. As with Java&#39;s <code>Grouped</code>, the step that gives <code>groupBy</code>&#39;s records their
-        new key takes the repartition&#39;s name.</p>
+        a step.</p>
         <p>In the first example, <code>groupBy</code> keys each view by its page, so the views of a
         page, from every user, are counted together. They go through the repartition
         topic <code>&lt;application id&gt;-views-by-page-repartition</code>. Choosing the key first
@@ -228,34 +234,48 @@
         <p>Without the <code>Repartition</code>, this does not compile: the views of a page must
         reach one partition before they can be counted together. A stream&#39;s type says
         whether its records are keyed as they were read, so the compiler knows which
-        <code>groupByKey</code> applies. <code>KStream(...)</code> and <code>filter</code>, <code>filterNot</code>, <code>mapValues</code>,
-        <code>flatMapValues</code>, <code>peek</code>, <code>evalFilter</code> and <code>evalMapValues</code> after it keep the key as
-        read, and <code>groupByKey(key, value)</code> groups the records where they are. After <code>map</code>,
-        <code>flatMap</code>, <code>selectKey</code> or <code>evalMap</code>, only <code>groupByKey(repartition, key, value)</code>
-        compiles. Each fails to compile where the other applies, with a message saying
-        which to use.</p>
-        <p>The stream&#39;s <code>Keying</code> type member carries this: <code>KeyState.AsRead</code> or
-        <code>KeyState.Changed</code>. Types are inferred, so a program rarely names it. To
-        annotate a stream without losing it, use <code>KStream.Of</code>, as in
-        <code>KStream.Of[IO, String, String, KeyState.AsRead]</code>. A
-        <code>KStream.Unkeyed[IO, String, String]</code> is a stream read from a topic whose type does
-        not say how it is keyed, and it is taken to have changed its key: grouping it by
-        key takes a <code>Repartition</code>, and if its key had not changed after all, <code>Topology.of</code>
-        refuses the name with <code>TopologyError.UnusedRepartition</code>.</p>
+        <code>groupByKey</code> applies:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Key after the step</th>
+              <th>Steps</th>
+              <th>Group with</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>As read</td>
+              <td><code>KStream(...)</code>, then <code>filter</code>, <code>filterNot</code>, <code>mapValues</code>, <code>flatMapValues</code>, <code>peek</code>, <code>evalFilter</code>, <code>evalMapValues</code></td>
+              <td><code>groupByKey(key, value)</code></td>
+            </tr>
+            <tr>
+              <td>May have changed</td>
+              <td><code>map</code>, <code>flatMap</code>, <code>selectKey</code>, <code>evalMap</code>, <code>mapRecord</code>, <code>evalMapRecord</code>, <code>flatMapRecord</code></td>
+              <td><code>groupByKey(repartition, key, value)</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Each <code>groupByKey</code> fails to compile if the other applies, with a message saying
+        which to use. Joining after a step that may have changed the key also needs a
+        repartition topic.</p>
         <p><code>repartition</code> sends records through a repartition topic whenever you ask, whether
         or not their key has changed. Afterwards they are keyed as read from that topic,
         so <code>groupByKey</code> needs no name for them.</p>
         <p><code>foreach</code> runs an effect for each record, and runs it again for records processed
         again, such as after a crash, as <code>peek</code> does. <code>print</code> writes each record as
-        <code>[label]: key, value</code> to the <code>Console[F]</code> in scope, labelled with the name of the
-        step before it unless you give a label, or with its own name if it starts a
-        <a href="branching.html#paths-that-share-what-follows">flow</a>. Java&#39;s <code>print</code> writes the same lines.</p>
+        <code>[label]: key, value</code> to the <code>Console[F]</code> in scope. The label is the one you give.
+        Without one, it is the name of the step before it, or <code>print</code>&#39;s own name if it
+        starts a <a href="branching.html#paths-that-share-what-follows">flow</a>.</p>
         <p>The application&#39;s own topics are named after its id: a store&#39;s changelog is
         <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, and a repartition topic is
-        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>. The broker creates them when the
-        application first starts.</p>
+        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>. As in Java, a stream&#39;s repartition whose
+        name already ends in <code>-repartition</code> takes it as it is, so <code>orders-repartition</code>
+        is <code>&lt;application id&gt;-orders-repartition</code>; a grouped table&#39;s always has the
+        suffix added. The broker creates them when the application first starts.</p>
         <p><code>Topology.of</code> checks the program and reports every problem at once, such as two
-        stores or steps with the same name, or one topic read twice. <code>liftTo</code>
+        stores or steps with the same name, or one topic read by two sources (to send
+        one stream down several paths, see <a href="branching.html">Branching</a>). <code>liftTo</code>
         raises them in <code>F</code> as an <code>InvalidTopology</code>, and refused settings as an
         <code>InvalidStreamsSettings</code>.</p>
         
@@ -319,124 +339,33 @@
             </tr>
           </tbody>
         </table>
-        <p>Each is given a <code>Record</code>, or a <code>FixedKeyRecord</code> where the key cannot change, as a
+        <p>Each is given a <code>Record</code>, or a <code>FixedKeyRecord</code> if the key cannot change, as a
         <a href="processors.html">processor</a> is. <code>withValue</code> and <code>withKey</code> keep the record&#39;s time and
-        headers, and <code>withTimestamp</code> and <code>withHeaders</code> change them. <code>record.origin</code> gives the
+        headers, and <code>withTimestamp</code> and <code>withHeaders</code> change them. A record written at
+        1970-01-01T00:00:00Z, as one read with that time is, carries that time on the JVM,
+        as Java&#39;s Kafka Streams writes it; on Scala.js and Scala Native librdkafka cannot
+        write that time, and the record carries the time it was sent at. <code>record.origin</code> gives the
         topic, partition and offset the record was read from. See
         <a href="../headers.html">Headers</a> for reading and changing headers.</p>
         <p>Grouping or joining after <code>mapRecord</code>, <code>evalMapRecord</code> or <code>flatMapRecord</code> needs a
         repartition topic, as it does after <code>map</code>. The other steps keep the key.</p>
         <p>To make any number of records with an effect, or to use a store, write a
-        <a href="processors.html">processor</a>. If some members run Java Kafka Streams, write these steps
-        in the Java program as <code>process</code> where the key can change and <code>processValues</code> where
-        it cannot, under the same names.</p>
+        <a href="processors.html">processor</a>.</p>
         
-        <h3 id="choosing-partitions" class="section"><a class="anchor-link left" href="#choosing-partitions"><i class="icofont-laika link">&#xef71;</i></a>Choosing partitions</h3>
-        <p>By default, each record goes to the partition Kafka&#39;s producers choose for its key,
-        so all of a key&#39;s records are in one partition, in order. A <code>Partitioner</code> chooses
-        some other way. You can give one in three places:</p>
-        <table>
-          <thead>
-            <tr>
-              <th>Where</th>
-              <th>What you can give</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>to</code></td>
-              <td><code>partitioner</code>, which chooses each record&#39;s partition in the output topic</td>
-            </tr>
-            <tr>
-              <td><code>repartition</code></td>
-              <td><code>partitions</code>, how many the repartition topic has, and <code>partitioner</code></td>
-            </tr>
-            <tr>
-              <td><code>KTable(...)</code>, read from a topic</td>
-              <td><code>partitioner</code>, saying how that topic is partitioned</td>
-            </tr>
-          </tbody>
-        </table>
-        <pre><code class="nohighlight"><span class="comment">// Keep each region&#39;s orders together: through a repartition topic of twelve partitions, then to the output, both partitioned by region.
-// An order&#39;s key starts with its region, as in &quot;eu-1042&quot;.
-</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
-
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
-
-</span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersByRegion</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
-  </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span>   = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
-  </span><span class="keyword">val</span><span> </span><span class="identifier">region</span><span> = </span><span class="type-name">Partitioner</span><span>.</span><span class="identifier">byKey</span><span>((</span><span class="identifier">key</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">count</span><span>: </span><span class="type-name">Int</span><span>) =&gt; </span><span class="type-name">Math</span><span>.</span><span class="identifier">floorMod</span><span>(</span><span class="identifier">key</span><span>.</span><span class="identifier">takeWhile</span><span>(</span><span class="identifier">_</span><span> != </span><span class="char-literal">&#39;-&#39;</span><span>).</span><span class="identifier">hashCode</span><span>, </span><span class="identifier">count</span><span>))  </span><span class="comment">// The same region, the same partition
-</span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
-    .</span><span class="identifier">repartition</span><span>(</span><span class="type-name">Repartition</span><span>(</span><span class="string-literal">&quot;orders-by-region&quot;</span><span>), </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">partitions</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">12</span><span>), </span><span class="identifier">partitioner</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="identifier">region</span><span>))      </span><span class="comment">// Twelve partitions, by region
-</span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-orders&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Some</span><span>(</span><span class="identifier">region</span><span>))                                                   </span><span class="comment">// The output is partitioned by region too</span></code></pre>
-        <p>Without <code>partitions</code>, the broker chooses how many partitions a repartition topic has,
-        as it does for every repartition topic. A count under one is refused when you call
-        <code>Topology.of</code>.</p>
-        
-        <h4 id="writing-a-partitioner" class="section"><a class="anchor-link left" href="#writing-a-partitioner"><i class="icofont-laika link">&#xef71;</i></a>Writing a partitioner</h4>
-        <p>A partitioner is given a record&#39;s key, value and headers, and how many partitions
-        the topic has. It gives back a partition, from 0 up to one less than that number.
-        Any other number stops the application, with an error naming the topic.</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Two partitioners: one that goes by the key alone, and one that also reads a header
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
-
-</span><span class="comment">// Customers&#39; ids are numbers after a letter, as in &quot;c42&quot;: spread customers by that number, each customer always in the same partition
-</span><span class="keyword">val</span><span> </span><span class="identifier">byCustomer</span><span> = </span><span class="type-name">Partitioner</span><span>.</span><span class="identifier">byKey</span><span>((</span><span class="identifier">key</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">count</span><span>: </span><span class="type-name">Int</span><span>) =&gt; </span><span class="type-name">Math</span><span>.</span><span class="identifier">floorMod</span><span>(</span><span class="identifier">key</span><span>.</span><span class="identifier">drop</span><span>(</span><span class="number-literal">1</span><span>).</span><span class="identifier">toIntOption</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="number-literal">0</span><span>), </span><span class="identifier">count</span><span>))
-
-</span><span class="comment">// Records with the header priority=urgent go to partition 0, and the rest are spread by key over the other partitions
-</span><span class="keyword">val</span><span> </span><span class="identifier">urgentFirst</span><span> = </span><span class="type-name">Partitioner</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>]: (</span><span class="identifier">key</span><span>, </span><span class="identifier">_</span><span>, </span><span class="identifier">headers</span><span>, </span><span class="identifier">count</span><span>) =&gt;
-  </span><span class="keyword">val</span><span> </span><span class="identifier">urgent</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>[</span><span class="type-name">String</span><span>](</span><span class="string-literal">&quot;priority&quot;</span><span>).</span><span class="identifier">contains</span><span>(</span><span class="type-name">Right</span><span>(</span><span class="string-literal">&quot;urgent&quot;</span><span>))
-  </span><span class="keyword">if</span><span> </span><span class="identifier">urgent</span><span> || </span><span class="identifier">count</span><span> == </span><span class="number-literal">1</span><span> </span><span class="keyword">then</span><span> </span><span class="number-literal">0</span><span> </span><span class="keyword">else</span><span> </span><span class="number-literal">1</span><span> + </span><span class="type-name">Math</span><span>.</span><span class="identifier">floorMod</span><span>(</span><span class="identifier">key</span><span>.</span><span class="identifier">hashCode</span><span>, </span><span class="identifier">count</span><span> - </span><span class="number-literal">1</span><span>)</span></code></pre>
-        <ul>
-          <li>Use <code>Partitioner.byKey</code> when the key alone decides, and <code>Partitioner(...)</code> when the
-          value or headers do too.</li>
-          <li>Only records in the same partition stay in order, so a partitioner that does not
-          go by the key alone can put one key&#39;s records out of order.</li>
-          <li>Give the same answer for the same record every time. Records processed again, such
-          as after a crash, should land where they did before.</li>
-          <li><code>hashCode</code> can be negative: <code>Math.floorMod</code>, unlike <code>%</code>, always gives a number
-          from 0 up.</li>
-        </ul>
-        
-        <h4 id="java-partitioners-jvm-only" class="section"><a class="anchor-link left" href="#java-partitioners-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Java partitioners (JVM only)</h4>
-        <p>On the JVM, a <code>StreamPartitioner</code> written for Java Kafka Streams can be used as a
-        partitioner. It comes with the <code>xkafka-streams-java</code> module, which also depends on
-        Java Kafka Streams:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %% </span><span class="string-literal">&quot;xkafka-streams-java&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Turn a StreamPartitioner your Java Kafka Streams application already uses into a partitioner for xkafka
-</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">processor</span><span>.</span><span class="type-name">StreamPartitioner</span><span>
-
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.*
-</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">interop</span><span>.*                                       </span><span class="comment">// Adds Partitioner.fromJava, on the JVM only
-</span><span>
-</span><span class="keyword">def</span><span> </span><span class="declaration-name">sameAsJava</span><span>(</span><span class="identifier">java</span><span>: </span><span class="type-name">StreamPartitioner</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>]): </span><span class="type-name">Partitioner</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>] = </span><span class="type-name">Partitioner</span><span>.</span><span class="identifier">fromJava</span><span>(</span><span class="identifier">java</span><span>)</span></code></pre>
-        <p>It is given each record&#39;s topic, key, value, headers and partition count, as in Java.
-        Where it chooses no partition, the record goes where Kafka&#39;s default puts it. Where
-        it chooses several partitions, or an empty set, the application stops with an error
-        naming the topic, since xkafka sends each record to one partition.</p>
-        
-        <h4 id="tables-whose-topic-is-partitioned-its-own-way" class="section"><a class="anchor-link left" href="#tables-whose-topic-is-partitioned-its-own-way"><i class="icofont-laika link">&#xef71;</i></a>Tables whose topic is partitioned its own way</h4>
-        <p>A table&#39;s topic may be written by another application that partitions it its own
-        way. Give the table that partitioner, made with <code>Partitioner.byKey</code>, since a table
-        needs each key to stay in one partition whatever its value. xkafka then uses it
-        whenever it sends records to be looked up in that table: a stream joined with the
-        table after the stream&#39;s key changed, and a
-        <a href="joins.html#joining-on-a-foreign-key">foreign-key join</a> looking up the table&#39;s rows.
-        Without it, those records go to partitions that do not hold their keys, and find
-        nothing.</p>
-        
-        <h4 id="with-java-members" class="section"><a class="anchor-link left" href="#with-java-members"><i class="icofont-laika link">&#xef71;</i></a>With Java members</h4>
-        <p>If some members run Java Kafka Streams, give them a <code>StreamPartitioner</code> that chooses
-        the same partitions, in <code>Produced</code>, <code>Repartitioned</code>, and a foreign-key join&#39;s
-        <code>TableJoined</code>. Java has no way to repartition a stream joined with a table by the
-        table&#39;s partitioner, so an application with Java members cannot rely on that.</p>
+        <h3 id="writing-a-stream-s-type" class="section"><a class="anchor-link left" href="#writing-a-stream-s-type"><i class="icofont-laika link">&#xef71;</i></a>Writing a stream&#39;s type</h3>
+        <p>You need this only to annotate a stream&#39;s type. The stream&#39;s <code>Keying</code> type member
+        says how its records are keyed: <code>KeyState.AsRead</code> or <code>KeyState.Changed</code>. Types are
+        inferred, so a program rarely names it. To annotate a stream without losing it, use
+        <code>KStream.Of</code>, as in <code>KStream.Of[IO, String, String, KeyState.AsRead]</code>.</p>
+        <p>A <code>KStream.Unkeyed[IO, String, String]</code> is a stream whose type does not say how it
+        is keyed, and it is taken to have changed its key. Grouping it by key takes a
+        <code>Repartition</code>, and if its key had not changed after all, <code>Topology.of</code> refuses the
+        name with <code>TopologyError.UnusedRepartition</code>.</p>
         
         <h3 id="describing-a-program" class="section"><a class="anchor-link left" href="#describing-a-program"><i class="icofont-laika link">&#xef71;</i></a>Describing a program</h3>
         <p><code>describe</code> shows what a program will run: the topics it reads and writes, the
-        order of its steps, the stores each step uses, and where a repartition divides
-        it. It needs no broker, so a program can be printed or checked in a test before
+        order of its steps, the stores each step uses, and where a repartition topic
+        divides it. It needs no broker, so a program can be printed or checked in a test before
         it runs. Here is the first example&#39;s:</p>
         <pre><code class="nohighlight"><span class="comment">// Build the first example&#39;s program, and describe it
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -488,11 +417,12 @@
         repartition topic joins two of them: here the first writes
         <code>views-by-page-repartition</code> and the second reads it. <code>--&gt;</code> points to the nodes a
         node passes its records to, and <code>&lt;--</code> to the nodes it gets them from.</p>
-        <p>Each step appears under its name. A repartition adds the nodes that write and
-        read its topic, named after it. The topic is shown without the application&#39;s id,
+        <p>Each step appears under its name. A repartition topic adds the nodes that write
+        and read it, named after it. The topic is shown without the application&#39;s id,
         so on the broker this one is <code>&lt;application id&gt;-views-by-page-repartition</code>.</p>
         <p>Java Kafka Streams&#39; <code>Topology.describe</code> writes the same text for the same
-        program, which lets you compare the two when moving a program between them.</p>
+        program, which lets you compare the two when moving a program between them (see
+        <a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a>).</p>
 
         
 <hr class="footer-rule"/>

@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -115,8 +119,7 @@
 
         <h1 id="tables" class="title">Tables</h1>
         <p>A <code>KTable</code> holds the latest value of each key. Besides the tables that <code>count</code>,
-        <code>reduce</code> and <code>aggregate</code> make, a table can be read straight from a topic, as Java
-        Kafka Streams&#39; <code>StreamsBuilder.table</code> reads it:</p>
+        <code>reduce</code> and <code>aggregate</code> make, a table can be read straight from a topic:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Read a table from a topic, and write every change to it
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -135,21 +138,21 @@
         changelog is <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, here
         <code>&lt;application id&gt;-users-changelog</code>. If the topic is partitioned some other way than
         by Kafka&#39;s default, give the table its partitioner (see
-        <a href="index.html#choosing-partitions">Choosing partitions</a>).</p>
+        <a href="partitioning.html">Choosing partitions</a>).</p>
         <p>A table read from a topic can delete keys, so its <code>toStream</code> gives <code>Option</code>
-        values: <code>Some</code> for an update and <code>None</code> for a delete, which a serde&#39;s <code>.option</code>
-        writes as a tombstone. A table that only ever updates
-        its keys, such as a <code>count</code>, gives its values as they are. The table&#39;s <code>Change</code>
-        type member says which, and <code>KTable.Of</code> names it in an annotation:
-        <code>KTable.Of[F, K, V, Option]</code> can delete, and <code>KTable.Of[F, K, V, KTable.Updated]</code>
-        only updates. Writing a table that can delete without <code>.option</code> does not
-        compile. A plain <code>KTable[F, K, V]</code> does not say, so its <code>toStream</code> cannot be
-        written with either serde.</p>
+        values: <code>Some</code> for an update and <code>None</code> for a delete. Write it with a serde&#39;s
+        <code>.option</code>, which writes <code>None</code> as a tombstone; writing it without <code>.option</code> does
+        not compile. A table that only ever updates its keys, such as a <code>count</code>, gives its
+        values as they are.</p>
+        <p>To annotate a table&#39;s type, use <code>KTable.Of</code>: <code>KTable.Of[F, K, V, Option]</code> can
+        delete, and <code>KTable.Of[F, K, V, KTable.Updated]</code> only updates. A plain
+        <code>KTable[F, K, V]</code> does not say, so its <code>toStream</code> cannot be written with either
+        serde.</p>
         <p>A stream becomes a table with <code>toTable</code>, which keeps each key&#39;s latest value in a
         store. Records whose key may have changed go through the repartition topic
         <code>&lt;application id&gt;-&lt;step&gt;-repartition</code> first, so the step&#39;s name also names that
-        topic. For a stream of <code>Option</code> values, passing the serde of the values inside
-        makes none delete the key:</p>
+        topic. If the stream&#39;s values are <code>Option</code>s, pass the serde of the inner values,
+        and a <code>None</code> value deletes the key:</p>
         <pre><code class="nohighlight"><span class="comment">// Keep each user&#39;s latest address as a table, and write every change to it
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -194,8 +197,7 @@
         is suppressed; <code>Topology.of</code> refuses it otherwise.</p>
         
         <h2 id="grouping-a-table" class="section"><a class="anchor-link left" href="#grouping-a-table"><i class="icofont-laika link">&#xef71;</i></a>Grouping a table</h2>
-        <p>A table&#39;s <code>groupBy</code> puts its values in new groups, as Java Kafka Streams&#39;
-        <code>KTable.groupBy</code> does, and <code>count</code>, <code>reduce</code> or <code>aggregate</code> keep a result for each
+        <p>A table&#39;s <code>groupBy</code> puts its values in new groups, and <code>count</code>, <code>reduce</code> or <code>aggregate</code> keep a result for each
         group in a store. A value can leave its group, when it is replaced or deleted, so
         <code>reduce</code> and <code>aggregate</code> take two functions, one to put a value in and one to take
         it out. Here each user&#39;s balance counts towards their country&#39;s total, and moving
@@ -217,17 +219,13 @@
 </span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;total-changes&quot;</span><span>))
     .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-totals&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">amount</span><span>.</span><span class="identifier">option</span><span>)  </span><span class="comment">// Each change is an Option, so write it with .option</span></code></pre>
         <p>Each change goes through the repartition topic
-        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>, which the application&#39;s Java Kafka Streams
-        members can read and write too. A group that loses its last value stays in the
+        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>. A group that loses its last value stays in the
         result, so a count stays at 0. To leave such groups out, <code>filter</code> the result.</p>
         <p>Changes to the result are <code>Option</code>s, which is why the example writes them with
-        <code>amount.option</code>. A change is <code>None</code> when a value leaves a group that holds nothing.
-        You can see this when you group a <code>count</code> by its value: a key&#39;s first count also
-        leaves the group for 0, so if that group is empty, its change is <code>None</code>.</p>
+        <code>amount.option</code>. A change is <code>None</code> when a value leaves a group that holds nothing.</p>
         
         <h2 id="folding-streams-together" class="section"><a class="anchor-link left" href="#folding-streams-together"><i class="icofont-laika link">&#xef71;</i></a>Folding streams together</h2>
-        <p><code>cogroup</code> folds several grouped streams into one store, as Java Kafka Streams&#39;
-        <code>cogroup</code> does. Each group has its own function, and each can hold a different
+        <p><code>cogroup</code> folds several grouped streams into one store. Each group has its own function, and each can hold a different
         type of value. Here orders and refunds, both keyed by the user, make one balance
         for each user:</p>
         <pre><code class="nohighlight"><span class="comment">// Fold orders and refunds into one balance per user
@@ -259,10 +257,9 @@
         into the result with <code>into</code>, as in <a href="branching.html">Branching</a>.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
-          <p>Java Kafka Streams cannot start a program in which several groups are folded
-          together and any of them goes through a repartition topic. Such a program runs on
-          xkafka, but cannot have Java members, and the application&#39;s <code>state</code> lists
-          <code>StreamsProblem.JavaMembersMayBeRefused</code>, naming the topics.</p>
+          <p>If any of the groups goes through a repartition topic, the application cannot have
+          Java Kafka Streams members (see
+          <a href="java-kafka-streams.html#folding-groups-together">Mixing with Java Kafka Streams</a>).</p>
         </div>
         <p>Folding in windows works as for one group, with <code>windowedBy</code> before <code>aggregate</code>.
         A session&#39;s <code>aggregate</code> also takes a function to merge two sessions:</p>
@@ -270,8 +267,8 @@
 </span><span class="identifier">grouped</span><span>
   .</span><span class="identifier">windowedBy</span><span>(</span><span class="type-name">TimeWindows</span><span>.</span><span class="identifier">tumbling</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>))  </span><span class="comment">// Window the groups before aggregating them
 </span><span>  .</span><span class="identifier">aggregate</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;balance&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;balances&quot;</span><span>), </span><span class="identifier">cents</span><span>)(</span><span class="number-literal">0L</span><span>)</span></code></pre>
-        <p>A record is late by the latest time read from its own group, not from the others,
-        so a group that falls behind keeps its records, as in Java. As in Java, these
+        <p>Each group decides whether a record is late from its own records&#39; times, not the
+        other groups&#39;, so a group whose records run behind still has them counted. These
         windows have no <code>emitOnWindowClose</code>. To send only each window&#39;s final result, use
         <a href="holding-back-updates.html"><code>suppress</code></a>.</p>
 

@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -142,10 +146,10 @@
         </table>
         <p>The API uses <code>Resource</code> for producer and consumer lifecycles, <code>Stream</code> for
         consumer records, effectful serializers and deserializers, and explicit offset
-        commits. On Scala.js it runs on Node.js, not in browsers. xkafka also runs
-        <a href="streams/">Kafka Streams programs</a>, alongside Java Kafka Streams
-        instances, and writes and reads Avro, JSON Schema and Protobuf with schemas kept in
-        a <a href="schema-registry.html">schema registry</a>.</p>
+        commits. On Scala.js it runs on Node.js, not in browsers.</p>
+        <p>xkafka also runs <a href="streams/">Kafka Streams programs</a>, alongside Java
+        Kafka Streams instances. It writes and reads Avro, JSON Schema and Protobuf with
+        schemas kept in a <a href="schema-registry.html">schema registry</a>.</p>
         <p>To add xkafka to your build and see what each platform needs, start with
         <a href="getting-started.html">Getting started</a>.</p>
         <pre><code class="nohighlight"><span class="comment">// Write one record to the topic &quot;events&quot;, and wait until it is delivered

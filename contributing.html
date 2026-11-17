@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 active nav-leaf"><a href="#">Contributing</a></li>
   </ul>
@@ -105,10 +109,11 @@
     <li class="level1 nav-leaf"><a href="#running-the-tests">Running the tests</a></li>
     <li class="level1 nav-leaf"><a href="#broker-backed-tests">Broker-backed tests</a></li>
     <li class="level1 nav-leaf"><a href="#librdkafka-for-the-native-build">librdkafka for the Native build</a></li>
-    <li class="level1 nav-leaf"><a href="#rocksdb-for-the-scala-js-and-native-builds">RocksDB for the Scala.js and Native builds</a></li>
+    <li class="level1 nav-leaf"><a href="#rocksdb-for-the-scala-js-and-scala-native-builds">RocksDB for the Scala.js and Scala Native builds</a></li>
     <li class="level1 nav-leaf"><a href="#the-c-shims">The C shims</a></li>
     <li class="level1 nav-leaf"><a href="#published-artifacts">Published artifacts</a></li>
-    <li class="level1 nav-leaf"><a href="#formatting">Formatting</a></li>
+    <li class="level1 nav-leaf"><a href="#formatting-and-checks">Formatting and checks</a></li>
+    <li class="level1 nav-leaf"><a href="#changes-to-the-build">Changes to the build</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -121,10 +126,11 @@
         
         <h2 id="running-the-tests" class="section"><a class="anchor-link left" href="#running-the-tests"><i class="icofont-laika link">&#xef71;</i></a>Running the tests</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt test</span></code></pre>
-        <p>That runs the ordinary JVM, Scala.js, and Scala Native suites. Use Node.js 24
-        for Scala.js, as <code>.nvmrc</code> records. Tests which need a broker or a schema
-        registry are skipped unless the environment names one, which the scripts below
-        do.</p>
+        <p>That runs the ordinary JVM, Scala.js, and Scala Native suites. A change usually
+        has to work on all three. Tests that need a broker or a schema registry are
+        skipped unless the environment names one, which the scripts below do.</p>
+        <p>Scala.js uses Node.js 24, the version <code>.nvmrc</code> records:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>nvm use</span></code></pre>
         <p>The Avro, JSON Schema and Protobuf suites on the JVM also check what xkafka
         writes and reads against Apache Avro and Confluent&#39;s own serializers, which
         come from Confluent&#39;s Maven repository.</p>
@@ -170,15 +176,19 @@
         
         <h2 id="librdkafka-for-the-native-build" class="section"><a class="anchor-link left" href="#librdkafka-for-the-native-build"><i class="icofont-laika link">&#xef71;</i></a>librdkafka for the Native build</h2>
         <p>The build downloads librdkafka, verifies its SHA-256 checksum, builds it, and
-        links it statically for the Native tests. To prepare it explicitly:</p>
+        links it statically for the Native tests. librdkafka is built with TLS and
+        compression, which need OpenSSL, zlib and zstd: <code>libssl-dev</code>, <code>zlib1g-dev</code> and
+        <code>libzstd-dev</code> on Debian and Ubuntu, or <code>brew install openssl@3 zstd zlib</code> on
+        macOS.</p>
+        <p>To prepare librdkafka explicitly:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt clientNative/prepareLibrdkafka</span></code></pre>
         <p>A prebuilt static installation can be supplied instead:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span>XKAFKA_LIBRDKAFKA_PREFIX=/path/to/librdkafka-prefix sbt test</span></code></pre>
         <p>The prefix must contain <code>include/librdkafka/rdkafka.h</code> and <code>lib/librdkafka.a</code>.</p>
         
-        <h2 id="rocksdb-for-the-scala-js-and-native-builds" class="section"><a class="anchor-link left" href="#rocksdb-for-the-scala-js-and-native-builds"><i class="icofont-laika link">&#xef71;</i></a>RocksDB for the Scala.js and Native builds</h2>
+        <h2 id="rocksdb-for-the-scala-js-and-scala-native-builds" class="section"><a class="anchor-link left" href="#rocksdb-for-the-scala-js-and-scala-native-builds"><i class="icofont-laika link">&#xef71;</i></a>RocksDB for the Scala.js and Scala Native builds</h2>
         <p>The build downloads the pinned <code>rocksdbjni</code> jar once, verifies its checksum, and
-        extracts the RocksDB library for this platform, which the Scala.js and Native
+        extracts the RocksDB library for this platform, which the Scala.js and Scala Native
         tests of stores kept on disk use.</p>
         
         <h2 id="the-c-shims" class="section"><a class="anchor-link left" href="#the-c-shims"><i class="icofont-laika link">&#xef71;</i></a>The C shims</h2>
@@ -195,14 +205,26 @@
         RocksDB library found each way a Native application finds it.</p>
         
         <h2 id="published-artifacts" class="section"><a class="anchor-link left" href="#published-artifacts"><i class="icofont-laika link">&#xef71;</i></a>Published artifacts</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span>XKAFKA_VERSION=</span><span class="number-literal">0.7.0</span><span> scripts/downstream-test.sh</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>XKAFKA_VERSION=&lt;version&gt; scripts/downstream-test.sh</span></code></pre>
         <p>Builds a separate application against the published <code>xkafka-client</code> artifacts
         of the version <code>XKAFKA_VERSION</code> names, and runs it against a broker the script
         starts, including both ways a Native application reaches librdkafka.</p>
         
-        <h2 id="formatting" class="section"><a class="anchor-link left" href="#formatting"><i class="icofont-laika link">&#xef71;</i></a>Formatting</h2>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt scalafmtAll scalafmtSbt</span></code></pre>
-        <p>Verify without mutating using <code>scalafmtCheckAll</code> and <code>scalafmtSbtCheck</code>.</p>
+        <h2 id="formatting-and-checks" class="section"><a class="anchor-link left" href="#formatting-and-checks"><i class="icofont-laika link">&#xef71;</i></a>Formatting and checks</h2>
+        <p>Before opening a pull request, run:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt prePR test mimaReportBinaryIssues doc docs/tlSite</span></code></pre>
+        <p><code>prePR</code> regenerates the CI workflow, adds missing license headers and formats
+        the code, so commit what it changes; continuous integration checks all three.
+        The rest runs the tests, the binary compatibility check, the API docs and the
+        site, whose examples are compiled, as continuous integration does. Continuous
+        integration also tests the sbt plugin on sbt 1 and sbt 2; to do the same, run
+        <code>sbt sbtCodegen/scripted &#39;++3.9.0 sbtCodegen/scripted&#39;</code>.</p>
+        
+        <h2 id="changes-to-the-build" class="section"><a class="anchor-link left" href="#changes-to-the-build"><i class="icofont-laika link">&#xef71;</i></a>Changes to the build</h2>
+        <p>The continuous integration workflow is generated from <code>build.sbt</code>. After
+        changing anything that affects it, such as adding a module:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>sbt githubWorkflowGenerate</span></code></pre>
+        <p><code>githubWorkflowCheck</code> fails the build if the committed workflow is stale.</p>
 
         
 <hr class="footer-rule"/>

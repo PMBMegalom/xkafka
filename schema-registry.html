@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 active nav-leaf"><a href="#">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -124,7 +128,7 @@
     <li class="level1 nav-leaf"><a href="#which-schema-is-written">Which schema is written</a></li>
     <li class="level1 nav-leaf"><a href="#registry-operations">Registry operations</a></li>
     <li class="level1 nav-leaf"><a href="#errors">Errors</a></li>
-    <li class="level1 nav-leaf"><a href="#not-yet-supported">Not yet supported</a></li>
+    <li class="level1 nav-leaf"><a href="#not-supported">Not supported</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -151,14 +155,18 @@
           <li><code>xkafka-avro</code> gives you Avro serdes for your types, <code>xkafka-json-schema</code> JSON
           Schema serdes, and <code>xkafka-protobuf</code> Protobuf serdes. Add the ones you use.
           Each brings in <code>xkafka-schema-registry</code>, the registry client.</li>
+          <li>If your types come from vulcan, avro4s, avrohugger, ScalaPB or smithy4s, see
+          <a href="other-libraries.html">Using types from other libraries</a> for the module to add.
+          To generate classes from Avro or JSON Schema files, see
+          <a href="code-generation.html">Generating classes from schema files</a>.</li>
           <li><code>xkafka-schema-registry-http4s</code> lets the registry client use any http4s
           client. Ember is shown here, but any http4s client works. To use an HTTP
           client that is not http4s&#39;s, see <a href="#another-http-client">Another HTTP client</a>.</li>
         </ul>
         <p>On Scala Native, Ember needs the <a href="https://github.com/aws/s2n-tls">s2n-tls</a>
-        library, even when the registry is reached over plain HTTP, wherever the program
-        is built and run. On macOS, Homebrew&#39;s <code>s2n</code> package provides it; Ubuntu does not
-        package it, so build it from source there.</p>
+        library, even when the registry is reached over plain HTTP. Install it wherever
+        the program is built and run. On macOS, Homebrew&#39;s <code>s2n</code> package provides it.
+        Ubuntu does not package it, so build it from source there.</p>
         
         <h2 id="connecting-to-the-registry" class="section"><a class="anchor-link left" href="#connecting-to-the-registry"><i class="icofont-laika link">&#xef71;</i></a>Connecting to the registry</h2>
         <p>The registry is reached through your own HTTP client, which decides on TLS,
@@ -178,7 +186,9 @@
     </span><span class="identifier">registry</span><span> &lt;- </span><span class="type-name">Resource</span><span>.</span><span class="identifier">eval</span><span>(</span><span class="type-name">SchemaRegistry</span><span>.</span><span class="identifier">of</span><span>(</span><span class="identifier">settings</span><span>, </span><span class="type-name">Http4sTransport</span><span>(</span><span class="identifier">client</span><span>)))
   </span><span class="keyword">yield</span><span> </span><span class="identifier">registry</span></code></pre>
         <p>To authenticate, wrap the client so it adds the credentials to every request,
-        and pass the wrapped client to <code>Http4sTransport</code>:</p>
+        and pass the wrapped client to <code>Http4sTransport</code>. A registry URL holding
+        credentials, such as <code>https://user:password@registry</code>, is refused, since no
+        client would send them from there:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Send basic authentication with every request to the registry
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">http4s</span><span>.</span><span class="type-name">BasicCredentials</span><span>
@@ -304,7 +314,6 @@
         <code>serde.option</code> writes a record without a value.</p>
         
         <h2 id="avro" class="section"><a class="anchor-link left" href="#avro"><i class="icofont-laika link">&#xef71;</i></a>Avro</h2>
-        <p>The example above derives Avro codecs with <code>derives AvroCodec</code>.</p>
         
         <h3 id="derived-avro-schemas" class="section"><a class="anchor-link left" href="#derived-avro-schemas"><i class="icofont-laika link">&#xef71;</i></a>Derived Avro schemas</h3>
         <p><code>derives AvroCodec</code> makes a schema from the type:</p>
@@ -321,12 +330,12 @@
               <td><code>boolean</code>, <code>int</code>, <code>long</code>, <code>float</code>, <code>double</code>, <code>string</code></td>
             </tr>
             <tr>
-              <td><code>fs2.Chunk[Byte]</code></td>
+              <td><code>fs2.Chunk[Byte]</code>, <code>Array[Byte]</code></td>
               <td><code>bytes</code></td>
             </tr>
             <tr>
               <td><code>Option[A]</code></td>
-              <td>a union of <code>null</code> and <code>A</code>, <code>null</code> first</td>
+              <td>a union of <code>null</code> and <code>A</code>, <code>null</code> first; an option of an option is refused, since both nones would be <code>null</code></td>
             </tr>
             <tr>
               <td><code>List</code>, <code>Vector</code>, <code>Seq</code>, <code>Set</code></td>
@@ -361,6 +370,10 @@
               <td>a <code>record</code> of its fields</td>
             </tr>
             <tr>
+              <td>a case class marked <code>@AvroFixed(size)</code>, of one <code>fs2.Chunk[Byte]</code> or <code>Array[Byte]</code> field</td>
+              <td>a <code>fixed</code> of <code>size</code> bytes</td>
+            </tr>
+            <tr>
               <td>an enum or sealed trait whose cases are all objects</td>
               <td>an <code>enum</code> of the cases&#39; names</td>
             </tr>
@@ -371,13 +384,34 @@
           </tbody>
         </table>
         <ul>
-          <li>A record is named after its class, in the namespace of its package. A generic
-          class&#39;s name carries its type arguments: <code>Box[Int]</code> is <code>Box__Int</code>.</li>
+          <li>A record is named after its class, in the namespace of its package and the
+          objects it is in, so <code>Here.Line</code> and <code>There.Line</code> are two records. A generic
+          class&#39;s name carries its type arguments in full, <code>Box[List[Int]]</code> being
+          <code>Box__List__Int</code>, where the class is derived for those arguments.</li>
+          <li>Two types given one name, for example with <code>@SchemaName</code>, make no schema,
+          so making a serde of them fails with <code>RegistryException.NoSchema</code>. So do two
+          cases of a sealed trait given one name, which would be one union branch twice,
+          and a type in no namespace that the schema names again inside a namespace
+          holding a type of the same name, where Avro reads the name as that type&#39;s.</li>
           <li>A field&#39;s Scala default is its default in the schema. An optional field whose
           default is a value has that value&#39;s branch first in its union, since Avro takes
-          a union&#39;s default from its first branch.</li>
-          <li>Give a type that holds itself, such as a linked list&#39;s node, its codec with
-          <code>derives AvroCodec</code> on that type.</li>
+          a union&#39;s default from its first branch. A default the schema cannot place is
+          left out: one of the record its field is in, or one holding a value of a
+          union&#39;s later branch inside it, such as <code>Inner(Some(5))</code> for a field of a
+          record with an optional field. A schema registered by another application
+          may give a union field a default of any branch, as Avro 1.12 allows.</li>
+          <li>A key or value that is bytes on its own is written after the header as it
+          is, with no length before it, as Confluent&#39;s serializers write it, here and
+          in the vulcan and avro4s serdes.</li>
+          <li>For a recursive type, such as a linked list&#39;s node, put <code>derives AvroCodec</code>
+          on the type itself.</li>
+          <li>Writing a <code>fixed</code> value of the wrong size fails. Avro gives a
+          <code>fixed</code> no documentation, so <code>@SchemaDoc</code> on one fails to compile.</li>
+          <li>Mark an enum, or a sealed trait whose cases are all objects, with
+          <code>@AvroEnumDefault(&quot;NAME&quot;)</code> to make the case <code>NAME</code> its default: a record
+          written with a symbol your enum does not have reads as that case, so other
+          applications can add symbols. A name that is not one of its cases, or a type
+          whose cases are not all objects, fails to compile.</li>
         </ul>
         <p><code>AvroCodec.instantMicros</code>, <code>AvroCodec.instantNanos</code>,
         <code>AvroCodec.localTimeMillis</code> and <code>AvroCodec.localDateTimeMillis</code> write those
@@ -398,8 +432,37 @@
 </span><span class="keyword">given</span><span> </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">BigDecimal</span><span>] = </span><span class="type-name">AvroCodec</span><span>.</span><span class="identifier">decimal</span><span>(</span><span class="identifier">precision</span><span> = </span><span class="number-literal">10</span><span>, </span><span class="identifier">scale</span><span> = </span><span class="number-literal">2</span><span>)
 
 </span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Price</span><span>(</span><span class="identifier">sku</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">amount</span><span>: </span><span class="type-name">BigDecimal</span><span>) </span><span class="keyword">derives</span><span> </span><span class="type-name">AvroCodec</span></code></pre>
+        <p>If fields need different precisions, mark each with <code>@SchemaDecimal</code>. It
+        covers every <code>BigDecimal</code> in the field, including inside an <code>Option</code> or a list,
+        and overrides any <code>given AvroCodec[BigDecimal]</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Write prices to the cent and weights to the gram
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">AvroCodec</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.</span><span class="type-name">SchemaDecimal</span><span>
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Parcel</span><span>(
+    </span><span class="annotation">@SchemaDecimal</span><span>(</span><span class="identifier">precision</span><span> = </span><span class="number-literal">10</span><span>, </span><span class="identifier">scale</span><span> = </span><span class="number-literal">2</span><span>) </span><span class="identifier">price</span><span>: </span><span class="type-name">BigDecimal</span><span>,
+    </span><span class="annotation">@SchemaDecimal</span><span>(</span><span class="identifier">precision</span><span> = </span><span class="number-literal">8</span><span>, </span><span class="identifier">scale</span><span> = </span><span class="number-literal">3</span><span>) </span><span class="identifier">weights</span><span>: </span><span class="type-name">List</span><span>[</span><span class="type-name">BigDecimal</span><span>]
+) </span><span class="keyword">derives</span><span> </span><span class="type-name">AvroCodec</span></code></pre>
         <p>A number with more digits, or more digits after the point, fails to write; it is
         not rounded.</p>
+        <p>For a field of a union type, such as <code>Cash | Card</code>, give the union its codec
+        with <code>AvroCodec.union</code>, listing its types in the order of the schema&#39;s union:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Pay in cash or by card
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">AvroCodec</span><span>
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Cash</span><span>(</span><span class="identifier">cents</span><span>: </span><span class="type-name">Long</span><span>) </span><span class="keyword">derives</span><span> </span><span class="type-name">AvroCodec</span><span>
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Card</span><span>(</span><span class="identifier">number</span><span>: </span><span class="type-name">String</span><span>) </span><span class="keyword">derives</span><span> </span><span class="type-name">AvroCodec</span><span>
+
+</span><span class="keyword">given</span><span> </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">Cash</span><span> | </span><span class="type-name">Card</span><span>] = </span><span class="type-name">AvroCodec</span><span>.</span><span class="identifier">union</span><span>[(</span><span class="type-name">Cash</span><span>, </span><span class="type-name">Card</span><span>)]
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Payment</span><span>(</span><span class="identifier">by</span><span>: </span><span class="type-name">Cash</span><span> | </span><span class="type-name">Card</span><span>, </span><span class="identifier">refundedBy</span><span>: </span><span class="type-name">Option</span><span>[</span><span class="type-name">Cash</span><span> | </span><span class="type-name">Card</span><span>] = </span><span class="type-name">None</span><span>) </span><span class="keyword">derives</span><span> </span><span class="type-name">AvroCodec</span></code></pre>
+        <p>A value is written as the first type in the union that it matches, and a
+        record is read by its name, so two records with the same fields stay apart. An <code>Option</code> of
+        a union type is the union with <code>null</code> first.</p>
+        <p>On Scala.js, numbers do not carry their Scala type: a <code>Double</code> that is a whole
+        number is also an <code>Int</code>, and one that a <code>Float</code> holds exactly is also a <code>Float</code>.
+        A union of number types, such as <code>Int | Double</code>, writes such a value as the
+        first of those types it lists, and reads it back as the same number.</p>
         <p>For a type of your own, map it to one that has a codec:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Write a customer id as the text it wraps
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">AvroCodec</span><span>
@@ -407,7 +470,24 @@
 </span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">CustomerId</span><span>(</span><span class="identifier">value</span><span>: </span><span class="type-name">String</span><span>)
 
 </span><span class="keyword">given</span><span> </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">CustomerId</span><span>] = </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">String</span><span>].</span><span class="identifier">imap</span><span>(</span><span class="type-name">CustomerId</span><span>(</span><span class="identifier">_</span><span>))(</span><span class="identifier">_</span><span>.</span><span class="identifier">value</span><span>)</span></code></pre>
-        <p><code>emap</code> does the same where reading can refuse a value.</p>
+        <p><code>emap</code> does the same if reading can refuse a value.</p>
+        <p>If a type must have the schema of a file you keep, for example one other
+        applications also write with, make its codec with <code>matching</code>. If the derived
+        schema differs from the file&#39;s, making a serde fails with
+        <code>RegistryException.NoSchema</code>, and the error shows both schemas:</p>
+        <pre><code class="nohighlight"><span class="comment">// A visit, whose schema must be the one in visit.avsc
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">AvroCodec</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">SchemaDoc</span><span>, </span><span class="type-name">SchemaNamespace</span><span>}
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">visitAvsc</span><span> =
+  </span><span class="string-literal">&quot;&quot;&quot;{&quot;type&quot;: &quot;record&quot;, &quot;name&quot;: &quot;Visit&quot;, &quot;namespace&quot;: &quot;com.example&quot;, &quot;doc&quot;: &quot;A visit to the shop&quot;,
+    | &quot;fields&quot;: [{&quot;name&quot;: &quot;id&quot;, &quot;type&quot;: &quot;string&quot;}, {&quot;name&quot;: &quot;pages&quot;, &quot;type&quot;: &quot;int&quot;, &quot;default&quot;: 1}]}&quot;&quot;&quot;</span><span>.</span><span class="identifier">stripMargin</span><span>
+
+</span><span class="annotation">@SchemaNamespace</span><span>(</span><span class="string-literal">&quot;com.example&quot;</span><span>)
+</span><span class="annotation">@SchemaDoc</span><span>(</span><span class="string-literal">&quot;A visit to the shop&quot;</span><span>)
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Visit</span><span>(</span><span class="identifier">id</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">pages</span><span>: </span><span class="type-name">Int</span><span> = </span><span class="number-literal">1</span><span>)
+
+</span><span class="keyword">given</span><span> </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">Visit</span><span>] = </span><span class="type-name">AvroCodec</span><span>.</span><span class="identifier">derived</span><span>[</span><span class="type-name">Visit</span><span>].</span><span class="identifier">matching</span><span>(</span><span class="identifier">visitAvsc</span><span>)</span></code></pre>
         
         <h3 id="avro-records-of-other-versions" class="section"><a class="anchor-link left" href="#avro-records-of-other-versions"><i class="icofont-laika link">&#xef71;</i></a>Avro records of other versions</h3>
         <p>Reading converts each record from the schema it was written with to your
@@ -421,7 +501,7 @@
         <code>RegistryException.Unserializable</code>.</p>
         
         <h3 id="avro-values-known-only-at-run-time" class="section"><a class="anchor-link left" href="#avro-values-known-only-at-run-time"><i class="icofont-laika link">&#xef71;</i></a>Avro values known only at run time</h3>
-        <p>Where a program does not know the schema until it runs, such as a tool that
+        <p>If a program does not know the schema until it runs, such as a tool that
         copies or shows any topic&#39;s records, it works with <code>AvroValue</code>s, which describe
         any Avro value, and <code>AvroSchema</code>s.</p>
         <p><code>AvroSerde.asWritten</code> reads each record as it was written, together with the
@@ -438,7 +518,10 @@
     </span><span class="identifier">reading</span><span>.</span><span class="identifier">deserialize</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>, </span><span class="type-name">Some</span><span>(</span><span class="identifier">bytes</span><span>)).</span><span class="identifier">map</span><span>: </span><span class="identifier">written</span><span> =&gt;
       </span><span class="string-literal">s&quot;</span><span class="substitution">${AvroSchemaJson.render(written.schema)}</span><span class="string-literal">: </span><span class="substitution">${written.value}</span><span class="string-literal">&quot;</span></code></pre>
         <p><code>AvroSerde.generic</code> writes values of a schema you hold, and reads any record
-        converted to that schema, as a derived serde does:</p>
+        converted to that schema, as a derived serde does. <code>AvroSerde.genericText</code>
+        does the same for a schema you hold as text, and registers that text as it is.
+        Use it for a schema another client registered, such as one Kafka Connect
+        registered with properties of its own, which xkafka&#39;s schemas do not keep:</p>
         <pre><code class="nohighlight"><span class="comment">// Write a line of an order, with a schema read from its JSON as the program runs
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -451,6 +534,8 @@
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">lines</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">AvroValue</span><span>]] =
   </span><span class="type-name">IO</span><span>.</span><span class="identifier">fromEither</span><span>(</span><span class="type-name">AvroSchemaJson</span><span>.</span><span class="identifier">parse</span><span>(</span><span class="identifier">text</span><span>).</span><span class="identifier">left</span><span>.</span><span class="identifier">map</span><span>(</span><span class="keyword">new</span><span> </span><span class="type-name">IllegalArgumentException</span><span>(</span><span class="identifier">_</span><span>))).</span><span class="identifier">flatMap</span><span>: </span><span class="identifier">schema</span><span> =&gt;
     </span><span class="type-name">AvroSerde</span><span>.</span><span class="identifier">generic</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="identifier">schema</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">linesAsWritten</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">AvroValue</span><span>]] = </span><span class="type-name">AvroSerde</span><span>.</span><span class="identifier">genericText</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">line</span><span> = </span><span class="type-name">AvroValue</span><span>.</span><span class="type-name">Record</span><span>(</span><span class="type-name">FullName</span><span>(</span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;com.example&quot;</span><span>), </span><span class="string-literal">&quot;Line&quot;</span><span>), </span><span class="type-name">Vector</span><span>(</span><span class="string-literal">&quot;sku&quot;</span><span> -&gt; </span><span class="type-name">AvroValue</span><span>.</span><span class="type-name">String</span><span>(</span><span class="string-literal">&quot;apple&quot;</span><span>), </span><span class="string-literal">&quot;quantity&quot;</span><span> -&gt; </span><span class="type-name">AvroValue</span><span>.</span><span class="type-name">Int</span><span>(</span><span class="number-literal">3</span><span>)))</span></code></pre>
         <p>A value that does not fit the schema fails to write with
@@ -472,8 +557,7 @@
 </span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Order</span><span>(</span><span class="identifier">id</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">placedAt</span><span>: </span><span class="type-name">Instant</span><span>, </span><span class="identifier">lines</span><span>: </span><span class="type-name">List</span><span>[</span><span class="type-name">Line</span><span>], </span><span class="identifier">note</span><span>: </span><span class="type-name">Option</span><span>[</span><span class="type-name">String</span><span>] = </span><span class="type-name">None</span><span>) </span><span class="keyword">derives</span><span> </span><span class="type-name">JsonSchemaCodec</span><span>
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">orders</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>]] = </span><span class="type-name">JsonSchemaSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
-        <p>A record is the schema&#39;s id followed by the JSON as UTF-8 text, as Confluent&#39;s
-        <code>KafkaJsonSchemaSerializer</code> writes it.</p>
+        <p>Records match what Confluent&#39;s <code>KafkaJsonSchemaSerializer</code> writes.</p>
         
         <h3 id="derived-json-schemas" class="section"><a class="anchor-link left" href="#derived-json-schemas"><i class="icofont-laika link">&#xef71;</i></a>Derived JSON schemas</h3>
         <p><code>derives JsonSchemaCodec</code> makes a JSON Schema of draft 7 from the type:</p>
@@ -499,7 +583,7 @@
             <tr>
               <td><code>Float</code>, <code>Double</code>, <code>BigDecimal</code></td>
               <td><code>number</code></td>
-              <td>numbers; infinities and NaN are refused</td>
+              <td>numbers; infinities and NaN are refused; <code>@SchemaDecimal</code> changes nothing</td>
             </tr>
             <tr>
               <td><code>fs2.Chunk[Byte]</code></td>
@@ -509,7 +593,7 @@
             <tr>
               <td><code>Option[A]</code></td>
               <td><code>oneOf</code> <code>null</code> and <code>A</code></td>
-              <td><code>null</code> where it is <code>None</code></td>
+              <td><code>null</code> for <code>None</code>; an option of an option is refused, since both nones would be <code>null</code></td>
             </tr>
             <tr>
               <td><code>List</code>, <code>Vector</code>, <code>Seq</code>, <code>Set</code></td>
@@ -539,7 +623,7 @@
             <tr>
               <td><code>java.time.LocalTime</code>, <code>LocalDateTime</code></td>
               <td><code>string</code></td>
-              <td>ISO-8601 text, such as <code>07:00:00</code></td>
+              <td>ISO-8601 text, such as <code>07:00</code>, with seconds where they are not zero</td>
             </tr>
             <tr>
               <td>a case class</td>
@@ -559,8 +643,8 @@
           </tbody>
         </table>
         <ul>
-          <li>An object&#39;s <code>title</code> is the type&#39;s full name, in the namespace of its package,
-          and naming subjects by record uses it, as Confluent&#39;s tools do.</li>
+          <li>An object&#39;s <code>title</code> is the type&#39;s full name, in the namespace of its
+          package and the objects it is in. With <code>SubjectNaming.RecordName</code>, the subject is that title.</li>
           <li>A field with a default, or an optional one, may be left out of a record; the
           others are required.</li>
           <li>Objects are closed: their schema allows no other properties. Under the
@@ -568,6 +652,19 @@
           default, or an optional one, as a new version of the schema, and refuses to
           let you remove a field.</li>
           <li>A case of a sealed trait must not have a field named <code>type</code>: writing it fails.</li>
+          <li>These make no schema, so making a serde of them fails with
+          <code>RegistryException.NoSchema</code>: two cases of a sealed
+          trait or enum with one name, such as <code>V1.Created</code> and <code>V2.Created</code>, which
+          <code>type</code> could not tell apart; two types of one name that hold themselves, as a
+          generic class derived once for every type argument gives; and an option
+          holding an option, or a schema written by hand that may take <code>null</code>, which
+          <code>null</code> would be a value of twice. A schema may take <code>null</code> unless a keyword
+          rules it out, such as a <code>type</code> or <code>enum</code> without <code>null</code>, since <code>null</code> must
+          satisfy every keyword, so <code>{&quot;minimum&quot;: 0}</code> takes it. Neither can a schema written by hand that
+          names its own definitions by reference, or that is written for a draft other
+          than draft 7, be held in a derived type, in an option, a collection or a map:
+          the schema holding it is for draft 7, and its references would name that
+          schema&#39;s definitions.</li>
         </ul>
         <p>For a schema written by hand, give its JSON with circe&#39;s codecs for its values,
         which must write what the schema describes:</p>
@@ -587,19 +684,19 @@
         <p>Reading takes a record&#39;s JSON as it is, whatever version of the schema it was
         written with:</p>
         <ul>
-          <li>a field the record lacks takes its default, or <code>None</code> where it is optional;</li>
+          <li>a field the record lacks takes its default, or <code>None</code> if it is optional;</li>
           <li>a field is also read under any name <code>@SchemaAlias</code> gives it;</li>
           <li>properties your type does not have are ignored.</li>
         </ul>
-        <p>Values are not checked against the schema when they are written or read, as
-        Confluent&#39;s serializers do not check them by default.</p>
+        <p>xkafka does not validate values against the schema when writing or reading.
+        Confluent&#39;s serializers do not validate by default either.</p>
         
         <h3 id="json-values-known-only-at-run-time" class="section"><a class="anchor-link left" href="#json-values-known-only-at-run-time"><i class="icofont-laika link">&#xef71;</i></a>JSON values known only at run time</h3>
         <p><code>JsonSchemaSerde.generic</code> writes circe <code>Json</code> values of a schema you hold, as
         they are, and reads each record&#39;s JSON as it is:</p>
         <pre><code class="nohighlight"><span class="comment">// Write a line of an order as JSON, with a schema read from its text as the program runs
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
-</span><span class="keyword">import</span><span> </span><span class="identifier">io</span><span>.</span><span class="identifier">circe</span><span>.{</span><span class="type-name">Json</span><span>, </span><span class="identifier">parser</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">io</span><span>.</span><span class="identifier">circe</span><span>.{</span><span class="identifier">jawn</span><span>, </span><span class="type-name">Json</span><span>}
 
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">jsonschema</span><span>.</span><span class="type-name">JsonSchemaSerde</span><span>
@@ -608,11 +705,10 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span> = </span><span class="string-literal">&quot;&quot;&quot;{&quot;type&quot;:&quot;object&quot;,&quot;title&quot;:&quot;com.example.Line&quot;,&quot;properties&quot;:{&quot;sku&quot;:{&quot;type&quot;:&quot;string&quot;},&quot;quantity&quot;:{&quot;type&quot;:&quot;integer&quot;}}}&quot;&quot;&quot;</span><span>
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">lines</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Json</span><span>]] =
-  </span><span class="type-name">IO</span><span>.</span><span class="identifier">fromEither</span><span>(</span><span class="identifier">parser</span><span>.</span><span class="identifier">parse</span><span>(</span><span class="identifier">text</span><span>)).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">schema</span><span> =&gt; </span><span class="type-name">JsonSchemaSerde</span><span>.</span><span class="identifier">generic</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="identifier">schema</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>))
+  </span><span class="type-name">IO</span><span>.</span><span class="identifier">fromEither</span><span>(</span><span class="identifier">jawn</span><span>.</span><span class="identifier">parse</span><span>(</span><span class="identifier">text</span><span>)).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">schema</span><span> =&gt; </span><span class="type-name">JsonSchemaSerde</span><span>.</span><span class="identifier">generic</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="identifier">schema</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>))
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">line</span><span> = </span><span class="type-name">Json</span><span>.</span><span class="identifier">obj</span><span>(</span><span class="string-literal">&quot;sku&quot;</span><span> -&gt; </span><span class="type-name">Json</span><span>.</span><span class="identifier">fromString</span><span>(</span><span class="string-literal">&quot;apple&quot;</span><span>), </span><span class="string-literal">&quot;quantity&quot;</span><span> -&gt; </span><span class="type-name">Json</span><span>.</span><span class="identifier">fromInt</span><span>(</span><span class="number-literal">3</span><span>))</span></code></pre>
-        <p>The schema&#39;s <code>title</code>, where it has one, is its name for naming subjects by
-        record. <code>JsonSchemaSerde.asWritten</code> reads each record as a <code>JsonSchemaWritten</code>:
+        <p>With <code>SubjectNaming.RecordName</code>, the subject is the schema&#39;s <code>title</code>. <code>JsonSchemaSerde.asWritten</code> reads each record as a <code>JsonSchemaWritten</code>:
         its JSON, with the schema it was written with.</p>
         
         <h2 id="protobuf" class="section"><a class="anchor-link left" href="#protobuf"><i class="icofont-laika link">&#xef71;</i></a>Protobuf</h2>
@@ -648,7 +744,7 @@ import &quot;google/protobuf/timestamp.proto&quot;;
 
 message Order {
   string id = 1;
-  google.protobuf.Timestamp placedAt = 2;
+  .google.protobuf.Timestamp placedAt = 2;
   repeated Line lines = 3;
   optional string note = 4;
 }
@@ -693,11 +789,11 @@ message Line {
             </tr>
             <tr>
               <td><code>Option[A]</code></td>
-              <td>an <code>optional</code> field; a field of a message, which records whether it is set, needs no label</td>
+              <td>an <code>optional</code> field (a message field needs no label, since a message already records whether it is set)</td>
             </tr>
             <tr>
               <td><code>List</code>, <code>Vector</code>, <code>Seq</code>, <code>Set</code></td>
-              <td>a <code>repeated</code> field, packed where it holds numbers</td>
+              <td>a <code>repeated</code> field, packed if it holds numbers</td>
             </tr>
             <tr>
               <td><code>Map[String, A]</code></td>
@@ -705,7 +801,7 @@ message Line {
             </tr>
             <tr>
               <td><code>java.util.UUID</code>, <code>BigDecimal</code></td>
-              <td><code>string</code>, holding the value as text</td>
+              <td><code>string</code>, holding the value as text; <code>@SchemaDecimal</code> changes nothing</td>
             </tr>
             <tr>
               <td><code>java.time.Instant</code></td>
@@ -736,10 +832,10 @@ message Line {
           <li>Number each case of a sealed trait or enum with <code>@ProtobufField</code> on the case,
           as on a field. An enum needs a case numbered 0, or it fails to compile: a field
           of it that a record lacks reads as that case.</li>
-          <li>A field with a Scala default is labelled <code>optional</code> and written even where it
+          <li>A field with a Scala default is labelled <code>optional</code> and written even if it
           is zero, so a record that lacks it reads the default. Other fields are written
-          as proto3 writes them: left out where they are zero (<code>0</code>, <code>&quot;&quot;</code>, <code>false</code>, an
-          empty list, an enum&#39;s case numbered 0), and read as zero where a record lacks
+          as proto3 writes them: left out if they are zero (<code>0</code>, <code>&quot;&quot;</code>, <code>false</code>, an
+          empty list, an enum&#39;s case numbered 0), and read as zero if a record lacks
           them. Lists, maps and options do not use a default: a record that lacks one
           reads it as empty or <code>None</code>.</li>
           <li>Protobuf has no field for a list of lists, a list or map of options, or an
@@ -763,7 +859,7 @@ message Line {
         <p>Reading takes a record&#39;s fields by number, whatever version of the schema it
         was written with:</p>
         <ul>
-          <li>a field the record lacks takes its default, or its zero where it has none;</li>
+          <li>a field the record lacks takes its default, or its zero if it has none;</li>
           <li>fields your type does not have are skipped;</li>
           <li>a record whose enum field holds a number your enum lacks fails to read with
           <code>RegistryException.Unserializable</code>.</li>
@@ -772,14 +868,18 @@ message Line {
         compatible change, and changing a field&#39;s type is not.</p>
         
         <h3 id="protobuf-values-known-only-at-run-time" class="section"><a class="anchor-link left" href="#protobuf-values-known-only-at-run-time"><i class="icofont-laika link">&#xef71;</i></a>Protobuf values known only at run time</h3>
-        <p>Where a program does not know the schema until it runs, such as a tool that
+        <p>If a program does not know the schema until it runs, such as a tool that
         copies or shows any topic&#39;s records, it works with <code>ProtobufValue</code>s, which
         describe any Protobuf value, and <code>ProtobufSchema.File</code>s, which describe .proto
         files.</p>
         <p><code>ProtobufSerde.asWritten</code> reads each record as it was written, together with
-        the .proto file its writer registered. Where that file imports files registered
-        under other subjects, they are fetched from the registry. Protobuf&#39;s well-known
-        types, such as <code>google/protobuf/timestamp.proto</code>, need no fetching.</p>
+        the .proto file its writer registered. If that file imports files registered
+        under other subjects, they are fetched from the registry. The files Confluent&#39;s
+        serializers know without references need no fetching: Protobuf&#39;s own, such as
+        <code>google/protobuf/timestamp.proto</code> and <code>google/protobuf/descriptor.proto</code>, Google&#39;s
+        common types under <code>google/type/</code>, such as <code>date.proto</code> and <code>money.proto</code>, and
+        Confluent&#39;s <code>confluent/meta.proto</code> and <code>confluent/type/decimal.proto</code>, which
+        Kafka Connect&#39;s records import.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Read any Protobuf record of any schema, and show its message and one of its fields
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -807,7 +907,7 @@ message Line {
     </span><span class="type-name">ProtobufSerde</span><span>.</span><span class="identifier">generic</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="identifier">file</span><span>, </span><span class="string-literal">&quot;com.example.Line&quot;</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">line</span><span> = </span><span class="type-name">ProtobufValue</span><span>.</span><span class="type-name">Message</span><span>(</span><span class="string-literal">&quot;com.example.Line&quot;</span><span>, </span><span class="type-name">Vector</span><span>(</span><span class="string-literal">&quot;sku&quot;</span><span> -&gt; </span><span class="type-name">ProtobufValue</span><span>.</span><span class="type-name">String</span><span>(</span><span class="string-literal">&quot;apple&quot;</span><span>), </span><span class="string-literal">&quot;quantity&quot;</span><span> -&gt; </span><span class="type-name">ProtobufValue</span><span>.</span><span class="type-name">Int32</span><span>(</span><span class="number-literal">3</span><span>)))</span></code></pre>
-        <p>The file may import only the well-known types, and must declare the message you
+        <p>The file may import only those known files, and must declare the message you
         name; otherwise <code>ProtobufSerde.generic</code> fails with <code>RegistryException.NoSchema</code>.
         <code>ProtobufSchemaText.render</code> turns a <code>ProtobufSchema.File</code> back into text.</p>
         <p>A message is named by its full name, such as <code>com.example.Line</code>, and holds its
@@ -849,10 +949,10 @@ message Line {
             </tr>
           </tbody>
         </table>
-        <p>An enum&#39;s value is <code>Enum(&quot;STATUS_PAID&quot;)</code>, by name, or <code>EnumNumber(7)</code> where a
-        record holds a number the enum has no name for, as one written by a newer
+        <p>An enum&#39;s value is <code>Enum(&quot;STATUS_PAID&quot;)</code>, by name, or <code>EnumNumber(7)</code> if a
+        record holds a number the enum has no name for, such as one written by a newer
         version of the schema.</p>
-        <p>Writing fails with <code>RegistryException.Unserializable</code> where a value does not fit
+        <p>Writing fails with <code>RegistryException.Unserializable</code> if a value does not fit
         its message: it has a field the message lacks, a value of the wrong type, two
         fields of one <code>oneof</code>, an unsigned number out of range, or lacks a proto2
         <code>required</code> field.</p>
@@ -862,7 +962,9 @@ message Line {
         
         <h2 id="names-and-documentation" class="section"><a class="anchor-link left" href="#names-and-documentation"><i class="icofont-laika link">&#xef71;</i></a>Names and documentation</h2>
         <p>These annotations, in <code>xkafka.schemaregistry</code>, change what a derived schema
-        calls things, for every format:</p>
+        calls things, for every format. Each that takes an argument takes a constant, a
+        literal or a value the compiler folds to one, such as a <code>final val</code>; any other
+        argument fails to compile:</p>
         <table>
           <thead>
             <tr>
@@ -880,7 +982,7 @@ message Line {
             <tr>
               <td><code>@SchemaNamespace(&quot;com.example&quot;)</code></td>
               <td>a type</td>
-              <td>puts it in this namespace in place of its package&#39;s</td>
+              <td>puts it in this namespace in place of its package&#39;s and objects&#39;, or in none for <code>@SchemaNamespace(&quot;&quot;)</code></td>
             </tr>
             <tr>
               <td><code>@SchemaDoc(&quot;text&quot;)</code></td>
@@ -917,8 +1019,8 @@ message Line {
         records name fields by number, so a renamed field or type needs no alias.</p>
         
         <h2 id="subjects" class="section"><a class="anchor-link left" href="#subjects"><i class="icofont-laika link">&#xef71;</i></a>Subjects</h2>
-        <p>A schema is kept under a subject, named as Confluent&#39;s subject name strategies
-        name it:</p>
+        <p>The registry keeps each schema under a subject. <code>SubjectNaming</code> chooses the
+        subject&#39;s name, as Confluent&#39;s subject name strategies do:</p>
         <table>
           <thead>
             <tr>
@@ -935,7 +1037,7 @@ message Line {
             </tr>
             <tr>
               <td><code>RecordName</code></td>
-              <td><code>com.example.Order</code>, the record&#39;s full name, the JSON schema&#39;s <code>title</code> or the Protobuf message&#39;s full name</td>
+              <td><code>com.example.Order</code>, the record&#39;s full name, the JSON Schema&#39;s <code>title</code> or the Protobuf message&#39;s full name</td>
               <td><code>RecordNameStrategy</code></td>
             </tr>
             <tr>
@@ -946,8 +1048,10 @@ message Line {
           </tbody>
         </table>
         <p><code>RecordName</code> and <code>TopicRecordName</code> need a named record: writing a type that has
-        none, such as a <code>String</code> in Avro, or a JSON schema without a <code>title</code>, fails with
-        <code>RegistryException.Unserializable</code>.</p>
+        none, such as a <code>String</code>, an enum or a fixed type in Avro, or a JSON Schema
+        without a <code>title</code>, fails with <code>RegistryException.Unserializable</code> when written.</p>
+        <p><code>Subject.from</code> refuses an empty subject, and <code>.</code> and <code>..</code>, which would make
+        the registry read another path.</p>
         
         <h2 id="which-schema-is-written" class="section"><a class="anchor-link left" href="#which-schema-is-written"><i class="icofont-laika link">&#xef71;</i></a>Which schema is written</h2>
         <p><code>of</code> and <code>generic</code> take a <code>Writing</code>:</p>
@@ -960,23 +1064,32 @@ message Line {
           <li><code>AlreadyRegistered</code>: writes with your codec&#39;s schema, which must already be
           registered. Use it when schemas are registered ahead of time, for example by a
           deployment pipeline, and applications must not register them. Writing fails
-          with <code>RegistryException.Unserializable</code> where the schema is not registered.</li>
+          with <code>RegistryException.Unserializable</code> if the schema is not registered.</li>
           <li><code>Latest</code>: writes with the subject&#39;s latest version, as Confluent&#39;s
           <code>use.latest.version</code> does. Use it when another team owns the schema. With
-          Avro, fields the latest version lacks are left out, and those it adds take
-          their defaults; JSON is written as your codec writes it. A Protobuf message
-          is written as your codec writes it, as the message of the latest version&#39;s
-          file with your type&#39;s name; a file without one is refused. Writing fails with
-          <code>RegistryException.Unserializable</code> where the subject has no versions.</li>
-          <li><code>Pinned(id)</code>: writes with the schema registered as <code>id</code>.</li>
+          Avro, the value is read into the latest version as Avro resolves your
+          codec&#39;s schema into it: fields it lacks are left out, those it adds take
+          their defaults, a field it renames is found through its alias, and an <code>int</code>
+          is written as its <code>long</code>. JSON is written as your codec writes it. A Protobuf message
+          is written as your codec writes it, using the message in the latest
+          version&#39;s file that has your type&#39;s name. If the file has no such message,
+          writing fails. Writing also fails with <code>RegistryException.Unserializable</code> if
+          the subject has no versions.</li>
+          <li><code>Pinned(id)</code>: writes with the schema registered as <code>id</code>. Use it when every
+          writer must use one exact schema.</li>
         </ul>
+        <p>With Avro, including the vulcan and avro4s serdes, <code>Latest</code> and <code>Pinned</code> refuse
+        a schema that would change what a value means: one with a decimal of another
+        scale or fewer digits than your codec writes, a time in another unit, such as
+        microseconds for your milliseconds, or text where your codec writes bytes.
+        Writing then fails with <code>RegistryException.Unserializable</code>.</p>
         
         <h2 id="registry-operations" class="section"><a class="anchor-link left" href="#registry-operations"><i class="icofont-laika link">&#xef71;</i></a>Registry operations</h2>
         <p><code>SchemaRegistry</code> also offers the registry&#39;s operations directly: <code>schema(id)</code>,
         <code>register</code>, <code>lookup</code>, <code>latest</code>, <code>version</code>, and <code>compatibility</code>, which tells
         whether a schema could be registered as a subject&#39;s next version, with the
-        registry&#39;s reasons where it could not.</p>
-        <p><code>lookup</code>, <code>latest</code> and <code>version</code> answer <code>None</code> where the registry does not have
+        registry&#39;s reasons if it could not.</p>
+        <p><code>lookup</code>, <code>latest</code> and <code>version</code> return <code>None</code> if the registry does not have
         the subject, the version, or the schema under that subject. <code>schema(id)</code> of an
         id the registry does not have fails with <code>RegistryException.Refused</code>.</p>
         
@@ -1000,7 +1113,7 @@ message Line {
             </tr>
             <tr>
               <td><code>Unreadable</code></td>
-              <td>the registry&#39;s answer could not be read, as one from a proxy in front of it</td>
+              <td>the registry&#39;s answer could not be read, such as one from a proxy in front of it</td>
             </tr>
             <tr>
               <td><code>Unserializable</code></td>
@@ -1008,23 +1121,44 @@ message Line {
             </tr>
             <tr>
               <td><code>NoSchema</code></td>
-              <td>your type has no schema in the serde&#39;s format, as a list of lists has none in Protobuf</td>
+              <td>your type has no schema in the serde&#39;s format, such as a list of lists in Protobuf</td>
             </tr>
           </tbody>
         </table>
+        <p>A record nested more than 100 deep, such as a list of 101 nodes that each hold
+        the next, is also <code>Unserializable</code>, written or read, in Avro and JSON Schema with
+        xkafka&#39;s own codecs. A Protobuf record may hold 100 messages below its own, as
+        protobuf-java reads it, counting a oneof&#39;s message and each map entry as one, so
+        a list of 102 nodes is refused there. A record read through ScalaPB or smithy4s,
+        whose readers count no depth, is held to the same limits before they read it.
+        So are:</p>
+        <ul>
+          <li>an Avro record whose arrays or maps claim more items than its bytes can hold,
+          or that has bytes left after its value, with xkafka&#39;s codecs or with vulcan&#39;s
+          and avro4s&#39;s;</li>
+          <li>a JSON or Protobuf record whose text is not UTF-8. An Avro record&#39;s text is
+          read with such bytes replaced.</li>
+        </ul>
+        <p>The serdes of vulcan and avro4s write and read nested records as their libraries
+        do. Those of ScalaPB and smithy4s hold what they write to the same limits as what
+        they read, so they write nothing that reading refuses, and refuse bytes that are
+        not a message of their type before their libraries read them.</p>
+        <p>A value an error names is cut short after 200 characters, with its full
+        length.</p>
         <p>Settings the registry client refuses raise <code>InvalidRegistrySetting</code>, and a
         record without a value raises <code>Deserializer.NullValueException</code> (see
         <a href="#writing-and-reading-records">Writing and reading records</a>).</p>
         
-        <h2 id="not-yet-supported" class="section"><a class="anchor-link left" href="#not-yet-supported"><i class="icofont-laika link">&#xef71;</i></a>Not yet supported</h2>
+        <h2 id="not-supported" class="section"><a class="anchor-link left" href="#not-supported"><i class="icofont-laika link">&#xef71;</i></a>Not supported</h2>
         <ul>
           <li>Avro and JSON Schema schemas that name schemas registered under other subjects
           (schema references): records written with them are refused when reading, and
           <code>Latest</code> or <code>Pinned</code> cannot write with them. Protobuf records with such
           schemas are read: derived serdes read by field number and do not need the
           other schemas, and <code>ProtobufSerde.asWritten</code> fetches them.</li>
-          <li>Generic Protobuf serdes of files that import files other than the
-          well-known types.</li>
+          <li>Generic Protobuf serdes, and serdes of messages ScalaPB generated, of files
+          that import files other than those
+          <a href="#protobuf-values-known-only-at-run-time">Confluent&#39;s serializers know</a>.</li>
           <li>Protobuf files that declare groups or extensions, or are written in an edition
           of Protobuf.</li>
         </ul>

@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -106,10 +110,10 @@
     <li class="level1 nav-leaf"><a href="#properties">Properties</a></li>
     <li class="level1 nav-leaf"><a href="#managed-properties">Managed properties</a></li>
     <li class="level1 nav-leaf"><a href="#changing-settings">Changing settings</a></li>
+    <li class="level1 nav-leaf"><a href="#client-settings">Client settings</a></li>
     <li class="level1 nav-leaf"><a href="#consumer-settings">Consumer settings</a></li>
     <li class="level1 nav-leaf"><a href="#producer-settings">Producer settings</a></li>
     <li class="level1 nav-leaf"><a href="#streams-settings">Streams settings</a></li>
-    <li class="level1 nav-leaf"><a href="#client-settings">Client settings</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -158,11 +162,37 @@
         <code>KafkaException.InvalidSettings</code>, which carries every <code>SettingsError</code>, so the
         accumulation survives the lift.</p>
         <p>Bootstrap servers must be <code>host:port</code>, including bracketed IPv6 literals.
-        Property names must not be blank. Every duration must be positive and at most
-        <code>Int.MaxValue</code> milliseconds (about 24.9 days), with these exceptions:</p>
+        Property names must not be blank. Every duration, in these settings and in
+        <code>StreamsSettings</code>, must be a whole number of milliseconds, since Kafka&#39;s clients
+        count no finer. It must also be positive. In these settings it must be at most
+        <code>Int.MaxValue</code> milliseconds (about 24.9 days); <code>StreamsSettings</code> sets no such
+        limit. The exceptions are:</p>
         <ul>
-          <li><code>linger</code> may be zero, and at most <code>ProducerSettings.LingerLimit</code> (15 minutes).</li>
+          <li><code>linger</code> may be zero, and must be less than <code>ProducerSettings.LingerLimit</code>
+          (5 minutes), and less than a <code>message.timeout.ms</code> or <code>delivery.timeout.ms</code>
+          the properties set. A transactional producer&#39;s linger must also be less than
+          its <code>transactionTimeout</code>.</li>
+          <li>A <code>delivery.timeout.ms</code> the properties set must be at least <code>linger</code> and the
+          request timeout, <code>request.timeout.ms</code> or 30 seconds, together, as the Java
+          client needs. A transactional producer&#39;s <code>message.timeout.ms</code> or
+          <code>delivery.timeout.ms</code> must be at most its <code>transactionTimeout</code>, and its
+          <code>socket.timeout.ms</code> at most 100 milliseconds more, as librdkafka needs. These
+          fail with <code>SettingsError.PropertyDurationBelowMinimum</code> and
+          <code>SettingsError.PropertyDurationAboveLimit</code>.</li>
+          <li><code>transactionTimeout</code> is at least
+          <code>TransactionalProducerSettings.TransactionTimeoutMinimum</code> (1 second).</li>
+          <li><code>metadataRefreshInterval</code> is at most
+          <code>ClientSettings.MetadataRefreshIntervalLimit</code> (1 hour).</li>
           <li><code>fetchWait</code> may be zero, and at most <code>ConsumerSettings.FetchWaitLimit</code> (5 minutes).</li>
+          <li>The streams <code>taskTimeout</code> may be zero.</li>
+          <li>Under exactly-once, a streams <code>commitInterval</code> must be at most
+          <code>StreamsSettings.TransactionTimeout</code> (10 seconds), as Java refuses, since the
+          broker aborts a transaction open longer.</li>
+          <li>A streams application&#39;s client properties must make producer settings these
+          rules allow, since its producers take them: under exactly-once, those of a
+          transactional producer with the 10-second transaction timeout. One that does
+          not fails with <code>StreamsSettingsError.ProducerSetting</code>, holding the producer&#39;s
+          <code>SettingsError</code>.</li>
           <li>The group membership intervals are at most
           <code>ConsumerSettings.SessionTimeoutLimit</code> (1 hour),
           <code>ConsumerSettings.HeartbeatIntervalLimit</code> (1 hour), and
@@ -187,15 +217,16 @@
 </span><span>  ).</span><span class="identifier">andThen</span><span>: </span><span class="identifier">client</span><span> =&gt;
     </span><span class="comment">// For this producer only, and overrides the client&#39;s
 </span><span>    </span><span class="type-name">ProducerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">properties</span><span> = </span><span class="type-name">Map</span><span>(</span><span class="string-literal">&quot;retry.backoff.ms&quot;</span><span> -&gt; </span><span class="string-literal">&quot;200&quot;</span><span>))</span></code></pre>
-        <p>Producer or consumer properties override client properties. Each platform&#39;s client reads
-        the names and values itself: the Java client on the JVM, and librdkafka on Scala.js
-        and Scala Native. For code that runs on more than one platform, use only properties
-        that both accept with the same meaning.</p>
+        <p>Producer or consumer properties override client properties. Properties go
+        straight to the platform&#39;s client: the Java client on the JVM, and librdkafka on
+        Scala.js and Scala Native. The two accept different names, so for code that runs
+        on the JVM and elsewhere, use only properties both accept with the same meaning.</p>
         
         <h2 id="managed-properties" class="section"><a class="anchor-link left" href="#managed-properties"><i class="icofont-laika link">&#xef71;</i></a>Managed properties</h2>
         <p><code>ManagedProperties</code> is the set of property names xkafka sets from the typed
         settings, such as <code>bootstrap.servers</code>, <code>group.id</code>, <code>acks</code>, <code>linger.ms</code>, and the
-        TLS and SASL names. Supplying one of them through the map fails as
+        TLS and SASL names, with the other names librdkafka reads them under, such as
+        <code>metadata.broker.list</code>. Supplying one of them through the map fails as
         <code>SettingsError.ManagedProperty</code>; use the typed setting instead.</p>
         
         <h2 id="changing-settings" class="section"><a class="anchor-link left" href="#changing-settings"><i class="icofont-laika link">&#xef71;</i></a>Changing settings</h2>
@@ -204,8 +235,16 @@
         <code>ValidatedNel[SettingsError, *]</code> and validate the result in full: every one
         that sets a duration or properties, and <code>withBootstrapServers</code>, <code>withAcks</code>,
         <code>withIdempotence</code>, <code>withBatchSize</code>, <code>withGroupInstanceId</code>,
-        <code>withRebalanceSafeCommits</code>, and <code>withStartingOffsets</code>. The others, such as
-        <code>withCompression</code> or <code>withIsolationLevel</code>, return the settings directly.</p>
+        <code>withRebalanceSafeCommits</code>, <code>withStartingOffsets</code>, <code>withoutSessionTimeout</code>, and
+        <code>withoutHeartbeatInterval</code>, and <code>TlsSettings</code>&#39; <code>withCertificateAuthority</code> and
+        <code>withClientCertificate</code>, <code>SaslSettings</code>&#39; <code>withCredentials</code>, and the
+        <code>withClient</code> of <code>ConsumerSettings</code>, <code>ProducerSettings</code> and
+        <code>TransactionalProducerSettings</code>, which check the settings again under the new
+        client&#39;s properties. The others, such as <code>withCompression</code> or
+        <code>withIsolationLevel</code>, return the settings directly. <code>StreamsSettings</code> works the
+        same way: its methods that set a duration, the concurrency, the guarantee, the
+        client or the state directory return <code>ValidatedNel[StreamsSettingsError, *]</code>,
+        and the others, such as <code>withApplicationId</code>, return the settings directly.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Change two settings, each of which validates the result again
 </span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
 
@@ -215,6 +254,31 @@
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">tuned</span><span>[</span><span class="type-name">F</span><span>[</span><span class="identifier">_</span><span>], </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>](</span><span class="identifier">settings</span><span>: </span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">ConsumerSettings</span><span>[</span><span class="type-name">F</span><span>, </span><span class="type-name">K</span><span>, </span><span class="type-name">V</span><span>]] =
   </span><span class="identifier">settings</span><span>.</span><span class="identifier">withFetchWait</span><span>(</span><span class="number-literal">100</span><span>.</span><span class="identifier">millis</span><span>).</span><span class="identifier">andThen</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">withProperty</span><span>(</span><span class="string-literal">&quot;fetch.min.bytes&quot;</span><span>, </span><span class="string-literal">&quot;65536&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
+        
+        <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
+        <p><code>ClientSettings</code> applies to producers and consumers alike:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>setting</th>
+              <th>default</th>
+              <th>meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>metadataRefreshInterval</code></td>
+              <td>5m</td>
+              <td>how long a new topic, partition, or leader can go unnoticed</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Setting this once covers every platform. Kafka spells it
+        <code>metadata.max.age.ms</code> and librdkafka spells it
+        <code>topic.metadata.refresh.interval.ms</code>, so look for those names when comparing
+        against their documentation.</p>
+        <p><code>ClientSettings</code> also carries the bootstrap servers, an optional client id, and
+        the security settings. See <a href="transport-security.html">Transport security</a>.</p>
         
         <h2 id="consumer-settings" class="section"><a class="anchor-link left" href="#consumer-settings"><i class="icofont-laika link">&#xef71;</i></a>Consumer settings</h2>
         <p>Beyond the group and the deserializers, <code>ConsumerSettings</code> carries:</p>
@@ -265,7 +329,7 @@
             <tr>
               <td><code>groupInstanceId</code></td>
               <td>none</td>
-              <td>an identity that makes the consumer a static member of its group</td>
+              <td>an identity that makes the consumer a static member of its group, named as a topic is</td>
             </tr>
             <tr>
               <td><code>sessionTimeout</code></td>
@@ -301,8 +365,7 @@
         </table>
         <p><code>requestTimeout</code> bounds <code>committed</code>, <code>beginningOffsets</code>, <code>endOffsets</code>,
         <code>offsetsForTimes</code>, <code>partitionsFor</code>, <code>listTopics</code>, <code>seek</code>, <code>seekToBeginning</code>, and
-        <code>seekToEnd</code>. Its default matches
-        what Kafka&#39;s own clients use.</p>
+        <code>seekToEnd</code>.</p>
         <p><code>fetchWait</code> is the longest the broker holds a fetch while fewer than
         <code>fetch.min.bytes</code> of records are waiting. <code>fetch.min.bytes</code> is an ordinary
         property, 1 byte by default. With that default the broker answers as soon as any
@@ -336,7 +399,7 @@
             <tr>
               <td><code>closeTimeout</code></td>
               <td>60s</td>
-              <td>maximum flush wait for records already accepted by a producer</td>
+              <td>how long releasing the producer waits for records it has not delivered yet</td>
             </tr>
             <tr>
               <td><code>idempotence</code></td>
@@ -351,7 +414,7 @@
             <tr>
               <td><code>linger</code></td>
               <td>5ms</td>
-              <td>how long a record waits for others to join its batch, from zero to 15 minutes</td>
+              <td>how long a record waits for others to join its batch, from zero to under 5 minutes</td>
             </tr>
             <tr>
               <td><code>batchSize</code></td>
@@ -385,7 +448,7 @@
             </tr>
             <tr>
               <td><code>commitInterval</code></td>
-              <td>unset, which is 30s at least once and 100ms exactly once</td>
+              <td>unset, which is 30s with at-least-once and 100ms with exactly-once processing</td>
               <td>how often tasks commit</td>
             </tr>
             <tr>
@@ -418,36 +481,16 @@
               <td>500ms</td>
               <td>how long the broker may hold a fetch of the application&#39;s consumers, from zero up to 5m</td>
             </tr>
+            <tr>
+              <td><code>taskTimeout</code></td>
+              <td>5m</td>
+              <td>how long the application keeps asking the group&#39;s coordinator to read or commit offsets while it is not ready, does not know the member yet, or while asking fails in a way worth retrying, and keeps starting its tasks again after a failure worth retrying, before it stops with the last failure; with zero, it stops at the first</td>
+            </tr>
           </tbody>
         </table>
         <p>See <a href="streams/running.html#guarantees">Streams</a> for each of them. <code>fetchWait</code> works
         as a <a href="#consumer-settings">consumer&#39;s</a> does, and <code>fetch.min.bytes</code>, set in the
         client settings&#39; properties, reaches the application&#39;s consumers too.</p>
-        
-        <h2 id="client-settings" class="section"><a class="anchor-link left" href="#client-settings"><i class="icofont-laika link">&#xef71;</i></a>Client settings</h2>
-        <p><code>ClientSettings</code> applies to producers and consumers alike:</p>
-        <table>
-          <thead>
-            <tr>
-              <th>setting</th>
-              <th>default</th>
-              <th>meaning</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>metadataRefreshInterval</code></td>
-              <td>5m</td>
-              <td>how long a new topic, partition, or leader can go unnoticed</td>
-            </tr>
-          </tbody>
-        </table>
-        <p>Setting this once covers every platform. Kafka spells it
-        <code>metadata.max.age.ms</code> and librdkafka spells it
-        <code>topic.metadata.refresh.interval.ms</code>, so look for those names when comparing
-        against their documentation.</p>
-        <p><code>ClientSettings</code> also carries the bootstrap servers, an optional client id, and
-        the security settings. See <a href="transport-security.html">Transport security</a>.</p>
 
         
 <hr class="footer-rule"/>

@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -104,6 +108,7 @@
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#reading-and-changing-headers">Reading and changing headers</a></li>
     <li class="level1 nav-leaf"><a href="#how-values-are-written">How values are written</a></li>
+    <li class="level1 nav-leaf"><a href="#header-names">Header names</a></li>
     <li class="level1 nav-leaf"><a href="#headers-with-no-value">Headers with no value</a></li>
     <li class="level1 nav-leaf"><a href="#java-s-headers-jvm-only">Java&#39;s headers (JVM only)</a></li>
     <li class="level1 nav-leaf"><a href="#your-own-types">Your own types</a></li>
@@ -209,6 +214,10 @@
           </tbody>
         </table>
         
+        <h2 id="header-names" class="section"><a class="anchor-link left" href="#header-names"><i class="icofont-laika link">&#xef71;</i></a>Header names</h2>
+        <p>A header name cannot hold the character NUL (<code>\u0000</code>). Sending a record with
+        such a name fails with an <code>IllegalArgumentException</code>, before anything is sent.</p>
+        
         <h2 id="headers-with-no-value" class="section"><a class="anchor-link left" href="#headers-with-no-value"><i class="icofont-laika link">&#xef71;</i></a>Headers with no value</h2>
         <p>Kafka allows a header to have no value, which is <code>Header(name, None)</code>. Every platform
         keeps it, and it stays different from an empty value, <code>Header(name, Some(Chunk.empty))</code>.</p>
@@ -239,8 +248,7 @@
 </span><span class="keyword">given</span><span> </span><span class="type-name">HeaderDeserializer</span><span>[</span><span class="type-name">Tenant</span><span>] = </span><span class="type-name">HeaderDeserializer</span><span>.</span><span class="identifier">utf8</span><span>.</span><span class="identifier">map</span><span>(</span><span class="type-name">Tenant</span><span>(</span><span class="identifier">_</span><span>))   </span><span class="comment">// Read the name
 </span><span>
 </span><span class="keyword">val</span><span> </span><span class="identifier">tenant</span><span> = </span><span class="type-name">Headers</span><span>.</span><span class="identifier">empty</span><span>.</span><span class="identifier">append</span><span>(</span><span class="string-literal">&quot;tenant&quot;</span><span>, </span><span class="type-name">Tenant</span><span>(</span><span class="string-literal">&quot;acme&quot;</span><span>)).</span><span class="identifier">get</span><span>[</span><span class="type-name">Tenant</span><span>](</span><span class="string-literal">&quot;tenant&quot;</span><span>)</span></code></pre>
-        <p>These are plain functions, not effects, because a header value is already in memory
-        by the time one is applied.</p>
+        <p>Header codecs are plain functions, not effects.</p>
 
         
 <hr class="footer-rule"/>

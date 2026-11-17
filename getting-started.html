@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -103,8 +107,10 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#dependency">Dependency</a></li>
+    <li class="level1 nav-leaf"><a href="#modules">Modules</a></li>
     <li class="level1 nav-leaf"><a href="#versioning">Versioning</a></li>
     <li class="level1 nav-leaf"><a href="#constructing-a-client">Constructing a client</a></li>
+    <li class="level1 nav-leaf"><a href="#jvm">JVM</a></li>
     <li class="level1 nav-leaf"><a href="#scala-js">Scala.js</a></li>
     <li class="level1 nav-leaf"><a href="#scala-native">Scala Native</a></li>
   </ul>
@@ -120,10 +126,11 @@
         <h2 id="dependency" class="section"><a class="anchor-link left" href="#dependency"><i class="icofont-laika link">&#xef71;</i></a>Dependency</h2>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add xkafka to your build; %%% picks the artifact for your platform
 </span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-client&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
-        <p>The <code>%%%</code> operator selects the artifact for the platform being built. The same
-        code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
-        each one runs on its platform&#39;s Kafka client.</p>
-        <p>Most applications need <code>xkafka-client</code> alone. The other modules are:</p>
+        <p>The same code compiles for the JVM, Scala.js and Scala Native, and each
+        runs on its platform&#39;s Kafka client.</p>
+        
+        <h2 id="modules" class="section"><a class="anchor-link left" href="#modules"><i class="icofont-laika link">&#xef71;</i></a>Modules</h2>
+        <p>Most applications need <code>xkafka-client</code> only. The other modules are:</p>
         <ul>
           <li><code>xkafka-kernel</code> holds the data types, serializers, deserializers and serdes,
           the producer, consumer, and administration interfaces, and the streams DSL,
@@ -131,15 +138,26 @@
           add it yourself for code that must not depend on a client.</li>
           <li><code>xkafka-avro</code>, <code>xkafka-json-schema</code> and <code>xkafka-protobuf</code> write and read Avro,
           JSON Schema and Protobuf with the schemas a Confluent Schema Registry keeps.
-          Each brings in <code>xkafka-schema-registry</code>, the registry client, and
-          <code>xkafka-schema-registry-http4s</code> lets it reach the registry through an http4s
-          client.
-          See <a href="schema-registry.html">Schema registry</a>.</li>
+          Each brings in the registry client, <code>xkafka-schema-registry</code>. To reach the
+          registry through http4s, also add <code>xkafka-schema-registry-http4s</code> and an
+          http4s client such as Ember. See <a href="schema-registry.html">Schema registry</a>.</li>
+          <li><code>xkafka-protobuf-scalapb</code> writes and reads the Protobuf messages
+          <a href="https://scalapb.github.io">ScalaPB</a> generates, with the registry&#39;s schemas.
+          See <a href="other-libraries.html#scalapb-messages">ScalaPB messages</a>.</li>
+          <li><code>xkafka-smithy4s</code> writes and reads the types smithy4s generates from Smithy
+          files, as smithy4s&#39;s JSON or Protobuf, with the registry&#39;s schemas. See
+          <a href="other-libraries.html#smithy4s-types-as-json">smithy4s types as JSON</a>.</li>
+          <li><code>xkafka-avro-vulcan</code> and <code>xkafka-avro4s</code> write and read the types vulcan and
+          avro4s have codecs for, with the registry&#39;s schemas, on the JVM only. See
+          <a href="other-libraries.html#vulcan-or-avro4s-codecs">vulcan or avro4s codecs</a>.</li>
+          <li><code>sbt-xkafka-codegen</code> generates Scala classes from Avro and JSON Schema files
+          while sbt compiles; <code>xkafka-codegen</code> is the generator it runs. See
+          <a href="code-generation.html">Generating classes from schema files</a>.</li>
           <li><code>xkafka-streams-http4s</code> lets the members of a streams application query each
           other&#39;s stores over http4s. See <a href="streams/queries.html">Queries</a>.</li>
           <li><code>xkafka-streams-java</code>, on the JVM only, lets streams programs use code written
           for Java Kafka Streams, such as its partitioners. It depends on Java Kafka
-          Streams itself.</li>
+          Streams itself. See <a href="streams/java-kafka-streams.html">Java Kafka Streams</a>.</li>
         </ul>
         
         <h2 id="versioning" class="section"><a class="anchor-link left" href="#versioning"><i class="icofont-laika link">&#xef71;</i></a>Versioning</h2>
@@ -161,17 +179,20 @@
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
 
 </span><span class="keyword">val</span><span> </span><span class="identifier">client</span><span> = </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>]</span></code></pre>
-        <p>This line is the same on every platform. What each platform needs at runtime is
-        described below. Once it builds, <a href="producing.html">Producing</a> and
-        <a href="consuming.html">Consuming</a> show how to write and read records, and
-        <a href="settings.html">Settings</a> covers what you can configure.</p>
+        <p>What each platform needs at run time is described below. Once your project
+        builds, <a href="producing.html">Producing</a> and <a href="consuming.html">Consuming</a> show how to
+        write and read records, and <a href="settings.html">Settings</a> covers what you can
+        configure.</p>
+        
+        <h2 id="jvm" class="section"><a class="anchor-link left" href="#jvm"><i class="icofont-laika link">&#xef71;</i></a>JVM</h2>
+        <p>Nothing else is needed. xkafka brings in the Apache Kafka Java client, and runs
+        on Java 17 or newer.</p>
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
-        <p>xkafka uses librdkafka here, the same release as on Scala Native, and runs on
-        Node.js 24, not in browsers. It comes from npm as <code>@xkafka/librdkafka</code>, with a
-        prebuilt library for the platform it runs on, so nothing else needs installing.
-        sbt-scalajs-bundler installs the npm package, so enable that plugin in the
-        Scala.js project:</p>
+        <p>On Scala.js, xkafka runs on Node.js 24, not in browsers. It uses librdkafka from
+        the npm package <code>@xkafka/librdkafka</code>, which ships a prebuilt library for each
+        platform it supports, so you install nothing else. The sbt-scalajs-bundler
+        plugin installs the package. Add it, and enable it in your Scala.js project:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In project/plugins.sbt: add the plugin that installs the npm package
 </span><span class="identifier">addSbtPlugin</span><span>(</span><span class="string-literal">&quot;ch.epfl.scala&quot;</span><span> % </span><span class="string-literal">&quot;sbt-scalajs-bundler&quot;</span><span> % </span><span class="string-literal">&quot;0.21.1&quot;</span><span>)</span></code></pre>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In build.sbt: enable that plugin for the Scala.js side of a cross project
@@ -181,9 +202,9 @@
         npm installs.</p>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
-        <p>xkafka uses librdkafka 2.16.0 here, which must be installed where the
-        application&#39;s compiler and linker can find it. See <a href="platform-notes.html">Platform notes</a> for the linking recipes,
-        including the flags a static link requires.</p>
+        <p>On Scala Native, xkafka links librdkafka 2.16.0. Install it where your
+        compiler and linker can find it. <a href="platform-notes.html">Platform notes</a> gives the
+        linking recipes, including the flags a static link needs.</p>
 
         
 <hr class="footer-rule"/>

@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -115,8 +119,7 @@
       <main class="content">
 
         <h1 id="joins" class="title">Joins</h1>
-        <p><code>join</code> pairs each record of a stream with its key&#39;s value in a table, as Java
-        Kafka Streams&#39; stream-table join does. Here each order, keyed by the user who
+        <p><code>join</code> pairs each record of a stream with its key&#39;s value in a table. Here each order, keyed by the user who
         placed it, is joined with that user&#39;s name:</p>
         <pre><code class="nohighlight"><span class="comment">// Join each order with the name of the user who placed it
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -138,35 +141,22 @@
         dropped. <code>leftJoin</code> keeps it, passing <code>None</code> instead of the table&#39;s value. The
         result keeps each record&#39;s timestamp and headers.</p>
         <p>The table can be read from a topic, made by <code>count</code>, <code>reduce</code>, <code>aggregate</code> or
-        <code>toTable</code>, or come from another table&#39;s <code>filter</code>, <code>mapValues</code> or join. A join with a
-        suppressed table sees, for a key whose update is held back, the value from before
-        that update, as in Java.</p>
+        <code>toTable</code>, or come from another table&#39;s <code>filter</code>, <code>mapValues</code> or join. If the
+        table holds back updates with <code>suppress</code>, the join sees each key&#39;s value from
+        before any update still held back.</p>
         <p>A stream and the table it joins are processed together, so their topics must
-        have the same number of partitions, as in Java. If they do not, the broker
+        have the same number of partitions. If they do not, the broker
         refuses the application&#39;s topics, which shows up in <code>state</code> as
         <code>StreamsProblem.IncorrectlyPartitionedTopics</code>. A member processes the records
-        it has read from both topics earliest timestamp first, as Java does.</p>
+        it has read from both topics earliest timestamp first.</p>
         <p>An application whose members all run xkafka can run any join. If some members run
-        Java Kafka Streams, the broker requires every member to describe the application
-        in the same way, and may refuse the Java members otherwise. For some pairs of
-        joined topic names, xkafka cannot tell whether its description will match Java&#39;s.
-        The application&#39;s <code>state</code> then lists <code>StreamsProblem.JavaMembersMayBeRefused</code>,
-        naming the topics. Joining topics with other names avoids it.</p>
-        <p><code>state</code> lists the same problem for a join with an input that has sub-topologies of
-        its own, for example a table counted after a repartition. To keep the Java members,
-        build what <code>join</code> is called on first in the Java program, before anything of the
-        other input:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In the Java program: build the stream that join is called on first
-</span><span class="type-name">KStream</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">orders</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">stream</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>);
-</span><span class="type-name">KTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">Long</span><span>&gt; </span><span class="identifier">visits</span><span> = </span><span class="identifier">builder</span><span>.&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt;</span><span class="identifier">stream</span><span>(</span><span class="string-literal">&quot;visits&quot;</span><span>)
-    .</span><span class="identifier">groupBy</span><span>((</span><span class="identifier">key</span><span>, </span><span class="identifier">page</span><span>) -&gt; </span><span class="identifier">page</span><span>, </span><span class="type-name">Grouped</span><span>.</span><span class="identifier">as</span><span>(</span><span class="string-literal">&quot;by-page&quot;</span><span>))
-    .</span><span class="identifier">count</span><span>(</span><span class="type-name">Materialized</span><span>.</span><span class="identifier">as</span><span>(</span><span class="string-literal">&quot;visits&quot;</span><span>));
-</span><span class="identifier">orders</span><span>.</span><span class="identifier">join</span><span>(</span><span class="identifier">visits</span><span>, (</span><span class="identifier">order</span><span>, </span><span class="identifier">count</span><span>) -&gt; </span><span class="identifier">order</span><span> + </span><span class="identifier">count</span><span>).</span><span class="identifier">to</span><span>(</span><span class="string-literal">&quot;out&quot;</span><span>);</span></code></pre>
+        Java Kafka Streams, some joins need the Java program built in a certain order (see
+        <a href="java-kafka-streams.html#joins">Mixing with Java Kafka Streams</a>).</p>
         <p>If the stream&#39;s key may have changed since it was read, for example after
         <code>selectKey</code>, its records first go through a repartition topic, and <code>join</code> and
         <code>leftJoin</code> compile only with serdes to write it with, as <code>groupByKey</code> compiles
         only with a name. The topic is named after the join,
-        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>, as Java names it after its <code>Joined</code> name:</p>
+        <code>&lt;application id&gt;-&lt;name&gt;-repartition</code>:</p>
         <pre><code class="nohighlight"><span class="comment">// Key orders by user, then join them with the users table
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 
@@ -185,8 +175,7 @@
         keys them by the user before the join.</p>
         
         <h2 id="joining-tables" class="section"><a class="anchor-link left" href="#joining-tables"><i class="icofont-laika link">&#xef71;</i></a>Joining tables</h2>
-        <p>Two tables with the same key join into a table, as Java Kafka Streams&#39; table-table
-        joins do. Every change to either table updates the result for its key:</p>
+        <p>Two tables with the same key join into a table. Every change to either table updates the result for its key:</p>
         <pre><code class="nohighlight"><span class="comment">// Join users and plans into one account per user, whichever of the two a user has
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.</span><span class="type-name">Ior</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -216,8 +205,8 @@
           an <code>Ior</code>: the left, the right, or both.</li>
         </ul>
         <p>The result can delete keys, whichever tables were joined, so its changes are
-        <code>Option</code> values, and <code>toStream</code> writes a delete as a tombstone. As in Java, a
-        delete on either side of <code>join</code> deletes the key from the result, even a key the
+        <code>Option</code> values, and <code>toStream</code> writes a delete as a tombstone. A delete on
+        either side of <code>join</code> deletes the key from the result, even a key the
         result never held. The joining function cannot delete a key itself. Each
         result takes the later timestamp of the two values it was made from.</p>
         <p>The result is computed when needed and kept in no store. To keep it in one, pass
@@ -300,7 +289,11 @@
         <p>The result is kept in no store. To group it, or to join it with something else, keep
         it in one, by passing the store&#39;s name and a serde for its values:
         <code>joinOnForeignKey(named, other, value, otherKey, otherValue, Store(&quot;results&quot;), serde)</code>.
-        <code>Topology.of</code> refuses a program that needs this and does not do it.</p>
+        <code>Topology.of</code> refuses a program that needs this and does not do it. A step
+        after the result that keeps a store of its own, such as <code>mapValues</code> given a
+        <code>Store</code>, can be joined or grouped through that store instead. A <code>filter</code> of the
+        result runs without a store, as in Java, and makes a delete of every value it
+        drops, whether or not the key held a value that passed before.</p>
         <p>With the name <code>order-customer</code>, the join adds these to the application:</p>
         <table>
           <thead>
@@ -327,18 +320,13 @@
         <p>Windowed tables cannot join on a foreign key, and there is no outer version. (Other
         joins of windowed tables are in <a href="windows.html#joining-windowed-tables">Windows</a>.) If the
         other table&#39;s topic is partitioned some other way than by Kafka&#39;s default, give that
-        table its partitioner (see <a href="index.html#choosing-partitions">Choosing partitions</a>).</p>
-        <p>If some members run Java Kafka Streams, name the join with <code>TableJoined.as</code> and build
-        the left table first, or the broker may refuse the Java members:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In the Java program: build the left table first, and name the join as the xkafka program does
-</span><span class="type-name">KTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">orders</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">table</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>);
-</span><span class="type-name">KTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">customers</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">table</span><span>(</span><span class="string-literal">&quot;customers&quot;</span><span>);
-</span><span class="identifier">orders</span><span>.</span><span class="identifier">join</span><span>(</span><span class="identifier">customers</span><span>, </span><span class="identifier">order</span><span> -&gt; </span><span class="identifier">order</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="string-literal">&quot;:&quot;</span><span>) ? </span><span class="identifier">order</span><span>.</span><span class="identifier">split</span><span>(</span><span class="string-literal">&quot;:&quot;</span><span>)[</span><span class="number-literal">0</span><span>] : </span><span class="literal-value">null</span><span>, (</span><span class="identifier">order</span><span>, </span><span class="identifier">customer</span><span>) -&gt; </span><span class="identifier">order</span><span> + </span><span class="string-literal">&quot; for &quot;</span><span> + </span><span class="identifier">customer</span><span>,
-    </span><span class="type-name">TableJoined</span><span>.</span><span class="identifier">as</span><span>(</span><span class="string-literal">&quot;order-customer&quot;</span><span>)).</span><span class="identifier">toStream</span><span>().</span><span class="identifier">to</span><span>(</span><span class="string-literal">&quot;out&quot;</span><span>);</span></code></pre>
+        table its partitioner (see <a href="partitioning.html">Choosing partitions</a>).</p>
+        <p>If some members run Java Kafka Streams, see
+        <a href="java-kafka-streams.html#joins">Mixing with Java Kafka Streams</a> for how to name the
+        join and build the Java program.</p>
         
         <h2 id="joining-streams" class="section"><a class="anchor-link left" href="#joining-streams"><i class="icofont-laika link">&#xef71;</i></a>Joining streams</h2>
-        <p>Two streams with the same key join within windows of time, as Java Kafka
-        Streams&#39; stream-stream joins do. Each record joins every record of the other
+        <p>Two streams with the same key join within windows of time. Each record joins every record of the other
         stream with its key whose time is close enough to its own. Here orders and
         payments are both keyed by the order, and each order should be paid within
         five minutes:</p>
@@ -390,7 +378,7 @@
         arrive they wait.</p>
         <p>Each stream&#39;s records are kept in a store for the windows&#39; size and grace, and
         a left or outer join keeps the records that matched nothing in a third store.
-        The stores are named from the store&#39;s name, as Java names them:</p>
+        The stores are named from the store&#39;s name:</p>
         <table>
           <thead>
             <tr>
@@ -417,8 +405,9 @@
         stream whose key has changed is written first to a repartition topic named
         after the join, <code>&lt;application id&gt;-&lt;join&gt;-left-repartition</code> or
         <code>&lt;application id&gt;-&lt;join&gt;-right-repartition</code>, with the same serdes. A Java
-        program names everything the same way with
-        <code>StreamJoined.with(keySerde, valueSerde, otherValueSerde).withName(join).withStoreName(store)</code>.</p>
+        program names everything the same way with <code>StreamJoined</code>, as
+        <a href="java-kafka-streams.html#writing-the-java-program">Mixing with Java Kafka Streams</a>
+        shows.</p>
         <p>A record without a key, one whose key serde writes none, is written alone at
         once by a left join&#39;s left stream and by either stream of an outer join, and
         is otherwise dropped.</p>
@@ -428,8 +417,7 @@
         
         <h2 id="joining-a-global-table" class="section"><a class="anchor-link left" href="#joining-a-global-table"><i class="icofont-laika link">&#xef71;</i></a>Joining a global table</h2>
         <p>A <code>GlobalKTable</code> holds the latest value of each key of a topic, and every member
-        of the application keeps all of it, as with Java Kafka Streams&#39; <code>GlobalKTable</code>. It
-        suits reference data small enough for each member to hold. A stream joins it by a
+        of the application keeps all of it. It suits reference data small enough for each member to hold. A stream joins it by a
         key taken from each record, so the two need not share a key or a number of
         partitions. Here each order is joined with the product named in its value:</p>
         <pre><code class="nohighlight"><span class="comment">// Join each order with the product named in its value
@@ -440,7 +428,7 @@
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">ordersWithProducts</span><span>(</span><span class="identifier">orders</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">products</span><span>: </span><span class="type-name">Topic</span><span>, </span><span class="identifier">output</span><span>: </span><span class="type-name">Topic</span><span>): </span><span class="type-name">Pipeline</span><span>[</span><span class="type-name">IO</span><span>] =
   </span><span class="keyword">val</span><span> </span><span class="identifier">text</span><span>    = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">utf8</span><span>[</span><span class="type-name">IO</span><span>]
-  </span><span class="keyword">val</span><span> </span><span class="identifier">catalog</span><span> = </span><span class="type-name">GlobalKTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>), </span><span class="identifier">products</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>))  </span><span class="comment">// Every running instance holds all of this table
+  </span><span class="keyword">val</span><span> </span><span class="identifier">catalog</span><span> = </span><span class="type-name">GlobalKTable</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>), </span><span class="identifier">products</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>))  </span><span class="comment">// Every member holds all of this table
 </span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>), </span><span class="identifier">orders</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
     </span><span class="comment">// Find the table&#39;s key in each record, then make the result
 </span><span>    .</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;with-product&quot;</span><span>), </span><span class="identifier">catalog</span><span>)((</span><span class="identifier">_</span><span>, </span><span class="identifier">product</span><span>) =&gt; </span><span class="identifier">product</span><span>)((</span><span class="identifier">product</span><span>, </span><span class="identifier">details</span><span>) =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">$product</span><span class="string-literal">: </span><span class="substitution">$details</span><span class="string-literal">&quot;</span><span>)
@@ -455,13 +443,11 @@
         not exist. It then follows the topic for as long as it runs. If it cannot read a
         record it finds there, <code>run</code> fails. The table&#39;s topic is all that backs it, so it has
         no changelog. <code>Topology.of</code> refuses a program that also reads that topic elsewhere.</p>
-        <p>When some members run Java Kafka Streams, the Java program must build the table
-        after the stream that first joins it, or the broker may refuse the Java members. The
-        application&#39;s <code>state</code> lists <code>StreamsProblem.JavaMembersMayBeRefused</code> as a reminder:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In the Java program: build the global table after the stream that joins it
-</span><span class="type-name">KStream</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">orders</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">stream</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>);
-</span><span class="type-name">GlobalKTable</span><span>&lt;</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>&gt; </span><span class="identifier">catalog</span><span> = </span><span class="identifier">builder</span><span>.</span><span class="identifier">globalTable</span><span>(</span><span class="string-literal">&quot;products&quot;</span><span>);
-</span><span class="identifier">orders</span><span>.</span><span class="identifier">join</span><span>(</span><span class="identifier">catalog</span><span>, (</span><span class="identifier">order</span><span>, </span><span class="identifier">product</span><span>) -&gt; </span><span class="identifier">product</span><span>, (</span><span class="identifier">product</span><span>, </span><span class="identifier">details</span><span>) -&gt; </span><span class="identifier">product</span><span> + </span><span class="string-literal">&quot;: &quot;</span><span> + </span><span class="identifier">details</span><span>).</span><span class="identifier">to</span><span>(</span><span class="string-literal">&quot;out&quot;</span><span>);</span></code></pre>
+        <p>The application&#39;s <code>state</code> lists <code>StreamsProblem.JavaMembersMayBeRefused</code> for every
+        program with a global table, whether or not any members run Java Kafka Streams. An
+        application whose members all run xkafka can ignore it. If some members run Java
+        Kafka Streams, see <a href="java-kafka-streams.html#joins">Mixing with Java Kafka Streams</a>
+        for how to build the Java program.</p>
 
         
 <hr class="footer-rule"/>

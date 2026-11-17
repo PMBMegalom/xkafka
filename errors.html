@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 active nav-leaf"><a href="#">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -106,7 +110,7 @@
     <li class="level1 nav-leaf"><a href="#schema-registry">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="#deserializing">Deserializing</a></li>
     <li class="level1 nav-leaf"><a href="#backend-failures">Backend failures</a></li>
-    <li class="level1 nav-leaf"><a href="#portable-codes">Portable codes</a></li>
+    <li class="level1 nav-leaf"><a href="#matching-on-error-codes">Matching on error codes</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -116,11 +120,12 @@
       <main class="content">
 
         <h1 id="errors" class="title">Errors</h1>
-        <p>Failures Kafka reports, and values or settings xkafka rejects, are
-        <code>KafkaException</code> values, except for those under <a href="#streams">Streams</a>,
-        <a href="#schema-registry">Schema registry</a> and <a href="#deserializing">Deserializing</a> below. A failure raised by your own
-        serializer, handler or other effect stays as it is, and an invalid argument, such
-        as a <code>maxQueuedRecords</code> that is not positive, raises <code>IllegalArgumentException</code>.</p>
+        <p>xkafka raises a <code>KafkaException</code> when Kafka reports a failure, or when it
+        refuses a value or settings. <a href="#streams">Streams</a>, the
+        <a href="#schema-registry">schema registry</a> and <a href="#deserializing">deserializers</a> have
+        exceptions of their own, described below. A failure from your own code, such as
+        a serializer or a handler, reaches you unchanged. An invalid argument, such as a
+        <code>maxQueuedRecords</code> that is not positive, raises <code>IllegalArgumentException</code>.</p>
         <table>
           <thead>
             <tr>
@@ -151,11 +156,11 @@
             </tr>
             <tr>
               <td><code>CommitFailed</code></td>
-              <td>a commit kept failing as retriable after every retry its <a href="offsets.html#retrying-a-failed-commit">recovery policy</a> allowed</td>
+              <td>a commit kept failing as retriable after every retry its <a href="offsets.html#retrying-a-failed-commit">recovery policy</a> allowed, with a policy that retries at least once</td>
             </tr>
             <tr>
               <td><code>Unsupported</code></td>
-              <td>a transaction was asked to record offsets that came from a consumer of another backend</td>
+              <td>a transaction was asked to record offsets that did not come from a consumer of <code>KafkaClient</code>, such as offsets from a committer of your own</td>
             </tr>
             <tr>
               <td><code>UncommittedRevocation</code></td>
@@ -168,8 +173,8 @@
         survives being lifted into an effect.</p>
         
         <h2 id="streams" class="section"><a class="anchor-link left" href="#streams"><i class="icofont-laika link">&#xef71;</i></a>Streams</h2>
-        <p>A streams program or its settings being refused raises an exception of its own,
-        when <code>liftTo</code> carries the refusal into the effect:</p>
+        <p>An invalid streams program, or invalid streams settings, raise an exception of
+        their own when <code>liftTo</code> carries the refusal into the effect:</p>
         <ul>
           <li><code>InvalidTopology</code> carries every <code>TopologyError</code> in <code>errors</code>.</li>
           <li><code>InvalidStreamsSettings</code> carries every <code>StreamsSettingsError</code> in <code>errors</code>.</li>
@@ -186,37 +191,37 @@
         <a href="serialization.html#nulls-and-tombstones">Nulls and tombstones</a>.</p>
         
         <h2 id="backend-failures" class="section"><a class="anchor-link left" href="#backend-failures"><i class="icofont-laika link">&#xef71;</i></a>Backend failures</h2>
-        <p><code>BackendFailure</code> keeps the original failure as its cause, where there is one.
-        Its <code>code</code> is the failure&#39;s <code>ErrorCode</code>, where the client gave one, and three
-        flags say more:</p>
+        <p><code>BackendFailure</code> keeps the original failure as its cause, if there is one. Its
+        <code>code</code> is the failure&#39;s <code>ErrorCode</code>, if the client gave one, and three flags say
+        more:</p>
         <ul>
           <li><code>retriable</code> is what the code&#39;s <code>retriable</code> says, so it is the same on every
-          platform, and <code>None</code> only where there is no code.</li>
+          platform, and <code>None</code> only if there is no code.</li>
           <li><code>fatal</code> and <code>transactionAbortRequired</code> are what the platform&#39;s client
           reports: that the client cannot recover, and that the current transaction must
-          be aborted. Each is <code>None</code> where the client does not report it. A
+          be aborted. Each is <code>None</code> if the client does not report it. A
           transactional producer fenced by a newer one fails with <code>fatal</code> set to <code>true</code>
           on every platform.</li>
         </ul>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Retry only a failure that can clear on its own
-</span><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) </span><span class="keyword">then</span><span> </span><span class="identifier">retry</span><span> </span><span class="keyword">else</span><span> </span><span class="identifier">giveUp</span></code></pre>
+</span><span class="identifier">action</span><span>.</span><span class="identifier">handleErrorWith</span><span>:
+  </span><span class="keyword">case</span><span> </span><span class="identifier">failure</span><span>: </span><span class="type-name">KafkaException</span><span>.</span><span class="type-name">BackendFailure</span><span> </span><span class="keyword">if</span><span> </span><span class="identifier">failure</span><span>.</span><span class="identifier">retriable</span><span>.</span><span class="identifier">contains</span><span>(</span><span class="boolean-literal">true</span><span>) =&gt; </span><span class="identifier">retry</span><span>
+  </span><span class="keyword">case</span><span> </span><span class="identifier">failure</span><span>                                                                    =&gt; </span><span class="identifier">giveUp</span><span>(</span><span class="identifier">failure</span><span>)</span></code></pre>
         <p><code>ErrorCode.retriable</code> is true for a network failure, a timed out request, an
         unavailable broker, a partition whose leader is unavailable or has moved, an
         unavailable, loading or moved coordinator, and a rebalance in progress.</p>
         
-        <h2 id="portable-codes" class="section"><a class="anchor-link left" href="#portable-codes"><i class="icofont-laika link">&#xef71;</i></a>Portable codes</h2>
+        <h2 id="matching-on-error-codes" class="section"><a class="anchor-link left" href="#matching-on-error-codes"><i class="icofont-laika link">&#xef71;</i></a>Matching on error codes</h2>
         <p>The named <code>ErrorCode</code> cases are Kafka protocol errors, which every broker
         reports under the same code, plus client-side conditions such as a timed out
         request. <code>ErrorCode.Other(value)</code> carries a code xkafka does not name. Its value
         comes from the platform&#39;s client and can differ between the JVM and Scala.js or
-        Native, so code meant for every platform should not match on it.</p>
+        Scala Native, so code meant for every platform should not match on it.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Choose what to do by the failure&#39;s code
 </span><span class="identifier">failure</span><span>.</span><span class="identifier">code</span><span> </span><span class="keyword">match</span><span>
   </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">ErrorCode</span><span>.</span><span class="type-name">OffsetOutOfRange</span><span>)        =&gt; </span><span class="identifier">resetPosition</span><span>
   </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">ErrorCode</span><span>.</span><span class="type-name">SaslAuthenticationFailed</span><span>) =&gt; </span><span class="identifier">refreshCredentials</span><span>
   </span><span class="keyword">case</span><span> </span><span class="identifier">_</span><span>                                        =&gt; </span><span class="identifier">giveUp</span></code></pre>
-        <p>Matching on a protocol error such as <code>OffsetOutOfRange</code> behaves the same on all
-        three platforms.</p>
         <p>Three codes cover failures around transactional producers:</p>
         <table>
           <thead>
@@ -228,7 +233,7 @@
           <tbody>
             <tr>
               <td><code>ErrorCode.Fenced</code></td>
-              <td>a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way</td>
+              <td>a newer producer with the same transactional id has taken over, and every later transaction on this producer fails the same way; for a consumer, another with the same <code>groupInstanceId</code> has taken its place in the group</td>
             </tr>
             <tr>
               <td><code>ErrorCode.InvalidProducerEpoch</code></td>
@@ -236,7 +241,7 @@
             </tr>
             <tr>
               <td><code>ErrorCode.Purged</code></td>
-              <td>the client discarded a record before sending it, such as one still waiting when its transaction aborted</td>
+              <td>the client discarded a record before sending it, for example one still waiting when its transaction aborted</td>
             </tr>
           </tbody>
         </table>

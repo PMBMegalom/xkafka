@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 active nav-leaf"><a href="#">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -102,13 +106,13 @@
   <p class="header"><a href="#">Platform notes</a></p>
 
   <ul class="nav-list">
-    <li class="level1 nav-leaf"><a href="#record-delivery">Record delivery</a></li>
+    <li class="level1 nav-leaf"><a href="#consumers">Consumers</a></li>
     <li class="level1 nav-node"><a href="#scala-native">Scala Native</a></li>
     <li class="level2 nav-leaf"><a href="#linking-an-application">Linking an application</a></li>
     <li class="level2 nav-leaf"><a href="#stores-on-disk">Stores on disk</a></li>
     <li class="level2 nav-leaf"><a href="#schema-registry">Schema registry</a></li>
     <li class="level1 nav-leaf"><a href="#scala-js">Scala.js</a></li>
-    <li class="level1 nav-leaf"><a href="#transformations">Transformations</a></li>
+    <li class="level1 nav-leaf"><a href="#changing-the-effect-type">Changing the effect type</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -121,14 +125,10 @@
         <p>The API is the same everywhere. These notes cover what each platform needs, and
         how the API carries across platforms and effects.</p>
         
-        <h2 id="record-delivery" class="section"><a class="anchor-link left" href="#record-delivery"><i class="icofont-laika link">&#xef71;</i></a>Record delivery</h2>
-        <p>On every platform a consumer joins its group and takes its share of the
-        partitions as soon as it is acquired, even before anything reads its records. A
-        partition whose buffer fills is paused until its reader catches up, so a slow
-        partition does not hold up the others.</p>
-        <p>A consumer whose records go unread for longer than its <code>maxPollInterval</code> leaves
-        its group. See <a href="consuming.html#group-membership">Group membership</a>.</p>
-        <p>On the JVM each consumer uses one thread of its own.</p>
+        <h2 id="consumers" class="section"><a class="anchor-link left" href="#consumers"><i class="icofont-laika link">&#xef71;</i></a>Consumers</h2>
+        <p>On the JVM each consumer uses one thread of its own. Everything else about how a
+        consumer joins its group and reads records is the same on every platform; see
+        <a href="consuming.html">Consuming</a>.</p>
         
         <h2 id="scala-native" class="section"><a class="anchor-link left" href="#scala-native"><i class="icofont-laika link">&#xef71;</i></a>Scala Native</h2>
         <p>Scala Native needs librdkafka 2.16.0, the release xkafka is built and tested
@@ -143,11 +143,9 @@ sudo apt-get update
 sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span> librdkafka</span><span class="number-literal">1</span><span>=</span><span class="number-literal">2.16.0</span><span>-</span><span class="number-literal">1</span><span>.cflt~ubu</span><span class="number-literal">24</span><span>  </span><span class="comment"># Install exactly this release</span></code></pre>
         <p>Use a librdkafka built with TLS, SASL SCRAM and every compression codec, so it
         can reach authenticated brokers and read and write records in any compression.</p>
-        <p>librdkafka links these against system libraries, so a Scala Native application
-        needs OpenSSL, zlib, and zstd available:
+        <p>librdkafka uses the system&#39;s OpenSSL, zlib and zstd, so install those too:
         <code>libssl-dev</code>, <code>zlib1g-dev</code>, and <code>libzstd-dev</code> on Debian and Ubuntu, or
-        <code>brew install openssl@3 zstd zlib</code> on macOS. Homebrew keeps them keg-only, so
-        on macOS their locations have to be named when linking.</p>
+        <code>brew install openssl@3 zstd zlib</code> on macOS.</p>
         
         <h3 id="linking-an-application" class="section"><a class="anchor-link left" href="#linking-an-application"><i class="icofont-laika link">&#xef71;</i></a>Linking an application</h3>
         <p>Compiling an application needs the headers of librdkafka and OpenSSL, and xkafka
@@ -166,12 +164,23 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
   .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> ++ </span><span class="type-name">Seq</span><span>(
     </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>, </span><span class="string-literal">&quot;-lrdkafka&quot;</span><span>, </span><span class="string-literal">&quot;-lssl&quot;</span><span>, </span><span class="string-literal">&quot;-lcrypto&quot;</span><span>, </span><span class="string-literal">&quot;-lz&quot;</span><span>, </span><span class="string-literal">&quot;-lzstd&quot;</span><span>
   ))</span></code></pre>
-        <p>On macOS add a <code>-L</code> for the OpenSSL installation as well.</p>
+        <p>On macOS, Homebrew&#39;s libraries are not where the linker looks by default, so a
+        static link there also names their directories, ahead of the libraries:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Link the static librdkafka on macOS, with Homebrew&#39;s OpenSSL 3, zstd and zlib
+</span><span class="identifier">nativeConfig</span><span> := </span><span class="identifier">nativeConfig</span><span>.</span><span class="identifier">value</span><span>
+  .</span><span class="identifier">withCompileOptions</span><span>(</span><span class="identifier">_</span><span> :+ </span><span class="string-literal">&quot;-I/path/to/librdkafka/include&quot;</span><span>)
+  .</span><span class="identifier">withLinkingOptions</span><span>(</span><span class="identifier">_</span><span> ++ </span><span class="type-name">Seq</span><span>(
+    </span><span class="string-literal">&quot;-L/path/to/librdkafka/lib&quot;</span><span>,
+    </span><span class="string-literal">&quot;-L/opt/homebrew/opt/openssl@3/lib&quot;</span><span>, </span><span class="string-literal">&quot;-L/opt/homebrew/opt/zstd/lib&quot;</span><span>, </span><span class="string-literal">&quot;-L/opt/homebrew/opt/zlib/lib&quot;</span><span>,
+    </span><span class="string-literal">&quot;-lrdkafka&quot;</span><span>, </span><span class="string-literal">&quot;-lssl&quot;</span><span>, </span><span class="string-literal">&quot;-lcrypto&quot;</span><span>, </span><span class="string-literal">&quot;-lz&quot;</span><span>, </span><span class="string-literal">&quot;-lzstd&quot;</span><span>
+  ))</span></code></pre>
+        <p><code>brew --prefix openssl@3</code>, <code>brew --prefix zstd</code> and <code>brew --prefix zlib</code> print
+        the directories to use, without the <code>/lib</code>, if Homebrew is installed elsewhere.</p>
         
         <h3 id="stores-on-disk" class="section"><a class="anchor-link left" href="#stores-on-disk"><i class="icofont-laika link">&#xef71;</i></a>Stores on disk</h3>
         <p>An application that keeps its streams stores on disk, with a
         <a href="streams/running.html#keeping-stores-on-disk">state directory</a>, also needs RocksDB
-        10.1.3 when it runs. Take it from the <code>org.rocksdb:rocksdbjni:10.1.3</code> jar on
+        10.10.1 when it runs. Take it from the <code>org.rocksdb:rocksdbjni:10.10.1.1</code> jar on
         Maven Central, which carries it for each platform:</p>
         <table>
           <thead>
@@ -208,7 +217,7 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
           </tbody>
         </table>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment"># Put this platform&#39;s RocksDB next to the application, here for Linux x64 with glibc
-</span><span>unzip -j rocksdbjni-</span><span class="number-literal">10.1.3</span><span>.jar librocksdbjni-linux</span><span class="number-literal">64</span><span>.so -d path/to/app/bin</span></code></pre>
+</span><span>unzip -j rocksdbjni-</span><span class="number-literal">10.10.1.1</span><span>.jar librocksdbjni-linux</span><span class="number-literal">64</span><span>.so -d path/to/app/bin</span></code></pre>
         <p>The application looks for the file in the directory of its executable, then
         wherever the system looks for libraries. To keep it somewhere else, set
         <code>XKAFKA_ROCKSDB_LIBRARY</code> to its path. Any other RocksDB release is refused when
@@ -221,7 +230,7 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         
         <h2 id="scala-js" class="section"><a class="anchor-link left" href="#scala-js"><i class="icofont-laika link">&#xef71;</i></a>Scala.js</h2>
         <p>xkafka uses librdkafka here, the same release as on Scala Native. It runs on
-        Node.js, not in browsers.</p>
+        Node.js 24, not in browsers.</p>
         <p>The library comes from npm as <code>@xkafka/librdkafka</code>, which sbt-scalajs-bundler
         installs. npm adds the prebuilt library for the platform it runs on:</p>
         <table>
@@ -265,7 +274,7 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         published with, so do not pin or override that package. With any other version,
         acquiring a client fails with a <code>BackendFailure</code> naming both versions.</p>
         
-        <h2 id="transformations" class="section"><a class="anchor-link left" href="#transformations"><i class="icofont-laika link">&#xef71;</i></a>Transformations</h2>
+        <h2 id="changing-the-effect-type" class="section"><a class="anchor-link left" href="#changing-the-effect-type"><i class="icofont-laika link">&#xef71;</i></a>Changing the effect type</h2>
         <p>These have cats-tagless <code>FunctorK</code> instances, and a <code>mapK</code> that changes their
         effect: serializers, deserializers and serdes; producer, transactional producer
         and consumer settings; offset committers, committable offsets, batches and
@@ -273,14 +282,15 @@ sudo apt-get install librdkafka-dev=</span><span class="number-literal">2.16.0</
         schema registry client.</p>
         <p><code>KafkaProducer</code> has <code>mapK</code> too, which needs a <code>Functor</code> for the target effect,
         and so no <code>FunctorK</code> instance.</p>
-        <p>What runs effects in both directions changes effect with <code>imapK</code>, given a
-        transformation each way, and has a cats-tagless <code>InvariantK</code> instance:
+        <p>Types that both run effects and take them from you change effect with <code>imapK</code>,
+        which takes a transformation each way, and have a cats-tagless <code>InvariantK</code>
+        instance:
         <code>Transaction</code>, <code>KafkaTransactionalProducer</code>, a streams <code>Pipeline</code> or
         <code>Topology</code>, where a <a href="streams/processors.html">processor</a> runs its handler in one
         effect and its stores in the other, and <code>KafkaStreams</code>, whose queries go both
         ways.</p>
-        <p><code>KafkaClient.imapK</code> transforms a complete client between effects in both
-        directions while preserving <code>Resource</code> cancellation semantics.</p>
+        <p><code>KafkaClient.imapK</code> changes the effect of a whole client, given a transformation
+        each way, and its resources are still released when cancelled.</p>
 
         
 <hr class="footer-rule"/>

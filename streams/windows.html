@@ -82,13 +82,17 @@
     <li class="level2 active nav-leaf"><a href="#">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -153,7 +157,7 @@
         sliding windows and sessions, below, do.</p>
         
         <h2 id="final-results-only" class="section"><a class="anchor-link left" href="#final-results-only"><i class="icofont-laika link">&#xef71;</i></a>Final results only</h2>
-        <p>By default, every update to a window goes downstream. To send only each
+        <p>By default, every update to a window is sent on. To send only each
         window&#39;s final result, once the window has closed, add <code>emitOnWindowClose</code>:</p>
         <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s page views per minute, and write only each final count
 </span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
@@ -175,7 +179,7 @@
     .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
     .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
         <p>A closed window&#39;s result is sent when the next record arrives, at most once a
-        second, as in Java Kafka Streams. So results do not go out at the exact moment
+        second. So results do not go out at the exact moment
         a window closes, and while no records arrive, they wait.</p>
         <p>If the work moves to another member, results that were already sent and
         committed are not sent again.</p>
@@ -188,13 +192,12 @@
           <li>12:02:05, the next record.</li>
         </ul>
         <p>The record at 12:02:05 closes the window from 12:00, whose grace ended at
-        12:01:10. But it also starts the window from 12:02, which is more than seventy
-        seconds after 12:00, so the window from 12:00 is removed before its result is
-        sent. Its count never goes downstream. The same can happen when the records in
+        12:01:10. It also starts the window from 12:02, and a window is removed once a
+        later window starts more than its seventy seconds after it. So the window from
+        12:00 is removed before its result is sent, and its count is never sent on. The same can happen when the records in
         between arrive quickly, since closed windows are looked for at most once a second.</p>
         <p>Keeping windows longer, as <code>withRetention(10.minutes)</code> does in the example,
-        keeps the window from 12:00 until its result has been sent. Java Kafka Streams
-        has the same limit, and the same remedy.</p>
+        keeps the window from 12:00 until its result has been sent.</p>
         
         <h2 id="sliding-windows" class="section"><a class="anchor-link left" href="#sliding-windows"><i class="icofont-laika link">&#xef71;</i></a>Sliding windows</h2>
         <p>Sliding windows answer questions like &quot;how many times did this user fail to
@@ -257,7 +260,7 @@
     </span><span class="comment">// A replaced session is written as a tombstone
 </span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">sessionSerde</span><span>(</span><span class="identifier">user</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">option</span><span>)</span></code></pre>
         <p>A new record within the gap of two separate sessions merges them into one, so a
-        session already sent downstream can be replaced. A table of
+        session already sent on can be replaced. A table of
         sessions is therefore a table that can delete keys (see <a href="tables.html">Tables</a>): its
         <code>toStream</code> gives <code>None</code> for each replaced session, then the merged session with
         its value. For example, with a five-minute gap, records of one key at 10:00 and
@@ -265,8 +268,7 @@
         record then gives <code>None</code> for that session and a count of 2 for the session from
         10:00 to 10:02.</p>
         <p>Write session results with an <code>option</code> serde, such as <code>Serde.long[IO].option</code>:
-        <code>None</code> is written as a record with no value, a tombstone, exactly as Java Kafka
-        Streams writes a replaced session.</p>
+        <code>None</code> is written as a record with no value, a tombstone.</p>
         <p><code>count</code> and <code>reduce</code> know how to merge sessions. <code>aggregate</code> takes a function
         for it as well, given the two sessions&#39; values. Over a stream of purchases in
         cents, keyed by user, this adds up what each user spends per visit:</p>
@@ -277,7 +279,7 @@
         <code>SessionWindows.withNoGrace</code> gives no grace. By
         default, sessions are kept for the gap plus the grace after they end, which is
         also the shortest <code>withRetention</code> accepts. With <code>emitOnWindowClose</code>, only each
-        session&#39;s final value goes downstream, and no <code>None</code> values are sent.</p>
+        session&#39;s final value is sent on, and no <code>None</code> values are sent.</p>
         
         <h2 id="joining-windowed-tables" class="section"><a class="anchor-link left" href="#joining-windowed-tables"><i class="icofont-laika link">&#xef71;</i></a>Joining windowed tables</h2>
         <p>Two windowed tables join window by window, as other tables join key by key. This

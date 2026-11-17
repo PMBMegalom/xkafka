@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 active nav-leaf"><a href="#">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -112,11 +116,7 @@
       <main class="content">
 
         <h1 id="holding-back-updates" class="title">Holding back updates</h1>
-        <p><code>suppress</code> holds back a table&#39;s updates and sends on only some of them, as Java
-        Kafka Streams&#39; <code>suppress</code> does. Each suppression has a name, and keeps what it
-        holds in a store called <code>&lt;name&gt;-store</code>, with the changelog
-        <code>&lt;application id&gt;-&lt;name&gt;-store-changelog</code>, so a member that takes over the work
-        goes on with what the last one held.</p>
+        <p><code>suppress</code> holds back a table&#39;s updates and sends on only some of them.</p>
         <p>To send only each window&#39;s final result, use <code>Suppressed.untilWindowCloses</code>:</p>
         <pre><code class="nohighlight"><span class="comment">// Count each user&#39;s views per minute, and write only each window&#39;s final count
 </span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
@@ -136,18 +136,24 @@
     .</span><span class="identifier">suppress</span><span>(</span><span class="type-name">Suppressed</span><span>.</span><span class="identifier">untilWindowCloses</span><span>(</span><span class="string-literal">&quot;final-views&quot;</span><span>))  </span><span class="comment">// Hold each window&#39;s updates until it closes
 </span><span>    .</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;view-counts&quot;</span><span>))
     .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-view-counts&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="type-name">Windowed</span><span>.</span><span class="identifier">timeSerde</span><span>(</span><span class="identifier">user</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>), </span><span class="type-name">Serde</span><span>.</span><span class="identifier">long</span><span>[</span><span class="type-name">IO</span><span>])</span></code></pre>
-        <p>A window&#39;s result goes on once a record arrives timestamped at or after the
+        <p>A window&#39;s result is sent on once a record arrives timestamped at or after the
         window&#39;s end plus its grace. For sessions, the inactivity gap is added too,
-        and a session merged into another is not sent at all. <code>untilWindowCloses</code> is
-        only available on windowed tables.</p>
+        and a session merged into another is not sent at all.</p>
+        <p><code>untilWindowCloses</code> needs a table with windowed keys that windowed
+        aggregations reach along every way into it, directly or through steps such as
+        <code>toStream</code> and <code>toTable</code>. It uses their grace, the largest where several reach
+        it; a stream joined with a table takes the stream&#39;s alone. <code>Topology.of</code>
+        refuses it, with <code>TopologyError.InvalidSuppression</code>, on a table that some way
+        reaches without a windowed aggregation, such as one read from a topic of
+        windowed keys, or one that such a stream also sends into.</p>
         <p>To send each key&#39;s latest value at most once in a while, use
         <code>Suppressed.untilTimeLimit</code>, on any table:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Send each page&#39;s latest count at most once a minute
 </span><span>.</span><span class="identifier">count</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count-views&quot;</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;views-per-page&quot;</span><span>))
 .</span><span class="identifier">suppress</span><span>(</span><span class="type-name">Suppressed</span><span>.</span><span class="identifier">untilTimeLimit</span><span>(</span><span class="string-literal">&quot;calm-views&quot;</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>))</span></code></pre>
-        <p>Once a key has an update, it is held. Later updates replace it. The latest goes
-        on once a record arrives timestamped a minute or more after the first. Time
-        here is the records&#39; time, so while no records arrive, nothing goes on.</p>
+        <p>Once a key has an update, it is held. Later updates replace it. The latest is
+        sent on once a record arrives timestamped a minute or more after the first. Time
+        here is the records&#39; time, so while no records arrive, nothing is sent on.</p>
         
         <h2 id="buffer-limits" class="section"><a class="anchor-link left" href="#buffer-limits"><i class="icofont-laika link">&#xef71;</i></a>Buffer limits</h2>
         <p>By default a suppression holds as much as it needs to. To limit it, pass a
@@ -157,9 +163,12 @@
         <p><code>BufferLimit.records(n)</code> holds at most <code>n</code> keys, and <code>BufferLimit.bytes(n)</code> at
         most <code>n</code> bytes, counted as Java Kafka Streams counts them. Add <code>withMaxBytes</code> or
         <code>withMaxRecords</code> to limit both. When the buffer holds more, the earliest updates
-        go on early. To stop the application with an error instead, add
+        are sent on early. To stop the application with an error instead, add
         <code>shutDownWhenFull</code>. <code>untilWindowCloses</code> only accepts limits that never send
         early: none, or one with <code>shutDownWhenFull</code>. Any other does not compile.</p>
+        <p>Each suppression keeps what it holds in the store <code>&lt;name&gt;-store</code>, with the
+        changelog <code>&lt;application id&gt;-&lt;name&gt;-store-changelog</code>, so a member that takes over
+        the work continues from what was held.</p>
 
         
 <hr class="footer-rule"/>

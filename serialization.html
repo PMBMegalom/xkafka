@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 active nav-leaf"><a href="#">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -165,8 +169,8 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">serde</span><span> = </span><span class="type-name">Serde</span><span>(</span><span class="identifier">write</span><span>, </span><span class="identifier">read</span><span>)</span></code></pre>
         <p>To work with the bytes, the topic or the headers directly, use
         <code>Serializer.instance</code> and <code>Deserializer.instance</code>, which take a function of the
-        topic, the headers, and the value or its bytes. A serializer answers
-        <code>Option[Chunk[Byte]]</code>, where <code>None</code> writes a record without a value. A
+        topic, the headers, and the value or its bytes. A serializer returns
+        <code>F[Option[Chunk[Byte]]]</code>, and <code>None</code> writes a record without a value. A
         deserializer is given <code>None</code> for a record without a value.</p>
         
         <h2 id="nulls-and-tombstones" class="section"><a class="anchor-link left" href="#nulls-and-tombstones"><i class="icofont-laika link">&#xef71;</i></a>Nulls and tombstones</h2>
@@ -201,14 +205,14 @@
 </span><span class="keyword">val</span><span> </span><span class="identifier">read</span><span>  = </span><span class="type-name">Deserializer</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="keyword">new</span><span> </span><span class="type-name">StringDeserializer</span><span>).</span><span class="identifier">option</span><span>    </span><span class="comment">// Reads them back, with None for a record without a value
 </span><span class="keyword">val</span><span> </span><span class="identifier">serde</span><span> = </span><span class="type-name">Serde</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="type-name">Serdes</span><span>.</span><span class="type-name">String</span><span>())                         </span><span class="comment">// Both at once, as a streams program takes them</span></code></pre>
         <ul>
-          <li>The Java codec is given each record&#39;s topic and headers, as it is in Java.</li>
+          <li>The Java codec is given each record&#39;s topic and headers.</li>
           <li>Configure it before you pass it in, and close it once nothing uses it: xkafka calls
           neither <code>configure</code> nor <code>close</code>.</li>
-          <li>Headers a Java serializer adds are not written: it is given a copy of the record&#39;s
-          headers. Configure a serializer that can write headers of its own not to.</li>
+          <li>A Java serializer gets a copy of the record&#39;s headers, so headers it adds are
+          not written. If your serializer can add headers, turn that off.</li>
           <li>A record without a value fails the deserializer, as it does xkafka&#39;s own;
           read with <code>.option</code> to get <code>None</code> for it. If the Java deserializer returns <code>null</code>
-          for a value, the record fails with <code>JavaNullValueException</code>.</li>
+          for a value, the record fails with <code>JavaNullValueException</code>, in <code>xkafka.interop</code>.</li>
           <li>Whatever the Java codec throws fails the effect it runs in.</li>
         </ul>
         

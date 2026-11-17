@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 active nav-leaf"><a href="#">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -103,7 +107,7 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#setting-up">Setting up</a></li>
-    <li class="level1 nav-leaf"><a href="#asking">Asking</a></li>
+    <li class="level1 nav-leaf"><a href="#querying-a-store">Querying a store</a></li>
     <li class="level1 nav-leaf"><a href="#window-and-session-stores">Window and session stores</a></li>
     <li class="level1 nav-leaf"><a href="#when-a-query-cannot-be-answered">When a query cannot be answered</a></li>
     <li class="level1 nav-leaf"><a href="#standby-copies">Standby copies</a></li>
@@ -121,6 +125,8 @@
         balance in a table, the count of a page&#39;s views, and so on. Each member holds only
         part of each store, so the member you ask may not hold the key. xkafka finds the
         member that does and asks it, through a connection your application provides.</p>
+        <p>A query sees each update as soon as the member applies it, before the update is
+        committed.</p>
         
         <h2 id="setting-up" class="section"><a class="anchor-link left" href="#setting-up"><i class="icofont-laika link">&#xef71;</i></a>Setting up</h2>
         <p>Every member of the application needs:</p>
@@ -136,13 +142,16 @@
         </ol>
         <p>With <a href="https://http4s.org">http4s</a>, the <code>xkafka-streams-http4s</code> module gives the
         last two, on every platform:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-streams-http4s&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// In build.sbt
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-streams-http4s&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
         <p><code>Http4sQueries.forward(client)</code> posts each query to the member that holds the
         key, through your http4s client, and <code>Http4sQueries.routes(streams)</code> is the
         internal route that answers them. Both use the path <code>/xkafka/query</code> unless you
-        give another. This example serves the route and reaches other members with
-        Ember, from <code>http4s-ember-server</code> and <code>http4s-ember-client</code>, which you add
-        yourself; any http4s client and server work:</p>
+        give another. An endpoint&#39;s host may be a name or an IPv4 or IPv6 address, the
+        IPv6 one with or without brackets.</p>
+        <p>This example serves the route and reaches other members with Ember, from
+        <code>http4s-ember-server</code> and <code>http4s-ember-client</code>, which you add yourself. Any http4s
+        client and server work:</p>
         <pre><code class="nohighlight"><span class="comment">// Run a member that answers other members&#39; queries over HTTP, and asks them for the keys they hold
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">comcast</span><span>.</span><span class="identifier">ip4s</span><span>.*
@@ -170,9 +179,11 @@
         when it raises an error. The internal route only needs to pass the bytes it
         receives to <code>streams.answer</code> and send back what it returns.</p>
         <p>Keep the internal route away from the outside world: it answers any query, for
-        any store.</p>
+        any store. <code>Http4sQueries.routes</code> answers bytes that are not a query with
+        <code>400 Bad Request</code>, and a body over <code>Http4sQueries.MaxQuery</code> (2 MiB) with
+        <code>413 Payload Too Large</code>, without reading the rest of it.</p>
         
-        <h2 id="asking" class="section"><a class="anchor-link left" href="#asking"><i class="icofont-laika link">&#xef71;</i></a>Asking</h2>
+        <h2 id="querying-a-store" class="section"><a class="anchor-link left" href="#querying-a-store"><i class="icofont-laika link">&#xef71;</i></a>Querying a store</h2>
         <p>Describe a key-value store with <code>QueryableStore.keyValue</code>, giving its name and the
         serdes its keys and values are written with, then pass a query to <code>query</code>. The call
         is the same whichever member holds the key. Here a public route answers with a
@@ -316,27 +327,31 @@
               <td>the program has no store of that name of the kind queried</td>
               <td>check the store&#39;s name, and that it is a key-value, window or session store as queried</td>
             </tr>
+            <tr>
+              <td><code>FedByPattern(store)</code></td>
+              <td>a Java member&#39;s program fills the store from a pattern of topics, and xkafka cannot tell which members hold it</td>
+              <td>read the store from Java members with Java&#39;s own queries</td>
+            </tr>
           </tbody>
         </table>
         <p>A range fails as a whole if any member it needs cannot answer, so you never get
         part of a store without being told.</p>
         
         <h2 id="standby-copies" class="section"><a class="anchor-link left" href="#standby-copies"><i class="icofont-laika link">&#xef71;</i></a>Standby copies</h2>
-        <p>Where the broker keeps <a href="running.html#standby-copies">standby copies</a> of the
+        <p>If the broker keeps <a href="running.html#standby-copies">standby copies</a> of the
         stores, <code>query(..., allowStandby = true)</code> lets a copy answer. A copy can be a
         little behind, but it can answer while its store is moving between members.</p>
         
         <h2 id="java-members" class="section"><a class="anchor-link left" href="#java-members"><i class="icofont-laika link">&#xef71;</i></a>Java members</h2>
         <p>An application can mix xkafka and Java Kafka Streams members. A Java member
         answers xkafka&#39;s queries through <code>JavaQueries</code>, from the
-        <a href="index.html#java-partitioners-jvm-only"><code>xkafka-streams-java</code> module</a>. Give it the
+        <a href="java-kafka-streams.html#adding-the-module"><code>xkafka-streams-java</code> module</a>. Give it the
         instance, the application&#39;s id, and each store that can be queried with its Java
         serdes, then serve its <code>answer</code> as the member&#39;s internal route: at the path
         xkafka members post to, <code>/xkafka/query</code> with <code>Http4sQueries.forward</code>, taking the
         posted bytes and answering with the bytes it returns. The member&#39;s
         <code>application.server</code> setting is the endpoint xkafka members reach it at.</p>
         <pre><code class="nohighlight"><span class="comment">// Let a Java member answer xkafka members&#39; queries of its page view counts
-</span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">clients</span><span>.</span><span class="identifier">admin</span><span>.</span><span class="type-name">Admin</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">common</span><span>.</span><span class="identifier">serialization</span><span>.</span><span class="type-name">Serdes</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="type-name">KafkaStreams</span><span>;
 
@@ -360,14 +375,14 @@
         <p><code>JavaQueries</code> also takes <code>session</code> stores. It reads each store through Java&#39;s own
         interactive queries on that instance. A Java member without it does not answer
         in a format xkafka reads, so a query that needs it fails with <code>NotXkafka</code>, or with
-        <code>Unreachable</code> where nothing answers at its endpoint.</p>
+        <code>Unreachable</code> if nothing answers at its endpoint.</p>
         <p>A Java member asks with <code>JavaQuerying</code>, giving it the instance, its topology, the
-        application&#39;s id, a Kafka <code>Admin</code>, and how to send a query to another member. It
-        works out a key&#39;s partition from how many partitions the topic has, which it asks
-        the <code>Admin</code> once for each topic. It finds the member holding that partition through
-        Java&#39;s own metadata, which lists xkafka members too, and sends the query to that
-        member&#39;s internal route, even when that member is itself. While a partition moves
-        between members, a query that needs it fails with <code>Rebalancing</code>:</p>
+        application&#39;s id, a Kafka <code>Admin</code> (used to look up each topic&#39;s partition count),
+        and a function that posts a query to another member&#39;s internal route. It finds the
+        member holding each key, xkafka or Java, and asks it, even when that member is
+        itself. A global table&#39;s store, which every member holds whole, it answers from
+        its own. While a partition moves between members, a query that needs it fails
+        with <code>Rebalancing</code>:</p>
         <pre><code class="nohighlight"><span class="comment">// Let a Java member ask for a page&#39;s view count, wherever it is held
 </span><span class="keyword">import</span><span> </span><span class="identifier">java</span><span>.</span><span class="identifier">util</span><span>.</span><span class="type-name">Optional</span><span>;
 </span><span class="keyword">import</span><span> </span><span class="identifier">java</span><span>.</span><span class="identifier">util</span><span>.</span><span class="identifier">function</span><span>.</span><span class="type-name">BiFunction</span><span>;

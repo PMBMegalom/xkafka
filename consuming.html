@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -103,11 +107,11 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#what-a-record-carries">What a record carries</a></li>
-    <li class="level1 nav-leaf"><a href="#what-a-consumer-reads">What a consumer reads</a></li>
+    <li class="level1 nav-leaf"><a href="#choosing-topics-or-partitions">Choosing topics or partitions</a></li>
     <li class="level1 nav-leaf"><a href="#where-a-consumer-starts">Where a consumer starts</a></li>
     <li class="level1 nav-leaf"><a href="#processing-records">Processing records</a></li>
-    <li class="level1 nav-leaf"><a href="#partition-streams">Partition streams</a></li>
-    <li class="level1 nav-leaf"><a href="#stopping">Stopping</a></li>
+    <li class="level1 nav-leaf"><a href="#a-stream-per-partition">A stream per partition</a></li>
+    <li class="level1 nav-leaf"><a href="#stopping-without-losing-records">Stopping without losing records</a></li>
     <li class="level1 nav-node"><a href="#group-membership">Group membership</a></li>
     <li class="level2 nav-leaf"><a href="#static-members">Static members</a></li>
     <li class="level1 nav-leaf"><a href="#inspecting-the-consumer">Inspecting the consumer</a></li>
@@ -134,7 +138,7 @@
   </span><span class="keyword">for</span><span>
     </span><span class="identifier">client</span><span>   &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">group</span><span>    &lt;- </span><span class="type-name">ConsumerGroup</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;workers&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="comment">// Start at the first record where the group has no committed offset
+    </span><span class="comment">// Start at the first record if the group has no committed offset
 </span><span>    </span><span class="identifier">settings</span><span> &lt;- </span><span class="type-name">ConsumerSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="identifier">client</span><span>, </span><span class="identifier">group</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="identifier">utf8</span><span>, </span><span class="type-name">AutoOffsetReset</span><span>.</span><span class="type-name">Earliest</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">topic</span><span>    &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">records</span><span>  &lt;-
@@ -157,11 +161,11 @@
           <tbody>
             <tr>
               <td><code>timestamp</code></td>
-              <td><code>RecordTimestamp.CreateTime</code> where the producer set the time, or <code>LogAppendTime</code> where the topic&#39;s <code>message.timestamp.type</code> is <code>LogAppendTime</code> and the broker set it</td>
+              <td><code>RecordTimestamp.CreateTime</code> if the producer or its client set the time, <code>LogAppendTime</code> if the broker set it because the topic&#39;s <code>message.timestamp.type</code> is <code>LogAppendTime</code>, or <code>None</code></td>
             </tr>
             <tr>
               <td><code>leaderEpoch</code></td>
-              <td>the leader epoch of the partition when the record was written</td>
+              <td>the leader epoch of the partition when the record was written, or <code>None</code> if the client did not report it</td>
             </tr>
             <tr>
               <td><code>serializedKeySize</code></td>
@@ -174,12 +178,13 @@
           </tbody>
         </table>
         
-        <h2 id="what-a-consumer-reads" class="section"><a class="anchor-link left" href="#what-a-consumer-reads"><i class="icofont-laika link">&#xef71;</i></a>What a consumer reads</h2>
+        <h2 id="choosing-topics-or-partitions" class="section"><a class="anchor-link left" href="#choosing-topics-or-partitions"><i class="icofont-laika link">&#xef71;</i></a>Choosing topics or partitions</h2>
         <p><code>Selection</code> says where a consumer&#39;s records come from.</p>
         <p><code>Selection.Topics</code> takes a non-empty set of topics. <code>Selection.Pattern</code> takes a
-        <code>TopicPattern</code>, which matches complete topic names. The JVM matches it as a Java
-        regular expression, and Scala.js and Native through librdkafka, so a pattern
-        meant for every platform should keep to simple syntax, such as <code>events-.*</code>.
+        <code>TopicPattern</code>, which matches complete topic names. The JVM reads it as a Java
+        regular expression, and Scala.js and Scala Native as one of librdkafka&#39;s, which
+        differ. For code that runs on every platform, keep to simple patterns such as
+        <code>events-.*</code>.
         Both join a consumer group, so the partitions a consumer holds follow the
         group&#39;s rebalances.</p>
         <div class="callout warning">
@@ -191,8 +196,8 @@
         </div>
         <p><code>Selection.Partitions</code> takes a non-empty set of topic-partitions and reads
         exactly those. It joins no group, so the assignment never changes. Two consumers
-        naming the same partition each read all of it, even when they share a consumer
-        group, because no group membership divides the partition between them.</p>
+        that name the same partition both read all of it, even in the same consumer
+        group.</p>
         <p>Committed offsets are still stored under the consumer group. Consumers reading
         the same partitions under one group therefore share those offsets, and one
         resuming from a commit continues from where the other left off.</p>
@@ -210,7 +215,7 @@
         <a href="transactions.html">Transactions</a>.</p>
         
         <h2 id="where-a-consumer-starts" class="section"><a class="anchor-link left" href="#where-a-consumer-starts"><i class="icofont-laika link">&#xef71;</i></a>Where a consumer starts</h2>
-        <p>A consumer resumes each partition from its group&#39;s committed offset. Where the
+        <p>A consumer resumes each partition from its group&#39;s committed offset. If the
         group has none, <code>autoOffsetReset</code> decides:</p>
         <table>
           <thead>
@@ -234,11 +239,11 @@
             </tr>
           </tbody>
         </table>
-        <p>A committed offset that is no longer in the partition, because the records it
-        pointed at were deleted, is handled by the same setting. <code>Earliest</code> starts at the
-        first record still there, and <code>Fail</code> fails the record stream.</p>
-        <p>Choose <code>Fail</code> where skipping or replaying records would be wrong, such as for a
-        replica rebuilt from a snapshot and the log written after it.</p>
+        <p>The same setting applies if the committed offset is no longer in the partition,
+        for example because its records were deleted. <code>Earliest</code> starts at the first
+        record still there, and <code>Fail</code> fails the record stream.</p>
+        <p>Choose <code>Fail</code> if skipping or replaying records would be wrong, for example when
+        you rebuild state from a snapshot plus the records written after it.</p>
         
         <h2 id="processing-records" class="section"><a class="anchor-link left" href="#processing-records"><i class="icofont-laika link">&#xef71;</i></a>Processing records</h2>
         <p><code>records</code> is one stream of the records from every partition the consumer is
@@ -250,30 +255,38 @@
 </span><span class="identifier">consumer</span><span>.</span><span class="identifier">consumeChunk</span><span>: </span><span class="identifier">records</span><span> =&gt;
   </span><span class="identifier">records</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">handle</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">CommitNow</span><span>)  </span><span class="comment">// CommitNow is what commits the chunk</span></code></pre>
         <p>Partitions are processed concurrently, so a slow chunk holds back only the
-        partition it came from. Returning <code>CommitNow</code> is what triggers the commit.</p>
+        partition it came from.</p>
         <p><code>consumeChunk</code> runs until it is cancelled, until something fails, or until
         <code>stopConsuming</code> has been called and everything already fetched has been
-        processed.</p>
+        processed. A chunk whose commit fails with <code>ErrorCode.IllegalGeneration</code>,
+        because the group moved its partition while it was being processed, is left
+        uncommitted, and <code>consumeChunk</code> goes on: the member that has the partition now
+        reads those records again.</p>
         
-        <h2 id="partition-streams" class="section"><a class="anchor-link left" href="#partition-streams"><i class="icofont-laika link">&#xef71;</i></a>Partition streams</h2>
+        <h2 id="a-stream-per-partition" class="section"><a class="anchor-link left" href="#a-stream-per-partition"><i class="icofont-laika link">&#xef71;</i></a>A stream per partition</h2>
         <p><code>partitionedRecords</code> exposes a record stream for each assigned topic-partition
         and ends that stream after the partition is revoked.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Give each assigned partition its own stream of records, and handle them
 </span><span class="identifier">consumer</span><span>.</span><span class="identifier">partitionedRecords</span><span>(</span><span class="identifier">maxQueuedRecords</span><span> = </span><span class="number-literal">256</span><span>).</span><span class="identifier">map</span><span> { </span><span class="identifier">partition</span><span> =&gt;  </span><span class="comment">// Pause a partition once 256 of its records are waiting
 </span><span>  </span><span class="identifier">partition</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">handle</span><span>)
 }.</span><span class="identifier">parJoinUnbounded</span><span>  </span><span class="comment">// Consume every partition&#39;s stream at once</span></code></pre>
-        <p>Every emitted stream must be consumed concurrently. <code>maxQueuedRecords</code> is the
-        point at which the consumer pauses a partition. Records already in flight can
-        temporarily take its buffer past that threshold.</p>
+        <p>Read every partition&#39;s stream at the same time, for example with
+        <code>parJoinUnbounded</code>. The consumer pauses a partition once <code>maxQueuedRecords</code> of
+        its records are waiting. Records already being fetched can briefly take it past
+        that limit.</p>
+        <p>The per-partition streams, and <code>consumeChunk</code>, rely on the consumer xkafka
+        makes, or one made from it with <code>mapK</code>. A <code>KafkaConsumer</code> of your own, even one
+        that wraps xkafka&#39;s, gets no pausing; with rebalance-safe commits it counts each
+        record as handed out when it is routed to its partition&#39;s stream; and a record
+        read before its partition was revoked can open a stream of that partition again.</p>
         
-        <h2 id="stopping" class="section"><a class="anchor-link left" href="#stopping"><i class="icofont-laika link">&#xef71;</i></a>Stopping</h2>
+        <h2 id="stopping-without-losing-records" class="section"><a class="anchor-link left" href="#stopping-without-losing-records"><i class="icofont-laika link">&#xef71;</i></a>Stopping without losing records</h2>
         <p><code>stopConsuming</code> stops fetching. The record streams then end once the records
         already fetched have been handed over. Nothing read from the broker is dropped,
         and offsets remain committable.</p>
         <p>Run it alongside the stream:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Consume until a shutdown is requested, then finish what was already fetched
-// Handle and commit each record
-</span><span class="keyword">val</span><span> </span><span class="identifier">consume</span><span> = </span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">consume</span><span> = </span><span class="identifier">consumer</span><span>.</span><span class="identifier">records</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">record</span><span> =&gt; </span><span class="identifier">handle</span><span>(</span><span class="identifier">record</span><span>) *&gt; </span><span class="identifier">record</span><span>.</span><span class="identifier">offset</span><span>.</span><span class="identifier">commit</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>  </span><span class="comment">// Handle and commit each record
 </span><span class="keyword">val</span><span> </span><span class="identifier">stop</span><span>    = </span><span class="identifier">shutdownRequested</span><span>.</span><span class="identifier">get</span><span> *&gt; </span><span class="identifier">consumer</span><span>.</span><span class="identifier">stopConsuming</span><span>  </span><span class="comment">// Stop fetching when a shutdown is requested
 </span><span>
 (</span><span class="identifier">consume</span><span>, </span><span class="identifier">stop</span><span>).</span><span class="identifier">parTupled</span><span>  </span><span class="comment">// Run both side by side</span></code></pre>
@@ -282,13 +295,13 @@
         effect, and a stream started after it is empty.</p>
         <p>Interrupting the stream instead, with <code>interruptWhen</code> for example, stops it
         mid-record and discards whatever had been fetched. Releasing the consumer
-        resource, or cancelling whatever reads it, does the same. In those cases whoever
-        resumes the group reads those offsets again.</p>
+        resource, or cancelling whatever reads it, does the same. The consumer that next
+        reads those partitions gets the uncommitted records again.</p>
         
         <h2 id="group-membership" class="section"><a class="anchor-link left" href="#group-membership"><i class="icofont-laika link">&#xef71;</i></a>Group membership</h2>
-        <p>A consumer that joins a group stays in it while it keeps in touch with the
-        group. Four settings govern that, and each is checked when the settings are
-        built, so a combination that would be refused on any platform is a <code>SettingsError</code>:</p>
+        <p>Four settings control how a consumer stays in its group. They are checked
+        together when you build the settings, and a combination any platform would
+        refuse is a <code>SettingsError</code>:</p>
         <ul>
           <li><code>sessionTimeout</code> is how long the group waits to hear from the consumer before
           handing its partitions to the others. The broker also bounds it, through its
@@ -297,16 +310,17 @@
           <li><code>heartbeatInterval</code> is how often the consumer tells the group it is alive. It
           must be less than the session timeout.</li>
           <li><code>maxPollInterval</code> is how long the consumer can go without fetching records.
-          Fetching stops while too many records wait unread, so a consumer whose records
-          go unread for longer than this leaves its group. It must be at least the
-          session timeout.</li>
-          <li><code>groupInstanceId</code> makes the consumer a static member of its group.</li>
+          It stops fetching while too many records wait unread, so if your code reads no
+          records for longer than this, the consumer leaves its group. It must be at
+          least the session timeout, unless <code>group.protocol</code> is <code>consumer</code>.</li>
+          <li><code>groupInstanceId</code> makes the consumer a static member of its group. It follows
+          the rules for topic names: at most 249 letters, digits, <code>.</code>, <code>_</code> or <code>-</code>, and
+          not <code>.</code> or <code>..</code>.</li>
         </ul>
         <p>Unless they are set, the session timeout and heartbeat interval are 45 seconds
-        and 3 seconds on every platform. Under the consumer group protocol, which the
-        <code>group.protocol</code> property set to <code>consumer</code> selects, the broker decides both, so
-        leave them unset: a consumer with either one set fails as
-        <code>ErrorCode.InvalidConfiguration</code>.</p>
+        and 3 seconds on every platform. If you set the property <code>group.protocol</code> to
+        <code>consumer</code>, the broker decides both. Leave them unset then: a consumer with
+        either one set fails as <code>ErrorCode.InvalidConfiguration</code>.</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Make a consumer a static member, with an identity of its own and a longer session timeout
 </span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
 
@@ -346,7 +360,10 @@
           metadata each was committed with, and <code>None</code> for a partition with no
           committed offset.</li>
           <li><code>beginningOffsets</code> and <code>endOffsets</code> query the available offset range.</li>
-          <li><code>offsetsForTimes</code> finds the earliest available offsets at or after timestamps.</li>
+          <li><code>offsetsForTimes</code> finds the earliest available offsets at or after timestamps.
+          A time before 1970 raises <code>IllegalArgumentException</code>, as does writing a record
+          with one, since Kafka holds none, or with 1970-01-01T00:00:00Z itself, which
+          librdkafka would write as the time it sends the record at.</li>
           <li><code>partitionsFor</code> returns a topic&#39;s partitions. For a topic the cluster does
           not have, it fails with <code>ErrorCode.UnknownTopicOrPartition</code> and creates
           nothing.</li>
@@ -362,7 +379,8 @@
           ahead of the records the stream has handed out, so after consuming, <code>position</code>
           is at or past the offset after the last record consumed, by an amount that
           differs between platforms. Before the consumer has consumed from the partition,
-          it can be <code>None</code>.</p>
+          it can be <code>None</code>, and it is <code>None</code> for a partition of a known topic that the
+          consumer is not assigned.</p>
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
@@ -370,9 +388,8 @@
           the offset sought, and no record fetched before the seek is handed out. A seek
           of a partition the consumer has not been assigned fails with
           <code>ErrorCode.UnknownTopicOrPartition</code>. On Scala.js and Scala Native, a seek is
-          also refused until the partition it names is being fetched, which happens
-          shortly after the assignment arrives, so code meant for every platform should
-          retry briefly if it seeks immediately after starting a consumer.</p>
+          also refused until the partition is being fetched, which happens shortly after
+          it is assigned. If you seek right after starting a consumer, retry briefly.</p>
         </div>
 
         

@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -120,8 +124,7 @@
         branches.</p>
         <p><code>fork</code> sends each record down the first path, including everything that follows
         on it, then down the next, so a later path sees what an earlier one did to a store.
-        Only then does the next record start. Java runs the paths of a branching stream in
-        the same way. Each path starts from the stream&#39;s records and ends in a topic or a
+        Only then does the next record start. Each path starts from the stream&#39;s records and ends in a topic or a
         table:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Send every order to one topic, and a marked copy of it to an audit topic
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -137,8 +140,8 @@
   )</span></code></pre>
         <p><code>forkMerge</code> works like <code>fork</code>, and what the paths make goes on as one stream.</p>
         <p><code>merge</code> makes one stream of two, and their topics need not have the same number
-        of partitions. A merge is keyed as read only if each of its
-        sides is:</p>
+        of partitions. Grouping or joining after <code>merge</code> needs a repartition topic if
+        either side may have changed its key:</p>
         <pre><code class="nohighlight"><span class="comment">// Merge orders and refunds, flag large amounts, and write them all to one topic
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -153,10 +156,8 @@
       </span><span class="identifier">_</span><span>.</span><span class="identifier">filterNot</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;small&quot;</span><span>))((</span><span class="identifier">_</span><span>, </span><span class="identifier">amount</span><span>) =&gt; </span><span class="identifier">amount</span><span>.</span><span class="identifier">length</span><span> &gt; </span><span class="number-literal">3</span><span>)
     )
     .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)</span></code></pre>
-        <p><code>split</code> sends each record down the first branch that takes it, as Java&#39;s <code>split</code>
-        does. A branch&#39;s node is named by the split&#39;s name followed by the branch&#39;s, here
-        <code>route-large</code>. <code>defaultBranch</code> takes what no branch took; with <code>noDefaultBranch</code>,
-        those records go no further:</p>
+        <p><code>split</code> sends each record down the first branch that takes it. <code>defaultBranch</code>
+        takes what no branch took; with <code>noDefaultBranch</code>, those records go no further:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Send large orders to one topic, and the rest to another
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.*
@@ -169,10 +170,14 @@
 </span><span>    </span><span class="comment">// Large orders take this branch
 </span><span>    .</span><span class="identifier">branch</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;large&quot;</span><span>))((</span><span class="identifier">_</span><span>, </span><span class="identifier">amount</span><span>) =&gt; </span><span class="identifier">amount</span><span>.</span><span class="identifier">length</span><span> &gt; </span><span class="number-literal">3</span><span>)(</span><span class="identifier">_</span><span>.</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-large&quot;</span><span>), </span><span class="identifier">large</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>))
     .</span><span class="identifier">defaultBranch</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;small&quot;</span><span>))(</span><span class="identifier">_</span><span>.</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-small&quot;</span><span>), </span><span class="identifier">small</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>))  </span><span class="comment">// Everything else takes this branch</span></code></pre>
+        <p>A branch&#39;s step is named by the split&#39;s name and the branch&#39;s together, such as
+        <code>route-large</code>, and <code>Topology.of</code> refuses one Kafka&#39;s rules for names refuse, as
+        it refuses any step&#39;s name. Java names the node the same way without checking it.</p>
         
         <h2 id="paths-that-share-what-follows" class="section"><a class="anchor-link left" href="#paths-that-share-what-follows"><i class="icofont-laika link">&#xef71;</i></a>Paths that share what follows</h2>
-        <p><code>fork</code> writes each path once, so it cannot send two paths to the same place. For
-        that, write the shared part first as a flow, then send records to it with <code>into</code>.
+        <p>With <code>fork</code>, each path has steps of its own, so two paths cannot lead into the same
+        steps. To share steps between paths, write them first as a flow, then send records
+        to it with <code>into</code>.
         A flow starts from one of:</p>
         <ul>
           <li><code>Flow.asRead[F, K, V]</code>, for records keyed as they were read;</li>
@@ -180,8 +185,8 @@
           <li><code>s.flow</code>, for the records of the stream <code>s</code>, whose types and key it takes on.</li>
         </ul>
         <p><code>into</code> sends each record to any number of flows, in the order given, one finishing
-        before the next starts, as <code>fork</code> does. Java goes by the order the paths were
-        written in, so to match a Java program, list them in that order.</p>
+        before the next starts, as <code>fork</code> does. To match a Java program, list the flows in
+        the order its paths are written in.</p>
         <p>Here large orders and every refund go to both of two topics:</p>
         <pre><code class="nohighlight"><span class="comment">// Send large orders and every refund to both of two topics
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -202,13 +207,15 @@
 </span><span>  )</span></code></pre>
         <p>When a flow gets records from several places, they all go straight to its first
         step. <code>merged</code> adds a step of its own to receive them, as <code>merge</code> would. Use it when the
-        program&#39;s description must match a Java program that merges those paths.</p>
+        program&#39;s description must match a Java program that merges those paths (see
+        <a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a>).</p>
         
         <h2 id="joining-a-stream-or-a-table-with-itself" class="section"><a class="anchor-link left" href="#joining-a-stream-or-a-table-with-itself"><i class="icofont-laika link">&#xef71;</i></a>Joining a stream or a table with itself</h2>
         <p>Flows are also how a stream is joined with something made from itself, such as its
-        own count, or with itself. <code>consumer</code> ends a table with no further steps, so that
-        it can be sent to while a join reads it. Here the count&#39;s path comes first, so the
-        join sees a count that includes the record it is joining:</p>
+        own count, or with itself. <code>counts.consumer</code> ends the count&#39;s flow without further
+        steps: the stream sends records into it, and the join reads the count. Here the
+        count&#39;s path comes first, so the join sees a count that includes the record it is
+        joining:</p>
         <pre><code class="nohighlight"><span class="comment">// Two programs: one joins each click with its key&#39;s count, the other with clicks close to it in time
 </span><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -233,7 +240,7 @@
 </span><span>    </span><span class="identifier">read</span><span>.</span><span class="identifier">flow</span><span>.</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;pairs&quot;</span><span>), </span><span class="identifier">read</span><span>.</span><span class="identifier">flow</span><span>, </span><span class="type-name">JoinWindows</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>, </span><span class="identifier">grace</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>), </span><span class="type-name">Store</span><span>(</span><span class="string-literal">&quot;pairs&quot;</span><span>), </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)(</span><span class="identifier">_</span><span> + </span><span class="identifier">_</span><span>)
       .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
   )</span></code></pre>
-        <p>As in Java, a stream joined with itself pairs each record with itself too, as well
+        <p>A stream joined with itself pairs each record with itself too, as well
         as with the other records in its window.</p>
         <p>A table is sent down several paths in the same way, with its own <code>flow</code>, <code>into</code> and
         <code>fork</code>:</p>
@@ -249,9 +256,10 @@
     </span><span class="comment">// Both sides of the join are the same table
 </span><span>    </span><span class="identifier">table</span><span>.</span><span class="identifier">flow</span><span>.</span><span class="identifier">join</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;self&quot;</span><span>), </span><span class="identifier">table</span><span>.</span><span class="identifier">flow</span><span>)(</span><span class="identifier">_</span><span> + </span><span class="identifier">_</span><span>).</span><span class="identifier">toStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;changes&quot;</span><span>)).</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>.</span><span class="identifier">option</span><span>)
   )</span></code></pre>
-        <p><code>Topology.of</code> refuses, with a <code>TopologyError</code>, a join reading a table no records
-        reach. A table read from a topic needs none of this to be read by several joins, or
-        to be read while its changes are written somewhere: use the one table in each.</p>
+        <p>If a join reads a table that no records reach, <code>Topology.of</code> refuses the program
+        with <code>TopologyError.UnfedTable</code>. A table read from a topic needs none of this to be
+        read by several joins, or to be read while its changes are written somewhere: use
+        the one table in each.</p>
         
         <h2 id="flows-whose-records-may-have-a-new-key" class="section"><a class="anchor-link left" href="#flows-whose-records-may-have-a-new-key"><i class="icofont-laika link">&#xef71;</i></a>Flows whose records may have a new key</h2>
         <p>A flow made with <code>Flow</code> has no source to say how its records are keyed, so every

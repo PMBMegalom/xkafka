@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
     <li class="level1 active nav-leaf"><a href="#">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -203,10 +207,12 @@
 </span><span>    </span><span class="identifier">clientCertificate</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="type-name">ClientCertificate</span><span>.</span><span class="type-name">PemFile</span><span>(</span><span class="string-literal">&quot;/etc/kafka/client.pem&quot;</span><span>, </span><span class="identifier">keyPassword</span><span> = </span><span class="type-name">None</span><span>))
   )</span></code></pre>
         <p>The private key must be PKCS#8, which PEM marks as <code>PRIVATE KEY</code>, or as
-        <code>ENCRYPTED PRIVATE KEY</code> when it needs <code>keyPassword</code>. Other forms are not
-        supported, and an inline key in another form, such as <code>RSA PRIVATE KEY</code>, is a
-        <code>SettingsError</code>, as is an empty <code>keyPassword</code>. <code>openssl pkcs8 -topk8</code> converts
-        one. The certificate&#39;s key and password are kept out of <code>toString</code>.</p>
+        <code>ENCRYPTED PRIVATE KEY</code> if it needs <code>keyPassword</code>. Other forms, such as
+        <code>RSA PRIVATE KEY</code>, are not supported. An inline key in another form is a
+        <code>SettingsError</code>, and so is an empty <code>keyPassword</code>. To convert a key:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment"># Convert a private key to PKCS#8, unencrypted; leave out -nocrypt to encrypt it with a password openssl asks for
+</span><span>openssl pkcs</span><span class="number-literal">8</span><span> -topk</span><span class="number-literal">8</span><span> -nocrypt -</span><span class="keyword">in</span><span> key.pem -out key-pkcs</span><span class="number-literal">8</span><span>.pem</span></code></pre>
+        <p>The certificate&#39;s key and password are kept out of <code>toString</code>.</p>
         <p>Java 17 can&#39;t read a key encrypted with PBES2, the scheme <code>openssl pkcs8</code>
         uses by default, so on the JVM with Java 17 acquiring the client fails with a
         <code>BackendFailure</code> whose code is <code>ErrorCode.InvalidConfiguration</code>. Encrypt the

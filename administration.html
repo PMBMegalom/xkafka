@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 active nav-leaf"><a href="#">Administration</a></li>
     <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
   </ul>
@@ -119,9 +123,8 @@
       <main class="content">
 
         <h1 id="administration" class="title">Administration</h1>
-        <p><code>KafkaClient[F].admin</code> is a <code>Resource</code> over the cluster and topic operations,
-        record deletion, topic configuration, and consumer groups. It neither produces nor
-        consumes.</p>
+        <p><code>KafkaClient[F].admin(client)</code> gives you a <code>Resource</code> for managing topics, their
+        records and configuration, and consumer groups.</p>
         <pre><code class="nohighlight"><span class="comment">// Create the topic &quot;events&quot; with six partitions, each on three brokers
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -140,10 +143,10 @@
         <h2 id="what-it-does" class="section"><a class="anchor-link left" href="#what-it-does"><i class="icofont-laika link">&#xef71;</i></a>What it does</h2>
         <ul>
           <li><code>createTopics</code> creates each topic with the partitions, replication factor, and
-          configuration given, and fails where one already exists.</li>
-          <li><code>deleteTopics</code> deletes each topic, and fails where one does not exist.</li>
+          configuration given, and fails if one already exists.</li>
+          <li><code>deleteTopics</code> deletes each topic, and fails if one does not exist.</li>
           <li><code>createPartitions</code> grows a topic to a new total partition count, and fails
-          where the topic already has that many or more.</li>
+          if the topic already has that many or more.</li>
           <li><code>describeCluster</code> reports the cluster&#39;s id, its brokers, and its controller.</li>
           <li><code>describeTopics</code> reports each topic&#39;s id, its partitions, and where their replicas are. See <a href="#cluster-and-topics">Cluster and topics</a>.</li>
           <li><code>deleteRecords</code> deletes each partition&#39;s records below an offset. See <a href="#deleting-records">Deleting records</a>.</li>
@@ -156,9 +159,10 @@
         </ul>
         <p><code>NewTopic.from</code> rejects a partition count or replication factor that is not
         positive. <code>createPartitions</code> likewise rejects a non-positive count before
-        contacting Kafka. The broker still validates cluster-dependent constraints such
-        as duplicate topics, replication capacity, topic configuration, and whether a
-        new total partition count is greater than the current one.</p>
+        contacting Kafka. The broker checks the rest: that the topic does not already
+        exist, that there are enough brokers for the replication factor, that the
+        configuration is valid, and that a new partition count is larger than the
+        current one.</p>
         <div class="callout warning">
           <i class="icofont-laika warning">&#xf026;</i>
           <p>Creating, deleting, and growing topics report only the first failure, even
@@ -167,15 +171,14 @@
         </div>
         <div class="callout info">
           <i class="icofont-laika info">&#xef4e;</i>
-          <p>Creating, growing, and deleting topics all propagate through the cluster in their
-          own time, so a description taken immediately afterwards may not yet reflect the
-          request before it.</p>
+          <p>Creating, growing and deleting topics take a moment to reach every broker, so
+          describing a topic right afterwards can still show the old state.</p>
         </div>
         
         <h2 id="cluster-and-topics" class="section"><a class="anchor-link left" href="#cluster-and-topics"><i class="icofont-laika link">&#xef71;</i></a>Cluster and topics</h2>
-        <p><code>describeCluster</code> answers the cluster&#39;s id, each of its brokers with the host
+        <p><code>describeCluster</code> returns the cluster&#39;s id, each of its brokers with the host
         and port clients connect to, and which broker is its controller.</p>
-        <p><code>describeTopics</code> answers each requested topic on its own with a
+        <p><code>describeTopics</code> returns a result for each requested topic on its own, a
         <code>TopicDescription</code>: the topic&#39;s id, whether it is <code>internal</code>, and each
         partition&#39;s leader, replicas, and in-sync replicas, by <code>BrokerId</code>. Look a broker
         id up in <code>describeCluster</code>&#39;s brokers for its host and port.</p>
@@ -189,8 +192,8 @@
   </span><span class="keyword">for</span><span>
     </span><span class="identifier">client</span><span>  &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">topic</span><span>   &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="identifier">answers</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeTopics</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))  </span><span class="comment">// The answer for each topic is separate
-</span><span>    </span><span class="identifier">_</span><span>       &lt;- </span><span class="identifier">answers</span><span>(</span><span class="identifier">topic</span><span>) </span><span class="keyword">match</span><span>
+    </span><span class="identifier">results</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeTopics</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))  </span><span class="comment">// The result for each topic is separate
+</span><span>    </span><span class="identifier">_</span><span>       &lt;- </span><span class="identifier">results</span><span>(</span><span class="identifier">topic</span><span>) </span><span class="keyword">match</span><span>
                  </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">Right</span><span>(</span><span class="identifier">description</span><span>)) =&gt;  </span><span class="comment">// The topic&#39;s description
 </span><span>                   </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${description.partitions.length}</span><span class="string-literal"> partitions, id </span><span class="substitution">${description.id.value}</span><span class="string-literal">&quot;</span><span>)
                  </span><span class="comment">// Why this topic could not be described
@@ -198,11 +201,10 @@
                  </span><span class="keyword">case</span><span> </span><span class="type-name">None</span><span>                =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">unit</span><span>
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         <ul>
-          <li>A topic the cluster does not have answers with
-          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other topics are still answered.</li>
+          <li>The result for a topic the cluster does not have is
+          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other topics still get theirs.</li>
           <li><code>internal</code> is true for the topics Kafka keeps for itself, such as
-          <code>__consumer_offsets</code>. The cluster creates that one for the first committed
-          offset, so a cluster where nothing has committed yet does not have it.</li>
+          <code>__consumer_offsets</code>.</li>
           <li>A topic keeps its id. A topic deleted and created again under the same name
           gets a new one. The id reads the same on every platform.</li>
           <li>Either call fails as a whole when the cluster cannot be reached in time. That
@@ -212,8 +214,8 @@
         <h2 id="deleting-records" class="section"><a class="anchor-link left" href="#deleting-records"><i class="icofont-laika link">&#xef71;</i></a>Deleting records</h2>
         <p><code>deleteRecords</code> takes an offset for each partition and deletes the records below
         it, so a cut at 3 removes offsets 0 to 2 and keeps 3 onwards. Each partition
-        answers on its own: with its new low watermark, the offset the partition now
-        begins at, or with the failure that refused the cut.</p>
+        gets a result of its own: its new low watermark, the offset the partition now
+        begins at, or the failure that refused the cut.</p>
         <pre><code class="nohighlight"><span class="comment">// Delete the records below offset 1000 in partition 0 of &quot;journal&quot;
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptyMap</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -227,24 +229,24 @@
     </span><span class="identifier">topic</span><span>     &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;journal&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">partition</span><span> &lt;- </span><span class="type-name">Partition</span><span>.</span><span class="identifier">from</span><span>(</span><span class="number-literal">0</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">cut</span><span>       &lt;- </span><span class="type-name">Offset</span><span>.</span><span class="identifier">from</span><span>(</span><span class="number-literal">1000L</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="comment">// Delete the records, with a separate answer for each partition
-</span><span>    </span><span class="identifier">answers</span><span>   &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">deleteRecords</span><span>(</span><span class="type-name">NonEmptyMap</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">TopicPartition</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">partition</span><span>), </span><span class="identifier">cut</span><span>)))
-    </span><span class="identifier">_</span><span>         &lt;- </span><span class="identifier">answers</span><span>.</span><span class="identifier">toSortedMap</span><span>.</span><span class="identifier">toList</span><span>.</span><span class="identifier">traverse_</span><span> :
+    </span><span class="comment">// Delete the records, with a separate result for each partition
+</span><span>    </span><span class="identifier">results</span><span>   &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">deleteRecords</span><span>(</span><span class="type-name">NonEmptyMap</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">TopicPartition</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">partition</span><span>), </span><span class="identifier">cut</span><span>)))
+    </span><span class="identifier">_</span><span>         &lt;- </span><span class="identifier">results</span><span>.</span><span class="identifier">toSortedMap</span><span>.</span><span class="identifier">toList</span><span>.</span><span class="identifier">traverse_</span><span> :
                    </span><span class="comment">// The offset this partition now begins at
 </span><span>                   </span><span class="keyword">case</span><span> (</span><span class="identifier">topicPartition</span><span>, </span><span class="type-name">Right</span><span>(</span><span class="identifier">lowWatermark</span><span>)) =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${topicPartition.show}</span><span class="string-literal"> begins at </span><span class="substitution">${lowWatermark.show}</span><span class="string-literal">&quot;</span><span>)
                    </span><span class="comment">// Why the records of this partition were not deleted
 </span><span>                   </span><span class="keyword">case</span><span> (</span><span class="identifier">topicPartition</span><span>, </span><span class="type-name">Left</span><span>(</span><span class="identifier">failure</span><span>))       =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${topicPartition.show}</span><span class="string-literal"> was refused: </span><span class="substitution">${failure.getMessage}</span><span class="string-literal">&quot;</span><span>)
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         <ul>
-          <li>A cut at or below the partition&#39;s current start deletes nothing and answers
-          with the current low watermark, so repeating a cut is safe.</li>
+          <li>A cut at or below the partition&#39;s current start deletes nothing and returns
+          the current low watermark, so repeating a cut is safe.</li>
           <li>A cut at the end of the partition deletes all of its records. A cut past the end
           is refused as <code>ErrorCode.OffsetOutOfRange</code>, and the other partitions in the same
-          call are still answered.</li>
-          <li>A topic or partition the cluster does not have answers with
-          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other partitions in the call are
-          still answered.</li>
-          <li>The call fails as a whole only when no partition got an answer, such as when
+          call still get their results.</li>
+          <li>The result for a topic or partition the cluster does not have is
+          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other partitions in the call
+          still get theirs.</li>
+          <li>The call fails as a whole only if no partition got a result, for example if
           the cluster cannot be reached in time. That failure is retriable.</li>
           <li>Deleting records moves no consumer group&#39;s offsets. A group whose committed
           offset is now below the start of the partition resumes as its
@@ -260,10 +262,10 @@
         <h2 id="topic-configuration" class="section"><a class="anchor-link left" href="#topic-configuration"><i class="icofont-laika link">&#xef71;</i></a>Topic configuration</h2>
         <p><code>describeTopicConfigurations</code> reports the configuration each topic has in
         effect, including the values it inherits from the broker or from Kafka&#39;s
-        defaults. Each topic answers on its own, as with <code>deleteRecords</code>: a topic the
-        cluster does not have answers with <code>ErrorCode.UnknownTopicOrPartition</code>, and the
-        call fails as a whole only when no topic got an answer, such as when the cluster
-        cannot be reached in time.</p>
+        defaults. Each topic gets a result of its own, as with <code>deleteRecords</code>: the
+        result for a topic the cluster does not have is
+        <code>ErrorCode.UnknownTopicOrPartition</code>, and the call fails as a whole only if no
+        topic got a result, for example if the cluster cannot be reached in time.</p>
         <pre><code class="nohighlight"><span class="comment">// Print the value of &quot;cleanup.policy&quot; on &quot;journal&quot;, and where that value comes from
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
@@ -275,20 +277,20 @@
     </span><span class="identifier">client</span><span>  &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">topic</span><span>   &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;journal&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="comment">// Read the topic&#39;s effective configuration
-</span><span>    </span><span class="identifier">answers</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeTopicConfigurations</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))
-    </span><span class="identifier">policy</span><span>   = </span><span class="identifier">answers</span><span>(</span><span class="identifier">topic</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">toOption</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;cleanup.policy&quot;</span><span>))  </span><span class="comment">// Pick one property from the topic&#39;s answer
+</span><span>    </span><span class="identifier">results</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeTopicConfigurations</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>)))
+    </span><span class="identifier">policy</span><span>   = </span><span class="identifier">results</span><span>(</span><span class="identifier">topic</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">toOption</span><span>).</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;cleanup.policy&quot;</span><span>))  </span><span class="comment">// Pick one property from the topic&#39;s result
 </span><span>    </span><span class="identifier">_</span><span>       &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="identifier">policy</span><span>.</span><span class="identifier">fold</span><span>(</span><span class="string-literal">&quot;no cleanup.policy reported&quot;</span><span>)(</span><span class="identifier">entry</span><span> =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">${entry.value}</span><span class="string-literal"> from </span><span class="substitution">${entry.source}</span><span class="string-literal">&quot;</span><span>))
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         <p>Each <code>ConfigurationEntry</code> carries:</p>
         <ul>
-          <li><code>value</code>: <code>Present</code> with the value, <code>Absent</code> where the property has none, or
-          <code>Redacted</code> where the value is sensitive and the broker withheld it.</li>
+          <li><code>value</code>: <code>Present</code> with the value, <code>Absent</code> if the property has none, or
+          <code>Redacted</code> if the value is sensitive and the broker withheld it.</li>
           <li><code>source</code>: where the value comes from. <code>TopicOverride</code> is set on the topic
           itself; <code>DynamicBroker</code>, <code>DynamicClusterDefault</code>, and <code>StaticBroker</code> are
           inherited from broker configuration; <code>Default</code> is Kafka&#39;s own default.</li>
           <li><code>readOnly</code>: whether the property can be changed.</li>
         </ul>
-        <p>A property the broker did not report has no entry, so <code>get</code> answers <code>None</code>.</p>
+        <p>A property the broker did not report has no entry, so <code>get</code> returns <code>None</code>.</p>
         
         <h3 id="changing-it" class="section"><a class="anchor-link left" href="#changing-it"><i class="icofont-laika link">&#xef71;</i></a>Changing it</h3>
         <p><code>alterTopicConfigurations</code> changes the properties it names on each topic and
@@ -314,16 +316,17 @@
     </span><span class="comment">// Set one property, and append to a list property
 </span><span>    </span><span class="identifier">changes</span><span>  = </span><span class="type-name">NonEmptyMap</span><span>.</span><span class="identifier">of</span><span>(</span><span class="string-literal">&quot;retention.ms&quot;</span><span> -&gt; </span><span class="type-name">ConfigurationChange</span><span>.</span><span class="type-name">Set</span><span>(</span><span class="string-literal">&quot;604800000&quot;</span><span>), </span><span class="string-literal">&quot;cleanup.policy&quot;</span><span> -&gt; </span><span class="type-name">ConfigurationChange</span><span>.</span><span class="type-name">Append</span><span>(</span><span class="string-literal">&quot;compact&quot;</span><span>))
     </span><span class="comment">// Every other property stays as it is
-</span><span>    </span><span class="identifier">answers</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">alterTopicConfigurations</span><span>(</span><span class="type-name">NonEmptyMap</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">changes</span><span>)))
-    </span><span class="identifier">_</span><span>       &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="identifier">answers</span><span>(</span><span class="identifier">topic</span><span>).</span><span class="identifier">fold</span><span>(</span><span class="string-literal">&quot;no answer&quot;</span><span>)(</span><span class="identifier">_</span><span>.</span><span class="identifier">fold</span><span>(</span><span class="identifier">failure</span><span> =&gt; </span><span class="string-literal">s&quot;not changed: </span><span class="substitution">${failure.getMessage}</span><span class="string-literal">&quot;</span><span>, </span><span class="identifier">_</span><span> =&gt; </span><span class="string-literal">&quot;changed&quot;</span><span>)))
+</span><span>    </span><span class="identifier">results</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">alterTopicConfigurations</span><span>(</span><span class="type-name">NonEmptyMap</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">changes</span><span>)))
+    </span><span class="identifier">_</span><span>       &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="identifier">results</span><span>(</span><span class="identifier">topic</span><span>).</span><span class="identifier">fold</span><span>(</span><span class="string-literal">&quot;no result&quot;</span><span>)(</span><span class="identifier">_</span><span>.</span><span class="identifier">fold</span><span>(</span><span class="identifier">failure</span><span> =&gt; </span><span class="string-literal">s&quot;not changed: </span><span class="substitution">${failure.getMessage}</span><span class="string-literal">&quot;</span><span>, </span><span class="identifier">_</span><span> =&gt; </span><span class="string-literal">&quot;changed&quot;</span><span>)))
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
-        <p>Each topic answers on its own, and the call fails as a whole only when no topic
-        got an answer, such as when the cluster cannot be reached in time. Where the
+        <p>Each topic gets a result of its own, and the call fails as a whole only if no
+        topic got a result, for example if the cluster cannot be reached in time. If the
         broker refuses one topic&#39;s changes, the other topics are still changed:</p>
         <ul>
-          <li>A topic the cluster does not have answers with <code>ErrorCode.UnknownTopicOrPartition</code>.</li>
+          <li>The result for a topic the cluster does not have is
+          <code>ErrorCode.UnknownTopicOrPartition</code>.</li>
           <li>A property Kafka does not have, and appending to or removing from a property
-          that holds no list, answer with <code>ErrorCode.InvalidConfiguration</code>.</li>
+          that holds no list, fail with <code>ErrorCode.InvalidConfiguration</code>.</li>
         </ul>
         
         <h2 id="leader-election" class="section"><a class="anchor-link left" href="#leader-election"><i class="icofont-laika link">&#xef71;</i></a>Leader election</h2>
@@ -342,22 +345,22 @@
     </span><span class="identifier">topic</span><span>     &lt;- </span><span class="type-name">Topic</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;events&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">partition</span><span> &lt;- </span><span class="type-name">Partition</span><span>.</span><span class="identifier">from</span><span>(</span><span class="number-literal">0</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="comment">// Run the election for this partition
-</span><span>    </span><span class="identifier">answers</span><span>   &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">electPreferredLeaders</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">TopicPartition</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">partition</span><span>))))
-  </span><span class="keyword">yield</span><span> </span><span class="identifier">answers</span></code></pre>
+</span><span>    </span><span class="identifier">results</span><span>   &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">electPreferredLeaders</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="type-name">TopicPartition</span><span>(</span><span class="identifier">topic</span><span>, </span><span class="identifier">partition</span><span>))))
+  </span><span class="keyword">yield</span><span> </span><span class="identifier">results</span></code></pre>
         <ul>
-          <li>A partition its preferred replica already leads answers <code>Right(())</code>, as one
-          the election moved does.</li>
-          <li>A partition the cluster does not have answers with
-          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other partitions are still
-          answered.</li>
-          <li>The call fails as a whole only when no partition got an answer, such as when
+          <li>The result for a partition its preferred replica already leads is <code>Right(())</code>,
+          as for one the election moved.</li>
+          <li>The result for a partition the cluster does not have is
+          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other partitions still get
+          theirs.</li>
+          <li>The call fails as a whole only if no partition got a result, for example if
           the cluster cannot be reached in time.</li>
         </ul>
         
         <h2 id="consumer-groups" class="section"><a class="anchor-link left" href="#consumer-groups"><i class="icofont-laika link">&#xef71;</i></a>Consumer groups</h2>
-        <p><code>listConsumerGroups</code> answers every group the cluster knows with its
+        <p><code>listConsumerGroups</code> returns every group the cluster knows, with its
         <code>ConsumerGroupState</code>, including a group that has no members but still holds
-        committed offsets. <code>describeConsumerGroups</code> answers each requested group with
+        committed offsets. <code>describeConsumerGroups</code> returns each requested group with
         its state, its members, and the partitions each member is assigned.</p>
         <pre><code class="nohighlight"><span class="comment">// Print the state and members of the consumer group &quot;billing&quot;
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">data</span><span>.{</span><span class="type-name">NonEmptyList</span><span>, </span><span class="type-name">NonEmptySet</span><span>}
@@ -369,32 +372,31 @@
   </span><span class="keyword">for</span><span>
     </span><span class="identifier">client</span><span>  &lt;- </span><span class="type-name">ClientSettings</span><span>.</span><span class="identifier">from</span><span>(</span><span class="type-name">NonEmptyList</span><span>.</span><span class="identifier">one</span><span>(</span><span class="string-literal">&quot;localhost:9092&quot;</span><span>)).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
     </span><span class="identifier">group</span><span>   &lt;- </span><span class="type-name">ConsumerGroup</span><span>.</span><span class="identifier">from</span><span>(</span><span class="string-literal">&quot;billing&quot;</span><span>).</span><span class="identifier">liftTo</span><span>[</span><span class="type-name">IO</span><span>]
-    </span><span class="comment">// The answer for each group is separate
-</span><span>    </span><span class="identifier">answers</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeConsumerGroups</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">group</span><span>)))
-    </span><span class="identifier">_</span><span>       &lt;- </span><span class="identifier">answers</span><span>(</span><span class="identifier">group</span><span>) </span><span class="keyword">match</span><span>
+    </span><span class="comment">// The result for each group is separate
+</span><span>    </span><span class="identifier">results</span><span> &lt;- </span><span class="type-name">KafkaClient</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">admin</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">describeConsumerGroups</span><span>(</span><span class="type-name">NonEmptySet</span><span>.</span><span class="identifier">one</span><span>(</span><span class="identifier">group</span><span>)))
+    </span><span class="identifier">_</span><span>       &lt;- </span><span class="identifier">results</span><span>(</span><span class="identifier">group</span><span>) </span><span class="keyword">match</span><span>
                  </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">Right</span><span>(</span><span class="identifier">description</span><span>)) =&gt;
                    </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${description.state}</span><span class="string-literal">: </span><span class="substitution">${description.members.map(_.clientId).mkString(&quot;, &quot;)}</span><span class="string-literal">&quot;</span><span>)
                  </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="type-name">Left</span><span>(</span><span class="identifier">failure</span><span>)) =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;not described: </span><span class="substitution">${failure.getMessage}</span><span class="string-literal">&quot;</span><span>)
                  </span><span class="keyword">case</span><span> </span><span class="type-name">None</span><span>                =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">unit</span><span>
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         <ul>
-          <li>A group the cluster does not have answers with <code>ErrorCode.GroupIdNotFound</code>,
-          and is not listed.</li>
-          <li>Kafka keeps committed offsets under an empty group name and lists that
-          group, but <code>listConsumerGroups</code> leaves it out, because <code>ConsumerGroup</code> does
-          not accept an empty name.</li>
+          <li>The result for a group the cluster does not have is
+          <code>ErrorCode.GroupIdNotFound</code>, and the group is not listed.</li>
+          <li><code>listConsumerGroups</code> leaves out a group with an empty name, which
+          <code>ConsumerGroup</code> cannot hold.</li>
           <li>A group whose members have all left is <code>Empty</code>, with no members and no
           assignor.</li>
           <li><code>simple</code> is true for a group that holds committed offsets but that no
           consumer has joined, such as one created by <code>alterConsumerGroupOffsets</code>. It
           is false for a group consumers have joined, including after they all leave.</li>
         </ul>
-        <p><code>listConsumerGroupOffsets</code> answers the offsets a group has committed. Without
-        partitions it answers every one, and is empty for a group the cluster does not
-        have. With partitions it answers each of them, with <code>None</code> where the group has
+        <p><code>listConsumerGroupOffsets</code> returns the offsets a group has committed. Without
+        partitions it returns every one, and is empty for a group the cluster does not
+        have. With partitions it returns each of them, with <code>None</code> if the group has
         committed nothing.</p>
-        <p><code>alterConsumerGroupOffsets</code> and <code>deleteConsumerGroupOffsets</code> answer each
-        partition on its own, and <code>deleteConsumerGroups</code> each group on its own:</p>
+        <p><code>alterConsumerGroupOffsets</code> and <code>deleteConsumerGroupOffsets</code> return a result for
+        each partition on its own, and <code>deleteConsumerGroups</code> for each group on its own:</p>
         <ul>
           <li>A group with members refuses <code>alterConsumerGroupOffsets</code> as
           <code>ErrorCode.UnknownMemberId</code>, and <code>deleteConsumerGroups</code> as
@@ -403,11 +405,12 @@
           subscribed to as <code>ErrorCode.GroupSubscribedToTopic</code>.</li>
           <li><code>alterConsumerGroupOffsets</code> creates a group the cluster does not have. It
           refuses a topic the cluster does not have as
-          <code>ErrorCode.UnknownTopicOrPartition</code>, and still answers the other partitions.</li>
+          <code>ErrorCode.UnknownTopicOrPartition</code>, and the other partitions still get their
+          results.</li>
           <li><code>deleteConsumerGroupOffsets</code> and <code>deleteConsumerGroups</code> refuse a group the
           cluster does not have as <code>ErrorCode.GroupIdNotFound</code>.</li>
-          <li>A call fails as a whole only when no partition or group got an answer, such
-          as when the cluster cannot be reached in time. That failure is retriable.</li>
+          <li>A call fails as a whole only if no partition or group got a result, for
+          example if the cluster cannot be reached in time. That failure is retriable.</li>
         </ul>
         
         <h2 id="what-it-does-not-do" class="section"><a class="anchor-link left" href="#what-it-does-not-do"><i class="icofont-laika link">&#xef71;</i></a>What it does not do</h2>

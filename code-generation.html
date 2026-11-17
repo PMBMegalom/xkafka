@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Generating classes from schema files</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="helium/site/laika-helium.css" />
+  <script src="helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="index.html">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
+    <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 active nav-leaf"><a href="#">Generating classes from schema files</a></li>
+    <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Generating classes from schema files</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#with-sbt">With sbt</a></li>
+    <li class="level1 nav-leaf"><a href="#without-sbt">Without sbt</a></li>
+    <li class="level1 nav-node"><a href="#avro">Avro</a></li>
+    <li class="level2 nav-leaf"><a href="#what-is-generated-1">What is generated</a></li>
+    <li class="level2 nav-leaf"><a href="#what-is-refused-1">What is refused</a></li>
+    <li class="level1 nav-node"><a href="#json-schema">JSON Schema</a></li>
+    <li class="level2 nav-leaf"><a href="#names">Names</a></li>
+    <li class="level2 nav-leaf"><a href="#what-is-generated-2">What is generated</a></li>
+    <li class="level2 nav-leaf"><a href="#unions">Unions</a></li>
+    <li class="level2 nav-leaf"><a href="#what-is-refused-2">What is refused</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="generating-classes-from-schema-files" class="title">Generating classes from schema files</h1>
+        <p>If your schemas come first, as Avro or JSON Schema files shared with other
+        applications, xkafka can generate Scala classes from them. The classes register
+        the schemas in your files. They work on the JVM, Scala.js and Scala Native, and
+        need only <code>xkafka-avro</code> or <code>xkafka-json-schema</code> to compile.</p>
+        
+        <h2 id="with-sbt" class="section"><a class="anchor-link left" href="#with-sbt"><i class="icofont-laika link">&#xef71;</i></a>With sbt</h2>
+        <p>Add the plugin (it works with sbt 1.10 or newer and sbt 2.1 or newer) and the module for your schema
+        format:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// project/plugins.sbt
+</span><span class="identifier">addSbtPlugin</span><span>(</span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> % </span><span class="string-literal">&quot;sbt-xkafka-codegen&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// build.sbt: add the module for your format, or both
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-avro&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span><span>
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-json-schema&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
+        <p>Put your .avsc and .avdl files in <code>src/main/avro</code>, and your JSON Schema .json
+        files in <code>src/main/json-schema</code>. Each time the project compiles, the classes
+        are generated again if any file or setting changed. A schema the generator
+        refuses fails the build, saying why.</p>
+        <p>To read schemas from other directories, such as the shared directory of a
+        project built for several platforms, set <code>xkafkaAvroSources</code> and
+        <code>xkafkaJsonSchemaSources</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Read schemas from the shared directory of a cross-built project
+</span><span class="type-name">Compile</span><span> / </span><span class="identifier">xkafkaAvroSources</span><span>       := </span><span class="type-name">Seq</span><span>(</span><span class="identifier">baseDirectory</span><span>.</span><span class="identifier">value</span><span> / </span><span class="string-literal">&quot;..&quot;</span><span> / </span><span class="string-literal">&quot;shared&quot;</span><span> / </span><span class="string-literal">&quot;src&quot;</span><span> / </span><span class="string-literal">&quot;main&quot;</span><span> / </span><span class="string-literal">&quot;avro&quot;</span><span>)
+</span><span class="type-name">Compile</span><span> / </span><span class="identifier">xkafkaJsonSchemaSources</span><span> := </span><span class="type-name">Seq</span><span>(</span><span class="identifier">baseDirectory</span><span>.</span><span class="identifier">value</span><span> / </span><span class="string-literal">&quot;..&quot;</span><span> / </span><span class="string-literal">&quot;shared&quot;</span><span> / </span><span class="string-literal">&quot;src&quot;</span><span> / </span><span class="string-literal">&quot;main&quot;</span><span> / </span><span class="string-literal">&quot;json-schema&quot;</span><span>)</span></code></pre>
+        <p>Two settings change the classes of JSON Schema files:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// The package of the classes of files whose titles name none
+</span><span class="identifier">xkafkaJsonSchemaPackage</span><span> := </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;com.example.events&quot;</span><span>)
+</span><span class="comment">// JSON Schema&#39;s numbers as BigDecimal, which keeps every digit, in place of Double
+</span><span class="identifier">xkafkaJsonSchemaBigDecimals</span><span> := </span><span class="boolean-literal">true</span></code></pre>
+        <p>The generator runs in a JVM of its own, so its dependencies never reach your
+        build&#39;s classpath.</p>
+        
+        <h2 id="without-sbt" class="section"><a class="anchor-link left" href="#without-sbt"><i class="icofont-laika link">&#xef71;</i></a>Without sbt</h2>
+        <p>The generator is also a command-line program, published as
+        <code>io.github.pmbmegalom:xkafka-codegen_3:0.7.1</code>, with the main class
+        <code>xkafka.codegen.Main</code>. Run it from any tool that can run a program from a Maven
+        artifact and its dependencies:</p>
+        <ul>
+          <li>the first argument is the directory the classes are written to;</li>
+          <li>the others are .avsc, .avdl and .json files, or directories to search at any
+          depth;</li>
+          <li><code>--json-package &lt;package&gt;</code> and <code>--json-big-decimals</code>, given first, do what
+          <code>xkafkaJsonSchemaPackage</code> and <code>xkafkaJsonSchemaBigDecimals</code> do.</li>
+        </ul>
+        <pre><code># The arguments of xkafka.codegen.Main: options, the output directory, then the schemas
+--json-package com.example.events target/generated src/main/avro src/main/json-schema</code></pre>
+        
+        <h2 id="avro" class="section"><a class="anchor-link left" href="#avro"><i class="icofont-laika link">&#xef71;</i></a>Avro</h2>
+        
+        <h3 id="what-is-generated-1" class="section"><a class="anchor-link left" href="#what-is-generated-1"><i class="icofont-laika link">&#xef71;</i></a>What is generated</h3>
+        <p>Each named type is a file of its own, in the package of its namespace:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Avro</th>
+              <th>Scala</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>a <code>record</code></td>
+              <td>a case class of its fields, with the file&#39;s defaults as Scala defaults</td>
+            </tr>
+            <tr>
+              <td>an <code>enum</code></td>
+              <td>a Scala 3 enum, marked <code>@AvroEnumDefault</code> if the enum has a default</td>
+            </tr>
+            <tr>
+              <td>a <code>fixed</code></td>
+              <td>a case class of its <code>bytes: fs2.Chunk[Byte]</code>, marked <code>@AvroFixed</code></td>
+            </tr>
+            <tr>
+              <td><code>boolean</code>, <code>int</code>, <code>long</code>, <code>float</code>, <code>double</code>, <code>string</code></td>
+              <td><code>Boolean</code>, <code>Int</code>, <code>Long</code>, <code>Float</code>, <code>Double</code>, <code>String</code></td>
+            </tr>
+            <tr>
+              <td><code>bytes</code></td>
+              <td><code>fs2.Chunk[Byte]</code></td>
+            </tr>
+            <tr>
+              <td>an <code>array</code>, a <code>map</code></td>
+              <td><code>List[A]</code>, <code>Map[String, A]</code></td>
+            </tr>
+            <tr>
+              <td>a union of <code>null</code> and one type</td>
+              <td><code>Option[A]</code></td>
+            </tr>
+            <tr>
+              <td>a union of several types</td>
+              <td>a union type, such as <code>Cash | Card</code>, or an <code>Option</code> of one if the union has <code>null</code></td>
+            </tr>
+            <tr>
+              <td><code>decimal</code></td>
+              <td><code>BigDecimal</code>, marked <code>@SchemaDecimal</code> with its precision and scale</td>
+            </tr>
+            <tr>
+              <td><code>uuid</code>, <code>date</code></td>
+              <td><code>java.util.UUID</code>, <code>java.time.LocalDate</code></td>
+            </tr>
+            <tr>
+              <td><code>time-millis</code>, <code>time-micros</code></td>
+              <td><code>java.time.LocalTime</code></td>
+            </tr>
+            <tr>
+              <td><code>timestamp-millis</code>, <code>timestamp-micros</code>, <code>timestamp-nanos</code></td>
+              <td><code>java.time.Instant</code></td>
+            </tr>
+            <tr>
+              <td><code>local-timestamp-millis</code>, <code>local-timestamp-micros</code></td>
+              <td><code>java.time.LocalDateTime</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Documentation and aliases become <code>@SchemaDoc</code> and <code>@SchemaAlias</code>. A name that
+        is a Scala keyword, such as <code>type</code>, is written in backquotes. Some names get a
+        trailing underscore in Scala, such as <code>copy_</code>, and keep their name in the
+        schema:</p>
+        <ul>
+          <li>a field or symbol named like a member every case class or enum has, such as
+          <code>copy</code> or <code>values</code>;</li>
+          <li>a symbol named <code>avroSchema</code>, the name of the companion&#39;s schema.</li>
+        </ul>
+        <p>Each type&#39;s companion object holds <code>avroSchema</code>, the schema it was generated
+        from, and a codec checked against that schema with <code>matching</code>. If the codec&#39;s
+        schema ever differs from it, making a serde fails with
+        <code>RegistryException.NoSchema</code>. Write and read the classes like any
+        others:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Visits, generated from visit.avsc
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">example</span><span>.</span><span class="identifier">web</span><span>.</span><span class="type-name">Visit</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">AvroSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">visits</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Visit</span><span>]] = </span><span class="type-name">AvroSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Visit</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        
+        <h3 id="what-is-refused-1" class="section"><a class="anchor-link left" href="#what-is-refused-1"><i class="icofont-laika link">&#xef71;</i></a>What is refused</h3>
+        <p>The generator refuses a schema it cannot write exactly, saying which type and
+        field, and why, for example:</p>
+        <ul>
+          <li>a named type without a namespace, which its package is made from;</li>
+          <li>properties of a schema or field other than the ones Avro defines, a field&#39;s
+          sort order, a logical type xkafka does not know, and a <code>fixed</code> type&#39;s
+          documentation, none of which xkafka&#39;s schemas keep;</li>
+          <li><code>local-timestamp-nanos</code>, and a <code>decimal</code> held in a <code>fixed</code> type, which xkafka
+          has no codec for;</li>
+          <li>a <code>decimal</code> in a union of several types;</li>
+          <li>a <code>time-millis</code> or <code>time-micros</code> default that is no time of day, such as a
+          negative one;</li>
+          <li>a <code>uuid</code> default that is no UUID in its canonical form, of 36 characters,
+          and a <code>decimal</code> default of no bytes;</li>
+          <li>a default holding a value of a union&#39;s branch other than its first, in the
+          field&#39;s union or in one inside it, such as <code>[&quot;x&quot;]</code> for a list of
+          <code>[&quot;null&quot;, &quot;string&quot;]</code>, since xkafka writes a union&#39;s default in its first
+          branch;</li>
+          <li><code>null</code> in a union anywhere but first, or right after the type of the field&#39;s
+          default, and in a union inside a list or a map anywhere but first;</li>
+          <li>a record with fields of one Scala type at two precisions, such as a
+          <code>timestamp-millis</code> and a <code>timestamp-micros</code>, or with the same union in two
+          orders;</li>
+          <li>two files declaring one type differently.</li>
+        </ul>
+        
+        <h2 id="json-schema" class="section"><a class="anchor-link left" href="#json-schema"><i class="icofont-laika link">&#xef71;</i></a>JSON Schema</h2>
+        <p>Each file becomes a type: a case class if the file describes an object, an
+        enum if it is an enum of text, and a sealed trait if it is a <code>oneOf</code> or
+        <code>anyOf</code> of objects, whose cases are those objects. The types the file holds,
+        in its <code>definitions</code> or <code>$defs</code> and in its properties, are declared in the
+        companion of the type that holds them, such as <code>Order.Line</code>.</p>
+        <p>The companion object holds <code>jsonSchema</code>, the file&#39;s schema, and the type&#39;s
+        codec. The codec registers the file&#39;s schema unchanged apart from whitespace,
+        with <code>$schema</code> first. A file that names no draft is registered as draft 7, the
+        draft Confluent&#39;s serializers take by default. With <code>SubjectNaming.RecordName</code>,
+        the subject is the schema&#39;s <code>title</code>. A file&#39;s type whose schema names its own
+        definitions by reference, or that names a draft other than draft 7, cannot be a
+        field of a derived type, or held in an <code>Option</code>, a collection or a map: those
+        references would name the definitions of the other schema, and the schema
+        holding it is for draft 7, so a serde of that type fails with
+        <code>RegistryException.NoSchema</code>. Write and read the classes like any others:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Orders, generated from order.json
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">example</span><span>.</span><span class="identifier">events</span><span>.</span><span class="type-name">Order</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">jsonschema</span><span>.</span><span class="type-name">JsonSchemaSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">orders</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>]] = </span><span class="type-name">JsonSchemaSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        
+        <h3 id="names" class="section"><a class="anchor-link left" href="#names"><i class="icofont-laika link">&#xef71;</i></a>Names</h3>
+        <p>If a file&#39;s <code>title</code> is a full Scala name, such as <code>com.example.events.Order</code>,
+        the type takes its package and name from it. Otherwise the type goes in the
+        package <code>xkafkaJsonSchemaPackage</code> sets. It is named by its title if that is a
+        Scala name, or else by its file&#39;s name: <code>line-item.json</code> and
+        <code>line-item.schema.json</code> make <code>LineItem</code>.</p>
+        <p>The types inside a file are named after where they are:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>Where</th>
+              <th>Name</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>definitions</code> or <code>$defs</code></td>
+              <td>the definition&#39;s name, <code>line</code> making <code>Line</code></td>
+            </tr>
+            <tr>
+              <td>a property</td>
+              <td>the property&#39;s name, <code>shipping</code> making <code>Shipping</code></td>
+            </tr>
+            <tr>
+              <td>an array&#39;s items</td>
+              <td>the property&#39;s name and <code>Item</code>, such as <code>LinesItem</code></td>
+            </tr>
+            <tr>
+              <td>the values of an object of any properties</td>
+              <td>the property&#39;s name and <code>Value</code></td>
+            </tr>
+            <tr>
+              <td>a branch of a <code>oneOf</code> or <code>anyOf</code></td>
+              <td>its title, if that is a Scala name, or else the property&#39;s name and the branch&#39;s place, such as <code>Payment1</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <p>A property&#39;s field keeps the property&#39;s name if that is a Scala name, and
+        otherwise takes its letters and digits: <code>first-name</code> makes <code>firstName</code>. An
+        enum&#39;s values are named the same way, <code>in-progress</code> making <code>InProgress</code>. A
+        name that is a Scala keyword, such as <code>type</code>, is written in backquotes. A name
+        of a member every case class or enum has, such as <code>copy</code> or <code>values</code>, gets a
+        trailing underscore. Each keeps its name in JSON.</p>
+        
+        <h3 id="what-is-generated-2" class="section"><a class="anchor-link left" href="#what-is-generated-2"><i class="icofont-laika link">&#xef71;</i></a>What is generated</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>JSON Schema</th>
+              <th>Scala</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>an object with <code>properties</code></td>
+              <td>a case class</td>
+            </tr>
+            <tr>
+              <td>an <code>enum</code> of text</td>
+              <td>a Scala 3 enum</td>
+            </tr>
+            <tr>
+              <td><code>boolean</code>, <code>integer</code>, <code>string</code></td>
+              <td><code>Boolean</code>, <code>Long</code>, <code>String</code></td>
+            </tr>
+            <tr>
+              <td><code>number</code></td>
+              <td><code>Double</code>, or <code>BigDecimal</code> if <code>xkafkaJsonSchemaBigDecimals</code> is set</td>
+            </tr>
+            <tr>
+              <td>a <code>string</code> of the <code>format</code> <code>date-time</code>, <code>date</code>, <code>time</code> or <code>uuid</code></td>
+              <td><code>java.time.Instant</code>, <code>java.time.LocalDate</code>, <code>java.time.OffsetTime</code>, <code>java.util.UUID</code></td>
+            </tr>
+            <tr>
+              <td>a <code>string</code> of the <code>contentEncoding</code> <code>base64</code></td>
+              <td><code>fs2.Chunk[Byte]</code></td>
+            </tr>
+            <tr>
+              <td>an <code>array</code></td>
+              <td><code>List[A]</code></td>
+            </tr>
+            <tr>
+              <td>an <code>object</code> without <code>properties</code>, of <code>additionalProperties</code> of one schema</td>
+              <td><code>Map[String, A]</code></td>
+            </tr>
+            <tr>
+              <td>an <code>object</code> without <code>properties</code> or a schema for them</td>
+              <td><code>Map[String, io.circe.Json]</code></td>
+            </tr>
+            <tr>
+              <td><code>{}</code>, <code>true</code>, or a schema of no type</td>
+              <td><code>io.circe.Json</code></td>
+            </tr>
+            <tr>
+              <td>a type that may be <code>null</code>, such as <code>[&quot;string&quot;, &quot;null&quot;]</code> or a <code>oneOf</code> with <code>{&quot;type&quot;: &quot;null&quot;}</code></td>
+              <td><code>Option[A]</code></td>
+            </tr>
+            <tr>
+              <td>a <code>oneOf</code> or <code>anyOf</code> of several types, or several types, such as <code>[&quot;string&quot;, &quot;integer&quot;]</code></td>
+              <td>a union type, such as <code>Cash | Card</code></td>
+            </tr>
+            <tr>
+              <td>a <code>$ref</code> to a definition of the same file, or <code>#</code>, the file itself</td>
+              <td>the definition&#39;s type, or the file&#39;s</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Each property is a field, read and written as the file has it:</p>
+        <ul>
+          <li>A required property is always written, and must be there when read; one that
+          may be <code>null</code> is an <code>Option</code>, whose <code>None</code> is written as <code>null</code>.</li>
+          <li>A property that is not required but has a <code>default</code> gets that default as its
+          Scala default, and takes it when a record leaves the property out.</li>
+          <li>A property that is not required, without a default, is an <code>Option</code>, <code>None</code>
+          by default: <code>None</code> leaves it out, and it is read as <code>None</code> if it is left out
+          or <code>null</code>.</li>
+          <li>A required property with one fixed text value, a <code>const</code> or an <code>enum</code> of one
+          value, is not a field. It is always written, and must have that value when
+          read, so it tells a <code>oneOf</code>&#39;s branches apart.</li>
+        </ul>
+        <p>A <code>description</code> becomes the documentation of its type or field. Keywords that
+        only check values, such as <code>minimum</code>, <code>pattern</code> or a <code>format</code> other than those
+        above, are kept in the schema the type registers, and the classes do not check
+        them: neither writing nor reading checks values against the schema.</p>
+        
+        <h3 id="unions" class="section"><a class="anchor-link left" href="#unions"><i class="icofont-laika link">&#xef71;</i></a>Unions</h3>
+        <p>A value of a union is written as its branch writes it. Reading takes up to two
+        passes:</p>
+        <ol class="arabic">
+          <li>Each branch reads the value and refuses properties its schema does not name.
+          If exactly one branch reads it, the value belongs to that branch.</li>
+          <li>If none does, for example because a writer added a property, each branch
+          reads it again and ignores the properties it does not name. If exactly one
+          branch reads it this time, the value belongs to that branch.</li>
+        </ol>
+        <p>If several branches read a value, a <code>oneOf</code> fails, since JSON Schema has the
+        value of a <code>oneOf</code> be of exactly one branch, and an <code>anyOf</code> takes the first.
+        Take these payments:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>{
+  </span><span class="attribute-name">&quot;oneOf&quot;</span><span>: [
+    { </span><span class="attribute-name">&quot;title&quot;</span><span>: </span><span class="string-literal">&quot;Cash&quot;</span><span>, </span><span class="attribute-name">&quot;type&quot;</span><span>: </span><span class="string-literal">&quot;object&quot;</span><span>,
+      </span><span class="attribute-name">&quot;properties&quot;</span><span>: { </span><span class="attribute-name">&quot;amount&quot;</span><span>: { </span><span class="attribute-name">&quot;type&quot;</span><span>: </span><span class="string-literal">&quot;number&quot;</span><span> } }, </span><span class="attribute-name">&quot;required&quot;</span><span>: [</span><span class="string-literal">&quot;amount&quot;</span><span>] },
+    { </span><span class="attribute-name">&quot;title&quot;</span><span>: </span><span class="string-literal">&quot;Card&quot;</span><span>, </span><span class="attribute-name">&quot;type&quot;</span><span>: </span><span class="string-literal">&quot;object&quot;</span><span>,
+      </span><span class="attribute-name">&quot;properties&quot;</span><span>: { </span><span class="attribute-name">&quot;amount&quot;</span><span>: { </span><span class="attribute-name">&quot;type&quot;</span><span>: </span><span class="string-literal">&quot;number&quot;</span><span> }, </span><span class="attribute-name">&quot;last4&quot;</span><span>: { </span><span class="attribute-name">&quot;type&quot;</span><span>: </span><span class="string-literal">&quot;string&quot;</span><span> } }, </span><span class="attribute-name">&quot;required&quot;</span><span>: [</span><span class="string-literal">&quot;amount&quot;</span><span>] }
+  ]
+}</span></code></pre>
+        <p><code>{&quot;amount&quot;: 10, &quot;last4&quot;: &quot;4242&quot;}</code> is a <code>Card</code>, the only branch that names
+        <code>last4</code>. <code>{&quot;amount&quot;: 10}</code> fails: <code>Card</code> reads it as well as <code>Cash</code>, since its
+        <code>last4</code> is not required. JSON Schema itself refuses that value too. If <code>Cash</code>
+        allowed other properties, JSON Schema would refuse the card as well. To keep
+        branches apart, give each one a required constant, such as
+        <code>&quot;kind&quot;: {&quot;const&quot;: &quot;cash&quot;}</code>. Numbers are values of every branch of a number
+        type: <code>5</code> is both
+        an <code>integer</code> and a <code>number</code>, so a <code>oneOf</code> of the two fails on it, and an
+        <code>anyOf</code> reads it as the first.</p>
+        
+        <h3 id="what-is-refused-2" class="section"><a class="anchor-link left" href="#what-is-refused-2"><i class="icofont-laika link">&#xef71;</i></a>What is refused</h3>
+        <p>The generator refuses a schema it cannot make types of, saying where in which
+        file, and why, for example:</p>
+        <ul>
+          <li>a file whose title names no package, if <code>xkafkaJsonSchemaPackage</code> sets
+          none, and two files of one type;</li>
+          <li>a file that is not an object, an enum of text, or a <code>oneOf</code> or <code>anyOf</code> of
+          objects, including one that may be <code>null</code>;</li>
+          <li><code>allOf</code>, <code>if</code>, <code>then</code> and <code>else</code>, <code>dependentSchemas</code> and <code>dependencies</code> of
+          schemas, <code>patternProperties</code>, <code>prefixItems</code>, <code>items</code> that are a list of
+          schemas, <code>$dynamicRef</code> and <code>$recursiveRef</code>, which combine schemas in ways
+          types cannot hold;</li>
+          <li>a <code>$ref</code> to another file, and a <code>$ref</code> beside
+          keywords that give its value a type;</li>
+          <li>an object of both <code>properties</code> and a schema for other properties;</li>
+          <li>an object that requires a name none of its <code>properties</code> declares, since no
+          value its class writes would have it;</li>
+          <li>a <code>const</code> that is not text, or not of a required property, and an <code>enum</code> of
+          values other than text without a <code>type</code>;</li>
+          <li>a union with two branches of one Scala class, such as two kinds of text or
+          two arrays, with a branch of any value, or with a union inside it, whose
+          values written could not be told apart; and a type holding one union both as
+          a <code>oneOf</code> and as an <code>anyOf</code>;</li>
+          <li>a <code>oneOf</code> two of whose branches take <code>null</code>, which then matches no one of
+          them;</li>
+          <li>a definition that holds itself without a type of its own, such as an array
+          of itself;</li>
+          <li>two types of one name in one companion, or a type named as its file&#39;s;</li>
+          <li>a <code>default</code> that is not a value of its property.</li>
+        </ul>
+        <p>Whatever the format, two types whose classes would be one file are refused too:
+        an Avro and a JSON Schema type of one full name, or two whose names differ only
+        in case, which macOS and Windows treat as one file name.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>

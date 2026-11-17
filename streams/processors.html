@@ -82,13 +82,17 @@
     <li class="level2 nav-leaf"><a href="windows.html">Windows</a></li>
     <li class="level2 nav-leaf"><a href="holding-back-updates.html">Holding back updates</a></li>
     <li class="level2 active nav-leaf"><a href="#">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="partitioning.html">Choosing partitions</a></li>
     <li class="level2 nav-leaf"><a href="queries.html">Querying stores</a></li>
     <li class="level2 nav-leaf"><a href="running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
     <li class="level1 nav-leaf"><a href="../administration.html">Administration</a></li>
     <li class="level1 nav-leaf"><a href="../transport-security.html">Transport security</a></li>
     <li class="level1 nav-leaf"><a href="../errors.html">Errors</a></li>
     <li class="level1 nav-leaf"><a href="../serialization.html">Serialization</a></li>
     <li class="level1 nav-leaf"><a href="../schema-registry.html">Schema registry</a></li>
+    <li class="level1 nav-leaf"><a href="../other-libraries.html">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="../code-generation.html">Generating classes from schema files</a></li>
     <li class="level1 nav-leaf"><a href="../platform-notes.html">Platform notes</a></li>
     <li class="level1 nav-leaf"><a href="../contributing.html">Contributing</a></li>
   </ul>
@@ -102,7 +106,7 @@
   <p class="header"><a href="#">Processors</a></p>
 
   <ul class="nav-list">
-    <li class="level1 nav-leaf"><a href="#what-comes-out">What comes out</a></li>
+    <li class="level1 nav-leaf"><a href="#sending-records-on">Sending records on</a></li>
     <li class="level1 nav-leaf"><a href="#keeping-the-key">Keeping the key</a></li>
     <li class="level1 nav-leaf"><a href="#stores">Stores</a></li>
     <li class="level1 nav-leaf"><a href="#window-stores">Window stores</a></li>
@@ -142,11 +146,12 @@
             </span><span class="identifier">store</span><span>.</span><span class="identifier">put</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">key</span><span>, </span><span class="identifier">updated</span><span>).</span><span class="identifier">as</span><span>(</span><span class="type-name">List</span><span>(</span><span class="identifier">record</span><span>.</span><span class="identifier">withValue</span><span>(</span><span class="identifier">updated</span><span>)))  </span><span class="comment">// Save the new total, and send it on
 </span><span>    )
     .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write-totals&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">user</span><span>, </span><span class="identifier">amount</span><span>)</span></code></pre>
-        <p><code>Processor.withStore</code> hands your code the store already typed, so you cannot
+        <p>The function you give <code>Processor.onRecord</code>, the handler, runs for each record.
+        <code>Processor.withStore</code> hands your code the store already typed, so you cannot
         read a store you did not declare. Use <code>Processor.withStores</code> for two or three
         stores, and <code>Processor.withoutStores</code> for none.</p>
         
-        <h2 id="what-comes-out" class="section"><a class="anchor-link left" href="#what-comes-out"><i class="icofont-laika link">&#xef71;</i></a>What comes out</h2>
+        <h2 id="sending-records-on" class="section"><a class="anchor-link left" href="#sending-records-on"><i class="icofont-laika link">&#xef71;</i></a>Sending records on</h2>
         <p>Each record you return goes on to the next step. A record made with <code>withKey</code> or
         <code>withValue</code> keeps the time and headers of the one it was made from, and
         <code>withTimestamp</code> and <code>withHeaders</code> change them. Return an empty list to send
@@ -281,8 +286,9 @@
         raises no error, so choose a retention at least as long as the oldest window you
         still write to or read.</p>
         <p><code>size</code> is only what the <code>end</code> of a <code>Windowed</code> key says: a <code>put</code> does not check that
-        starts are a size apart. A size under a millisecond, or a retention shorter than the
-        size, is refused when you call <code>Topology.of</code>.</p>
+        starts are a size apart. A size under a millisecond, a retention shorter than the
+        size, or either holding part of a millisecond, is refused when you call
+        <code>Topology.of</code>.</p>
         <p>Writes are saved and restored as for a <code>KeyValueStore</code>, to the topic
         <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, which keeps records for the retention plus a
         day.</p>
@@ -365,12 +371,11 @@
         end written to the store is a whole retention past its own end. Reads do not find an
         expired session, and a <code>put</code> to one keeps nothing and raises no error, so choose a
         retention at least as long as the oldest session you still write to or read.</p>
-        <p>A <code>remove</code> does not count towards the latest end while
-        the store runs, but it does once the store is restored. So a restart can expire a
-        session you could read just before it, if you removed a session ending later than
-        any you have written. Java Kafka Streams&#39; session stores do the same.</p>
-        <p>A retention under a millisecond is refused when you call <code>Topology.of</code>. Writes are
-        saved and restored as for a <code>KeyValueStore</code>, to the topic
+        <p>After a restart, a <code>remove</code> counts towards the latest end, though it did not
+        before. So if you removed a session ending later than any you wrote, a restart can
+        expire sessions you could read just before it.</p>
+        <p>A retention under a millisecond, or holding part of one, is refused when you call
+        <code>Topology.of</code>. Writes are saved and restored as for a <code>KeyValueStore</code>, to the topic
         <code>&lt;application id&gt;-&lt;store&gt;-changelog</code>, which keeps records for the retention plus a
         day.</p>
         
@@ -430,11 +435,11 @@
         <p>With <code>Punctuation.streamTime(1.minute)</code> and a first record timestamped 12:00:30,
         it runs at 12:00:30, and next for the first record timestamped 12:01:00 or later.
         If several intervals have passed, it runs once. It is given the stream time or
-        clock time it runs at. An interval below a millisecond is refused when you call
-        <code>Topology.of</code>.</p>
+        clock time it runs at. An interval below a millisecond, or holding part of one,
+        is refused when you call <code>Topology.of</code>.</p>
         <p>What a punctuator writes to a store is saved at the next commit, as a handler&#39;s
-        writes are. Under exactly-once processing, a wall-clock punctuator that runs while no records arrive
-        commits a transaction each time, so avoid very short intervals.</p>
+        writes are. Under exactly-once processing, a wall-clock punctuator that runs while no
+        records arrive commits a transaction each time, so avoid very short intervals.</p>
         <p>Schedules are not saved. When a task starts again, here or on another member, a
         stream-time punctuator runs as soon as the task has a stream time, even if its
         interval has not passed, and a wall-clock interval starts afresh. To remember when
@@ -452,7 +457,7 @@
         <h2 id="java-processors-jvm-only" class="section"><a class="anchor-link left" href="#java-processors-jvm-only"><i class="icofont-laika link">&#xef71;</i></a>Java processors (JVM only)</h2>
         <p>On the JVM, a <code>Processor</code> or <code>FixedKeyProcessor</code> written for Java Kafka Streams can
         run as a step. It comes with the <code>xkafka-streams-java</code> module (see
-        <a href="index.html#java-partitioners-jvm-only">Java partitioners</a>).</p>
+        <a href="java-kafka-streams.html#adding-the-module">Adding the module</a>).</p>
         <pre><code class="nohighlight"><span class="comment">// Run a processor written for Java Kafka Streams as a step, with the store it uses
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">org</span><span>.</span><span class="identifier">apache</span><span>.</span><span class="identifier">kafka</span><span>.</span><span class="identifier">streams</span><span>.</span><span class="identifier">processor</span><span>.</span><span class="identifier">api</span><span>.</span><span class="type-name">Processor</span><span> </span><span class="keyword">as</span><span> </span><span class="type-name">JavaProcessor</span><span>
@@ -467,15 +472,17 @@
 </span><span>  </span><span class="type-name">KStream</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;read&quot;</span><span>), </span><span class="identifier">input</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)
     .</span><span class="identifier">process</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;count&quot;</span><span>), </span><span class="type-name">Processor</span><span>.</span><span class="identifier">fromJava</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">make</span><span>, </span><span class="identifier">counts</span><span>))     </span><span class="comment">// Each task makes an instance of its own with make
 </span><span>    .</span><span class="identifier">to</span><span>(</span><span class="type-name">Named</span><span>(</span><span class="string-literal">&quot;write&quot;</span><span>), </span><span class="identifier">output</span><span>, </span><span class="identifier">text</span><span>, </span><span class="identifier">text</span><span>)</span></code></pre>
-        <p>The processor runs as it does in Java Kafka Streams:</p>
+        <p>The processor runs as it would in Java Kafka Streams:</p>
         <ul>
           <li>Each task makes its own instance, calls <code>init</code> when the task starts, and <code>close</code>
           when the task stops or moves to another member. Fields keep their values in
           between.</li>
           <li><code>forward</code> sends records on, with the times and headers they are given.</li>
           <li><code>schedule</code> runs punctuators by stream time or by the clock, from the start time
-          given where there is one, and <code>cancel</code> stops them. Each task&#39;s instance schedules
-          its own.</li>
+          given if there is one, and <code>cancel</code> stops them. A start time already past runs
+          first at the next time on its grid, a whole number of intervals after it, as
+          Java schedules it, and one before 1970 is refused. Each task&#39;s instance
+          schedules its own.</li>
           <li><code>recordMetadata</code> gives the topic, partition and offset of the record being read,
           and <code>taskId</code>, <code>applicationId</code>, <code>currentStreamTimeMs</code> and <code>currentSystemTimeMs</code>
           give what they do in Java.</li>
@@ -483,17 +490,17 @@
         <p>Declare each store the Java code reads with <code>JavaStore.keyValue</code>, which it takes as a
         <code>KeyValueStore&lt;K, V&gt;</code>, or <code>JavaStore.timestamped</code>, which it takes as a
         <code>TimestampedKeyValueStore&lt;K, V&gt;</code>. Keys and values must be objects, such as <code>String</code>
-        or <code>java.lang.Long</code>. Window and session stores cannot be given yet, and a store given
+        or <code>java.lang.Long</code>. Window and session stores cannot be given, and a store given
         to a Java processor cannot also be given to one of xkafka&#39;s.</p>
-        <p>Each call into the Java code runs on a thread meant for waiting, since its calls to
-        stores wait for them. That can cost a switch of threads for each record such a step
-        handles; xkafka&#39;s own steps do not pay it.</p>
+        <p>Java processors run on a blocking thread, so each record they handle can cost a
+        switch of threads that xkafka&#39;s own steps avoid.</p>
         <p>These fail with an error saying so: writing to a store or sending records on in
         <code>init</code>, sending records to a named next step, <code>stateDir</code>, <code>keySerde</code> and <code>valueSerde</code>.
         <code>commit()</code> does nothing, since commits happen at the commit interval anyway, and
         sensors from <code>metrics()</code> record what they are given, which nothing reports.</p>
         <p>If some members run Java Kafka Streams, give their program the same processor under
-        the same name, with the same stores.</p>
+        the same name, with the same stores (see
+        <a href="java-kafka-streams.html">Mixing with Java Kafka Streams</a>).</p>
 
         
 <hr class="footer-rule"/>

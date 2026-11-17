@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Using types from other libraries</title>
+  
+  <meta name="author" content="Piermatteo Barambani Megalom"/>
+  
+  
+  <meta name="description" content="docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="helium/site/laika-helium.css" />
+  <script src="helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="https://github.com/PMBMegalom/xkafka"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://github.com/PMBMegalom/xkafka"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="index.html">xkafka</a></li>
+    <li class="level1 nav-leaf"><a href="getting-started.html">Getting started</a></li>
+    <li class="level1 nav-leaf"><a href="settings.html">Settings</a></li>
+    <li class="level1 nav-leaf"><a href="producing.html">Producing</a></li>
+    <li class="level1 nav-leaf"><a href="consuming.html">Consuming</a></li>
+    <li class="level1 nav-leaf"><a href="headers.html">Headers</a></li>
+    <li class="level1 nav-leaf"><a href="offsets.html">Offsets</a></li>
+    <li class="level1 nav-leaf"><a href="transactions.html">Transactions</a></li>
+    <li class="level1 nav-node"><a href="streams/">Streams</a></li>
+    <li class="level2 nav-leaf"><a href="streams/tables.html">Tables</a></li>
+    <li class="level2 nav-leaf"><a href="streams/joins.html">Joins</a></li>
+    <li class="level2 nav-leaf"><a href="streams/branching.html">Branching</a></li>
+    <li class="level2 nav-leaf"><a href="streams/windows.html">Windows</a></li>
+    <li class="level2 nav-leaf"><a href="streams/holding-back-updates.html">Holding back updates</a></li>
+    <li class="level2 nav-leaf"><a href="streams/processors.html">Processors</a></li>
+    <li class="level2 nav-leaf"><a href="streams/partitioning.html">Choosing partitions</a></li>
+    <li class="level2 nav-leaf"><a href="streams/queries.html">Querying stores</a></li>
+    <li class="level2 nav-leaf"><a href="streams/running.html">Running a program</a></li>
+    <li class="level2 nav-leaf"><a href="streams/java-kafka-streams.html">Mixing with Java Kafka Streams</a></li>
+    <li class="level1 nav-leaf"><a href="administration.html">Administration</a></li>
+    <li class="level1 nav-leaf"><a href="transport-security.html">Transport security</a></li>
+    <li class="level1 nav-leaf"><a href="errors.html">Errors</a></li>
+    <li class="level1 nav-leaf"><a href="serialization.html">Serialization</a></li>
+    <li class="level1 nav-leaf"><a href="schema-registry.html">Schema registry</a></li>
+    <li class="level1 active nav-leaf"><a href="#">Using types from other libraries</a></li>
+    <li class="level1 nav-leaf"><a href="code-generation.html">Generating classes from schema files</a></li>
+    <li class="level1 nav-leaf"><a href="platform-notes.html">Platform notes</a></li>
+    <li class="level1 nav-leaf"><a href="contributing.html">Contributing</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Using types from other libraries</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#vulcan-or-avro4s-codecs">vulcan or avro4s codecs</a></li>
+    <li class="level1 nav-leaf"><a href="#avrohugger-classes">avrohugger classes</a></li>
+    <li class="level1 nav-leaf"><a href="#scalapb-messages">ScalaPB messages</a></li>
+    <li class="level1 nav-leaf"><a href="#smithy4s-types-as-json">smithy4s types as JSON</a></li>
+    <li class="level1 nav-leaf"><a href="#smithy4s-types-as-protobuf">smithy4s types as Protobuf</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="using-types-from-other-libraries" class="title">Using types from other libraries</h1>
+        <p>If your types already come from another library, xkafka writes and reads them
+        with the schemas a Confluent Schema Registry keeps, as
+        <a href="schema-registry.html">Schema registry</a> describes for derived codecs:</p>
+        <ul>
+          <li><code>xkafka-avro-vulcan</code> and <code>xkafka-avro4s</code> write and read the types
+          <a href="https://fd4s.github.io/vulcan/">vulcan</a> and
+          <a href="https://github.com/sksamuel/avro4s">avro4s</a> have codecs for, as Avro, on the
+          JVM only.</li>
+          <li><code>xkafka-avro</code> writes and reads the classes
+          <a href="https://github.com/julianpeeters/avrohugger">avrohugger</a> generates from
+          Avro files.</li>
+          <li><code>xkafka-protobuf-scalapb</code> writes and reads the Protobuf messages
+          <a href="https://scalapb.github.io">ScalaPB</a> generates from .proto files.</li>
+          <li><code>xkafka-smithy4s</code> writes and reads the types
+          <a href="https://disneystreaming.github.io/smithy4s/">smithy4s</a> generates from Smithy
+          files, as smithy4s&#39;s JSON or as Protobuf.</li>
+        </ul>
+        <p>Each needs a <code>SchemaRegistry</code>, made as
+        <a href="schema-registry.html#connecting-to-the-registry">Connecting to the registry</a>
+        shows.</p>
+        
+        <h2 id="vulcan-or-avro4s-codecs" class="section"><a class="anchor-link left" href="#vulcan-or-avro4s-codecs"><i class="icofont-laika link">&#xef71;</i></a>vulcan or avro4s codecs</h2>
+        <p>If your types already have vulcan codecs or avro4s encoders and decoders, for
+        example because you are moving from fs2-kafka, use <code>xkafka-avro-vulcan</code> or
+        <code>xkafka-avro4s</code> to write and read them with the registry&#39;s schemas. Both
+        modules run on the JVM only, because vulcan and avro4s do.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add vulcan and avro4s serdes; each module is for the JVM only
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %% </span><span class="string-literal">&quot;xkafka-avro-vulcan&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span><span>
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %% </span><span class="string-literal">&quot;xkafka-avro4s&quot;</span><span>      % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
+        <pre><code class="nohighlight"><span class="comment">// Visits, written and read by vulcan&#39;s codec
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">syntax</span><span>.</span><span class="identifier">all</span><span>.*
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">VulcanSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Visit</span><span>(</span><span class="identifier">id</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">pages</span><span>: </span><span class="type-name">Int</span><span> = </span><span class="number-literal">1</span><span>)
+
+</span><span class="keyword">object</span><span> </span><span class="type-name">Visit</span><span>:
+  </span><span class="keyword">given</span><span> </span><span class="identifier">vulcan</span><span>.</span><span class="type-name">Codec</span><span>[</span><span class="type-name">Visit</span><span>] =
+    </span><span class="identifier">vulcan</span><span>.</span><span class="type-name">Codec</span><span>.</span><span class="identifier">record</span><span>(</span><span class="string-literal">&quot;Visit&quot;</span><span>, </span><span class="string-literal">&quot;com.example.web&quot;</span><span>): </span><span class="identifier">field</span><span> =&gt;
+      (</span><span class="identifier">field</span><span>(</span><span class="string-literal">&quot;id&quot;</span><span>, </span><span class="identifier">_</span><span>.</span><span class="identifier">id</span><span>), </span><span class="identifier">field</span><span>(</span><span class="string-literal">&quot;pages&quot;</span><span>, </span><span class="identifier">_</span><span>.</span><span class="identifier">pages</span><span>, </span><span class="identifier">default</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">1</span><span>))).</span><span class="identifier">mapN</span><span>(</span><span class="type-name">Visit</span><span>(</span><span class="identifier">_</span><span>, </span><span class="identifier">_</span><span>))
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">visits</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Visit</span><span>]] = </span><span class="type-name">VulcanSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Visit</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Visits, written and read by the encoder and decoder avro4s derives
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">sksamuel</span><span>.</span><span class="identifier">avro4s</span><span>.</span><span class="type-name">AvroNamespace</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">Avro4sSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="annotation">@AvroNamespace</span><span>(</span><span class="string-literal">&quot;com.example.web&quot;</span><span>)
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Visit</span><span>(</span><span class="identifier">id</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">pages</span><span>: </span><span class="type-name">Int</span><span> = </span><span class="number-literal">1</span><span>)
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">visits</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Visit</span><span>]] = </span><span class="type-name">Avro4sSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Visit</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        <p>xkafka registers the library&#39;s schema for the type. With
+        <code>SubjectNaming.RecordName</code>, the subject is that schema&#39;s full name where it is a
+        record; a type that is not one, such as an enum, fails to write with
+        <code>RegistryException.Unserializable</code>, as a derived one does. Records are
+        the bytes Confluent&#39;s <code>KafkaAvroSerializer</code> writes for the library&#39;s values, so
+        Confluent&#39;s serializers and these serdes read each other&#39;s records.</p>
+        <p>Each record is read with the schema it was written with, so a type reads the
+        records of its older versions:</p>
+        <ul>
+          <li>a field a record lacks takes its default;</li>
+          <li>an <code>int</code> is read as a <code>long</code>;</li>
+          <li>a symbol the enum lacks is read as the enum&#39;s default. avro4s gives a Scala 3
+          enum no default, so give such an enum a <code>SchemaFor</code> whose schema has one.</li>
+        </ul>
+        <p>When a value is written with another schema than the library&#39;s, as with
+        <code>Writing.Latest</code>, it is converted to that schema by Avro&#39;s schema resolution: a
+        field the library&#39;s schema lacks takes its default.</p>
+        <p>A type the library gives no schema, such as one whose vulcan codec has a name
+        that is not a valid Avro name, fails to make a serde with
+        <code>RegistryException.NoSchema</code>.</p>
+        
+        <h2 id="avrohugger-classes" class="section"><a class="anchor-link left" href="#avrohugger-classes"><i class="icofont-laika link">&#xef71;</i></a>avrohugger classes</h2>
+        <p>To generate classes from .avsc or .avdl files, xkafka&#39;s own generator is the
+        first choice: see <a href="code-generation.html">Generating classes from schema files</a>.
+        Its classes register exactly the schemas in your files, which avrohugger&#39;s do
+        not, as the list below shows.</p>
+        <p>If you already use <a href="https://github.com/julianpeeters/avrohugger">avrohugger</a>,
+        its sbt plugin can generate case classes that <code>AvroCodec.derived</code> writes and
+        reads, on the JVM, Scala.js and Scala Native. Generate its standard classes,
+        with enums as case objects and unions as union types:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// project/plugins.sbt
+</span><span class="identifier">addSbtPlugin</span><span>(</span><span class="string-literal">&quot;com.julianpeeters&quot;</span><span> % </span><span class="string-literal">&quot;sbt-avrohugger&quot;</span><span> % </span><span class="string-literal">&quot;2.18.0&quot;</span><span>)</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// build.sbt: generate classes from src/main/avro whenever the project compiles
+</span><span class="type-name">Compile</span><span> / </span><span class="identifier">sourceGenerators</span><span> += (</span><span class="type-name">Compile</span><span> / </span><span class="identifier">avroScalaGenerate</span><span>).</span><span class="identifier">taskValue</span><span>
+</span><span class="type-name">Compile</span><span> / </span><span class="identifier">avroScalaCustomTypes</span><span> := </span><span class="identifier">avrohugger</span><span>.</span><span class="identifier">format</span><span>.</span><span class="type-name">Standard</span><span>.</span><span class="identifier">defaultTypes</span><span>.</span><span class="identifier">copy</span><span>(
+  </span><span class="identifier">`enum`</span><span> = </span><span class="identifier">avrohugger</span><span>.</span><span class="identifier">types</span><span>.</span><span class="type-name">ScalaCaseObjectEnum</span><span>,
+  </span><span class="identifier">union</span><span> = </span><span class="identifier">avrohugger</span><span>.</span><span class="identifier">types</span><span>.</span><span class="type-name">OptionScala3UnionType</span><span>
+)</span></code></pre>
+        <p>In a project built for several platforms, keep the files in the shared
+        directory and give avrohugger its canonical path, since avrohugger fails on
+        .avdl files under a path with <code>..</code> in it:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// build.sbt: read the files of the shared directory
+</span><span class="type-name">Compile</span><span> / </span><span class="identifier">avroSourceDirectories</span><span> := </span><span class="type-name">Seq</span><span>((</span><span class="identifier">baseDirectory</span><span>.</span><span class="identifier">value</span><span> / </span><span class="string-literal">&quot;..&quot;</span><span> / </span><span class="string-literal">&quot;shared&quot;</span><span> / </span><span class="string-literal">&quot;src&quot;</span><span> / </span><span class="string-literal">&quot;main&quot;</span><span> / </span><span class="string-literal">&quot;avro&quot;</span><span>).</span><span class="identifier">getCanonicalFile</span><span>)</span></code></pre>
+        <p>Give each record you write or read its codec; the records and enums inside it
+        get theirs from it. Give each union of several types its codec too, with
+        <code>AvroCodec.union</code>, in the order of the file&#39;s union:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Visits, a record avrohugger generated from visit.avsc, which may have come by ad or by link
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">example</span><span>.</span><span class="identifier">web</span><span>.{</span><span class="type-name">Ad</span><span>, </span><span class="type-name">Link</span><span>, </span><span class="type-name">Visit</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">avro</span><span>.</span><span class="type-name">AvroCodec</span><span>
+
+</span><span class="keyword">given</span><span> </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">Ad</span><span> | </span><span class="type-name">Link</span><span>] = </span><span class="type-name">AvroCodec</span><span>.</span><span class="identifier">union</span><span>[(</span><span class="type-name">Ad</span><span>, </span><span class="type-name">Link</span><span>)]
+</span><span class="keyword">given</span><span> </span><span class="type-name">AvroCodec</span><span>[</span><span class="type-name">Visit</span><span>]     = </span><span class="type-name">AvroCodec</span><span>.</span><span class="identifier">derived</span></code></pre>
+        <p>The schema derived for a class is the file&#39;s, without its <code>doc</code>s: avrohugger
+        turns them into comments, which a codec cannot see. Records, enums, primitive
+        types, <code>bytes</code>, unions, arrays, maps, defaults, and the logical types <code>uuid</code>,
+        <code>date</code> and <code>timestamp-millis</code> are derived as the file declares them. These are
+        not:</p>
+        <ul>
+          <li><code>decimal</code>: avrohugger makes it a <code>BigDecimal</code> without its precision and
+          scale, so it fails to compile until you give one with <code>AvroCodec.decimal</code>,
+          which then serves every <code>BigDecimal</code>;</li>
+          <li><code>fixed</code>: avrohugger makes it a case class of an <code>Array[Byte]</code>, which is
+          derived as a record, not as the file&#39;s <code>fixed</code>. Do not write such classes:
+          their schema is not the file&#39;s;</li>
+          <li>an enum&#39;s <code>default</code>: avrohugger&#39;s enums do not carry it, so the derived enum
+          has none;</li>
+          <li>a <code>bytes</code> default with a character past <code>\u007f</code>: avrohugger generates
+          different bytes than the file declares, and the derived default is those.</li>
+        </ul>
+        <p>Avoid avrohugger&#39;s <code>Scala3Enum</code> option for .avdl files: the classes it
+        generates for them do not compile.</p>
+        
+        <h2 id="scalapb-messages" class="section"><a class="anchor-link left" href="#scalapb-messages"><i class="icofont-laika link">&#xef71;</i></a>ScalaPB messages</h2>
+        <p>If your .proto files come first and ScalaPB generates your messages from them,
+        <code>xkafka-protobuf-scalapb</code> writes and reads those messages:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add Protobuf serdes for the messages ScalaPB generates
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-protobuf-scalapb&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Orders, a message ScalaPB generated from shop.proto, written and read with the registry&#39;s schemas
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">example</span><span>.</span><span class="identifier">shop</span><span>.</span><span class="identifier">shop</span><span>.</span><span class="type-name">Order</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">protobuf</span><span>.</span><span class="type-name">ScalaPBSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">orders</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>]] = </span><span class="type-name">ScalaPBSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        <p>ScalaPB writes and reads each message. The schema registered for it is the
+        .proto file it was generated from: the same messages, fields and enums, without
+        the file&#39;s options. Records are compatible with Confluent&#39;s Protobuf
+        serializers and deserializers in both directions.</p>
+        <p>Records written with another version of the file are read by field number, as
+        ScalaPB reads them. With <code>Writing.Latest</code> or <code>Writing.Pinned</code>, the message is
+        found in that version of the file by its full name, such as
+        <code>com.example.shop.Order</code>. With <code>SubjectNaming.RecordName</code>, the subject is that
+        name too. A message declared inside another, such as <code>Order.Line</code>, is written
+        and read the same way.</p>
+        <p>The file may import the files Confluent&#39;s serializers know: Protobuf&#39;s
+        well-known types, such as <code>google/protobuf/timestamp.proto</code>, and the others
+        listed in
+        <a href="schema-registry.html#protobuf-values-known-only-at-run-time">Protobuf values known only at run time</a>,
+        such as <code>google/type/date.proto</code>. It may also import <code>scalapb/scalapb.proto</code>,
+        which holds ScalaPB&#39;s options. <code>ScalaPBSerde.of</code> fails with
+        <code>RegistryException.NoSchema</code> if the file imports any other file, declares
+        groups or extensions, or is written in an edition of Protobuf.</p>
+        <p><code>xkafka-protobuf-scalapb</code> brings in ScalaPB&#39;s runtime 0.11.21. Generate your
+        messages with the same version of ScalaPB&#39;s code generator, as
+        <a href="https://scalapb.github.io/docs/installation/">ScalaPB&#39;s sbt setup</a> shows.</p>
+        
+        <h2 id="smithy4s-types-as-json" class="section"><a class="anchor-link left" href="#smithy4s-types-as-json"><i class="icofont-laika link">&#xef71;</i></a>smithy4s types as JSON</h2>
+        <p>If your types come from Smithy files, <code>xkafka-smithy4s</code> writes and reads the
+        types smithy4s generates as smithy4s&#39;s JSON, with the registry&#39;s schemas, on
+        the JVM, Scala.js and Scala Native. It can also write them as Protobuf; see
+        <a href="#smithy4s-types-as-protobuf">smithy4s types as Protobuf</a>.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Add JSON and Protobuf serdes for the types smithy4s generates
+</span><span class="identifier">libraryDependencies</span><span> += </span><span class="string-literal">&quot;io.github.pmbmegalom&quot;</span><span> %%% </span><span class="string-literal">&quot;xkafka-smithy4s&quot;</span><span> % </span><span class="string-literal">&quot;0.7.1&quot;</span></code></pre>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Orders, a structure smithy4s generated from shop.smithy
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">example</span><span>.</span><span class="identifier">shop</span><span>.</span><span class="type-name">Order</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">jsonschema</span><span>.</span><span class="type-name">Smithy4sJsonSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">orders</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>]] = </span><span class="type-name">Smithy4sJsonSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Order</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        <p>A record is the JSON smithy4s&#39;s own codecs write, byte for byte, so services
+        built with smithy4s read and write the same records. Reading takes the defaults
+        of the members a record lacks and ignores the properties it does not know, as
+        smithy4s does.</p>
+        <p>xkafka registers a draft 7 JSON Schema describing this JSON, built from the
+        type&#39;s smithy4s schema. Its title is the shape&#39;s full name, such as
+        <code>example.shop.Order</code>, which <code>SubjectNaming.RecordName</code> uses as the subject:</p>
+        <ul>
+          <li>A structure is an object of its members, named by <code>@jsonName</code> if they have
+          one. Its <code>@required</code> members are required; the others may be left out or
+          null, and carry their <code>@default</code>s.</li>
+          <li>A union is an object of its one member, such as <code>{&quot;card&quot;: {...}}</code>; with
+          <code>@discriminated(&quot;kind&quot;)</code>, its member&#39;s object with <code>kind</code> naming the member;
+          and with <code>@untagged</code>, any of its members&#39; values.</li>
+          <li>An enum is the text of its values, and an intEnum the numbers of its values.</li>
+          <li>A list is an array, with unique items if it has <code>@uniqueItems</code>, and a map
+          an object of its values.</li>
+          <li>A timestamp is a number of seconds, or with <code>@timestampFormat</code> the text of a
+          <code>date-time</code> or of an <code>http-date</code>. A blob is base64 text, and a document any
+          value.</li>
+          <li><code>@length</code>, <code>@range</code> and <code>@pattern</code> are JSON Schema&#39;s <code>minLength</code> and
+          <code>maxLength</code>, <code>minItems</code> and <code>maxItems</code>, <code>minProperties</code> and <code>maxProperties</code>,
+          <code>minimum</code> and <code>maximum</code>, and <code>pattern</code>. smithy4s&#39;s <code>@documentation</code> is each
+          schema&#39;s <code>description</code>.</li>
+          <li>A shape that holds itself refers to its definition, or to the schema itself.</li>
+        </ul>
+        
+        <h2 id="smithy4s-types-as-protobuf" class="section"><a class="anchor-link left" href="#smithy4s-types-as-protobuf"><i class="icofont-laika link">&#xef71;</i></a>smithy4s types as Protobuf</h2>
+        <p><code>xkafka-smithy4s</code> also writes and reads the types smithy4s generates as
+        Protobuf messages, byte for byte as <code>smithy4s-protobuf</code> writes them, with the
+        registry&#39;s schemas, on the JVM, Scala.js and Scala Native:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Payments, a structure smithy4s generated from till.smithy
+</span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="identifier">example</span><span>.</span><span class="identifier">till</span><span>.</span><span class="type-name">Payment</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="type-name">Serde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">protobuf</span><span>.</span><span class="type-name">Smithy4sProtobufSerde</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">xkafka</span><span>.</span><span class="identifier">schemaregistry</span><span>.{</span><span class="type-name">Part</span><span>, </span><span class="type-name">SchemaRegistry</span><span>}
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">payments</span><span>(</span><span class="identifier">registry</span><span>: </span><span class="type-name">SchemaRegistry</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Serde</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Payment</span><span>]] = </span><span class="type-name">Smithy4sProtobufSerde</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, </span><span class="type-name">Payment</span><span>](</span><span class="identifier">registry</span><span>, </span><span class="type-name">Part</span><span>.</span><span class="type-name">Value</span><span>)</span></code></pre>
+        <p>xkafka registers a proto3 .proto file, in the package of the shape&#39;s
+        namespace, declaring the messages smithy4s writes, as
+        <a href="https://github.com/disneystreaming/smithy-translate">smithy-translate</a> turns
+        Smithy into Protobuf:</p>
+        <ul>
+          <li>A structure is a message of its members, numbered by their <code>@protoIndex</code>es,
+          or else in their order from 1. A union is a message of one <code>oneof</code>, named
+          <code>definition</code>, or with <code>@protoInlinedOneOf</code> the <code>oneof</code> itself, in the
+          structure holding it. An enum is an enum, numbered by its values&#39;
+          <code>@protoIndex</code>es or in their order from 0.</li>
+          <li>A list is a repeated field, and a map a map. A <code>Long</code> or <code>Integer</code> is an
+          <code>int64</code> or <code>int32</code>, or by its <code>@protoNumType</code> a <code>sint</code>, <code>uint</code>, <code>fixed</code> or
+          <code>sfixed</code> one; a <code>Byte</code> or <code>Short</code> an <code>int32</code>; a <code>BigDecimal</code>, <code>BigInteger</code>,
+          <code>UUID</code>, date or time text; a blob <code>bytes</code>.</li>
+          <li>A timestamp is a <code>google.protobuf.Timestamp</code>, a duration a
+          <code>google.protobuf.Duration</code>, and a document a <code>google.protobuf.Value</code>; with
+          <code>@protoWrapped</code>, a number, boolean, text or blob is its well-known wrapper,
+          such as <code>google.protobuf.Int64Value</code>.</li>
+        </ul>
+        <p>The file&#39;s first message is the type&#39;s. With <code>SubjectNaming.RecordName</code>, the
+        subject is that message&#39;s full name, such as <code>example.till.Payment</code>.</p>
+        <p>A type that is not a structure or union, or holds what Protobuf cannot declare,
+        fails to make a serde with <code>RegistryException.NoSchema</code>, saying why:</p>
+        <ul>
+          <li>a list of lists, maps or nulls, or a map of them;</li>
+          <li>a union&#39;s member that is a list or map;</li>
+          <li>an inlined union whose members take the numbers of its structure&#39;s fields;</li>
+          <li>two shapes or enum values of one name.</li>
+        </ul>
+        <p>xkafka does not support smithy4s&#39;s compact forms of UUIDs, dates, times and
+        timestamps, or <code>@protoWrapped</code> on other types, and fails the same way for them.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>
