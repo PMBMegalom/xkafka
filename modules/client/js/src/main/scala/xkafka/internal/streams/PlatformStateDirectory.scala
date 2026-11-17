@@ -47,6 +47,8 @@ private[xkafka] object PlatformStateDirectory:
     def write(store: Store, writes: Vector[RocksdbWrite]): F[Unit]               = awaited(JsRocksdb.write(store, writes))
     def range(store: Store, family: Int, from: Option[Array[Byte]], to: Option[Array[Byte]]): F[Vector[(Array[Byte], Array[Byte])]] =
       awaited(JsRocksdb.range(store, family, from, to, 0))
+    def page(store: Store, family: Int, from: Option[Array[Byte]], limit: Int): F[Vector[(Array[Byte], Array[Byte])]] =
+      awaited(JsRocksdb.range(store, family, from, None, limit))
     def close(store: Store): F[Unit] = awaited(JsRocksdb.close(store))
 
   /** The file operations, through Node's `fs`. */

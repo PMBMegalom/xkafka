@@ -1,0 +1,3 @@
+{"type": "record", "name": "Scoped", "namespace": "example.shop", "doc": "An enum whose symbols are named as the packages generated code names",
+ "fields": [{"name": "scope", "type": {"type": "enum", "name": "Scope", "symbols": ["java", "fs2", "xkafka", "scala", "io"]}},
+            {"name": "at", "type": {"type": "long", "logicalType": "timestamp-millis"}}, {"name": "data", "type": "bytes"}]}

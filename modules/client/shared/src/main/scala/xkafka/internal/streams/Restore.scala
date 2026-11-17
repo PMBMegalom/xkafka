@@ -62,8 +62,13 @@ private[xkafka] object Restore:
           val positions = reached(polled.records, left -- remaining, ends, backing.get)
           written(stores, changes(polled.records.flatMap(record => backing.get((record.topic, record.partition)).map(_ -> record))), positions) *>
             read(remaining, ends)
-    driver.assign(consumer, starting, starting.map(partition => StartAt(partition, from.getOrElse(partition, 0L), -1))) *>
-      endsOf(driver, consumer, starting).flatMap(read(backing.keySet, _))
+    // A store whose position is outside its changelog, as one past its end after the topic was made anew, or before its start, holds what the
+    // changelog no longer does: as Java's restore takes such a task as corrupted, the store is emptied and restored from the start.
+    starting.traverse(partition => whileMoving(driver.watermarks(consumer, partition, EndsTimeoutMillis)).map(partition -> _)).flatMap: bounds =>
+      val outside = bounds.collect { case (partition, (low, high)) if from.get(partition).exists(at => at < low || at > high) => partition }
+      outside.flatMap(changelogs.get).distinct.traverse_(name => stores(name).clear) *>
+        driver.assign(consumer, starting, starting.map(partition => StartAt(partition, (from -- outside).getOrElse(partition, 0L), -1))) *>
+        endsOf(driver, consumer, starting).flatMap(read(backing.keySet, _))
 
   /** The changes `records` make to the stores they are paired with, by the store's name, in the order read. */
   def changes(records: Iterable[(String, PolledRecord)]): Map[String, StoreChanges] =

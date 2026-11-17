@@ -207,8 +207,8 @@ private[xkafka] final class Task[F[_]](
         synced  <- schedulesOf(node, ended._1, now)
       yield synced
 
-  /** Closes each hosted processor's instance. */
-  def close: F[Unit] = subtopology.hosted.traverse_(_.hosting.close(hostedTask))
+  /** Closes each hosted processor's instance, each though one before it fails to close, failing with the first failure. */
+  def close: F[Unit] = Task.closingAll(subtopology.hosted.map(_.hosting.close(hostedTask)))
 
   /** What a hosted processor's instance is given for a call, with the task's stream time, or -1 before it has one, as Java gives it. */
   private def hostedCall(access: Map[String, StoreAccess[F]], state: TaskState, now: Long): HostedCall[F] =
@@ -226,7 +226,14 @@ private[xkafka] final class Task[F[_]](
         added.toList.sortBy(_._1).foldLeft(state.punctuations): (queues, entry) =>
           val (id, scheduled) = entry
           val schedule        = scheduled.punctuation
-          val first           = scheduled.start.getOrElse(if schedule.wallClock then now + schedule.millis else 0L)
+          // A start already past runs first at the next time on its grid after now, as Java schedules it, now being the clock or the stream time.
+          val reference = if schedule.wallClock then now else streamTime(state).getOrElse(-1L)
+          val first     =
+            scheduled.start.fold(if schedule.wallClock then now + schedule.millis else 0L): start =>
+              if start >= reference then start
+              else
+                val missed = (reference - start) / schedule.millis + 1
+                if missed > (Long.MaxValue - start) / schedule.millis then Long.MaxValue else start + missed * schedule.millis
           queues.updated(schedule.wallClock, queues.getOrElse(schedule.wallClock, PunctuationQueue(Vector.empty)).added((node.named, id) -> first))
       val kept =
         state.hostedSchedules.filter((id, _) => id._1 != node.named) ++ live.map((id, scheduled) => (node.named, id) -> scheduled.punctuation)
@@ -389,7 +396,7 @@ private[xkafka] final class Task[F[_]](
       case Consumer.Then(named, last, next) => step(last, record, state, now, next.requests, node = named.value).flatMap: (after, records, written) =>
           allPushed(next, records, after, written, now)
       case Consumer.Output(_, topic, key, value, partitioner) => written(F.pure(topic), key, value, false, record, partitioner).map((state, _))
-      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate, _, partitioner) =>
+      case Consumer.Repartitioning(repartition, key, value, _, _, _, aggregate, _, partitioner, _) =>
         written(topicNamed(s"$application-${repartition.value}-repartition"), key, value, true, record, partitioner)
           // Java drops a value that is null before a grouped table's repartition topic, which here is a change its serializer writes as none.
           .map(out => (state, if aggregate.isDefined then out.filter(_.value.isDefined) else out))
@@ -520,22 +527,20 @@ private[xkafka] final class Task[F[_]](
         case None        => F.pure((state, Vector.empty))
         case Some(bytes) =>
           for
-            found <- join.right.present(record.value).flatTraverse(join.otherValues.serializer.serialize(topic, record.headers, _))
-            held  <- storedUnder(state, join.subscribed.value, prefixOf(bytes))
-          yield
-            val answers =
-              held.flatMap: (combined, stored) =>
-                Subscription.decoded(stored.value).map: subscription =>
-                  val answer = Response(subscription.hash, found).encoded
+            found   <- join.right.present(record.value).flatTraverse(join.otherValues.serializer.serialize(topic, record.headers, _))
+            held    <- storedUnder(state, join.subscribed.value, prefixOf(bytes))
+            answers <-
+              held.flatMap((combined, stored) => Subscription.decoded(stored.value).map(combined -> _)).traverse: (combined, subscription) =>
+                answerKey(join, primaryOf(combined, bytes), record.headers).map: key =>
                   TaskOutput(
                     topic,
                     Some(subscription.primaryPartition),
-                    Some(primaryOf(combined, bytes)),
-                    Some(answer),
+                    key,
+                    Some(Response(subscription.hash, found).encoded),
                     record.timestamp,
                     record.headers
                   )
-            (state, answers)
+          yield (state, answers)
 
   /** A subscription as it reaches the other table's side: kept or deleted, and answered as it asks, as Java's `SubscriptionReceiveProcessorSupplier`
     * and `SubscriptionJoinProcessorSupplier` do.
@@ -550,13 +555,22 @@ private[xkafka] final class Task[F[_]](
     val store      = join.subscribed.value
     record.value.flatMap(Subscription.decoded).liftTo[F](unreadable).flatMap: subscription =>
       val deleting = subscription.instruction == DeleteAndPropagate || subscription.instruction == DeleteNoPropagate
-      (topicNamed(s"$application-$store-changelog"), topicNamed(s"$application-${join.subscriptions}"), topicNamed(s"$application-${join.responses}"))
-        .tupled.flatMap: (changelog, topic, responses) =>
-          // Java drops a subscription without a foreign key unless it needs an answer, which that key then finds nothing for.
-          record.key match
-            case None if subscription.instruction != PropagateNullIfMissing => F.pure((state, Vector.empty))
-            case key                                                        =>
-              val kept            = key.map(combinedOf(_, subscription.primaryKey))
+      (
+        topicNamed(s"$application-$store-changelog"),
+        topicNamed(s"$application-${join.subscriptions}"),
+        topicNamed(s"$application-${join.subscriptions}-fk"),
+        topicNamed(s"$application-${join.responses}")
+      ).tupled.flatMap: (changelog, topic, keyTopic, responses) =>
+        // Java drops a subscription without a foreign key unless it needs an answer, which that key then finds nothing for.
+        record.key match
+          case None if subscription.instruction != PropagateNullIfMissing => F.pure((state, Vector.empty))
+          case key                                                        =>
+            // The foreign key is kept as written for the `-fk` topic, as Java's store keeps it and as a change to the other table looks it up.
+            key.flatTraverse(bytes =>
+              join.otherKeys.deserializer.deserialize(topic, record.headers, Some(bytes))
+                .flatMap(foreign => join.otherKeys.serializer.serialize(keyTopic, record.headers, foreign).map(_.map(foreign -> _)))
+            ).flatMap: decoded =>
+              val kept            = decoded.map((_, bytes) => combinedOf(bytes, subscription.primaryKey))
               val (after, logged) =
                 kept.fold((state, Vector.empty[TaskOutput])): combined =>
                   val value = Option.when(!deleting)(record.value).flatten
@@ -565,18 +579,16 @@ private[xkafka] final class Task[F[_]](
                     Vector(TaskOutput(changelog, Some(partition), Some(combined), value, record.timestamp, record.headers))
                   )
               for
-                foreign <-
-                  key.flatTraverse(bytes =>
-                    join.otherKeys.deserializer.deserialize(topic, record.headers, Some(bytes)).flatMap(lookup(join.right.view, _, after))
-                  )
-                bytes <- foreign.flatTraverse(found => join.otherValues.serializer.serialize(responses, record.headers, found._1))
+                foreign <- decoded.flatTraverse((foreign, _) => lookup(join.right.view, foreign, after))
+                bytes   <- foreign.flatTraverse(found => join.otherValues.serializer.serialize(responses, record.headers, found._1))
+                primary <- answerKey(join, subscription.primaryKey, record.headers)
               yield
                 def answer(found: Option[Chunk[Byte]]) =
                   val at = foreign.fold(record.timestamp)(found => math.max(record.timestamp, found._2))
                   Vector(TaskOutput(
                     responses,
                     Some(subscription.primaryPartition),
-                    Some(subscription.primaryKey),
+                    primary,
                     Some(Response(subscription.hash, found).encoded),
                     at,
                     record.headers
@@ -611,36 +623,50 @@ private[xkafka] final class Task[F[_]](
             else
               response.foreign.traverse(bytes => join.otherValues.deserializer.deserialize(topic, record.headers, Some(bytes))).flatMap: found =>
                 val made = current.flatMap(row => join.joiner(row._1, found))
-                foreignResult(join, key, made, primary, record, state, now)
+                foreignResult(join, key, made, record, state, now)
         yield done
+
+  /** The key of an answer to the row whose key was written as `primary` for the subscriptions' `-pk` topic: the row's key written for the answers'
+    * topic, as Java's answers are.
+    */
+  private def answerKey[K, V, KO, VO, R, C1, C2](
+      join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
+      primary: Chunk[Byte],
+      headers: Headers
+  ): F[Option[Chunk[Byte]]] =
+    (topicNamed(s"$application-${join.subscriptions}-pk"), topicNamed(s"$application-${join.responses}")).tupled.flatMap: (primaryTopic, topic) =>
+      join.keys.deserializer.deserialize(primaryTopic, headers, Some(primary)).flatMap(join.keys.serializer.serialize(topic, headers, _))
 
   /** A foreign-key join's result going on, kept in its store where it has one, with the value it replaces. */
   private def foreignResult[K, V, KO, VO, R, C1, C2](
       join: ForeignKeyJoined[F, K, V, KO, VO, R, C1, C2],
       key: K,
       made: Option[R],
-      primary: Chunk[Byte],
       record: Travelling[Option[Chunk[Byte]], Option[Chunk[Byte]]],
       state: TaskState,
       now: Long
   ): F[(TaskState, Vector[TaskOutput])] =
     def result(old: Option[R]) = Travelling[K, Option[R]](key, made, record.timestamp, record.headers, Some(old))
+    // Kept in no store, the result knows no value it replaces, so it goes with none, not with one saying there was nothing before.
     join.store match
-      case None                  => pushed(join.next, result(None), state, now)
+      case None                  => pushed(join.next, Travelling[K, Option[R]](key, made, record.timestamp, record.headers, None), state, now)
       case Some((named, values)) => topicNamed(s"$application-${named.value}-changelog").flatMap: changelog =>
+          // Kept under its key as written for the store's changelog, as every store's keys are, and as the store's readers ask for it.
           for
-            held    <- storedAt(state, named.value, primary)
+            at      <- join.keys.serializer.serialize(changelog, Headers.empty, key)
+            held    <- at.flatTraverse(storedAt(state, named.value, _))
             old     <- held.traverse(stored => values.deserializer.deserialize(changelog, Headers.empty, Some(stored.value)))
             written <- made.flatTraverse(values.serializer.serialize(changelog, Headers.empty, _))
-            log = TaskOutput(changelog, Some(partition), Some(primary), written, record.timestamp, Headers.empty)
-            done <-
-              allPushed(
-                join.next,
-                Vector(result(old)),
-                state.written(named.value, primary, written.map(Stored(_, record.timestamp))),
-                Vector(log),
-                now
-              )
+            done    <-
+              at match
+                case Some(bytes) => allPushed(
+                    join.next,
+                    Vector(result(old)),
+                    state.written(named.value, bytes, written.map(Stored(_, record.timestamp))),
+                    Vector(TaskOutput(changelog, Some(partition), Some(bytes), written, record.timestamp, Headers.empty)),
+                    now
+                  )
+                case None => pushed(join.next, result(old), state, now)
           yield done
 
   /** One side of a stream-stream join as Java's processor for it sees it: its own window store and the other side's, the serdes of their values, how
@@ -935,12 +961,12 @@ private[xkafka] final class Task[F[_]](
       case Step.EvalFilter(keep)      => keep(record.key, record.value).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
       case Step.EvalMap(change)       => change(record.key, record.value)
           .flatMap((k, v) => passing(Vector(Travelling(k, v, record.timestamp, record.headers))))
-      case Step.RecordFilter(keep)            => passing(if keep(asRead(record, state)) then Vector(record) else Vector.empty)
-      case Step.RecordPeek(effect)            => effect(asRead(record, state)) *> passing(Vector(record))
-      case Step.EvalRecordFilter(keep)        => keep(asRead(record, state)).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
-      case Step.RecordMap(change)             => passing(change(asRead(record, state)).iterator.map(travelling).toVector)
-      case Step.EvalRecordMap(change, result) => change(asRead(record, state)).flatMap(made => passing(Vector(travelling(result(made)))))
-      case Step.ToStream()                    => passing(Vector(record))
+      case Step.RecordFilter(keep)     => passing(if keep(asRead(record, state)) then Vector(record) else Vector.empty)
+      case Step.RecordPeek(effect)     => effect(asRead(record, state)) *> passing(Vector(record))
+      case Step.EvalRecordFilter(keep) => keep(asRead(record, state)).flatMap(kept => passing(if kept then Vector(record) else Vector.empty))
+      case Step.RecordMap(change, _)   => passing(change(asRead(record, state)).iterator.map(travelling).toVector)
+      case Step.EvalRecordMap(change, result, _) => change(asRead(record, state)).flatMap(made => passing(Vector(travelling(result(made)))))
+      case Step.ToStream()                       => passing(Vector(record))
       case folding @ Step.WindowedAggregate(_, _, _, _, _, _, _, _, _)   => windowed(folding, record, state, now, clock)
       case folding @ Step.SlidingAggregate(_, _, _, _, _, _, _, _, _)    => sliding(folding, record, state, now, clock)
       case folding @ Step.SessionAggregate(_, _, _, _, _, _, _, _, _, _) => session(folding, record, state, now, clock)
@@ -949,7 +975,7 @@ private[xkafka] final class Task[F[_]](
       case holding @ Step.Suppress(_, _, _, _)                           => suppress(holding, record, state)
       case joining @ Step.Join(_, _)                                     => joined(joining, record, state)
       case joining @ Step.GlobalJoin(_, _, _)                            => globallyJoined(joining, record, state)
-      case filtering @ Step.TableFilter(_, _, _)                         => tableFiltered(filtering, record, state)
+      case filtering @ Step.TableFilter(_, _, _, _)                      => tableFiltered(filtering, record, state)
       case mapping @ Step.TableMapValues(_, _, _, _)                     => tableMapped(mapping, record, state, asked)
       case Step.ToTable(lift, store, key, value)                         => topicNamed(s"$application-${store.value}-changelog").flatMap: changelog =>
           key.serializer.serialize(changelog, Headers.empty, record.key).flatMap:
@@ -1151,8 +1177,8 @@ private[xkafka] final class Task[F[_]](
             .sortBy((key, start, end, _) => (end, key, -start))(using Ordering.Tuple3(using Ordering.Long, StoreContents.keys, Ordering.Long))
 
   /** What Java's table filter makes of a change: its value where `keep` keeps it, and otherwise none, with the old value filtered too; a change from
-    * no value to no value goes no further. Java's filter always asks for old values, which every table here can give. Kept in no store, the old value
-    * comes from the change.
+    * no value to no value goes no further. Kept in no store, the old value comes from the change, and where the table before has none to send, as a
+    * foreign-key join's result kept in no store has not, a value dropped is a delete whatever came before, as Java's filter makes it then.
     */
   private def tableFiltered[K, C, V](
       step: Step.TableFilter[F, K, C, V],
@@ -1163,7 +1189,10 @@ private[xkafka] final class Task[F[_]](
     step.store match
       case None =>
         val old  = record.old.flatMap(step.present).filter(step.keep(record.key, _))
-        val goes = if old.isEmpty && value.isEmpty then Vector.empty else Vector(record.copy(value = value, old = Some(old)))
+        val goes =
+          if step.unseen then Vector(record.copy(value = value, old = None))
+          else if old.isEmpty && value.isEmpty then Vector.empty
+          else Vector(record.copy(value = value, old = Some(old)))
         F.pure((state, goes, Vector.empty))
       case Some(kept) => keptResult(kept, record.key, value, record.timestamp, state, true).map:
           case None                         => (state, Vector.empty, Vector.empty)
@@ -1441,7 +1470,9 @@ private[xkafka] final class Task[F[_]](
     if now < state.nextEmit.getOrElse(store, 0L) then F.pure((Vector.empty, state))
     else
       val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
-      range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
+      val last      = state.lastEmitted.getOrElse(store, WindowStore.NoTime)
+      // As Java's `shouldEmitFinal`, a close time not past the last emitted for emits nothing, as after a task starts again with a fresh stream time.
+      (if last != WindowStore.NoTime && last >= closeTime then None else range(last)) match
         case None                 => F.pure((Vector.empty, throttled))
         case Some((lower, upper)) => storedBetween(throttled, store, lower, upper).flatMap: entries =>
             val due =
@@ -1485,8 +1516,8 @@ private[xkafka] final class Task[F[_]](
     val values                   = bufferValue(step.value)
     val (until, wait, dropEmpty) =
       step.release match
-        case Release.WindowCloses(end, grace) => (end(record.key), grace, true)
-        case Release.TimeLimit(waited)        => (record.timestamp, waited, false)
+        case Release.WindowCloses(end) => (end(record.key), subtopology.closes.getOrElse(suppressed.name, 0L), true)
+        case Release.TimeLimit(waited) => (record.timestamp, waited, false)
     def unreadable = new IllegalStateException(s"the suppression '${suppressed.name}' buffer holds a change it cannot read")
     topicNamed(s"$application-$store-changelog").flatMap: changelog =>
       (
@@ -1670,7 +1701,9 @@ private[xkafka] final class Task[F[_]](
     else
       // The next look waits an interval from now, so a clock that jumps ahead does not make every record look.
       val throttled = state.copy(nextEmit = state.nextEmit.updated(store, now + Task.EmitIntervalMillis))
-      range(state.lastEmitted.getOrElse(store, WindowStore.NoTime)) match
+      val last      = state.lastEmitted.getOrElse(store, WindowStore.NoTime)
+      // As Java's `shouldEmitFinal`, a close time not past the last emitted for emits nothing, as after a task starts again with a fresh stream time.
+      (if last != WindowStore.NoTime && last >= closeTime then None else range(last)) match
         case None                 => F.pure((Vector.empty, throttled))
         case Some((lower, upper)) => storedBetween(throttled, store, lower, upper).flatMap: entries =>
             val due =
@@ -1765,6 +1798,13 @@ private[xkafka] final class Task[F[_]](
   private def topicNamed(name: String): F[Topic] = Topic.from(name).leftMap(error => new KafkaException.InvalidValue(error)).liftTo[F]
 
 private[xkafka] object Task:
+  /** Runs each of `closes`, each though one before it fails, as Java closes what it can, failing with the first failure, the others suppressed. */
+  def closingAll[F[_]](closes: List[F[Unit]])(using F: MonadThrow[F]): F[Unit] =
+    closes.traverse(_.attempt).flatMap: outcomes =>
+      outcomes.collect { case Left(failure) => failure } match
+        case first :: rest => F.unit.map(_ => rest.foreach(first.addSuppressed)) *> F.raiseError(first)
+        case Nil           => F.unit
+
   /** A task over each store its sub-topology declares, opened with `open`, holding what `held` gives for it. */
   def over[F[_]](
       application: String,

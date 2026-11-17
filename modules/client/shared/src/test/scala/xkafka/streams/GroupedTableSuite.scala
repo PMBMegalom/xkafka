@@ -61,6 +61,10 @@ final class GroupedTableSuite extends CatsEffectSuite:
     read(97, 1, 3).assertEquals(TableChange(None, Some("a"))) *> read(97, 0, 4).assertEquals(TableChange(Some("a"), None)) *> read(2, 97, 98, 1, 5)
       .assertEquals(TableChange(Some("a"), Some("b")))
 
+  test("a change whose byte saying if it is the latest is neither 0 nor 1 is refused, as Java's ChangedDeserializer refuses it"):
+    def read(values: Int*) = changes.deserializer.deserialize(at, Headers.empty, Some(bytes(values*))).attempt
+    List(read(97, 2, 3), read(97, 7, 4), read(2, 97, 98, 9, 5)).sequence.map(found => assert(found.forall(_.isLeft), found))
+
   test("a value staying in its group is one change, and one moving leaves its group before it joins the next, its new pair made first"):
     def select(seen: scala.collection.mutable.ListBuffer[String])(unused: String, value: String) =
       val _ = unused

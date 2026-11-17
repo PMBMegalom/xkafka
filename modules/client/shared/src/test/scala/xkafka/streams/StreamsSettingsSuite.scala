@@ -67,10 +67,51 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(settings.withFetchWait(5.minutes + 1.milli), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange(5.minutes + 1.milli)))
     assertEquals(settings.withFetchWait((-1).milli), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange((-1).milli)))
     assertEquals(StreamsSettings.from(client, app, fetchWait = 6.minutes), Validated.invalidNel(StreamsSettingsError.FetchWaitOutOfRange(6.minutes)))
-    // The signature code compiled against 0.7.0 calls.
+    // The signature code compiled against 0.7.x calls.
     val earlier = StreamsSettings.from(client, app, ProcessingGuarantee.AtLeastOnce, None, 1, 30.seconds, true, None, None).orFail
     assertEquals(earlier.fetchWait, ConsumerSettings.DefaultFetchWait)
     assertEquals(StreamsSettingsError.FetchWaitOutOfRange((-1).milli).message, "fetch wait must be from 0 to 5 minutes, was -1 milliseconds")
+
+  test("exactly once commits within its transaction timeout, as Java refuses a commit interval past it, however the settings are made"):
+    val refused = Validated.invalidNel(StreamsSettingsError.CommitIntervalAboveTransactionTimeout(30.seconds, StreamsSettings.TransactionTimeout))
+    val exactly = ProcessingGuarantee.ExactlyOnce
+    assertEquals(StreamsSettings.from(client, app, exactly, commitInterval = Some(30.seconds)), refused)
+    assertEquals(StreamsSettings.from(client, app, exactly).orFail.withCommitInterval(30.seconds), refused)
+    assertEquals(StreamsSettings.from(client, app, commitInterval = Some(30.seconds)).orFail.withGuarantee(exactly), refused)
+    assert(StreamsSettings.from(client, app, exactly, commitInterval = Some(StreamsSettings.TransactionTimeout)).isValid)
+    assert(StreamsSettings.from(client, app, commitInterval = Some(30.seconds)).isValid)
+    assertEquals(
+      StreamsSettings.from(client, app, exactly, commitInterval = Some(30.seconds), concurrency = 0),
+      Validated.invalid(NonEmptyList.of(
+        StreamsSettingsError.CommitIntervalAboveTransactionTimeout(30.seconds, StreamsSettings.TransactionTimeout),
+        StreamsSettingsError.NonPositiveConcurrency(0)
+      )),
+      "reported with every other reason"
+    )
+
+  test("client properties the application's producers refuse are refused as the settings are made, however they are made"):
+    def withProperty(name: String, value: String) = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map(name -> value)).orFail
+    val exactly                                   = ProcessingGuarantee.ExactlyOnce
+    val short                                     = withProperty("delivery.timeout.ms", "20000")
+    val refusedShort                              =
+      Validated.invalidNel(
+        StreamsSettingsError.ProducerSetting(SettingsError.PropertyDurationBelowMinimum("delivery.timeout.ms", 20.seconds, 30.seconds + 5.millis))
+      )
+    assertEquals(StreamsSettings.from(short, app), refusedShort)
+    assertEquals(StreamsSettings.from(client, app).orFail.withClient(short), refusedShort)
+    // Exactly once, a message timeout past the transaction timeout is refused too, as a transactional producer refuses it.
+    val long        = withProperty("message.timeout.ms", "20000")
+    val refusedLong =
+      Validated
+        .invalidNel(StreamsSettingsError.ProducerSetting(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 20.seconds, 10.seconds)))
+    assert(StreamsSettings.from(long, app).isValid)
+    assertEquals(StreamsSettings.from(long, app, exactly), refusedLong)
+    assertEquals(StreamsSettings.from(long, app).orFail.withGuarantee(exactly), refusedLong)
+    assertEquals(
+      StreamsSettingsError.ProducerSetting(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 20.seconds, 10.seconds)).message,
+      "the application's producers refuse their settings: " + SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 20.seconds, 10.seconds)
+        .message
+    )
 
   test("every invalid setting is reported at once"):
     assertEquals(
@@ -97,8 +138,9 @@ final class StreamsSettingsSuite extends FunSuite:
   test("each setting can be changed, and invalid changes are refused"):
     val settings = StreamsSettings.from(client, app).orFail
     val changed  =
-      settings.withGuarantee(ProcessingGuarantee.ExactlyOnce).withApplicationId(ApplicationId.from("other").orFail).withCommitInterval(1.second)
-        .andThen(_.withConcurrency(4)).andThen(_.withCloseTimeout(5.seconds)).orFail
+      settings.withGuarantee(ProcessingGuarantee.ExactlyOnce)
+        .andThen(_.withApplicationId(ApplicationId.from("other").orFail).withCommitInterval(1.second)).andThen(_.withConcurrency(4))
+        .andThen(_.withCloseTimeout(5.seconds)).orFail
     assertEquals(
       (changed.guarantee, changed.applicationId.value, changed.commitInterval, changed.concurrency, changed.closeTimeout),
       (ProcessingGuarantee.ExactlyOnce, "other", Some(1.second), 4, 5.seconds)
@@ -109,3 +151,19 @@ final class StreamsSettingsSuite extends FunSuite:
     assertEquals(settings.withConcurrency(-2), Validated.invalidNel(StreamsSettingsError.NonPositiveConcurrency(-2)))
     assertEquals(settings.withCommitInterval((-1).second), Validated.invalidNel(StreamsSettingsError.NonPositiveCommitInterval((-1).second)))
     assertEquals(settings.withCloseTimeout(Duration.Zero), Validated.invalidNel(StreamsSettingsError.NonPositiveCloseTimeout(Duration.Zero)))
+    assertEquals(
+      settings.withCommitInterval(500.micros),
+      Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("commit interval", 500.micros))
+    )
+    assertEquals(settings.withCloseTimeout(1500.micros), Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("close timeout", 1500.micros)))
+    assertEquals(settings.withFetchWait(500.micros), Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("fetch wait", 500.micros)))
+    assertEquals(settings.taskTimeout, StreamsSettings.DefaultTaskTimeout)
+    assertEquals(settings.withTaskTimeout(Duration.Zero).map(_.taskTimeout), Validated.validNel(Duration.Zero))
+    assertEquals(settings.withTaskTimeout((-1).milli), Validated.invalidNel(StreamsSettingsError.NegativeTaskTimeout((-1).milli)))
+    assertEquals(settings.withTaskTimeout(500.micros), Validated.invalidNel(StreamsSettingsError.PartialMilliseconds("task timeout", 500.micros)))
+    assertEquals(
+      StreamsSettings.from(client, app, taskTimeout = (-1).second).toEither.left.map(_.toList),
+      Left(List(StreamsSettingsError.NegativeTaskTimeout((-1).second)))
+    )
+    List(".", "..").foreach: id =>
+      assertEquals(ApplicationId.from(id), Left(StreamsSettingsError.ReservedApplicationId(id)), "a directory's own names are no application's")

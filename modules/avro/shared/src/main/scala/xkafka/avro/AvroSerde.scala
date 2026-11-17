@@ -22,9 +22,10 @@
 package xkafka.avro
 
 import cats.effect.Concurrent
+import cats.syntax.all.*
 import fs2.Chunk
 import xkafka.{Deserializer, Serde}
-import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
+import xkafka.schemaregistry.{Part, RegistryException, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
 
 /** A record as it was written: the schema its writer used, and its value in that schema. */
 final case class AvroWritten(schema: AvroSchema, value: AvroValue)
@@ -33,21 +34,39 @@ final case class AvroWritten(schema: AvroSchema, value: AvroValue)
   * resolved to the codec's. A schema that names schemas registered under other subjects is not read.
   */
 object AvroFormat:
-  def apply[A](using codec: AvroCodec[A]): SchemaFormat[A] =
-    new SchemaFormat[A]:
-      private val own = codec.schema
+  def apply[A](using codec: AvroCodec[A]): SchemaFormat[A] = registering(AvroSchemaJson.render(codec.schema), rendered = true)
 
-      override val schema: Schema             = Schema(AvroSchemaJson.render(own), SchemaType.Avro)
-      override val recordName: Option[String] = own.fullName.map(_.value)
+  /** The format of `codec`, registering `text` as its schema: the text `codec`'s schema was read from, or, `rendered`, the text xkafka writes of it,
+    * which must name each of its types as itself.
+    */
+  private[avro] def registering[A](text: String, rendered: Boolean = false)(using codec: AvroCodec[A]): SchemaFormat[A] =
+    new SchemaFormat[A]:
+      private val own     = codec.schema
+      private val refusal = if rendered then codec.renderedRefusal else codec.refusal
+
+      override val schema: Schema = Schema(text, SchemaType.Avro)
+      // Confluent's strategies that name subjects by record take no other named type.
+      override val recordName: Option[String] =
+        own match
+          case AvroSchema.Record(name, _, _, _) => Some(name.value)
+          case _                                => None
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        avro(target).map: written =>
-          // A value is written as its codec gives it; where the schema is another, the fields it lacks are left out and those it adds take their
-          // defaults.
-          value => codec.encode(value).flatMap(AvroBinary.encode(written, _))
+        refusal.toLeft(()) *> avro(target).flatTap(AvroBinary.writable(own, _)).flatMap: written =>
+          // A value is written as its codec gives it. Where the schema is another, it is read into that schema as Avro resolves the codec's into it,
+          // as Java's serializer and the vulcan and avro4s serdes do: through aliases, widening numbers, leaving out the fields it lacks and taking
+          // the defaults of those it adds.
+          // Bytes on their own are written as Confluent's serializers write them, with no length before them.
+          val framed =
+            if written == own then Right((value: A) => codec.encode(value).flatMap(AvroBinary.encode(own, _)))
+            else
+              AvroBinary.decoder(own, written).map: resolved =>
+                (value: A) => codec.encode(value).flatMap(AvroBinary.encode(own, _)).flatMap(resolved).flatMap(AvroBinary.encode(written, _))
+          framed.map(write => value => write(value).flatMap(AvroBinary.toPayload(written, _)))
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        avro(writer).flatMap(AvroBinary.decoder(_, own)).map(decode => bytes => decode(bytes).flatMap(codec.decode))
+        refusal.toLeft(()) *> avro(writer).flatMap: written =>
+          AvroBinary.decoder(written, own).map(decode => bytes => AvroBinary.fromPayload(written, bytes).flatMap(decode).flatMap(codec.decode))
 
   private[avro] def avro(schema: Schema): Either[String, AvroSchema] =
     if schema.schemaType != SchemaType.Avro then Left(s"the schema is ${schema.schemaType.name}, not Avro")
@@ -56,12 +75,13 @@ object AvroFormat:
 
 /** Serdes writing and reading Avro with the schemas the registry keeps, in Confluent's wire format, as Confluent's `KafkaAvroSerializer` does. */
 object AvroSerde:
-  def of[F[_]: Concurrent, A: AvroCodec](
-      registry: SchemaRegistry[F],
-      part: Part,
-      naming: SubjectNaming = SubjectNaming.TopicName,
-      writing: Writing = Writing.Register
-  ): F[Serde[F, A]] = RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
+  /** Fails with `RegistryException.NoSchema` where `A`'s codec does not have the schema it was made [[AvroCodec.matching]]. */
+  def of[F[_], A](registry: SchemaRegistry[F], part: Part, naming: SubjectNaming = SubjectNaming.TopicName, writing: Writing = Writing.Register)(using
+      F: Concurrent[F],
+      codec: AvroCodec[A]
+  ): F[Serde[F, A]] =
+    F.fromEither(codec.renderedRefusal.map(new RegistryException.NoSchema(_)).toLeft(())) *>
+      RegistrySerde.of(registry, AvroFormat[A], part, naming, writing)
 
   /** Serdes of values of `schema`, a schema known only as the program runs: values are written with it, and records read as it describes them. */
   def generic[F[_]: Concurrent](
@@ -72,10 +92,26 @@ object AvroSerde:
       writing: Writing = Writing.Register
   ): F[Serde[F, AvroValue]] = RegistrySerde.of(registry, AvroFormat(using AvroCodec.generic(schema)), part, naming, writing)
 
+  /** Serdes of values of the schema `text` declares, as [[generic]] makes, registering `text` as it is: with the properties xkafka's schemas do not
+    * keep, such as those Kafka Connect adds, so it is the schema another client registered. Fails with `RegistryException.NoSchema` where xkafka
+    * cannot read `text`.
+    */
+  def genericText[F[_]](
+      registry: SchemaRegistry[F],
+      text: String,
+      part: Part,
+      naming: SubjectNaming = SubjectNaming.TopicName,
+      writing: Writing = Writing.Register
+  )(using F: Concurrent[F]): F[Serde[F, AvroValue]] =
+    F.fromEither(AvroSchemaJson.parse(text).leftMap(new RegistryException.NoSchema(_))).flatMap: schema =>
+      RegistrySerde.of(registry, AvroFormat.registering(text)(using AvroCodec.generic(schema)), part, naming, writing)
+
   /** Reads each record as it was written, with the schema it names, whatever that schema is: for tools that show or copy any record. */
   def asWritten[F[_]: Concurrent](registry: SchemaRegistry[F]): F[Deserializer[F, AvroWritten]] =
     RegistrySerde.deserializer(
       registry,
       schema =>
-        AvroFormat.avro(schema).flatMap(writer => AvroBinary.decoder(writer, writer).map(read => bytes => read(bytes).map(AvroWritten(writer, _))))
+        AvroFormat.avro(schema).flatMap(writer =>
+          AvroBinary.decoder(writer, writer).map(read => bytes => AvroBinary.fromPayload(writer, bytes).flatMap(read).map(AvroWritten(writer, _)))
+        )
     )

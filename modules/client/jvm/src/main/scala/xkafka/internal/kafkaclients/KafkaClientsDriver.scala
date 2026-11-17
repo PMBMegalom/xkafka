@@ -99,9 +99,9 @@ private[kafkaclients] final class DeliveryBatch(capacity: Int):
   val delivered           = new CompletableFuture[Unit]
   private val sealedBatch = new java.util.concurrent.atomic.AtomicBoolean(false)
 
+  /** Keeps the first outcome reported for a record: the Java client can report one twice, as where a transaction fails while it is being sent. */
   def report(index: Int, outcome: Either[Throwable, JavaRecordMetadata]): Unit =
-    reports.set(index, outcome)
-    if outstanding.decrementAndGet() == 0 && sealedBatch.get then delivered.complete(()): Unit
+    if reports.compareAndSet(index, null, outcome) && outstanding.decrementAndGet() == 0 && sealedBatch.get then delivered.complete(()): Unit
 
   /** No further record joins the batch, so it is delivered once the ones it has are. */
   def seal(): Unit =
@@ -147,7 +147,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
         JavaClient.Consumer(thread)
     )
 
-  override def destroyConsumer(consumer: Client): F[Unit] = onThread(consumer)(thread => F.async_[Unit](callback => thread.close(callback)))
+  override def destroyConsumer(consumer: Client): F[Unit] = onThread(consumer)(thread => javaCall(F.async_[Unit](callback => thread.close(callback))))
 
   override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): F[Client] =
     javaCall(F.blocking(JavaClient.Administration(clients.admin(connection(bootstrapServers, clientId, properties)))))
@@ -191,8 +191,9 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             case timedOut: JavaTimeoutException =>
               answered(timedOut)
               (true, partitions)
+            // The record no longer counts as outstanding, unless the client already reported it, which counted it.
             case error: Throwable =>
-              batch.outstanding.decrementAndGet()
+              if batch.reports.compareAndSet(index, null, Left(error)) then batch.outstanding.decrementAndGet(): Unit
               throw error
         def from(rest: List[EncodedRecord], partitions: Map[String, Int], taken: Int): Enqueued =
           rest match
@@ -224,7 +225,7 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             if metadata.hasOffset then metadata.offset else -1L,
             if metadata.hasTimestamp then metadata.timestamp else -1L
           ))
-        case Left(error) => Left(JavaFailures.delivery(error))
+        case Left(error) => Left(JavaFailures.delivery(error, producerOf(producer)))
 
   override def initTransactions(producer: Client, timeoutMillis: Int): F[Unit] =
     producing(producer)(value => withinTimeout(timeoutMillis)(value.initTransactions()))
@@ -236,6 +237,14 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
     producing(producer)(value => withinTimeout(timeoutMillis)(value.abortTransaction()))
+
+  /** A topic the producer's look-up did not find within the time given, which librdkafka answers as unknown. */
+  private def notFound(topic: String): KafkaException.BackendFailure =
+    new KafkaException.BackendFailure(
+      s"the topic '$topic' was not found within the time given",
+      Some(ErrorCode.UnknownTopicOrPartition),
+      Some(ErrorCode.UnknownTopicOrPartition.retriable)
+    )
 
   /** The Java client bounds a transaction call by its `max.block.ms`, the enqueue timeout, and a call that timed out or was interrupted is safe to
     * make again. So it is made again until `timeoutMillis` has passed, when the one still waiting is interrupted, as librdkafka's call gives up then.
@@ -294,11 +303,11 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   override def takeRebalances(consumer: Client): F[List[Rebalance[Event]]] =
     onThread(consumer): thread =>
-      F.async_[List[ConsumerThread.Rebalancing]](thread.takeRebalances).map(_.map(taken => Rebalance(taken, taken.kind, taken.partitions)))
+      javaCall(F.async_[List[ConsumerThread.Rebalancing]](thread.takeRebalances)).map(_.map(taken => Rebalance(taken, taken.kind, taken.partitions)))
 
   /** Inside the listener, which an assignment is still waiting in, a seek decides where the partition starts. */
   override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): F[Unit] =
-    onThread(consumer)(thread => F.async_[Unit](thread.apply(event, startAt(_, starts))))
+    onThread(consumer)(thread => javaCall(F.async_[Unit](thread.apply(event, startAt(_, starts)))))
 
   private def startAt(consumer: JavaConsumer[Array[Byte], Array[Byte]], starts: Vector[StartAt]): Unit =
     starts.foreach: start =>
@@ -319,11 +328,18 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     onConsumer(consumer)(_.commitSync(committedOffsets(offsets), Duration.ofMillis(timeoutMillis.toLong)))
 
+  /** The Java consumer refuses a partition it is not assigned with an `IllegalStateException`, where librdkafka leaves it be, so only those it is
+    * assigned are paused, and resumed below.
+    */
   override def pause(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    onConsumer(consumer)(_.pause(partitions.map(javaTopicPartition).asJava))
+    onConsumer(consumer)(value => value.pause(assigned(value, partitions).asJava))
 
   override def resume(consumer: Client, partitions: Vector[TopicPartition]): F[Unit] =
-    onConsumer(consumer)(_.resume(partitions.map(javaTopicPartition).asJava))
+    onConsumer(consumer)(value => value.resume(assigned(value, partitions).asJava))
+
+  private def assigned(consumer: JavaConsumer[Array[Byte], Array[Byte]], partitions: Vector[TopicPartition]): Vector[JavaTopicPartition] =
+    val held = consumer.assignment
+    partitions.map(javaTopicPartition).filter(held.contains)
 
   override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): F[Vector[StoredOffset]] =
     onConsumer(consumer): value =>
@@ -347,9 +363,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       val answers   = value.offsetsForTimes(requested.asJava, Duration.ofMillis(timeoutMillis.toLong))
       searches.map((partition, _) => Option(answers.get(javaTopicPartition(partition))).fold(-1L)(_.offset))
 
-  /** The Java client settles on a position before answering, so it has one whenever the partition is assigned. */
+  /** The Java client settles on a position before answering, so it has one whenever the partition is assigned; one it is not assigned, which it
+    * refuses, has none, as librdkafka answers.
+    */
   override def positions(consumer: Client, partitions: Vector[TopicPartition]): F[Vector[Long]] =
-    onConsumer(consumer)(value => partitions.map(partition => value.position(javaTopicPartition(partition))))
+    onConsumer(consumer): value =>
+      val held = value.assignment
+      partitions.map(javaTopicPartition).map(partition => if held.contains(partition) then value.position(partition) else -1L)
 
   /** The Java consumer refuses a partition it is not fetching with an `IllegalStateException`, where librdkafka answers that the partition is
     * unknown, so the same answer is given here.
@@ -375,8 +395,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
             Vector(name -> partitions(value.partitionsFor(name, timeout)))
           )
       case JavaClient.Producer(value) => topic match
-          case Some(name) => javaCall(F.blocking(Vector(name -> partitions(value.partitionsFor(name)))))
-          case None       => F.raiseError(new IllegalArgumentException("a producer looks up one topic at a time"))
+          // The Java producer waits for the topic up to max.block.ms, so it is asked again each time it gives up, until the time given passes, as
+          // librdkafka's look-up waits; a topic not found by then is unknown, as librdkafka answers.
+          case Some(name) =>
+            def lookUp: F[Vector[(String, Vector[Int])]] =
+              F.interruptible(Vector(name -> partitions(value.partitionsFor(name)))).recoverWith { case _: JavaTimeoutException => lookUp }
+            javaCall(lookUp).timeoutTo(timeoutMillis.millis, F.raiseError(notFound(name)))
+          case None => F.raiseError(new IllegalArgumentException("a producer looks up one topic at a time"))
       case JavaClient.Administration(value) =>
         val names =
           topic.fold(answered(value.listTopics(new ListTopicsOptions().timeoutMs(timeoutMillis)).names).map(_.asScala.toList))(name =>
@@ -653,13 +678,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       case portable: KafkaException => portable
       case other                    => new KafkaException.BackendFailure(other.toString, cause = other)
 
-  /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
   /** Listing groups wraps the reason it found no broker in a plain Java client exception, which classifies as nothing. */
   private val withoutWrapper: PartialFunction[Throwable, Throwable] = {
     case error: JavaKafkaException if error.getClass == classOf[JavaKafkaException] && error.getCause.isInstanceOf[JavaKafkaException] =>
       error.getCause
   }
 
+  /** A failure that says the request did not get an answer at all, which a refusal by the broker never is. */
   private def unreached(failure: KafkaException): Boolean =
     failure match
       case backendFailure: KafkaException.BackendFailure => backendFailure.code
@@ -679,8 +704,13 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
 
   private def producing[A](client: Client)(use: JavaProducer[Array[Byte], Array[Byte]] => F[A]): F[A] =
     client match
-      case JavaClient.Producer(value) => javaCall(F.defer(use(value)))
+      case JavaClient.Producer(value) => F.defer(use(value)).adaptError(JavaFailures.producedBy(value))
       case other                      => F.raiseError(new IllegalArgumentException(s"not a producer: $other"))
+
+  private def producerOf(client: Client): AnyRef =
+    client match
+      case JavaClient.Producer(value) => value
+      case other                      => other
 
   private def administering[A](client: Client)(use: Admin => F[A]): F[A] =
     client match

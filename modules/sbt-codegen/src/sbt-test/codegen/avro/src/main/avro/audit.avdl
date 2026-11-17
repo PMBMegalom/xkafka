@@ -1,0 +1,5 @@
+@namespace("example.audit")
+protocol Audit {
+  enum Level { LOW, HIGH } = LOW;
+  record Entry { string who; Level level = "LOW"; }
+}

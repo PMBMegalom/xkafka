@@ -205,7 +205,6 @@ private[xkafka] final case class StreamsGroupHeartbeatResponse(
     partitionsByUserEndpoint: Option[List[StreamsGroup.EndpointPartitions]]
 )
 
-/** Offsets a member commits for its group under its id and epoch (KIP-848), which the coordinator takes only from a member at its current epoch. */
 /** A member's description of its application's topology (KIP-1331), which the coordinator asks for in a heartbeat when it keeps descriptions. */
 private[xkafka] final case class StreamsGroupTopologyDescriptionUpdateRequest(
     groupId: String,
@@ -221,6 +220,7 @@ private[xkafka] final case class StreamsGroupTopologyDescriptionUpdateRequest(
 
 private[xkafka] final case class StreamsGroupTopologyDescriptionUpdateResponse(throttleTimeMs: Int, errorCode: Short, errorMessage: Option[String])
 
+/** Offsets a member commits for its group under its id and epoch (KIP-848), which the coordinator takes only from a member at its current epoch. */
 private[xkafka] final case class OffsetCommitRequest(
     groupId: String,
     memberId: String,

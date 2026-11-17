@@ -57,6 +57,13 @@ class Http4sQueriesSuite extends CatsEffectSuite:
         List((Method.POST, Uri.unsafeFromString("http://orders-3.internal:8080/xkafka/query")))
       )
 
+  test("a member at an IPv6 address is reached at it in brackets, and one at a name or an IPv4 address as it is"):
+    def at(host: String) = Http4sQueries.uri(Endpoint.from(host, 8080).toOption.get).renderString
+    assertEquals(at("::1"), "http://[::1]:8080/xkafka/query")
+    assertEquals(at("[fe80::1]"), "http://[fe80::1]:8080/xkafka/query")
+    assertEquals(at("10.0.0.7"), "http://10.0.0.7:8080/xkafka/query")
+    assertEquals(at("orders-3.internal"), "http://orders-3.internal:8080/xkafka/query")
+
   test("another path and scheme are posted to and answered at"):
     val path = Uri.Path.unsafeFromString("/internal/queries")
     for
@@ -80,3 +87,24 @@ class Http4sQueriesSuite extends CatsEffectSuite:
         case Left(error: UnexpectedStatus) => assertEquals(error.status, Status.NotFound)
         case other                         => fail(s"expected the query to fail, got $other")
       assertEquals(fetched.status, Status.NotFound)
+
+  test("bytes that are not a query are a bad request, and a body larger than any query is refused before it is all read"):
+    val refusing =
+      new KafkaStreams[IO]:
+        override def run: IO[Unit]                                                                     = IO.never
+        override def state: Stream[IO, StreamsState]                                                   = Stream.empty
+        override def query[A](query: Query[IO, A], allowStandby: Boolean): IO[Either[QueryProblem, A]] = IO.pure(Left(QueryProblem.Rebalancing))
+        override def answer(request: Chunk[Byte]): IO[Chunk[Byte]] = IO.raiseError(new IllegalArgumentException("the request is not an xkafka query"))
+    val app                          = Http4sQueries.routes(refusing).orNotFound
+    def post(body: Stream[IO, Byte]) = app.run(Request[IO](Method.POST, Uri.unsafeFromString("/xkafka/query"), body = body)).map(_.status)
+    for
+      bad    <- post(Stream.emits(Array[Byte](1, 2, 3)))
+      pulled <- Ref.of[IO, Long](0L)
+      // An endless body, of which no more than the limit and a chunk should be read.
+      endless = Stream.constant(0.toByte).chunkLimit(65536).evalTap(chunk => pulled.update(_ + chunk.size)).unchunks
+      large <- post(endless)
+      read  <- pulled.get
+    yield
+      assertEquals(bad, Status.BadRequest)
+      assertEquals(large, Status.PayloadTooLarge)
+      assert(read <= Http4sQueries.MaxQuery + 65536, s"read $read bytes")

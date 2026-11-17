@@ -107,6 +107,22 @@ final class TaskSuite extends CatsEffectSuite:
       // The window at 10000 ends the emission at close time 20000; the look at 26000 would end at it again, so emits nothing and keeps 20000.
       assertEquals(lasts, Vector(None, None, Some(20000L), Some(20000L), Some(31000L)))
 
+  // Java emits only once the close time passes the one it last emitted for (`shouldEmitFinal`), which a task started again keeps from its commit
+  // while its stream time starts afresh, so late records after a restart emit nothing again.
+  test("a task started again after emitting up to a close time emits nothing for records before it, though its stream time starts afresh"):
+    val emitting =
+      KStream(Named("read-r"), in, text, text).groupByKey(text, text).windowedBy(TimeWindows.tumbling(10.seconds, grace = 0.seconds))
+        .withRetention(1.hour).emitOnWindowClose.count(Named("count-r"), Store("windows")).toStream(Named("to-stream-r"))
+        .to(Named("write-r"), out, Windowed.timeSerde(text, 10.seconds), count)
+    val counted   = task(emitting, 0)
+    val restarted = TaskState.empty.copy(lastEmitted = Map("windows" -> 25000L))
+    for
+      first  <- counted.process(restarted, TaskInput(bytes("k"), bytes("v"), 12000L, Headers.empty), 0L)
+      second <- counted.process(first._1, TaskInput(bytes("k"), bytes("v"), 22000L, Headers.empty), 2000L)
+    yield
+      assertEquals((first._2 ++ second._2).filter(_.topic == out), Vector.empty)
+      assertEquals(second._1.lastEmitted.get("windows"), Some(25000L))
+
   // The example in the docs: a record at 2:05 both closes the window from 0:00 and starts the one from 2:00, past the default retention of 70 s.
   test("a window kept only for its size and grace is removed before its result is sent when record time jumps, and kept longer it is sent"):
     def emitted(retention: Option[FiniteDuration]) =

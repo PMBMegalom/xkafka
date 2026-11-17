@@ -67,6 +67,37 @@ final class BranchingSuite extends CatsEffectSuite:
       ))
     assertEquals(found, Some(List(TopologyError.DuplicateName("same"))))
 
+  test("a step named as a node a repartition or a join makes is refused, as Java refuses a second node of one name"):
+    val repartitioned =
+      read("in").selectKey(Named("key"))((_, v) => v).repartition(Repartition("x"), text, text).filter(Named("x-repartition-filter"))((_, _) => true)
+        .to(Named("write"), out, text, text)
+    assertEquals(refused(repartitioned), Some(List(TopologyError.DuplicateName("x-repartition-filter"))))
+    val joined =
+      read("in").join(Named("j"), read("other"), JoinWindows.withNoGrace(1.second), Store("s"), text, text, text)((a, b) => a + b)
+        .mapValues(Named("j-this-join"))(identity).to(Named("write"), out, text, text)
+    assertEquals(refused(joined), Some(List(TopologyError.DuplicateName("j-this-join"))))
+
+  test("a step named as a repartition topic's source is refused, as Java refuses a second node of one name"):
+    val repartitioned =
+      read("in").selectKey(Named("key"))((_, v) => v).repartition(Repartition("x"), text, text).filter(Named("x-repartition-source"))((_, _) => true)
+        .to(Named("write"), out, text, text)
+    assertEquals(refused(repartitioned), Some(List(TopologyError.DuplicateName("x-repartition-source"))))
+    assertEquals(
+      TopologyError.DuplicateName("x-repartition-source").message,
+      "two steps, or a step and a node the program makes, are named 'x-repartition-source'"
+    )
+
+  test("a step named as a join of two streams is not refused, since Java names no node so, but two joins of one name are"):
+    val join =
+      (named: String) =>
+        (_: KStream.Ends[IO, String, String, Pipeline[IO]])
+          .join(Named(named), read("other"), JoinWindows.withNoGrace(1.second), Store(s"$named-store"), text, text, text)((a, b) => a + b)
+    assert(Topology.of(join("j")(read("in").filter(Named("j"))((_, _) => true)).to(Named("write"), out, text, text)).isRight)
+    assert(
+      refused(join("j")(read("in")).to(Named("write"), out, text, text), join("j")(read("more")).to(Named("write-2"), topic("b"), text, text))
+        .exists(_.contains(TopologyError.DuplicateName("j")))
+    )
+
   test("split branch names are checked as the steps they make"):
     val found =
       refused(
@@ -241,6 +272,61 @@ final class BranchingSuite extends CatsEffectSuite:
     Task[IO]("app", topology.imapK(FunctionK.id[IO])(FunctionK.id[IO]).subtopologies.head, 0)
       .process(TaskState.empty, TaskInput(bytes("k"), bytes("a"), 0L, Headers.empty, "in"), 0L).map: (_, written) =>
         assertEquals(written.map(_.topic), Vector(out))
+
+  test("a stream's repartition named with '-repartition' already has that name as its topic, as Java names it, and a grouped table's has it added"):
+    val streamed =
+      read("in").selectKey(Named("key"))((_, v) => v).groupByKey(Repartition("orders-repartition"), text, text).count(Named("c"), Store("s"))
+        .toStream(Named("t")).to(Named("w"), topic("out"), text, Serde.long[IO])
+    val declared = internal.streams.Declaration("app", Topology.of(streamed).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name))
+    assertEquals(declared, List("app-orders-repartition"))
+    val nodes = Topology.of(streamed).orFail.describe.toString
+    List("orders-repartition-sink", "orders-repartition-source", "orders-repartition-filter")
+      .foreach(node => assert(nodes.contains(s"$node ("), nodes))
+    assert(!nodes.contains("orders-repartition-repartition"), nodes)
+    val grouped =
+      KTable(Named("t"), topic("t"), text, text, Store("ts")).groupBy(Repartition("by-repartition"), text, text)((k, v) => (v, k))
+        .count(Named("gc"), Store("gs")).toStream(Named("gt")).to(Named("gw"), topic("out"), text, Serde.long[IO].option)
+    assertEquals(
+      internal.streams.Declaration("app", Topology.of(grouped).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name)),
+      List("app-by-repartition-repartition")
+    )
+
+  test("a stream's repartition named only '-repartition' has that as its topic, as Java's, and refusals name a repartition as the program did"):
+    def counted(name: String) =
+      read("in").selectKey(Named("key"))((_, v) => v).groupByKey(Repartition(name), text, text).count(Named("c"), Store("s")).toStream(Named("t"))
+        .to(Named("w"), topic("out"), text, Serde.long[IO])
+    assertEquals(
+      internal.streams.Declaration("app", Topology.of(counted("-repartition")).orFail).subtopologies.flatMap(_.repartitionSourceTopics.map(_.name)),
+      List("app--repartition")
+    )
+    val twice =
+      List("a", "b").map(in =>
+        read(in).selectKey(Named(s"$in-key"))((_, v) => v).groupByKey(Repartition("orders-repartition"), text, text)
+          .count(Named(s"$in-c"), Store(s"$in-s")).toStream(Named(s"$in-t")).to(Named(s"$in-w"), topic(s"$in-out"), text, Serde.long[IO])
+      )
+    assert(refused(twice.head, twice(1)).exists(_.contains(TopologyError.DuplicateRepartition("orders-repartition"))), refused(twice.head, twice(1)))
+    val unused = Flow[IO, String, String].groupByKey(Repartition("r-repartition"), text, text).count(Named("counted"), Store("counts")).consumer
+    assertEquals(refused(read("in").into(unused)), Some(List(TopologyError.UnusedRepartition("r-repartition"))))
+    val long = "x" * (Topology.MaxNameLength - 5) + "-repartition"
+    assert(refused(counted(long)).exists(_.exists(_ == TopologyError.InvalidName(long, s"it is longer than ${Topology.MaxNameLength} characters"))))
+
+  test("a join is refused a name whose nodes Java would name past 249 characters, as Java checks each name it makes with a suffix"):
+    def long(name: String)  = TopologyError.InvalidName(name, s"it is longer than ${Topology.MaxNameLength} characters")
+    def table(name: String) = KTable(Named(s"$name-read"), topic(s"$name-in"), text, text, Store(s"$name-store"))
+    val tables              = "t" * 240
+    val joinedTables        =
+      table("l").join(Named(tables), table("r"))((a, b) => a + b).toStream(Named("ts")).to(Named("tw"), topic("t-out"), text, text.option)
+    assert(refused(joinedTables).exists(_.contains(long(s"$tables-join-other"))), refused(joinedTables))
+    val streams       = "s" * 236
+    val joinedStreams =
+      read("in").join(Named(streams), read("other"), JoinWindows.withNoGrace(1.second), Store("ss"), text, text, text)((a, b) => a + b)
+        .to(Named("sw"), topic("s-out"), text, text)
+    assert(refused(joinedStreams).exists(_.contains(long(s"$streams-other-windowed"))), refused(joinedStreams))
+    val foreign       = "f" * 220
+    val joinedForeign =
+      table("fl").joinOnForeignKey(Named(foreign), table("fr"), text, text, text)((_, value) => Some(value))((a, b) => a + b).toStream(Named("fs"))
+        .to(Named("fw"), topic("f-out"), text, text.option)
+    assert(refused(joinedForeign).exists(_.contains(long(s"$foreign-subscription-registration-processor"))), refused(joinedForeign))
 
   test("a program a flow prints in, labelled by its own name with no step before it, and by the step before where there is one"):
     given Console[IO] = Console.make[IO]

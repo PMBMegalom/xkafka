@@ -23,7 +23,7 @@ package xkafka.avro
 
 import cats.syntax.all.*
 import fs2.Chunk
-import io.circe.{parser, Json, JsonObject}
+import io.circe.{jawn, Json, JsonObject}
 
 /** Avro schemas as the JSON of an `.avsc` file, as the registry keeps them. */
 object AvroSchemaJson:
@@ -55,8 +55,7 @@ object AvroSchemaJson:
     )
 
   /** The schema `text` writes, or why it is not one. A named type is defined where it is first named, and named again by its name alone. */
-  def parse(text: String): Either[String, AvroSchema] =
-    parser.parse(text).leftMap(_.getMessage).flatMap(json => read(json, None, Map.empty).map(_._1))
+  def parse(text: String): Either[String, AvroSchema] = jawn.parse(text).leftMap(_.getMessage).flatMap(json => read(json, None, Map.empty).map(_._1))
 
   /** The schema as compact JSON: each named type defined where it first appears, and named by its name after. */
   def render(schema: AvroSchema): String = write(schema, None, AvroSchema.definitions(schema), Set.empty)._1.noSpaces
@@ -70,9 +69,9 @@ object AvroSchemaJson:
       _ => Left("a schema cannot be a number"),
       name => named(name, namespace, defined).map((_, defined)),
       branches =>
-        branches.toList.foldM((List.empty[AvroSchema], defined)) { case ((sofar, known), branch) =>
+        branches.toList.foldM((Vector.empty[AvroSchema], defined)) { case ((sofar, known), branch) =>
           read(branch, namespace, known).map((schema, more) => (sofar :+ schema, more))
-        }.flatMap((schemas, known) => union(schemas).map((_, known))),
+        }.flatMap((schemas, known) => union(schemas.toList).map((_, known))),
       fields => complex(fields, namespace, defined)
     )
 
@@ -84,16 +83,44 @@ object AvroSchemaJson:
 
   /** A union, refused where it holds a union, or two branches of one type other than named types of different names, as the specification says. */
   private def union(branches: List[AvroSchema]): Either[String, AvroSchema] =
-    def kind(schema: AvroSchema): String =
+    if branches.exists { case AvroSchema.Union(_) => true; case _ => false } then Left("a union cannot hold a union")
+    else twice(branches).map(kind => s"a union holds '$kind' twice").toLeft(AvroSchema.Union(branches))
+
+  /** The type two branches of a union are of, where two are: a named type by its full name, which a primitive of the same name is not. */
+  /** A type in no namespace named again, where `render` writes it, inside a record of a namespace whose type of the same name is defined before: Java
+    * and xkafka read that name as the type before, so the schema written would mean another.
+    */
+  private[avro] def shadowed(schema: AvroSchema): Option[String] =
+    val defined = AvroSchema.definitions(schema)
+    // The types written so far, as `write` defines each where it is first met.
+    def walk(at: AvroSchema, space: Option[String], written: Set[FullName]): (Option[String], Set[FullName]) =
+      def all(schemas: List[AvroSchema], inside: Option[String], seen: Set[FullName]) =
+        schemas.foldLeft((Option.empty[String], seen)) { case ((found, sofar), next) =>
+          if found.isDefined then (found, sofar) else walk(next, inside, sofar)
+        }
+      at match
+        case AvroSchema.Named(full) if written(full) =>
+          val shadow = space.map(inside => FullName(Some(inside), full.name)).filter(other => full.namespace.isEmpty && written(other))
+          (shadow.map(other => s"'${full.name}', in no namespace, would be read as '${other.value}' where it is named again"), written)
+        case AvroSchema.Named(full)                => defined.get(full).fold((None, written))(walk(_, space, written))
+        case AvroSchema.Record(name, fields, _, _) => all(fields.map(_.schema), name.namespace, written + name)
+        case AvroSchema.Enum(name, _, _, _, _)     => (None, written + name)
+        case AvroSchema.Fixed(name, _, _)          => (None, written + name)
+        case AvroSchema.Logical(logicalType)       => walk(logicalType.underlying, space, written)
+        case AvroSchema.Array(items)               => walk(items, space, written)
+        case AvroSchema.Map(values)                => walk(values, space, written)
+        case AvroSchema.Union(branches)            => all(branches, space, written)
+        case _                                     => (None, written)
+    walk(schema, None, Set.empty)._1
+
+  private[avro] def twice(branches: List[AvroSchema]): Option[String] =
+    def kind(schema: AvroSchema): (Boolean, String) =
       schema match
         case AvroSchema.Logical(logicalType)  => kind(logicalType.underlying)
-        case named if named.fullName.nonEmpty => named.fullName.fold("")(_.value)
-        case other                            => other.productPrefix
-    if branches.exists { case AvroSchema.Union(_) => true; case _ => false } then Left("a union cannot hold a union")
-    else
-      branches.map(kind).diff(branches.map(kind).distinct).headOption match
-        case Some(twice) => Left(s"a union holds '$twice' twice")
-        case None        => Right(AvroSchema.Union(branches))
+        case named if named.fullName.nonEmpty => (true, named.fullName.fold("")(_.value))
+        case other                            => (false, other.productPrefix)
+    val kinds = branches.map(kind)
+    kinds.diff(kinds.distinct).headOption.map(_._2)
 
   private def complex(fields: JsonObject, namespace: Option[String], defined: Defined): Either[String, (AvroSchema, Defined)] =
     def string(key: String)            = fields(key).flatMap(_.asString)
@@ -112,9 +139,10 @@ object AvroSchemaJson:
               val placeholder = AvroSchema.Record(name, Nil)
               define(name, placeholder, defined).flatMap: known =>
                 fields("fields").flatMap(_.asArray).toRight(s"record '${name.value}' needs 'fields'").flatMap: list =>
-                  list.toList.foldM((List.empty[AvroField], known)) { case ((sofar, known), json) =>
+                  list.toList.foldM((Vector.empty[AvroField], known)) { case ((sofar, known), json) =>
                     field(json, name.namespace, known).map((read, more) => (sofar :+ read, more))
-                  }.flatMap: (read, known) =>
+                  }.flatMap: (fields, known) =>
+                    val read  = fields.toList
                     val names = read.map(_.name)
                     if names.distinct.size != names.size then Left(s"record '${name.value}' names a field twice")
                     else
@@ -134,7 +162,7 @@ object AvroSchemaJson:
                 val schema =
                   (string("logicalType"), number("precision")) match
                     case (Some("decimal"), Some(precision)) if precision > 0 && number("scale").getOrElse(0) <= precision =>
-                      AvroSchema.Logical(LogicalType.FixedDecimal(name, size, precision, number("scale").getOrElse(0)))
+                      AvroSchema.Logical(LogicalType.FixedDecimal(name, size, precision, number("scale").getOrElse(0), aliases(name.namespace)))
                     case _ => fixed
                 define(name, schema, defined).map((schema, _))
           case "array" => fields("items").toRight("an array needs 'items'").flatMap(read(_, namespace, defined))
@@ -163,7 +191,7 @@ object AvroSchemaJson:
               (AvroField(name, schema, default, doc, aliases), known)
 
   /** The value `json` gives a field of `schema` by default, as the specification writes defaults: bytes as text of the characters 0 to 255, and a
-    * union's as its first branch's.
+    * union's as the first branch it fits.
     */
   def default(json: Json, schema: AvroSchema, defined: Map[FullName, AvroSchema]): Either[String, AvroValue] =
     def number = json.asNumber.toRight(s"expected a number, found ${json.noSpaces}")
@@ -171,13 +199,20 @@ object AvroSchemaJson:
     def bytes  =
       text.flatMap: chars =>
         if chars.forall(_ < 256) then Right(Chunk.array(chars.map(_.toByte).toArray)) else Left(s"'$chars' holds a character above 255")
+    // A default that is not a number, NaN or an infinity, is written as its name, which JSON has no number for.
+    def floating =
+      json.asString match
+        case Some("NaN")       => Right(Double.NaN)
+        case Some("Infinity")  => Right(Double.PositiveInfinity)
+        case Some("-Infinity") => Right(Double.NegativeInfinity)
+        case _                 => number.map(_.toDouble)
     schema match
       case AvroSchema.Null                       => Either.cond(json.isNull, AvroValue.Null, s"expected null, found ${json.noSpaces}")
       case AvroSchema.Boolean                    => json.asBoolean.map(AvroValue.Boolean(_)).toRight(s"expected a boolean, found ${json.noSpaces}")
       case AvroSchema.Int                        => number.flatMap(_.toInt.toRight(s"${json.noSpaces} is not an int")).map(AvroValue.Int(_))
       case AvroSchema.Long                       => number.flatMap(_.toLong.toRight(s"${json.noSpaces} is not a long")).map(AvroValue.Long(_))
-      case AvroSchema.Float                      => number.map(value => AvroValue.Float(value.toDouble.toFloat))
-      case AvroSchema.Double                     => number.map(value => AvroValue.Double(value.toDouble))
+      case AvroSchema.Float                      => floating.map(value => AvroValue.Float(value.toFloat))
+      case AvroSchema.Double                     => floating.map(AvroValue.Double(_))
       case AvroSchema.Bytes                      => bytes.map(AvroValue.Bytes(_))
       case AvroSchema.String                     => text.map(AvroValue.String(_))
       case AvroSchema.Record(name, fields, _, _) => json.asObject.toRight(s"expected an object, found ${json.noSpaces}").flatMap: supplied =>
@@ -191,7 +226,9 @@ object AvroSchemaJson:
           .flatMap(_.traverse(default(_, items, defined))).map(AvroValue.Array(_))
       case AvroSchema.Map(values) => json.asObject.toRight(s"expected an object, found ${json.noSpaces}")
           .flatMap(_.toVector.traverse((key, value) => default(value, values, defined).map(key -> _))).map(AvroValue.Map(_))
-      case AvroSchema.Union(branches)      => branches.headOption.toRight("a union without branches has no values").flatMap(default(json, _, defined))
+      // Avro 1.12 reads a union's default as the first branch it fits, where earlier versions took the first branch only.
+      case AvroSchema.Union(branches) => branches.iterator.map(default(json, _, defined)).find(_.isRight)
+          .getOrElse(Left(s"${json.noSpaces} fits none of the union's branches"))
       case AvroSchema.Fixed(name, size, _) => bytes.filterOrElse(_.size == size, s"expected $size bytes").map(AvroValue.Fixed(name, _))
       case AvroSchema.Logical(logicalType) => default(json, logicalType.underlying, defined)
       case AvroSchema.Named(name)          => defined.get(name).toRight(s"'${name.value}' is not defined").flatMap(default(json, _, defined))
@@ -200,7 +237,9 @@ object AvroSchemaJson:
   def defaultJson(value: AvroValue, schema: AvroSchema, defined: Map[FullName, AvroSchema]): Json =
     def chars(bytes: Chunk[Byte]) = Json.fromString(bytes.toArray.map(byte => (byte & 0xff).toChar).mkString)
     (value, schema) match
-      case (_, AvroSchema.Union(first :: _))                                  => defaultJson(value, first, defined)
+      // A default is written as the branch it was read as, the first it fits, as Avro 1.12 reads it.
+      case (_, AvroSchema.Union(branches @ (first :: _))) =>
+        defaultJson(value, branches.find(AvroBinary.fits(_, value, defined)).getOrElse(first), defined)
       case (_, AvroSchema.Logical(logicalType))                               => defaultJson(value, logicalType.underlying, defined)
       case (_, AvroSchema.Named(name)) if defined.contains(name)              => defaultJson(value, defined(name), defined)
       case (AvroValue.Null, _)                                                => Json.Null
@@ -236,19 +275,21 @@ object AvroSchemaJson:
         "aliases" -> Json.fromValues(names.map(alias => Json.fromString(if alias.namespace == space then alias.name else alias.value)))
       )
     schema match
-      case AvroSchema.Null                                  => (Json.fromString("null"), written)
-      case AvroSchema.Boolean                               => (Json.fromString("boolean"), written)
-      case AvroSchema.Int                                   => (Json.fromString("int"), written)
-      case AvroSchema.Long                                  => (Json.fromString("long"), written)
-      case AvroSchema.Float                                 => (Json.fromString("float"), written)
-      case AvroSchema.Double                                => (Json.fromString("double"), written)
-      case AvroSchema.Bytes                                 => (Json.fromString("bytes"), written)
-      case AvroSchema.String                                => (Json.fromString("string"), written)
-      case AvroSchema.Named(full)                           => (Json.fromString(name(full)), written)
+      case AvroSchema.Null    => (Json.fromString("null"), written)
+      case AvroSchema.Boolean => (Json.fromString("boolean"), written)
+      case AvroSchema.Int     => (Json.fromString("int"), written)
+      case AvroSchema.Long    => (Json.fromString("long"), written)
+      case AvroSchema.Float   => (Json.fromString("float"), written)
+      case AvroSchema.Double  => (Json.fromString("double"), written)
+      case AvroSchema.Bytes   => (Json.fromString("bytes"), written)
+      case AvroSchema.String  => (Json.fromString("string"), written)
+      // A type named before the place it is defined in, as a union whose default's branch comes first, is defined where it is first met.
+      case AvroSchema.Named(full) if !written.contains(full) && defined.contains(full) => write(defined(full), namespace, defined, written)
+      case AvroSchema.Named(full)                                                      => (Json.fromString(name(full)), written)
       case named if named.fullName.exists(written.contains) => (named.fullName.fold(Json.Null)(full => Json.fromString(name(full))), written)
       case AvroSchema.Record(full, fields, doc, names)      =>
         val (rendered, after) =
-          fields.foldLeft((List.empty[Json], written + full)) { case ((sofar, seen), field) =>
+          fields.foldLeft((Vector.empty[Json], written + full)) { case ((sofar, seen), field) =>
             val (schema, more) = write(field.schema, full.namespace, defined, seen)
             val json           =
               Json.fromFields(
@@ -278,10 +319,10 @@ object AvroSchemaJson:
           .leftMap(items => Json.obj("type" -> Json.fromString("array"), "items" -> items))
       case AvroSchema.Map(values) => write(values, namespace, defined, written)
           .leftMap(values => Json.obj("type" -> Json.fromString("map"), "values" -> values))
-      case AvroSchema.Union(branches) => branches.foldLeft((List.empty[Json], written)) { case ((sofar, seen), branch) =>
+      case AvroSchema.Union(branches) => branches.foldLeft((Vector.empty[Json], written)) { case ((sofar, seen), branch) =>
           write(branch, namespace, defined, seen).leftMap(sofar :+ _)
         }.leftMap(Json.fromValues)
-      case AvroSchema.Logical(LogicalType.FixedDecimal(full, size, precision, scale)) =>
+      case AvroSchema.Logical(LogicalType.FixedDecimal(full, size, precision, scale, names)) =>
         val json =
           Json.fromFields(
             header("fixed", full) ++ List(
@@ -289,7 +330,7 @@ object AvroSchemaJson:
               "logicalType" -> Json.fromString("decimal"),
               "precision"   -> Json.fromInt(precision),
               "scale"       -> Json.fromInt(scale)
-            )
+            ) ++ aliases(names, full.namespace)
           )
         (json, written + full)
       case AvroSchema.Logical(logicalType @ LogicalType.Decimal(precision, scale)) => (

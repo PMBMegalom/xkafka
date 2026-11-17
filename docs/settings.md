@@ -49,11 +49,37 @@ A rejected value raises `KafkaException.InvalidValue`, which carries the
 accumulation survives the lift.
 
 Bootstrap servers must be `host:port`, including bracketed IPv6 literals.
-Property names must not be blank. Every duration must be positive and at most
-`Int.MaxValue` milliseconds (about 24.9 days), with these exceptions:
+Property names must not be blank. Every duration, in these settings and in
+`StreamsSettings`, must be a whole number of milliseconds, since Kafka's clients
+count no finer. It must also be positive. In these settings it must be at most
+`Int.MaxValue` milliseconds (about 24.9 days); `StreamsSettings` sets no such
+limit. The exceptions are:
 
-- `linger` may be zero, and at most `ProducerSettings.LingerLimit` (15 minutes).
+- `linger` may be zero, and must be less than `ProducerSettings.LingerLimit`
+  (5 minutes), and less than a `message.timeout.ms` or `delivery.timeout.ms`
+  the properties set. A transactional producer's linger must also be less than
+  its `transactionTimeout`.
+- A `delivery.timeout.ms` the properties set must be at least `linger` and the
+  request timeout, `request.timeout.ms` or 30 seconds, together, as the Java
+  client needs. A transactional producer's `message.timeout.ms` or
+  `delivery.timeout.ms` must be at most its `transactionTimeout`, and its
+  `socket.timeout.ms` at most 100 milliseconds more, as librdkafka needs. These
+  fail with `SettingsError.PropertyDurationBelowMinimum` and
+  `SettingsError.PropertyDurationAboveLimit`.
+- `transactionTimeout` is at least
+  `TransactionalProducerSettings.TransactionTimeoutMinimum` (1 second).
+- `metadataRefreshInterval` is at most
+  `ClientSettings.MetadataRefreshIntervalLimit` (1 hour).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
+- The streams `taskTimeout` may be zero.
+- Under exactly-once, a streams `commitInterval` must be at most
+  `StreamsSettings.TransactionTimeout` (10 seconds), as Java refuses, since the
+  broker aborts a transaction open longer.
+- A streams application's client properties must make producer settings these
+  rules allow, since its producers take them: under exactly-once, those of a
+  transactional producer with the 10-second transaction timeout. One that does
+  not fails with `StreamsSettingsError.ProducerSetting`, holding the producer's
+  `SettingsError`.
 - The group membership intervals are at most
   `ConsumerSettings.SessionTimeoutLimit` (1 hour),
   `ConsumerSettings.HeartbeatIntervalLimit` (1 hour), and
@@ -82,16 +108,17 @@ val settings =
     ProducerSettings.from(client, utf8, utf8, properties = Map("retry.backoff.ms" -> "200"))
 ```
 
-Producer or consumer properties override client properties. Each platform's client reads
-the names and values itself: the Java client on the JVM, and librdkafka on Scala.js
-and Scala Native. For code that runs on more than one platform, use only properties
-that both accept with the same meaning.
+Producer or consumer properties override client properties. Properties go
+straight to the platform's client: the Java client on the JVM, and librdkafka on
+Scala.js and Scala Native. The two accept different names, so for code that runs
+on the JVM and elsewhere, use only properties both accept with the same meaning.
 
 ## Managed properties
 
 `ManagedProperties` is the set of property names xkafka sets from the typed
 settings, such as `bootstrap.servers`, `group.id`, `acks`, `linger.ms`, and the
-TLS and SASL names. Supplying one of them through the map fails as
+TLS and SASL names, with the other names librdkafka reads them under, such as
+`metadata.broker.list`. Supplying one of them through the map fails as
 `SettingsError.ManagedProperty`; use the typed setting instead.
 
 ## Changing settings
@@ -101,8 +128,16 @@ another. Those that can make the settings invalid return
 `ValidatedNel[SettingsError, *]` and validate the result in full: every one
 that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
 `withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
-`withRebalanceSafeCommits`, and `withStartingOffsets`. The others, such as
-`withCompression` or `withIsolationLevel`, return the settings directly.
+`withRebalanceSafeCommits`, `withStartingOffsets`, `withoutSessionTimeout`, and
+`withoutHeartbeatInterval`, and `TlsSettings`' `withCertificateAuthority` and
+`withClientCertificate`, `SaslSettings`' `withCredentials`, and the
+`withClient` of `ConsumerSettings`, `ProducerSettings` and
+`TransactionalProducerSettings`, which check the settings again under the new
+client's properties. The others, such as `withCompression` or
+`withIsolationLevel`, return the settings directly. `StreamsSettings` works the
+same way: its methods that set a duration, the concurrency, the guarantee, the
+client or the state directory return `ValidatedNel[StreamsSettingsError, *]`,
+and the others, such as `withApplicationId`, return the settings directly.
 
 ```scala mdoc:compile-only
 // Change two settings, each of which validates the result again
@@ -115,6 +150,22 @@ import xkafka.*
 def tuned[F[_], K, V](settings: ConsumerSettings[F, K, V]): IO[ConsumerSettings[F, K, V]] =
   settings.withFetchWait(100.millis).andThen(_.withProperty("fetch.min.bytes", "65536")).liftTo[IO]
 ```
+
+## Client settings
+
+`ClientSettings` applies to producers and consumers alike:
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `metadataRefreshInterval` | 5m | how long a new topic, partition, or leader can go unnoticed |
+
+Setting this once covers every platform. Kafka spells it
+`metadata.max.age.ms` and librdkafka spells it
+`topic.metadata.refresh.interval.ms`, so look for those names when comparing
+against their documentation.
+
+`ClientSettings` also carries the bootstrap servers, an optional client id, and
+the security settings. See [Transport security](transport-security.md).
 
 ## Consumer settings
 
@@ -129,7 +180,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `requestTimeout` | 60s | how long a call that asks the broker something waits for an answer |
 | `commitTimeout` | 15s | how long a commit waits before failing as a timed out request |
 | `assignmentFencing` | `true` | whether offsets from a partition this consumer no longer owns are refused |
-| `groupInstanceId` | none | an identity that makes the consumer a static member of its group |
+| `groupInstanceId` | none | an identity that makes the consumer a static member of its group, named as a topic is |
 | `sessionTimeout` | unset, which is 45s on every platform | how long the group waits to hear from the consumer before handing its partitions on |
 | `heartbeatInterval` | unset, which is 3s on every platform | how often the consumer tells the group it is alive |
 | `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
@@ -139,8 +190,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 
 `requestTimeout` bounds `committed`, `beginningOffsets`, `endOffsets`,
 `offsetsForTimes`, `partitionsFor`, `listTopics`, `seek`, `seekToBeginning`, and
-`seekToEnd`. Its default matches
-what Kafka's own clients use.
+`seekToEnd`.
 
 `fetchWait` is the longest the broker holds a fetch while fewer than
 `fetch.min.bytes` of records are waiting. `fetch.min.bytes` is an ordinary
@@ -164,10 +214,10 @@ Beyond the serializers, `ProducerSettings` carries:
 | setting | default | meaning |
 | --- | --- | --- |
 | `acks` | `Acks.AllReplicas` | how many replicas must hold a record before it is acknowledged |
-| `closeTimeout` | 60s | maximum flush wait for records already accepted by a producer |
+| `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered yet |
 | `idempotence` | `true` | whether Kafka's `enable.idempotence` is on, which requires `Acks.AllReplicas` |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
-| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to under 5 minutes |
 | `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
 | `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 
@@ -180,30 +230,15 @@ Beyond the client and the application's id, `StreamsSettings` carries:
 | setting | default | meaning |
 | --- | --- | --- |
 | `guarantee` | `ProcessingGuarantee.AtLeastOnce` | whether a record can be processed again after work moves |
-| `commitInterval` | unset, which is 30s at least once and 100ms exactly once | how often tasks commit |
+| `commitInterval` | unset, which is 30s with at-least-once and 100ms with exactly-once processing | how often tasks commit |
 | `concurrency` | 1 | how many tasks process records at once |
 | `closeTimeout` | 30s | how long releasing the application waits to give back its tasks and leave |
 | `topologyDescriptionPush` | `true` | whether a member sends the program's description when the broker asks for it |
 | `queryEndpoint` | unset, so other members cannot query this one | where this member answers other members' [queries](streams/queries.md) |
 | `stateDirectory` | unset, so stores are kept in memory | where the application keeps its stores on disk ([Keeping stores on disk](streams/running.md#keeping-stores-on-disk)) |
 | `fetchWait` | 500ms | how long the broker may hold a fetch of the application's consumers, from zero up to 5m |
+| `taskTimeout` | 5m | how long the application keeps asking the group's coordinator to read or commit offsets while it is not ready, does not know the member yet, or while asking fails in a way worth retrying, and keeps starting its tasks again after a failure worth retrying, before it stops with the last failure; with zero, it stops at the first |
 
 See [Streams](streams/running.md#guarantees) for each of them. `fetchWait` works
 as a [consumer's](#consumer-settings) does, and `fetch.min.bytes`, set in the
 client settings' properties, reaches the application's consumers too.
-
-## Client settings
-
-`ClientSettings` applies to producers and consumers alike:
-
-| setting | default | meaning |
-| --- | --- | --- |
-| `metadataRefreshInterval` | 5m | how long a new topic, partition, or leader can go unnoticed |
-
-Setting this once covers every platform. Kafka spells it
-`metadata.max.age.ms` and librdkafka spells it
-`topic.metadata.refresh.interval.ms`, so look for those names when comparing
-against their documentation.
-
-`ClientSettings` also carries the bootstrap servers, an optional client id, and
-the security settings. See [Transport security](transport-security.md).

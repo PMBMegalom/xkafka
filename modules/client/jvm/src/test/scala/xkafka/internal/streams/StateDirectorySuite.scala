@@ -52,8 +52,8 @@ final class StateDirectorySuite extends CatsEffectSuite:
       PlatformStateDirectory.refused("9.10.0"),
       Some(s"keeping stores on disk needs RocksDB ${BuildInfo.rocksdb}, but org.rocksdb:rocksdbjni is 9.10.0")
     )
-    assertEquals(BuildInfo.rocksdb, "10.1.3")
-    assert(PlatformStateDirectory.missing.contains("org.rocksdb:rocksdbjni:10.1.3"), PlatformStateDirectory.missing)
+    assertEquals((BuildInfo.rocksdb, BuildInfo.rocksdbjni), ("10.10.1", "10.10.1.1"))
+    assert(PlatformStateDirectory.missing.contains("org.rocksdb:rocksdbjni:10.10.1.1"), PlatformStateDirectory.missing)
 
   test("the process id is the first run's in every later run"):
     root.flatMap: at =>
@@ -98,10 +98,18 @@ final class StateDirectorySuite extends CatsEffectSuite:
           _    <- made(at, "0_2", 11.minutes)
           _    <- made(at, "0_3", 1.minute)
           _    <- made(at, StateDirectory.Global, 11.minutes)
+          _    <- made(at, "notes", 11.minutes)
           _    <- made(at, "0_4", 11.minutes) *> directory.released("0_4", Map("counts" -> 7L, "sums" -> 2L))
           held <- directory.held
           _    <- directory.cleaned(Set("0_2"), 10.minutes)
-          left <- IO.blocking(List("0_1", "0_2", "0_3", "0_4", StateDirectory.Global).filter(owner => Files.exists(at.resolve("app").resolve(owner))))
+          left <-
+            IO.blocking(
+              List("0_1", "0_2", "0_3", "0_4", StateDirectory.Global, "notes").filter(owner => Files.exists(at.resolve("app").resolve(owner)))
+            )
         yield
-          assertEquals(left, List("0_2", "0_3", "0_4", StateDirectory.Global))
+          assertEquals(
+            left,
+            List("0_2", "0_3", "0_4", StateDirectory.Global, "notes"),
+            "a directory no task is named as is not the application's to remove"
+          )
           assertEquals(held, Map("0_4" -> Map("counts" -> 7L, "sums" -> 2L)))

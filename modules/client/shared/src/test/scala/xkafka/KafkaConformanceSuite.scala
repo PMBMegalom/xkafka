@@ -810,6 +810,22 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         case Right(())                             => fail("expected a non-positive queue threshold to fail")
 
   /** librdkafka refuses a seek until the partition it names is being fetched, which holding the assignment does not yet mean. */
+  test(conformance("pausing, resuming and asking the position of a partition of a known topic not assigned do nothing and answer none")):
+    withBroker: server =>
+      val topic    = uniqueTopic("unassigned-pause")
+      val assigned = TopicPartition(topic, validPartition(0))
+      val other    = TopicPartition(topic, validPartition(1))
+
+      for
+        _        <- createPartitioned(server, topic, 2)
+        settings <- consumerSettings(server, uniqueGroup("unassigned-pause"))
+        outcome  <-
+          PlatformKafkaClient().consumer(settings, Selection.Partitions(NonEmptySet.one(assigned))).use: consumer =>
+            val pausing = consumer.pausing.orNoop
+            (pausing.pause(Set(other)).attempt, pausing.resume(Set(other)).attempt, consumer.position(other).attempt).tupled
+          .timeout(60.seconds)
+      yield assertEquals(outcome, (Right(()), Right(()), Right(None)))
+
   test(conformance("a seek of a partition not assigned is refused as unknown, and one of a partition assigned succeeds once it is fetched")):
     withBroker: server =>
       val topic      = uniqueTopic("early-seek")
@@ -874,26 +890,6 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
     def attempt: IO[Unit] = seek.handleErrorWith(_ => IO.sleep(250.millis) *> attempt)
     attempt.timeout(30.seconds)
 
-  test(conformance("a commit that cannot complete in time fails as a timed out request")):
-    withBroker: server =>
-      val topic     = uniqueTopic("commit-timeout")
-      val partition = validPartition(0)
-
-      for
-        _        <- produce(server, NonEmptyList.one(record(topic, Some("k"), Some("v"), partition)))
-        settings <- consumerSettings(server, uniqueGroup("commit-timeout"))
-        // A nanosecond cannot cover a round trip, so the outcome does not depend on how fast the broker is. Recovery is
-        // off, because the policy would otherwise retry this and report its own exhaustion instead.
-        bounded <- settings.withCommitTimeout(1.nanos).map(_.withCommitRecovery(CommitRecovery.none)).liftTo[IO]
-        outcome <-
-          PlatformKafkaClient().consumer(bounded, Selection.Topics(NonEmptySet.one(topic)))
-            .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(60.seconds)
-      yield outcome match
-        case Left(failure: KafkaException.BackendFailure) =>
-          assertEquals(failure.code, Some(ErrorCode.RequestTimedOut), s"got ${failure.getMessage}")
-          assert(failure.code.exists(_.retriable), "a commit that ran out of time should be worth retrying")
-        case other => fail(s"expected a timed out commit to fail, got $other")
-
   test(conformance("a later commit replaces an earlier one, even where its offset is lower")):
     withBroker: server =>
       val topic     = validTopic(partitionedTopic)
@@ -924,7 +920,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         // Kafka stores whatever was committed last, so a commit can move a group's position backwards and replay records.
         assertEquals(afterBehind, Some(lower), "a later commit should replace the stored offset even where it is lower")
 
-  test(conformance("a commit stores its offset's leader epoch and metadata, and a bare offset stores neither")):
+  test(conformance("a commit stores its offset's leader epoch and metadata, NUL included, and a bare offset stores neither")):
     withBroker: server =>
       val topic = uniqueTopic("commit-metadata")
       val named = TopicPartition(topic, validPartition(0))
@@ -936,7 +932,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
             for
               taken     <- consumer.records.take(2).compile.toList
-              _         <- taken.head.offset.withMetadata("première note").commit
+              _         <- taken.head.offset.withMetadata("première\u0000note").commit
               annotated <- consumer.committed(Set(named))
               _         <- taken.last.offset.committer.commit(Map(named -> taken.last.offset.nextOffset))
               bare      <- consumer.committed(Set(named))
@@ -944,7 +940,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           .timeout(60.seconds)
       yield
         val (annotated, bare) = outcome
-        assertEquals(annotated, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "première note")))
+        assertEquals(annotated, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "première\u0000note")))
         assertEquals(bare, Some(OffsetAndMetadata(validOffset(2))))
 
   test(conformance("a commit whose metadata is longer than the broker keeps fails as too large")):
@@ -1285,8 +1281,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
             assertEquals(failure.code, Some(ErrorCode.Fenced), failure.getMessage)
             assertEquals(failure.retriable, Some(false), failure.getMessage)
             assertEquals(failure.fatal, Some(true), failure.getMessage)
-            if backend == "jvm" then assertEquals(failure.transactionAbortRequired, None, failure.getMessage)
-            else assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
+            assertEquals(failure.transactionAbortRequired, Some(false), failure.getMessage)
           case other => fail(s"a fenced producer should report a backend failure, got $other")
         next match
           case Left(failure: KafkaException.BackendFailure) =>
@@ -1356,11 +1351,12 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               for
                 taken <- consumer.records.take(1).compile.toList
                 _     <-
-                  producer.transactionally(_.commitOffsets(CommittableOffsetBatch.fromFoldable(taken.map(_.offset.withMetadata("in a transaction")))))
+                  producer
+                    .transactionally(_.commitOffsets(CommittableOffsetBatch.fromFoldable(taken.map(_.offset.withMetadata("in a\u0000transaction")))))
                 after <- consumer.committed(Set(named))
               yield after.get(named).flatten
           .timeout(90.seconds)
-      yield assertEquals(stored, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "in a transaction")))
+      yield assertEquals(stored, Some(OffsetAndMetadata(validOffset(1), Some(validEpoch(0)), "in a\u0000transaction")))
 
   test(conformance("a transaction cannot record an offset from a partition its consumer has since lost")):
     withBroker: server =>
@@ -1770,7 +1766,7 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
               altered <-
                 admin.alterConsumerGroupOffsets(
                   group,
-                  NonEmptyMap.of(first -> OffsetAndMetadata(validOffset(3L), None, "kept"), unknown -> OffsetAndMetadata(validOffset(0L)))
+                  NonEmptyMap.of(first -> OffsetAndMetadata(validOffset(3L), None, "ke\u0000pt"), unknown -> OffsetAndMetadata(validOffset(0L)))
                 )
               all       <- admin.listConsumerGroupOffsets(group)
               named     <- admin.listConsumerGroupOffsets(group, NonEmptySet.of(first, second))
@@ -1782,8 +1778,8 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
         val (altered, all, named, described, listed) = seen
         assertEquals(altered(first).map(_.leftMap(_.getMessage)), Some(Right(())))
         refusedWith(altered(unknown), ErrorCode.UnknownTopicOrPartition, "altering the offset of an unknown topic")
-        assertEquals(all, Map(first -> OffsetAndMetadata(validOffset(3L), None, "kept")))
-        assertEquals(named.toSortedMap.toMap, Map(first -> Some(OffsetAndMetadata(validOffset(3L), None, "kept")), second -> None))
+        assertEquals(all, Map(first -> OffsetAndMetadata(validOffset(3L), None, "ke\u0000pt")))
+        assertEquals(named.toSortedMap.toMap, Map(first -> Some(OffsetAndMetadata(validOffset(3L), None, "ke\u0000pt")), second -> None))
         described(group) match
           case Some(Right(description)) =>
             assertEquals(description.state, ConsumerGroupState.Empty)
@@ -2059,6 +2055,25 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           case Left(failure: KafkaException.BackendFailure) => assertEquals(failure.code, Some(ErrorCode.UnknownMemberId), failure.getMessage)
           case other => fail(s"the commit of the record held through the loss should have failed as an unknown member, got $other")
         assertEquals(stored.get(partition).flatten, None, "the refused commit stored an offset")
+
+  test(conformance("a group's only member, removed from it, cannot commit what it read before")):
+    withBroker: server =>
+      val topic   = uniqueTopic("sole-lost")
+      val records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(index => record(topic, None, Some(s"record $index"), validPartition(0))))
+      for
+        _      <- createPartitioned(server, topic, 1)
+        _      <- produce(server, records)
+        plain  <- consumerSettings(server, uniqueGroup("sole-lost"))
+        member <- plain.withSessionTimeout(6.seconds).andThen(_.withHeartbeatInterval(2.seconds)).andThen(_.withMaxPollInterval(6.seconds)).liftTo[IO]
+        commit <-
+          PlatformKafkaClient().consumer(member, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
+            // The first record stays in hand for longer than the poll interval, which takes the member out of its group, and is then committed.
+            consumer.records.head.evalMap(handed => IO.sleep(15.seconds) *> handed.offset.commit.attempt).compile.lastOrError
+          .timeout(120.seconds)
+      yield
+        // With no other member in the group, the commit is refused for the member as it is where others stay.
+        val code = commit.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten
+        assertEquals(code, Some(ErrorCode.UnknownMemberId), commit)
 
   /** A first member with a limit of four seconds hands out one record of each partition and commits neither. A second member then joins, and `check`
     * gets the first member's record stream, what each member has read, and how long the second one waited for its partition.

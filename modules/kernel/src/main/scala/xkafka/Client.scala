@@ -27,6 +27,7 @@ import cats.{Applicative, FlatMap, Foldable, Functor, Order, Show}
 import cats.arrow.FunctionK
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet, Validated, ValidatedNel}
 import cats.effect.{Async, Concurrent, Temporal}
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import cats.tagless.{FunctorK, InvariantK}
 import fs2.{Chunk, Pipe, Stream}
@@ -38,10 +39,12 @@ import fs2.{Chunk, Pipe, Stream}
 val ManagedProperties: Set[String] =
   Set(
     "bootstrap.servers",
+    "metadata.broker.list",
     "client.id",
     "group.id",
     "auto.offset.reset",
     "enable.auto.commit",
+    "auto.commit.enable",
     "enable.auto.offset.store",
     "acks",
     "request.required.acks",
@@ -110,6 +113,13 @@ enum SettingsError derives CanEqual:
   case MaxPollIntervalBelowSessionTimeout(maxPollInterval: FiniteDuration, sessionTimeout: FiniteDuration)
   case RebalanceSafeCommitLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
   case StartingOffsetsLimitNotBelowMaxPollInterval(limit: FiniteDuration, maxPollInterval: FiniteDuration)
+  case PartialMilliseconds(field: SettingsError.DurationField, value: FiniteDuration)
+  case DurationNotBelowLimit(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration)
+  case DurationBelowMinimum(field: SettingsError.DurationField, value: FiniteDuration, minimum: FiniteDuration)
+  case LingerNotBelowTransactionTimeout(linger: FiniteDuration, transactionTimeout: FiniteDuration)
+  case InvalidGroupInstanceId(value: String)
+  case PropertyDurationAboveLimit(name: String, value: FiniteDuration, limit: FiniteDuration)
+  case PropertyDurationBelowMinimum(name: String, value: FiniteDuration, minimum: FiniteDuration)
 
   def message: String =
     this match
@@ -137,6 +147,14 @@ enum SettingsError derives CanEqual:
         s"the rebalance-safe commit limit must be less than maxPollInterval, was $limit against $maxPoll"
       case StartingOffsetsLimitNotBelowMaxPollInterval(limit, maxPoll) =>
         s"the starting offsets limit must be less than maxPollInterval, was $limit against $maxPoll"
+      case PartialMilliseconds(field, value)                  => s"${field.label} must be whole milliseconds, was $value"
+      case DurationNotBelowLimit(field, value, limit)         => s"${field.label} must be less than $limit, was $value"
+      case DurationBelowMinimum(field, value, minimum)        => s"${field.label} must be at least $minimum, was $value"
+      case LingerNotBelowTransactionTimeout(linger, timeout)  => s"linger must be less than transactionTimeout, was $linger against $timeout"
+      case PropertyDurationAboveLimit(name, value, limit)     => s"property '$name' must not exceed $limit, was $value"
+      case PropertyDurationBelowMinimum(name, value, minimum) => s"property '$name' must be at least $minimum, was $value"
+      case InvalidGroupInstanceId(value)                      =>
+        s"group instance id must be at most 249 letters, digits, '.', '_' or '-', and not '.' or '..', as a topic name is, was '$value'"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -175,27 +193,32 @@ private def propertyErrors(properties: Map[String, String], scope: SettingsError
 private def durationErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > SettingsError.MaxDuration then List(SettingsError.DurationExceedsMaximum(field, value))
-  else Nil
+  else partialErrors(field, value)
+
+/** Both backends count durations in milliseconds, so a part of one would be dropped, and a duration under one would become none. */
+private def partialErrors(field: SettingsError.DurationField, value: FiniteDuration): List[SettingsError] =
+  if value.toNanos % 1000000L == 0L then Nil else List(SettingsError.PartialMilliseconds(field, value))
 
 /** Checks a positive duration both backends accept up to a limit, which is the lower of their two maximums. */
 private def limitedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
   if value <= Duration.Zero then List(SettingsError.NonPositiveDuration(field, value))
   else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
-  else Nil
+  else partialErrors(field, value)
 
 /** Checks a duration both backends accept from zero up to a limit, which is the lower of their two maximums. */
 private def boundedDurationErrors(field: SettingsError.DurationField, value: FiniteDuration, limit: FiniteDuration): List[SettingsError] =
   if value < Duration.Zero then List(SettingsError.NegativeDuration(field, value))
   else if value > limit then List(SettingsError.DurationAboveLimit(field, value, limit))
-  else Nil
+  else partialErrors(field, value)
 
 /** Accepts `host:port`, including bracketed IPv6 literals, so an unusable endpoint is caught at construction. */
 private def bootstrapServerError(value: String, index: Int): Option[SettingsError] =
   val trimmed   = value.trim
   val separator = if trimmed.startsWith("[") then trimmed.indexOf(']') + 1 else trimmed.lastIndexOf(':')
   val host      = if separator > 0 then trimmed.substring(0, separator).stripPrefix("[").stripSuffix("]") else ""
-  val port      = if separator > 0 && separator < trimmed.length then trimmed.substring(separator + 1) else ""
-  val validPort = port.nonEmpty && port.forall(_.isDigit) && port.toIntOption.exists(value => value >= 1 && value <= 65535)
+  val port      = if separator > 0 && separator < trimmed.length && trimmed(separator) == ':' then trimmed.substring(separator + 1) else ""
+  val validPort =
+    port.nonEmpty && port.forall(digit => digit >= '0' && digit <= '9') && port.toIntOption.exists(value => value >= 1 && value <= 65535)
   if trimmed.isEmpty then Some(SettingsError.BlankBootstrapServer(index))
   else if host.isEmpty || !validPort then Some(SettingsError.InvalidBootstrapServer(index, value))
   else None
@@ -235,6 +258,9 @@ object ClientSettings:
   /** Both backends refresh metadata every five minutes by default. */
   val DefaultMetadataRefreshInterval: FiniteDuration = 5.minutes
 
+  /** The longest metadata refresh interval librdkafka accepts. */
+  val MetadataRefreshIntervalLimit: FiniteDuration = 1.hour
+
   def from(
       bootstrapServers: NonEmptyList[String],
       clientId: Option[String] = None,
@@ -245,7 +271,7 @@ object ClientSettings:
     val bootstrapErrors = bootstrapServers.toList.zipWithIndex.flatMap((server, index) => bootstrapServerError(server, index))
     val errors          =
       bootstrapErrors ++ propertyErrors(properties, SettingsError.PropertyScope.Client) ++
-        durationErrors(SettingsError.DurationField.MetadataRefreshInterval, metadataRefreshInterval)
+        limitedDurationErrors(SettingsError.DurationField.MetadataRefreshInterval, metadataRefreshInterval, MetadataRefreshIntervalLimit)
     validateSettings(errors).map(_ => new ClientSettings(bootstrapServers, clientId, properties, security, metadataRefreshInterval) {})
 
 sealed abstract case class ProducerSettings[F[_], K, V] private (
@@ -276,20 +302,10 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
       enqueueTimeout
     ) {}
 
-  def withClient(value: ClientSettings): ProducerSettings[F, K, V] =
-    new ProducerSettings(
-      value,
-      keySerializer,
-      valueSerializer,
-      properties,
-      acks,
-      closeTimeout,
-      idempotence,
-      compression,
-      linger,
-      batchSize,
-      enqueueTimeout
-    ) {}
+  /** These settings under another client, checked again in full, since the client's properties may refuse their linger. */
+  def withClient(value: ClientSettings): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
+    ProducerSettings
+      .from(value, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, linger, batchSize, enqueueTimeout)
 
   /** How many replicas must have a record before the broker answers for it. Anything short of `AllReplicas` needs idempotence turned off first. */
   def withAcks(value: Acks): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
@@ -338,7 +354,7 @@ sealed abstract case class ProducerSettings[F[_], K, V] private (
       enqueueTimeout
     ) {}
 
-  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
+  /** How long a record waits for others to join its batch before the batch is sent, from zero to below `ProducerSettings.LingerLimit`. */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, ProducerSettings[F, K, V]] =
     ProducerSettings
       .from(client, keySerializer, valueSerializer, properties, acks, closeTimeout, idempotence, compression, value, batchSize, enqueueTimeout)
@@ -399,8 +415,31 @@ object ProducerSettings:
   /** What both backends wait by default. */
   val DefaultLinger: FiniteDuration = 5.millis
 
-  /** The longest linger the settings accept. */
-  val LingerLimit: FiniteDuration = 15.minutes
+  /** The linger the settings accept up to and not including: librdkafka refuses one that is not below its message timeout, which is this. */
+  val LingerLimit: FiniteDuration = 5.minutes
+
+  /** Linger is below the limit, and below a message timeout (librdkafka's `message.timeout.ms`) or delivery timeout (Java's `delivery.timeout.ms`)
+    * the properties set, which librdkafka refuses a linger that is not below. A delivery timeout the properties set is at least linger and the
+    * request timeout together, as the Java client refuses one that is not.
+    */
+  private def lingerErrors(value: FiniteDuration, properties: Map[String, String]): List[SettingsError] =
+    val timeouts = TimeoutProperties.toList.flatMap(millisOf(properties, _)).filter(_ > Duration.Zero)
+    val limit    = (LingerLimit :: timeouts).min
+    if value < Duration.Zero then List(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, value))
+    else if value >= limit then List(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, value, limit))
+    else
+      val request = millisOf(properties, "request.timeout.ms").getOrElse(DefaultRequestTimeout)
+      partialErrors(SettingsError.DurationField.Linger, value) ++ millisOf(properties, "delivery.timeout.ms").filter(_ < value + request)
+        .map(SettingsError.PropertyDurationBelowMinimum("delivery.timeout.ms", _, value + request))
+
+  private val TimeoutProperties = Set("message.timeout.ms", "delivery.timeout.ms")
+
+  /** What both clients wait for a request by default, their `request.timeout.ms`. */
+  private val DefaultRequestTimeout: FiniteDuration = 30.seconds
+
+  /** The milliseconds a property named as `name`, in any case, sets, where it sets a number. */
+  private[xkafka] def millisOf(properties: Map[String, String], name: String): Option[FiniteDuration] =
+    properties.collectFirst { case (named, set) if named.trim.equalsIgnoreCase(name) => set.trim.toLongOption }.flatten.map(_.millis)
 
   /** What the Java client waits for room by default, its `max.block.ms`. */
   val DefaultEnqueueTimeout: FiniteDuration = 1.minute
@@ -421,8 +460,8 @@ object ProducerSettings:
     val errors =
       propertyErrors(properties, SettingsError.PropertyScope.Producer) ++ durationErrors(SettingsError.DurationField.CloseTimeout, closeTimeout) ++
         Option.when(idempotence && acks != Acks.AllReplicas)(SettingsError.IdempotenceRequiresAllReplicas(acks)) ++
-        boundedDurationErrors(SettingsError.DurationField.Linger, linger, LingerLimit) ++ batchSize.filter(_ <= 0)
-          .map(SettingsError.NonPositiveBatchSize(_)) ++ durationErrors(SettingsError.DurationField.EnqueueTimeout, enqueueTimeout)
+        lingerErrors(linger, client.properties ++ properties) ++ batchSize.filter(_ <= 0).map(SettingsError.NonPositiveBatchSize(_)) ++
+        durationErrors(SettingsError.DurationField.EnqueueTimeout, enqueueTimeout)
     validateSettings(errors).map(_ =>
       new ProducerSettings(
         client,
@@ -454,13 +493,13 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def mapK[G[_]](fk: FunctionK[F, G]): TransactionalProducerSettings[G, K, V] =
     new TransactionalProducerSettings(producer.mapK(fk), transactionalId, transactionTimeout) {}
 
-  def withClient(value: ClientSettings): TransactionalProducerSettings[F, K, V] =
-    new TransactionalProducerSettings(producer.withClient(value), transactionalId, transactionTimeout) {}
+  /** These settings under another client, checked again in full, since the client's properties may refuse their linger or timeouts. */
+  def withClient(value: ClientSettings): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    producer.withClient(value).andThen(TransactionalProducerSettings.checked(_, transactionalId, transactionTimeout))
 
   /** How long the broker lets a transaction stay open before it aborts it, Kafka's `transaction.timeout.ms`. */
   def withTransactionTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
-    validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, value))
-      .map(_ => new TransactionalProducerSettings(producer, transactionalId, value) {})
+    TransactionalProducerSettings.checked(producer, transactionalId, value)
 
   /** How long releasing the producer waits for records it has not delivered yet. */
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
@@ -470,9 +509,11 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
   def withCompression(value: Compression): TransactionalProducerSettings[F, K, V] =
     new TransactionalProducerSettings(producer.withCompression(value), transactionalId, transactionTimeout) {}
 
-  /** How long a record waits for others to join its batch before the batch is sent, from zero up to `ProducerSettings.LingerLimit`. */
+  /** How long a record waits for others to join its batch before the batch is sent, from zero to below `ProducerSettings.LingerLimit` and below the
+    * transaction timeout.
+    */
   def withLinger(value: FiniteDuration): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
-    producer.withLinger(value).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+    producer.withLinger(value).andThen(TransactionalProducerSettings.checked(_, transactionalId, transactionTimeout))
 
   /** The most bytes of records one batch holds before it is sent without waiting out the linger. */
   def withBatchSize(value: Int): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
@@ -490,7 +531,7 @@ sealed abstract case class TransactionalProducerSettings[F[_], K, V] private (
     withProperties(producer.properties.updated(name, value))
 
   def withProperties(values: Map[String, String]): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
-    producer.withProperties(values).map(new TransactionalProducerSettings(_, transactionalId, transactionTimeout) {})
+    producer.withProperties(values).andThen(TransactionalProducerSettings.checked(_, transactionalId, transactionTimeout))
 
 object TransactionalProducerSettings:
   /** What Kafka's own producers use for `transaction.timeout.ms`. */
@@ -521,8 +562,37 @@ object TransactionalProducerSettings:
         batchSize = batchSize,
         enqueueTimeout = enqueueTimeout
       ),
-      validateSettings(durationErrors(SettingsError.DurationField.TransactionTimeout, transactionTimeout))
-    ).mapN((producer, _) => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})
+      validateSettings(transactionTimeoutErrors(transactionTimeout))
+    ).tupled.andThen((producer, _) => checked(producer, transactionalId, transactionTimeout))
+
+  /** librdkafka refuses a transaction timeout under this. */
+  val TransactionTimeoutMinimum: FiniteDuration = 1.second
+
+  private def transactionTimeoutErrors(value: FiniteDuration): List[SettingsError] =
+    durationErrors(SettingsError.DurationField.TransactionTimeout, value) match
+      case Nil if value < TransactionTimeoutMinimum =>
+        List(SettingsError.DurationBelowMinimum(SettingsError.DurationField.TransactionTimeout, value, TransactionTimeoutMinimum))
+      case errors => errors
+
+  /** librdkafka times a transactional producer's records out after its transaction timeout, and refuses a linger that is not below it, a message
+    * timeout the properties set above it, and a socket timeout they set more than 100 milliseconds above it.
+    */
+  private[xkafka] def checked[F[_], K, V](
+      producer: ProducerSettings[F, K, V],
+      transactionalId: TransactionalId,
+      transactionTimeout: FiniteDuration
+  ): ValidatedNel[SettingsError, TransactionalProducerSettings[F, K, V]] =
+    val properties                                 = producer.client.properties ++ producer.properties
+    def above(name: String, limit: FiniteDuration) =
+      ProducerSettings.millisOf(properties, name).filter(_ > limit).map(SettingsError.PropertyDurationAboveLimit(name, _, limit))
+    val errors =
+      transactionTimeoutErrors(transactionTimeout) match
+        case Nil => Option
+            .when(producer.linger >= transactionTimeout)(SettingsError.LingerNotBelowTransactionTimeout(producer.linger, transactionTimeout))
+            .toList ++ List("message.timeout.ms", "delivery.timeout.ms").flatMap(above(_, transactionTimeout)) ++
+            above("socket.timeout.ms", transactionTimeout + 100.millis)
+        case errors => errors
+    validateSettings(errors).map(_ => new TransactionalProducerSettings(producer, transactionalId, transactionTimeout) {})
 
   given [K, V]: FunctorK[[F[_]] =>> TransactionalProducerSettings[F, K, V]] with
     override def mapK[F[_], G[_]](settings: TransactionalProducerSettings[F, K, V])(fk: FunctionK[F, G]): TransactionalProducerSettings[G, K, V] =
@@ -655,7 +725,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       fetchWait
     ) {}
 
-  def withClient(value: ClientSettings): ConsumerSettings[F, K, V] = copied(client = value)
+  /** The settings for another client, checked against it, as its properties can set the group protocol the membership settings are checked under. */
+  def withClient(value: ClientSettings): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(client = value)
 
   def withGroupId(value: ConsumerGroup): ConsumerSettings[F, K, V] = copied(groupId = value)
 
@@ -808,6 +879,7 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     ) {}
 
   private def revalidated(
+      client: ClientSettings = client,
       commitTimeout: FiniteDuration = commitTimeout,
       pollTimeout: FiniteDuration = pollTimeout,
       requestTimeout: FiniteDuration = requestTimeout,
@@ -870,6 +942,11 @@ object ConsumerSettings:
   /** The longest session timeout the settings accept. */
   val SessionTimeoutLimit: FiniteDuration = 1.hour
 
+  // The Java client holds a static member's id to the rules of topic names.
+  private def groupInstanceIdError(value: String): Option[SettingsError] =
+    if value.trim.isEmpty then Some(SettingsError.BlankGroupInstanceId)
+    else Topic.from(value).left.toOption.as(SettingsError.InvalidGroupInstanceId(value))
+
   /** The longest heartbeat interval the settings accept. */
   val HeartbeatIntervalLimit: FiniteDuration = 1.hour
 
@@ -903,6 +980,9 @@ object ConsumerSettings:
       startingOffsets: Option[StartingOffsets[F]] = None,
       fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
+    // The protocol may be set for the whole client or for the consumer, which then reads the consumer's.
+    val protocol  = (client.properties ++ properties).collect { case (name, value) if name.trim.equalsIgnoreCase("group.protocol") => value.trim }
+    val classic   = !protocol.exists(_.equalsIgnoreCase("consumer"))
     val session   = sessionTimeout.getOrElse(DefaultSessionTimeout)
     val heartbeat = heartbeatInterval.getOrElse(DefaultHeartbeatInterval)
     val intervals =
@@ -916,8 +996,9 @@ object ConsumerSettings:
     val combinations =
       if intervals.nonEmpty then Nil
       else
-        Option.when(heartbeat >= session)(SettingsError.HeartbeatNotBelowSessionTimeout(heartbeat, session)).toList ++
-          Option.when(maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session)) ++
+        // Under the consumer protocol the broker decides the session and heartbeat, so neither client compares them with the poll interval.
+        Option.when(classic && heartbeat >= session)(SettingsError.HeartbeatNotBelowSessionTimeout(heartbeat, session)).toList ++
+          Option.when(classic && maxPollInterval < session)(SettingsError.MaxPollIntervalBelowSessionTimeout(maxPollInterval, session)) ++
           // A revocation held longer than this outlasts the group's patience, which removes the consumer from it.
           rebalanceSafeCommits.filter(_.limit >= maxPollInterval)
             .map(safe => SettingsError.RebalanceSafeCommitLimitNotBelowMaxPollInterval(safe.limit, maxPollInterval)) ++
@@ -928,8 +1009,8 @@ object ConsumerSettings:
       propertyErrors(properties, SettingsError.PropertyScope.Consumer) ++ durationErrors(SettingsError.DurationField.CommitTimeout, commitTimeout) ++
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
         durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout) ++
-        boundedDurationErrors(SettingsError.DurationField.FetchWait, fetchWait, FetchWaitLimit) ++
-        Option.when(groupInstanceId.exists(_.trim.isEmpty))(SettingsError.BlankGroupInstanceId) ++ intervals ++ combinations
+        boundedDurationErrors(SettingsError.DurationField.FetchWait, fetchWait, FetchWaitLimit) ++ groupInstanceId.flatMap(groupInstanceIdError) ++
+        intervals ++ combinations
     validateSettings(errors).map(_ =>
       new ConsumerSettings(
         client,
@@ -1397,6 +1478,12 @@ trait CommittableOffset[F[_]]:
 
       override private[xkafka] def lease: Option[Lease] = self.lease
 
+      override private[xkafka] def stillHeld: Option[F[Boolean]] = self.stillHeld
+
+      override private[xkafka] def handingOut: Option[F[Boolean]] = self.handingOut
+
+      override private[xkafka] def assignment: Option[Long] = self.assignment
+
   /** The group membership this offset was read under, which is what a transaction records it against.
     *
     * A backend that cannot name that membership falls back to its committer's, which is the consumer's current one.
@@ -1405,6 +1492,19 @@ trait CommittableOffset[F[_]]:
 
   /** The lease this offset was read under, where its consumer fences its assignment and could name one. */
   private[xkafka] def lease: Option[Lease] = None
+
+  /** Whether the lease this offset was read under is still current, where its consumer fences its assignment: a record whose lease has ended was read
+    * under an assignment the group has since given to another member.
+    */
+  private[xkafka] def stillHeld: Option[F[Boolean]] = None
+
+  /** Whether the record can still be handed out, counting it handed out where it can, for a reader that takes it from [[KafkaConsumer.routedRecords]]
+    * and hands it out later; where the consumer counts none, whether it is still held.
+    */
+  private[xkafka] def handingOut: Option[F[Boolean]] = None
+
+  /** How many times the group had assigned this offset's partition to its consumer when the record was read, where the consumer counts them. */
+  private[xkafka] def assignment: Option[Long] = None
 
   final def commit: F[Unit] = committer.commitLeased(Map(topicPartition -> (offsetAndMetadata, lease)))
 
@@ -1423,6 +1523,12 @@ trait CommittableOffset[F[_]]:
       override private[xkafka] def membership: GroupMembership[G] = self.membership.mapK(fk)
 
       override private[xkafka] def lease: Option[Lease] = self.lease
+
+      override private[xkafka] def stillHeld: Option[G[Boolean]] = self.stillHeld.map(fk(_))
+
+      override private[xkafka] def handingOut: Option[G[Boolean]] = self.handingOut.map(fk(_))
+
+      override private[xkafka] def assignment: Option[Long] = self.assignment
 
 object CommittableOffset:
   given FunctorK[CommittableOffset] with
@@ -1480,15 +1586,23 @@ object CommittableOffsetBatch:
   given FunctorK[CommittableOffsetBatch] with
     override def mapK[F[_], G[_]](batch: CommittableOffsetBatch[F])(fk: FunctionK[F, G]): CommittableOffsetBatch[G] = batch.mapK(fk)
 
-  /** Keeps the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the earlier. */
+  /** Keeps the offset of the later assignment, where both were read under leases of different assignments, since only the current one can be
+    * committed, and else the higher offset. Where both are equal the incoming one wins, so its membership, usually the later one, replaces the
+    * earlier.
+    */
   private def include[F[_]](entries: Map[TopicPartition, Entry[F]], topicPartition: TopicPartition, entry: Entry[F]): Map[TopicPartition, Entry[F]] =
+    // Ordered by the assignment, then the offset, so that batches still merge in any order and grouping to one batch.
+    def rank(of: Entry[F]) = (of.lease.fold(Long.MinValue)(_.number), of.offset.offset.value)
     entries.updatedWith(topicPartition):
-      case current @ Some(existing) if existing.offset.offset.value > entry.offset.offset.value => current
-      case Some(_) | None                                                                       => Some(entry)
+      case current @ Some(existing) if Ordering[(Long, Long)].gt(rank(existing), rank(entry)) => current
+      case Some(_) | None                                                                     => Some(entry)
 
 /** Commits non-empty batches every `n` offsets or after `d`, whichever happens first. */
 def commitBatchWithin[F[_]: Temporal](n: Int, d: FiniteDuration): Pipe[F, CommittableOffset[F], Unit] =
-  _.groupWithin(n, d).evalMap(offsets => CommittableOffsetBatch.fromFoldable(offsets).commit)
+  // A batch of none, or no time, would never be committed.
+  if n <= 0 || d <= Duration.Zero then
+    _ => Stream.raiseError[F](new IllegalArgumentException(s"commitBatchWithin needs a positive size and time, was $n and $d"))
+  else _.groupWithin(n, d).evalMap(offsets => CommittableOffsetBatch.fromFoldable(offsets).commit)
 
 final case class CommittableConsumerRecord[F[_], K, V](record: ConsumerRecord[K, V], offset: CommittableOffset[F]):
   def mapK[G[_]](fk: FunctionK[F, G]): CommittableConsumerRecord[G, K, V] = CommittableConsumerRecord(record, offset.mapK(fk))
@@ -1534,7 +1648,9 @@ trait KafkaProducer[F[_], K, V]:
 
   /** Returns the partitions `topic` has, for choosing one to produce to.
     *
-    * Asking about a topic the cluster does not have creates it if the broker creates topics on request, which Kafka brokers do by default.
+    * Asking about a topic the cluster does not have creates it if the broker creates topics on request, which Kafka brokers do by default. It waits
+    * for the cluster's answer, and for a topic it is still creating, up to the client's `metadataRefreshInterval` or 30 seconds, whichever is
+    * shorter, and then fails.
     */
   def partitionsFor(topic: Topic): F[NonEmptySet[Partition]]
 
@@ -1563,7 +1679,13 @@ trait KafkaProducer[F[_], K, V]:
       maxInFlight: Int
   )(enqueue: NonEmptyList[ProducerRecord[K, V]] => F[F[A]])(using Concurrent[F]): Pipe[F, NonEmptyList[ProducerRecord[K, V]], A] =
     if maxInFlight <= 0 then _ => Stream.raiseError(new IllegalArgumentException("maxInFlight must be positive"))
-    else _.evalMap(enqueue).parEvalMap(maxInFlight)(identity)
+    else
+      // A permit is taken before a batch is enqueued and given back once it is acknowledged, since the stage that awaits acknowledgements takes the
+      // next batch, enqueuing it, before it waits for room.
+      batches =>
+        Stream.eval(Semaphore[F](maxInFlight.toLong)).flatMap: permits =>
+          batches.evalMap(batch => permits.acquire *> enqueue(batch).onError(_ => permits.release))
+            .parEvalMap(maxInFlight)(acknowledged => Concurrent[F].guarantee(acknowledged, permits.release))
 
   /** Transforms the effect. Translating the acknowledgement nested inside the enqueue needs a `Functor[G]`, so this is not a lawful `FunctorK`. */
   final def mapK[G[_]](fk: FunctionK[F, G])(using G: Functor[G]): KafkaProducer[G, K, V] =
@@ -1650,6 +1772,21 @@ trait KafkaConsumer[F[_], K, V]:
     */
   def assignmentChanges: Stream[F, Set[TopicPartition]]
 
+  /** Each assignment, with how many times the group has assigned each of its partitions, so a partition revoked and assigned again between two looks
+    * is seen to have been, where the consumer counts them.
+    */
+  private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] = assignmentChanges.map(_.map(_ -> 0L).toMap)
+
+  /** Whether `assignmentNumbers` counts the assignments, as the numbers its records carry do: a consumer that wraps another, and does not, has its
+    * records' numbers ignored, so that they are not taken for assignments its partitions' streams have not seen.
+    */
+  private[xkafka] def numbersAssignments: Boolean = false
+
+  /** The records, not yet counted as handed out, for a reader that hands each out later through its offset's `handingOut`: a record it drops then, as
+    * one fetched before a seek, is not waited for by rebalance-safe commits.
+    */
+  private[xkafka] def routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] = records
+
   /** Stops fetching, so the record streams end once the records already fetched have been handed over.
     *
     * This is how a consumer stops gracefully: nothing already fetched is dropped, and offsets stay committable afterwards. It returns as soon as
@@ -1663,7 +1800,9 @@ trait KafkaConsumer[F[_], K, V]:
   /** Hands every record to `process` a chunk at a time and commits each chunk once it returns.
     *
     * Partitions are processed alongside one another, so a slow chunk holds back only the partition it came from. It returns once `stopConsuming` has
-    * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails.
+    * been called and everything already fetched has been processed, and otherwise runs until it is cancelled or something fails. A chunk whose commit
+    * is refused as `ErrorCode.IllegalGeneration`, its partition having gone to another member, is not committed, and the member it went to reads its
+    * records again.
     *
     * @param maxQueuedRecords
     *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
@@ -1673,7 +1812,10 @@ trait KafkaConsumer[F[_], K, V]:
       _.records.chunks.evalMap: chunk =>
         val (offsets, records) =
           chunk.mapAccumulate(CommittableOffsetBatch.empty[F])((batch, committable) => (batch.updated(committable.offset), committable.record))
-        F.productR(process(records))(offsets.commit)
+        F.productR(process(records))(
+          offsets.commit.recover:
+            case failure: KafkaException.BackendFailure if failure.code.contains(ErrorCode.IllegalGeneration) => ()
+        )
     ).parJoinUnbounded.compile.drain
 
   /** One stream for each partition this consumer is assigned, ending once the partition is revoked.
@@ -1685,7 +1827,7 @@ trait KafkaConsumer[F[_], K, V]:
     *   positive per-partition threshold at which the backend pauses fetching; records already in flight can temporarily exceed it
     */
   def partitionedRecords(maxQueuedRecords: Int = 256)(using Async[F]): Stream[F, PartitionRecords[F, K, V]] =
-    PartitionRecords.fromConsumer(self, assignmentChanges, maxQueuedRecords, pausing)
+    PartitionRecords.fromConsumer(self, assignmentNumbers, maxQueuedRecords, pausing)
 
   /** Returns the broker-stored next offset for each requested topic-partition, with its leader epoch and metadata, or `None` when no offset has been
     * committed.
@@ -1729,7 +1871,8 @@ trait KafkaConsumer[F[_], K, V]:
   /** Returns where the client fetches the partition next.
     *
     * The client reads ahead of the records handed out, so after consuming it is at or past the offset after the last record consumed, by an amount
-    * that differs between platforms. Before the consumer has consumed from the partition, it can be `None`.
+    * that differs between platforms. Before the consumer has consumed from the partition, it can be `None`, and it is `None` for a partition of a
+    * known topic that the consumer is not assigned.
     */
   def position(topicPartition: TopicPartition): F[Option[Offset]]
 
@@ -1740,6 +1883,12 @@ trait KafkaConsumer[F[_], K, V]:
       override def assignment: G[Set[TopicPartition]] = fk(self.assignment)
 
       override val assignmentChanges: Stream[G, Set[TopicPartition]] = self.assignmentChanges.translate(fk)
+
+      override private[xkafka] def assignmentNumbers: Stream[G, Map[TopicPartition, Long]] = self.assignmentNumbers.translate(fk)
+
+      override private[xkafka] def numbersAssignments: Boolean = self.numbersAssignments
+
+      override private[xkafka] def routedRecords: Stream[G, CommittableConsumerRecord[G, K, V]] = self.routedRecords.map(_.mapK(fk)).translate(fk)
 
       override def committed(topicPartitions: Set[TopicPartition]): G[Map[TopicPartition, Option[OffsetAndMetadata]]] =
         fk(self.committed(topicPartitions))

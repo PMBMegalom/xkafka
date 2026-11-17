@@ -149,6 +149,67 @@ class ApacheAvroSuite extends ScalaCheckSuite:
       assert(scala.util.Try(apacheRead(apache(writerText), apache(readerText), written)).isFailure, s"$description: Apache Avro reads it")
       assert(AvroBinary.decoder(parsed(writerText), parsed(readerText)).flatMap(_(written)).isLeft, s"$description: xkafka reads it")
 
+  test("a writer's fields are read into the reader's fields their aliases name as Apache Avro reads them, or refused where it refuses them"):
+    def record(name: String, fields: String) = s"""{"type":"record","name":"$name","fields":[$fields]}"""
+    val seven                                = (field: String) => AvroValue.Record(FullName(None, "R"), Vector(field -> AvroValue.Int(7)))
+    List(
+      (
+        "an alias beats a name",
+        record("R", """{"name":"a","type":"int"}"""),
+        record("R", """{"name":"a","type":"int","default":0},{"name":"c","type":"int","default":0,"aliases":["a"]}"""),
+        seven("a")
+      ),
+      (
+        "an alias beats a name, its own field read without a default",
+        record("R", """{"name":"a","type":"int"}"""),
+        record("R", """{"name":"a","type":"int","default":0},{"name":"c","type":"int","aliases":["a"]}"""),
+        seven("a")
+      ),
+      (
+        "the later of two reader fields with one alias",
+        record("R", """{"name":"b","type":"int"}"""),
+        record("R", """{"name":"x","type":"int","default":0,"aliases":["b"]},{"name":"y","type":"int","default":0,"aliases":["b"]}"""),
+        seven("b")
+      ),
+      (
+        "a rename onto a field written too",
+        record("R", """{"name":"a","type":"int"},{"name":"b","type":"int"}"""),
+        record("R", """{"name":"a","type":"int","aliases":["b"]}"""),
+        AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
+      ),
+      (
+        "a schema read as itself, a field renamed and its old name taken again",
+        record("R", """{"name":"fullName","type":"string","aliases":["name"]},{"name":"name","type":"string","default":""}"""),
+        record("R", """{"name":"fullName","type":"string","aliases":["name"]},{"name":"name","type":"string","default":""}"""),
+        AvroValue.Record(FullName(None, "R"), Vector("fullName" -> AvroValue.String("Ada"), "name" -> AvroValue.String("A")))
+      ),
+      (
+        "a schema read as itself, two fields aliased to each other",
+        record("R", """{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}"""),
+        record("R", """{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}"""),
+        AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
+      ),
+      (
+        "schemas that differ only in documentation",
+        record("R", """{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}"""),
+        """{"type":"record","name":"R","doc":"Two numbers.","fields":[{"name":"a","type":"int","aliases":["b"]},{"name":"b","type":"int","aliases":["a"]}]}""",
+        AvroValue.Record(FullName(None, "R"), Vector("a" -> AvroValue.Int(1), "b" -> AvroValue.Int(2)))
+      ),
+      (
+        "a record read by its simple name alone",
+        """{"type":"record","name":"R","namespace":"old","fields":[{"name":"b","type":"int"}]}""",
+        """{"type":"record","name":"R","namespace":"new","fields":[{"name":"c","type":"int","default":0,"aliases":["b"]}]}""",
+        AvroValue.Record(FullName(Some("old"), "R"), Vector("b" -> AvroValue.Int(7)))
+      )
+    ).foreach: (description, writerText, readerText, value) =>
+      val (writer, reader) = (apache(writerText), apache(readerText))
+      val written          = apacheWrite(writer, toApache(value, writer))
+      val theirs           = scala.util.Try(apacheRead(writer, reader, written)).toEither.map(datum => sorted(fromApache(datum, reader)))
+      val ours             = AvroBinary.decoder(parsed(writerText), parsed(readerText)).flatMap(_(written)).map(sorted)
+      theirs match
+        case Right(read) => assertEquals(ours, Right(read), description)
+        case Left(_)     => assert(ours.isLeft, s"$description: Apache Avro refuses it, xkafka reads $ours")
+
   test("a record is not read as one of another name, as the specification and Apache Avro's compatibility check say, though its reader reads it"):
     val (writer, reader) = ("""{"type":"record","name":"A","fields":[]}""", """{"type":"record","name":"B","fields":[]}""")
     val compatibility    = SchemaCompatibility.checkReaderWriterCompatibility(apache(reader), apache(writer)).getType

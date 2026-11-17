@@ -1,0 +1,2 @@
+{"type": "record", "name": "Lone", "namespace": "example.shop", "doc": "A record whose text's default is half of a surrogate pair \udbff",
+ "fields": [{"name": "text", "type": "string", "default": "\ud800 and 😀"}]}

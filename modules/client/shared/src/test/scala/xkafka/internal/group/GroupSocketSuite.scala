@@ -66,6 +66,11 @@ final class GroupSocketSuite extends CatsEffectSuite:
       case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, Some(code), error.getMessage)
       case other                                      => fail(s"expected a backend failure with $code, got $other")
 
+  test("a timeout longer than a socket can hold is held to the longest it can, so a refused connection still fails as a network failure"):
+    sockets.connect("localhost", 1, None, 30.days).use_.attempt.map:
+      case Left(error: KafkaException.BackendFailure) => assertEquals(error.code, Some(ErrorCode.NetworkException), error.getMessage)
+      case other                                      => fail(s"expected a network failure, got $other")
+
   address("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS") match
     case None =>
       test("a plaintext connection is answered".ignore)(IO.unit)

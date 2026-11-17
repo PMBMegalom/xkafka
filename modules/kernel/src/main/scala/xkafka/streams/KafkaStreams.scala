@@ -57,7 +57,7 @@ object KafkaStreams:
   given InvariantK[KafkaStreams] with
     override def imapK[F[_], G[_]](streams: KafkaStreams[F])(fk: FunctionK[F, G])(gk: FunctionK[G, F]): KafkaStreams[G] = streams.imapK(fk)(gk)
 
-/** Where a streams application is, and what the group's coordinator reports wrong with the application as a whole. */
+/** Where a streams application is, and what keeps the application as a whole from running fully. */
 final case class StreamsState(phase: StreamsPhase, problems: List[StreamsProblem])
 
 object StreamsState:
@@ -76,7 +76,9 @@ enum StreamsPhase derives CanEqual:
   /** Its tasks were taken away without being given back, as when it stopped heartbeating for too long; it is joining again. */
   case Lost
 
-/** Something the group's coordinator reports keeps the application from running fully. Each comes with the coordinator's own description. */
+/** Something that keeps the application from running fully. Each but [[StreamsProblem.JavaMembersMayBeRefused]] is reported by the group's
+  * coordinator, with its own description.
+  */
 enum StreamsProblem derives CanEqual:
   /** The application declared another topology than the group runs. */
   case StaleTopology(detail: String)
@@ -102,9 +104,10 @@ enum StreamsProblem derives CanEqual:
   /** The application may not read or write some of its topics. */
   case TopicAuthorizationFailed(detail: String)
 
-  /** The application joins topics whose order xkafka cannot match exactly to a Java Streams application's, or joins inputs whose sub-topologies Java
-    * numbers by which input its program builds first, which xkafka takes to be the join's receiver; so the broker may refuse Java members of the same
-    * application. Members that all run xkafka are not affected. The detail names the topics.
+  /** xkafka's own warning that the broker may refuse Java Streams members of the same application, listed whether or not any run: for a join of
+    * topics whose order xkafka cannot match exactly to a Java Streams application's, a join whose sub-topologies Java numbers by which input its
+    * program builds first, a cogroup with a group that goes through a repartition topic, or a global table. An application whose members all run
+    * xkafka can ignore it. The detail names the topics.
     */
   case JavaMembersMayBeRefused(detail: String)
 

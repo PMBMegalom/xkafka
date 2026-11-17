@@ -1,69 +1,20 @@
 # Contributing to xkafka
 
-Thanks for your interest in xkafka.
+Thanks for your interest in xkafka. How to build it and run its tests, including
+the broker-backed suites, is described in
+[Contributing](https://pmbmegalom.github.io/xkafka/contributing.html)
+([docs/contributing.md](docs/contributing.md) in this repository).
 
-## Building
+## What a pull request should come with
 
-xkafka cross-builds for the JVM, Scala.js on Node.js, and Scala Native, so a
-change usually has to work on all three.
-
-```sh
-sbt test
-```
-
-The Scala.js backend uses the Node.js version in `.nvmrc`:
-
-```sh
-nvm use
-```
-
-The Native build compiles librdkafka with TLS and compression, which needs
-OpenSSL, zlib, and zstd. See the README for the packages to install.
-
-Format and check before opening a pull request, which is what continuous
-integration runs:
-
-```sh
-sbt scalafmtAll scalafmtSbt
-sbt scalafmtCheckAll scalafmtSbtCheck headerCheckAll test
-```
-
-## Broker-backed tests
-
-Behaviour that involves a broker belongs in the shared suites, which run the
-same assertions against every backend. Docker is required:
-
-```sh
-scripts/integration-test.sh
-```
-
-The streams engine's tests run separately, against a broker of each Kafka
-release it supports and beside a Java Kafka Streams application, as CI does in
-a job of their own:
-
-```sh
-scripts/integration-test.sh --streams
-```
-
-`KafkaConformanceSuite` asserts that the backends agree. A case may name the
-backends known to diverge from it, and those are marked as expected to fail, so
-fixing a backend makes the marked case fail and the marker has to be removed
-with it. A marker therefore cannot outlive the divergence it records.
-
-## Changes to the build
-
-The continuous integration workflow is generated from `build.sbt`. After
-changing anything that affects it:
-
-```sh
-sbt githubWorkflowGenerate
-```
-
-`githubWorkflowCheck` fails the build when the committed workflow is stale.
-
-## What a change should come with
-
-- Shared behaviour belongs in shared tests.
-- Backend-specific tests should cover translation, resource cleanup, and offset
+- Code formatted and checked as continuous integration checks it (see
+  [Formatting and checks](docs/contributing.md#formatting-and-checks)).
+- Tests. Shared behaviour belongs in shared tests, which run on every backend.
+  Backend-specific tests should cover translation, resource cleanup, and offset
   semantics at the platform boundary.
-- Public API changes belong in the README, which documents current behaviour.
+- Broker-backed tests for behaviour that involves a broker, in the shared
+  suites, which run the same assertions against every backend.
+- Documentation in `docs/` for changes to the public API. The documentation
+  describes current behaviour.
+- A regenerated workflow if the change affects continuous integration (see
+  [Changes to the build](docs/contributing.md#changes-to-the-build)).

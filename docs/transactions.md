@@ -28,8 +28,22 @@ val program =
 `transactionally` commits the transaction if its body succeeds, and aborts it if
 the body fails or is cancelled.
 
-A transactional producer only writes inside transactions. Create one with
-`transactionalProducer`, from `TransactionalProducerSettings`.
+If the commit itself fails, `transactionally` fails with that error:
+
+- A commit that fails in a way worth retrying without an abort, such as one
+  that timed out and may still complete, is tried once more, and the
+  transaction is not aborted. If it fails again, the next `transactionally`
+  asks for the commit again before it begins.
+- After a fatal failure, such as another producer with the same
+  `transactionalId` fencing this one, the producer can do nothing more. Release
+  it and create a new one.
+- Any other failure aborts the transaction, and the producer is ready for the
+  next one.
+
+An abort that fails is likewise asked for again before the next transaction
+begins.
+
+A transactional producer only writes inside transactions.
 
 Kafka allows one transaction at a time per transactional id, so concurrent calls
 to `transactionally` on one producer run one after another.
@@ -102,10 +116,10 @@ properties, along with these values:
 | setting | default | meaning |
 | --- | --- | --- |
 | `transactionalId` | required | Kafka's `transactional.id` |
-| `transactionTimeout` | 60s | how long the broker lets a transaction stay open before it aborts it (Kafka's `transaction.timeout.ms`), and how long creating the producer waits to be ready for transactions |
+| `transactionTimeout` | 60s | how long the broker lets a transaction stay open before it aborts it (Kafka's `transaction.timeout.ms`), and how long creating the producer waits to be ready for transactions; at least 1 second |
 | `closeTimeout` | 60s | how long releasing the producer waits for records it has not delivered |
 | `compression` | `Compression.Uncompressed` | how record batches are compressed |
-| `linger` | 5ms | how long a record waits for others to join its batch, from zero to 15 minutes |
+| `linger` | 5ms | how long a record waits for others to join its batch, from zero to under 5 minutes, and under `transactionTimeout` |
 | `batchSize` | unset, which leaves it to the platform's client | the most bytes one batch holds before it is sent |
 | `enqueueTimeout` | 60s | how long `produce` waits for room for a record while the client's buffer is full |
 

@@ -3,17 +3,11 @@
 The API is the same everywhere. These notes cover what each platform needs, and
 how the API carries across platforms and effects.
 
-## Record delivery
+## Consumers
 
-On every platform a consumer joins its group and takes its share of the
-partitions as soon as it is acquired, even before anything reads its records. A
-partition whose buffer fills is paused until its reader catches up, so a slow
-partition does not hold up the others.
-
-A consumer whose records go unread for longer than its `maxPollInterval` leaves
-its group. See [Group membership](consuming.md#group-membership).
-
-On the JVM each consumer uses one thread of its own.
+On the JVM each consumer uses one thread of its own. Everything else about how a
+consumer joins its group and reads records is the same on every platform; see
+[Consuming](consuming.md).
 
 ## Scala Native
 
@@ -34,11 +28,9 @@ sudo apt-get install librdkafka-dev=2.16.0-1.cflt~ubu24 librdkafka1=2.16.0-1.cfl
 Use a librdkafka built with TLS, SASL SCRAM and every compression codec, so it
 can reach authenticated brokers and read and write records in any compression.
 
-librdkafka links these against system libraries, so a Scala Native application
-needs OpenSSL, zlib, and zstd available:
+librdkafka uses the system's OpenSSL, zlib and zstd, so install those too:
 `libssl-dev`, `zlib1g-dev`, and `libzstd-dev` on Debian and Ubuntu, or
-`brew install openssl@3 zstd zlib` on macOS. Homebrew keeps them keg-only, so
-on macOS their locations have to be named when linking.
+`brew install openssl@3 zstd zlib` on macOS.
 
 ### Linking an application
 
@@ -66,13 +58,28 @@ nativeConfig := nativeConfig.value
   ))
 ```
 
-On macOS add a `-L` for the OpenSSL installation as well.
+On macOS, Homebrew's libraries are not where the linker looks by default, so a
+static link there also names their directories, ahead of the libraries:
+
+```scala
+// Link the static librdkafka on macOS, with Homebrew's OpenSSL 3, zstd and zlib
+nativeConfig := nativeConfig.value
+  .withCompileOptions(_ :+ "-I/path/to/librdkafka/include")
+  .withLinkingOptions(_ ++ Seq(
+    "-L/path/to/librdkafka/lib",
+    "-L/opt/homebrew/opt/openssl@3/lib", "-L/opt/homebrew/opt/zstd/lib", "-L/opt/homebrew/opt/zlib/lib",
+    "-lrdkafka", "-lssl", "-lcrypto", "-lz", "-lzstd"
+  ))
+```
+
+`brew --prefix openssl@3`, `brew --prefix zstd` and `brew --prefix zlib` print
+the directories to use, without the `/lib`, if Homebrew is installed elsewhere.
 
 ### Stores on disk
 
 An application that keeps its streams stores on disk, with a
 [state directory](streams/running.md#keeping-stores-on-disk), also needs RocksDB
-10.1.3 when it runs. Take it from the `org.rocksdb:rocksdbjni:10.1.3` jar on
+10.10.1 when it runs. Take it from the `org.rocksdb:rocksdbjni:10.10.1.1` jar on
 Maven Central, which carries it for each platform:
 
 | Platform | File in the jar |
@@ -86,7 +93,7 @@ Maven Central, which carries it for each platform:
 
 ```sh
 # Put this platform's RocksDB next to the application, here for Linux x64 with glibc
-unzip -j rocksdbjni-10.1.3.jar librocksdbjni-linux64.so -d path/to/app/bin
+unzip -j rocksdbjni-10.10.1.1.jar librocksdbjni-linux64.so -d path/to/app/bin
 ```
 
 The application looks for the file in the directory of its executable, then
@@ -103,7 +110,7 @@ library. See [Schema registry](schema-registry.md#dependencies).
 ## Scala.js
 
 xkafka uses librdkafka here, the same release as on Scala Native. It runs on
-Node.js, not in browsers.
+Node.js 24, not in browsers.
 
 The library comes from npm as `@xkafka/librdkafka`, which sbt-scalajs-bundler
 installs. npm adds the prebuilt library for the platform it runs on:
@@ -124,7 +131,7 @@ zstd. Stores kept on disk use RocksDB, which comes the same way, from
 published with, so do not pin or override that package. With any other version,
 acquiring a client fails with a `BackendFailure` naming both versions.
 
-## Transformations
+## Changing the effect type
 
 These have cats-tagless `FunctorK` instances, and a `mapK` that changes their
 effect: serializers, deserializers and serdes; producer, transactional producer
@@ -135,12 +142,13 @@ schema registry client.
 `KafkaProducer` has `mapK` too, which needs a `Functor` for the target effect,
 and so no `FunctorK` instance.
 
-What runs effects in both directions changes effect with `imapK`, given a
-transformation each way, and has a cats-tagless `InvariantK` instance:
+Types that both run effects and take them from you change effect with `imapK`,
+which takes a transformation each way, and have a cats-tagless `InvariantK`
+instance:
 `Transaction`, `KafkaTransactionalProducer`, a streams `Pipeline` or
 `Topology`, where a [processor](streams/processors.md) runs its handler in one
 effect and its stores in the other, and `KafkaStreams`, whose queries go both
 ways.
 
-`KafkaClient.imapK` transforms a complete client between effects in both
-directions while preserving `Resource` cancellation semantics.
+`KafkaClient.imapK` changes the effect of a whole client, given a transformation
+each way, and its resources are still released when cancelled.

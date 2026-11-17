@@ -96,12 +96,24 @@ private[xkafka] object Failures:
     val classified = ErrorCode.fromLibrdkafka(code)
     new KafkaException.BackendFailure(message, Some(classified), retriable = Some(classified.retriable))
 
+  /** A record's failure, which the shim answers -2 for where its enqueue or delivery failed once the producer met a fatal failure: retrying it does
+    * nothing.
+    */
+  def delivery(message: String, code: Int, answer: Int): KafkaException.BackendFailure =
+    if answer != -2 then coded(message, code)
+    else new KafkaException.BackendFailure(message, Some(ErrorCode.fromLibrdkafka(code)), retriable = Some(false), fatal = Some(true))
+
   /** A transactional failure, whose flags are -1 when librdkafka did not say. Whether it is retriable comes from its code, as on the JVM, so the same
     * failure is retriable on every platform.
     */
   def classified(message: String, code: Int, fatal: Int, transactionAbortRequired: Int): KafkaException.BackendFailure =
     val classified = ErrorCode.fromLibrdkafka(code)
     new KafkaException.BackendFailure(message, Some(classified), Some(classified.retriable), flag(fatal), flag(transactionAbortRequired))
+
+  /** A failed transaction commit, which librdkafka's own flag, 1 where it says so, says to ask for again whatever its code says. */
+  def committing(message: String, code: Int, fatal: Int, retriable: Int, transactionAbortRequired: Int): Throwable =
+    val failure = classified(message, code, fatal, transactionAbortRequired)
+    if retriable == 1 && fatal != 1 && transactionAbortRequired != 1 then driver.CommitToRetry(failure) else failure
 
   def plain(detail: String): KafkaException.BackendFailure = new KafkaException.BackendFailure(detail)
 

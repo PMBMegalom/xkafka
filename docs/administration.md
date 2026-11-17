@@ -1,8 +1,7 @@
 # Administration
 
-`KafkaClient[F].admin` is a `Resource` over the cluster and topic operations,
-record deletion, topic configuration, and consumer groups. It neither produces nor
-consumes.
+`KafkaClient[F].admin(client)` gives you a `Resource` for managing topics, their
+records and configuration, and consumer groups.
 
 ```scala mdoc:compile-only
 // Create the topic "events" with six partitions, each on three brokers
@@ -24,10 +23,10 @@ val program =
 ## What it does
 
 - `createTopics` creates each topic with the partitions, replication factor, and
-  configuration given, and fails where one already exists.
-- `deleteTopics` deletes each topic, and fails where one does not exist.
+  configuration given, and fails if one already exists.
+- `deleteTopics` deletes each topic, and fails if one does not exist.
 - `createPartitions` grows a topic to a new total partition count, and fails
-  where the topic already has that many or more.
+  if the topic already has that many or more.
 - `describeCluster` reports the cluster's id, its brokers, and its controller.
 - `describeTopics` reports each topic's id, its partitions, and where their replicas are. See [Cluster and topics](#cluster-and-topics).
 - `deleteRecords` deletes each partition's records below an offset. See [Deleting records](#deleting-records).
@@ -40,9 +39,10 @@ val program =
 
 `NewTopic.from` rejects a partition count or replication factor that is not
 positive. `createPartitions` likewise rejects a non-positive count before
-contacting Kafka. The broker still validates cluster-dependent constraints such
-as duplicate topics, replication capacity, topic configuration, and whether a
-new total partition count is greater than the current one.
+contacting Kafka. The broker checks the rest: that the topic does not already
+exist, that there are enough brokers for the replication factor, that the
+configuration is valid, and that a new partition count is larger than the
+current one.
 
 @:callout(warning)
 Creating, deleting, and growing topics report only the first failure, even
@@ -51,17 +51,16 @@ changed the cluster for the others.
 @:@
 
 @:callout(info)
-Creating, growing, and deleting topics all propagate through the cluster in their
-own time, so a description taken immediately afterwards may not yet reflect the
-request before it.
+Creating, growing and deleting topics take a moment to reach every broker, so
+describing a topic right afterwards can still show the old state.
 @:@
 
 ## Cluster and topics
 
-`describeCluster` answers the cluster's id, each of its brokers with the host
+`describeCluster` returns the cluster's id, each of its brokers with the host
 and port clients connect to, and which broker is its controller.
 
-`describeTopics` answers each requested topic on its own with a
+`describeTopics` returns a result for each requested topic on its own, a
 `TopicDescription`: the topic's id, whether it is `internal`, and each
 partition's leader, replicas, and in-sync replicas, by `BrokerId`. Look a broker
 id up in `describeCluster`'s brokers for its host and port.
@@ -77,8 +76,8 @@ val program =
   for
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic   <- Topic.from("events").liftTo[IO]
-    answers <- KafkaClient[IO].admin(client).use(_.describeTopics(NonEmptySet.one(topic)))  // The answer for each topic is separate
-    _       <- answers(topic) match
+    results <- KafkaClient[IO].admin(client).use(_.describeTopics(NonEmptySet.one(topic)))  // The result for each topic is separate
+    _       <- results(topic) match
                  case Some(Right(description)) =>  // The topic's description
                    IO.println(s"${description.partitions.length} partitions, id ${description.id.value}")
                  // Why this topic could not be described
@@ -87,11 +86,10 @@ val program =
   yield ()
 ```
 
-- A topic the cluster does not have answers with
-  `ErrorCode.UnknownTopicOrPartition`, and the other topics are still answered.
+- The result for a topic the cluster does not have is
+  `ErrorCode.UnknownTopicOrPartition`, and the other topics still get theirs.
 - `internal` is true for the topics Kafka keeps for itself, such as
-  `__consumer_offsets`. The cluster creates that one for the first committed
-  offset, so a cluster where nothing has committed yet does not have it.
+  `__consumer_offsets`.
 - A topic keeps its id. A topic deleted and created again under the same name
   gets a new one. The id reads the same on every platform.
 - Either call fails as a whole when the cluster cannot be reached in time. That
@@ -101,8 +99,8 @@ val program =
 
 `deleteRecords` takes an offset for each partition and deletes the records below
 it, so a cut at 3 removes offsets 0 to 2 and keeps 3 onwards. Each partition
-answers on its own: with its new low watermark, the offset the partition now
-begins at, or with the failure that refused the cut.
+gets a result of its own: its new low watermark, the offset the partition now
+begins at, or the failure that refused the cut.
 
 ```scala mdoc:compile-only
 // Delete the records below offset 1000 in partition 0 of "journal"
@@ -118,9 +116,9 @@ val program =
     topic     <- Topic.from("journal").liftTo[IO]
     partition <- Partition.from(0).liftTo[IO]
     cut       <- Offset.from(1000L).liftTo[IO]
-    // Delete the records, with a separate answer for each partition
-    answers   <- KafkaClient[IO].admin(client).use(_.deleteRecords(NonEmptyMap.one(TopicPartition(topic, partition), cut)))
-    _         <- answers.toSortedMap.toList.traverse_ :
+    // Delete the records, with a separate result for each partition
+    results   <- KafkaClient[IO].admin(client).use(_.deleteRecords(NonEmptyMap.one(TopicPartition(topic, partition), cut)))
+    _         <- results.toSortedMap.toList.traverse_ :
                    // The offset this partition now begins at
                    case (topicPartition, Right(lowWatermark)) => IO.println(s"${topicPartition.show} begins at ${lowWatermark.show}")
                    // Why the records of this partition were not deleted
@@ -128,15 +126,15 @@ val program =
   yield ()
 ```
 
-- A cut at or below the partition's current start deletes nothing and answers
-  with the current low watermark, so repeating a cut is safe.
+- A cut at or below the partition's current start deletes nothing and returns
+  the current low watermark, so repeating a cut is safe.
 - A cut at the end of the partition deletes all of its records. A cut past the end
   is refused as `ErrorCode.OffsetOutOfRange`, and the other partitions in the same
-  call are still answered.
-- A topic or partition the cluster does not have answers with
-  `ErrorCode.UnknownTopicOrPartition`, and the other partitions in the call are
-  still answered.
-- The call fails as a whole only when no partition got an answer, such as when
+  call still get their results.
+- The result for a topic or partition the cluster does not have is
+  `ErrorCode.UnknownTopicOrPartition`, and the other partitions in the call
+  still get theirs.
+- The call fails as a whole only if no partition got a result, for example if
   the cluster cannot be reached in time. That failure is retriable.
 - Deleting records moves no consumer group's offsets. A group whose committed
   offset is now below the start of the partition resumes as its
@@ -152,10 +150,10 @@ see the records such a cut deletes, even after their transaction commits.
 
 `describeTopicConfigurations` reports the configuration each topic has in
 effect, including the values it inherits from the broker or from Kafka's
-defaults. Each topic answers on its own, as with `deleteRecords`: a topic the
-cluster does not have answers with `ErrorCode.UnknownTopicOrPartition`, and the
-call fails as a whole only when no topic got an answer, such as when the cluster
-cannot be reached in time.
+defaults. Each topic gets a result of its own, as with `deleteRecords`: the
+result for a topic the cluster does not have is
+`ErrorCode.UnknownTopicOrPartition`, and the call fails as a whole only if no
+topic got a result, for example if the cluster cannot be reached in time.
 
 ```scala mdoc:compile-only
 // Print the value of "cleanup.policy" on "journal", and where that value comes from
@@ -169,22 +167,22 @@ val program =
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     topic   <- Topic.from("journal").liftTo[IO]
     // Read the topic's effective configuration
-    answers <- KafkaClient[IO].admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(topic)))
-    policy   = answers(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy"))  // Pick one property from the topic's answer
+    results <- KafkaClient[IO].admin(client).use(_.describeTopicConfigurations(NonEmptySet.one(topic)))
+    policy   = results(topic).flatMap(_.toOption).flatMap(_.get("cleanup.policy"))  // Pick one property from the topic's result
     _       <- IO.println(policy.fold("no cleanup.policy reported")(entry => s"${entry.value} from ${entry.source}"))
   yield ()
 ```
 
 Each `ConfigurationEntry` carries:
 
-- `value`: `Present` with the value, `Absent` where the property has none, or
-  `Redacted` where the value is sensitive and the broker withheld it.
+- `value`: `Present` with the value, `Absent` if the property has none, or
+  `Redacted` if the value is sensitive and the broker withheld it.
 - `source`: where the value comes from. `TopicOverride` is set on the topic
   itself; `DynamicBroker`, `DynamicClusterDefault`, and `StaticBroker` are
   inherited from broker configuration; `Default` is Kafka's own default.
 - `readOnly`: whether the property can be changed.
 
-A property the broker did not report has no entry, so `get` answers `None`.
+A property the broker did not report has no entry, so `get` returns `None`.
 
 ### Changing it
 
@@ -212,18 +210,19 @@ val program =
     // Set one property, and append to a list property
     changes  = NonEmptyMap.of("retention.ms" -> ConfigurationChange.Set("604800000"), "cleanup.policy" -> ConfigurationChange.Append("compact"))
     // Every other property stays as it is
-    answers <- KafkaClient[IO].admin(client).use(_.alterTopicConfigurations(NonEmptyMap.one(topic, changes)))
-    _       <- IO.println(answers(topic).fold("no answer")(_.fold(failure => s"not changed: ${failure.getMessage}", _ => "changed")))
+    results <- KafkaClient[IO].admin(client).use(_.alterTopicConfigurations(NonEmptyMap.one(topic, changes)))
+    _       <- IO.println(results(topic).fold("no result")(_.fold(failure => s"not changed: ${failure.getMessage}", _ => "changed")))
   yield ()
 ```
 
-Each topic answers on its own, and the call fails as a whole only when no topic
-got an answer, such as when the cluster cannot be reached in time. Where the
+Each topic gets a result of its own, and the call fails as a whole only if no
+topic got a result, for example if the cluster cannot be reached in time. If the
 broker refuses one topic's changes, the other topics are still changed:
 
-- A topic the cluster does not have answers with `ErrorCode.UnknownTopicOrPartition`.
+- The result for a topic the cluster does not have is
+  `ErrorCode.UnknownTopicOrPartition`.
 - A property Kafka does not have, and appending to or removing from a property
-  that holds no list, answer with `ErrorCode.InvalidConfiguration`.
+  that holds no list, fail with `ErrorCode.InvalidConfiguration`.
 
 ## Leader election
 
@@ -244,23 +243,23 @@ val program =
     topic     <- Topic.from("events").liftTo[IO]
     partition <- Partition.from(0).liftTo[IO]
     // Run the election for this partition
-    answers   <- KafkaClient[IO].admin(client).use(_.electPreferredLeaders(NonEmptySet.one(TopicPartition(topic, partition))))
-  yield answers
+    results   <- KafkaClient[IO].admin(client).use(_.electPreferredLeaders(NonEmptySet.one(TopicPartition(topic, partition))))
+  yield results
 ```
 
-- A partition its preferred replica already leads answers `Right(())`, as one
-  the election moved does.
-- A partition the cluster does not have answers with
-  `ErrorCode.UnknownTopicOrPartition`, and the other partitions are still
-  answered.
-- The call fails as a whole only when no partition got an answer, such as when
+- The result for a partition its preferred replica already leads is `Right(())`,
+  as for one the election moved.
+- The result for a partition the cluster does not have is
+  `ErrorCode.UnknownTopicOrPartition`, and the other partitions still get
+  theirs.
+- The call fails as a whole only if no partition got a result, for example if
   the cluster cannot be reached in time.
 
 ## Consumer groups
 
-`listConsumerGroups` answers every group the cluster knows with its
+`listConsumerGroups` returns every group the cluster knows, with its
 `ConsumerGroupState`, including a group that has no members but still holds
-committed offsets. `describeConsumerGroups` answers each requested group with
+committed offsets. `describeConsumerGroups` returns each requested group with
 its state, its members, and the partitions each member is assigned.
 
 ```scala mdoc:compile-only
@@ -274,9 +273,9 @@ val program =
   for
     client  <- ClientSettings.from(NonEmptyList.one("localhost:9092")).liftTo[IO]
     group   <- ConsumerGroup.from("billing").liftTo[IO]
-    // The answer for each group is separate
-    answers <- KafkaClient[IO].admin(client).use(_.describeConsumerGroups(NonEmptySet.one(group)))
-    _       <- answers(group) match
+    // The result for each group is separate
+    results <- KafkaClient[IO].admin(client).use(_.describeConsumerGroups(NonEmptySet.one(group)))
+    _       <- results(group) match
                  case Some(Right(description)) =>
                    IO.println(s"${description.state}: ${description.members.map(_.clientId).mkString(", ")}")
                  case Some(Left(failure)) => IO.println(s"not described: ${failure.getMessage}")
@@ -284,24 +283,23 @@ val program =
   yield ()
 ```
 
-- A group the cluster does not have answers with `ErrorCode.GroupIdNotFound`,
-  and is not listed.
-- Kafka keeps committed offsets under an empty group name and lists that
-  group, but `listConsumerGroups` leaves it out, because `ConsumerGroup` does
-  not accept an empty name.
+- The result for a group the cluster does not have is
+  `ErrorCode.GroupIdNotFound`, and the group is not listed.
+- `listConsumerGroups` leaves out a group with an empty name, which
+  `ConsumerGroup` cannot hold.
 - A group whose members have all left is `Empty`, with no members and no
   assignor.
 - `simple` is true for a group that holds committed offsets but that no
   consumer has joined, such as one created by `alterConsumerGroupOffsets`. It
   is false for a group consumers have joined, including after they all leave.
 
-`listConsumerGroupOffsets` answers the offsets a group has committed. Without
-partitions it answers every one, and is empty for a group the cluster does not
-have. With partitions it answers each of them, with `None` where the group has
+`listConsumerGroupOffsets` returns the offsets a group has committed. Without
+partitions it returns every one, and is empty for a group the cluster does not
+have. With partitions it returns each of them, with `None` if the group has
 committed nothing.
 
-`alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` answer each
-partition on its own, and `deleteConsumerGroups` each group on its own:
+`alterConsumerGroupOffsets` and `deleteConsumerGroupOffsets` return a result for
+each partition on its own, and `deleteConsumerGroups` for each group on its own:
 
 - A group with members refuses `alterConsumerGroupOffsets` as
   `ErrorCode.UnknownMemberId`, and `deleteConsumerGroups` as
@@ -310,11 +308,12 @@ partition on its own, and `deleteConsumerGroups` each group on its own:
   subscribed to as `ErrorCode.GroupSubscribedToTopic`.
 - `alterConsumerGroupOffsets` creates a group the cluster does not have. It
   refuses a topic the cluster does not have as
-  `ErrorCode.UnknownTopicOrPartition`, and still answers the other partitions.
+  `ErrorCode.UnknownTopicOrPartition`, and the other partitions still get their
+  results.
 - `deleteConsumerGroupOffsets` and `deleteConsumerGroups` refuse a group the
   cluster does not have as `ErrorCode.GroupIdNotFound`.
-- A call fails as a whole only when no partition or group got an answer, such
-  as when the cluster cannot be reached in time. That failure is retriable.
+- A call fails as a whole only if no partition or group got a result, for
+  example if the cluster cannot be reached in time. That failure is retriable.
 
 ## What it does not do
 

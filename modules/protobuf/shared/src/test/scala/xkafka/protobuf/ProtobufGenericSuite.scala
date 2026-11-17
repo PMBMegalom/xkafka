@@ -24,6 +24,8 @@ package xkafka.protobuf
 import java.time.{Instant, LocalDate}
 import java.util.UUID
 
+import scala.concurrent.duration.*
+
 import cats.data.NonEmptyList
 import cats.effect.IO
 import fs2.Chunk
@@ -124,6 +126,23 @@ class ProtobufGenericSuite extends CatsEffectSuite:
 
   test("a proto3 file is read with its messages, nested types, oneofs, maps and enums, past comments, options, reservations and services"):
     assertEquals(parsed(shop), shopFile)
+
+  test("quoted text is read with protobuf's escapes, and a default is kept exactly as written"):
+    val file =
+      parsed("""syntax = "proto\x32";
+        |import "dir\057a\x2Fb\U000000e9\u00e9.proto";
+        |message Raw { optional bytes data = 1 [default = '\xFF\101"']; }
+        |""".stripMargin)
+    assertEquals(file.syntax, Syntax.Proto2)
+    assertEquals(file.imports, List("dir/a/b\u00e9\u00e9.proto"))
+    assertEquals(file.messages.flatMap(_.fields.flatMap(_.default)), List("""'\xFF\101"'"""))
+    assert(ProtobufSchemaText.render(file).contains("""[default = '\xFF\101"']"""), ProtobufSchemaText.render(file))
+    assert(ProtobufSchemaText.parse("""syntax = "proto3"; import "a\q";""").isLeft)
+
+  test("a map whose values are maps is refused before they are read, however deep they go"):
+    val depth = 3000
+    val text  = s"""syntax = "proto3"; message M { ${"map<string, " * depth}int32${">" * depth} m = 1; }"""
+    assertEquals(ProtobufSchemaText.parse(text), Left("a map's values are a map, which Protobuf does not allow"))
 
   test("a proto2 file is read with its labels, defaults as written, and packing"):
     assertEquals(
@@ -248,10 +267,41 @@ class ProtobufGenericSuite extends CatsEffectSuite:
     assertEquals(codecs.decode("com.example.shop.Order", written), Right(value))
     assert(written.toList.containsSlice(List[Byte](0x30, 1, 0x30, 2)), "counts are not packed, as the file says")
 
-  test("of two map entries with one key, the later is read"):
-    val entry = (value: Int) => Chunk[Byte](0x22, 5, 0x0a, 1, 'k', 0x10, value.toByte)
-    val read  = dynamic(shopFile).decode("com.example.shop.Order", entry(1) ++ entry(2)).fold(fail(_), identity)
-    assertEquals(read.field("tags"), Some(ProtobufValue.Map(Vector(ProtobufValue.String("k") -> ProtobufValue.Int64(2)))))
+  test("many map entries are read in time proportional to their number"):
+    val entry =
+      (key: Int) =>
+        ProtobufWire
+          .field(4, Raw.Bytes(ProtobufWire.field(1, Raw.Bytes(Chunk.array(key.toString.getBytes("UTF-8")))) ++ ProtobufWire.field(2, Raw.Varint(1))))
+    val entries = Chunk.concat((0 until 100000).map(entry)).compact
+    IO(dynamic(shopFile).decode("com.example.shop.Order", entries)).timeout(20.seconds).map: read =>
+      assertEquals(read.map(_.field("tags").collect { case ProtobufValue.Map(all) => all.size }), Right(Some(100000)))
+
+  test("of map entries with one key, the later is read, in the order of the later ones"):
+    val entry = (key: Char, value: Int) => Chunk[Byte](0x22, 5, 0x0a, 1, key.toByte, 0x10, value.toByte)
+    val read  = dynamic(shopFile).decode("com.example.shop.Order", entry('a', 1) ++ entry('b', 2) ++ entry('a', 3)).fold(fail(_), identity)
+    assertEquals(
+      read.field("tags"),
+      Some(ProtobufValue.Map(Vector(ProtobufValue.String("b") -> ProtobufValue.Int64(2), ProtobufValue.String("a") -> ProtobufValue.Int64(3))))
+    )
+
+  test("messages nested deeper than the limit are refused, not read until the stack runs out"):
+    val list   = dynamic(parsed("syntax = \"proto3\"; package p; message N { N next = 1; }"))
+    val nested = (1 to ProtobufWire.MaxDepth + 1).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
+    assert(list.decode("p.N", nested).left.exists(_.endsWith(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")))
+    val within = (1 to ProtobufWire.MaxDepth).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(1, Raw.Bytes(inner)))
+    assert(list.decode("p.N", within).isRight)
+
+  test("messages nested deeper than the limit are refused when written too, so nothing is written that reading refuses"):
+    val list                              = dynamic(parsed("syntax = \"proto3\"; package p; message N { N next = 1; }"))
+    def nested(count: Int): ProtobufValue = (1 until count).foldLeft[ProtobufValue](ProtobufValue.Message("p.N", Vector.empty)): (inner, _) =>
+      ProtobufValue.Message("p.N", Vector("next" -> inner))
+    assert(list.encode("p.N", nested(ProtobufWire.MaxDepth + 2)).left.exists(_.endsWith(s"the record is nested more than ${ProtobufWire
+        .MaxDepth} deep")))
+    assert(list.encode("p.N", nested(ProtobufWire.MaxDepth + 1)).isRight)
+
+  test("a number in a file that is not one is refused, saying where"):
+    assert(ProtobufSchemaText.parse("message A { int32 a = 0x; }").isLeft)
+    assert(ProtobufSchemaText.parse("message A { int32 a = 0xZZ; }").isLeft)
 
   test("a value that does not fit its message is refused, saying why"):
     val codecs                                                                 = dynamic(shopFile)
@@ -286,6 +336,59 @@ class ProtobufGenericSuite extends CatsEffectSuite:
   private val topic    = Topic.from("lines").toOption.get
 
   private def client: IO[SchemaRegistry[IO]] = FakeRegistry().flatMap(fake => SchemaRegistry.of(settings, fake.transport("http://registry:8081")))
+
+  test("a message field written twice is the two merged, as protobuf merges them, and of a oneof's fields the last written is read"):
+    val read =
+      dynamic(parsed("""syntax = "proto3";
+        |message Inner { int32 a = 1; int32 b = 2; }
+        |message Outer { Inner in = 1; oneof pick { string text = 2; int32 count = 3; } }
+        |""".stripMargin))
+    val inner = read.decode("Outer", Chunk[Byte](0x0a, 0x02, 0x08, 0x01, 0x0a, 0x02, 0x10, 0x02))
+    assertEquals(
+      inner.map(_.fields.toMap.get("in")),
+      Right(Some(ProtobufValue.Message("Inner", Vector("a" -> ProtobufValue.Int32(1), "b" -> ProtobufValue.Int32(2)))))
+    )
+    val picked = read.decode("Outer", Chunk[Byte](0x12, 0x01, 0x78, 0x18, 0x07))
+    assertEquals(picked.map(_.fields.map(_._1)), Right(Vector("count")))
+
+  test("a map entry whose message value is left out holds the empty message, as protobuf reads one"):
+    val read = dynamic(parsed("""syntax = "proto3"; message Item { int32 n = 1; } message Bag { map<string, Item> items = 1; }"""))
+    // One entry, of the key "k" alone.
+    val bag = read.decode("Bag", Chunk[Byte](0x0a, 0x03, 0x0a, 0x01, 0x6b))
+    assertEquals(
+      bag.map(_.fields.toMap.get("items")),
+      Right(Some(ProtobufValue.Map(Vector(ProtobufValue.String("k") -> ProtobufValue.Message("Item", Vector("n" -> ProtobufValue.Int32(0)))))))
+    )
+
+  test("a file nesting messages deeper than records may be nested is refused, and a map of maps, which Protobuf has no field for"):
+    val deep = "syntax = \"proto3\"; " + "message A { " * 5000 + "}" * 5000
+    assert(ProtobufSchemaText.parse(deep).left.exists(_.contains("nested more than")), "nesting")
+    assert(ProtobufSchemaText.parse("""syntax = "proto3"; message M { map<string, map<string, int32>> m = 1; }""").isLeft)
+    assert(ProtobufSchemaText.parse("syntax = \"proto3\"; " + "message A { " * 50 + "}" * 50).isRight)
+
+  test("the files Confluent's serializers know without references are known here too, as Kafka Connect's decimals and dates import them"):
+    assertEquals(WellKnown.files.keySet, WellKnown.texts.keySet)
+    val file =
+      parsed("""syntax = "proto3";
+        |import "confluent/type/decimal.proto";
+        |import "google/type/date.proto";
+        |message Priced { confluent.type.Decimal amount = 1; google.type.Date on = 2; }
+        |""".stripMargin)
+    // amount: value 0x01, scale 2; on: year 2026.
+    val read = dynamic(file).decode("Priced", Chunk[Byte](0x0a, 0x05, 0x0a, 0x01, 0x01, 0x18, 0x02, 0x12, 0x03, 0x08, 0xea.toByte, 0x0f))
+    assertEquals(read.map(_.fields.map(_._1)), Right(Vector("amount", "on")))
+
+  test("a field option of any name whose value is an aggregate is skipped, nested braces and all"):
+    val text =
+      """syntax = "proto2"; message M { optional bool on = 1 [feature_support = { removed: { at: 1 } }, default = true, json_name = "on"]; }"""
+    assertEquals(ProtobufSchemaText.parse(text).map(_.messages.flatMap(_.fields.map(_.default))), Right(List(Some("true"))))
+
+  test("an enum two of whose values share a number is written with allow_alias, as protoc requires of one"):
+    val file = parsed("""syntax = "proto3"; enum E { option allow_alias = true; A = 0; B = 0; C = 1; }""")
+    val text = ProtobufSchemaText.render(file)
+    assert(text.contains("option allow_alias = true;"), text)
+    assertEquals(ProtobufSchemaText.parse(text), Right(file))
+    assert(!ProtobufSchemaText.render(parsed("""syntax = "proto3"; enum F { A = 0; B = 1; }""")).contains("allow_alias"))
 
   test("a generic serde writes values of a file it holds, which a derived serde reads, and reads what one writes"):
     val file = parsed(ProtobufCodec[Line].schema.fold(fail(_), identity))
@@ -356,3 +459,10 @@ class ProtobufGenericSuite extends CatsEffectSuite:
             .Message("google.protobuf.Timestamp", Vector("seconds" -> ProtobufValue.Int64(1794294000L), "nanos" -> ProtobufValue.Int32(123000000)))
         )
       )
+
+  test("text that is not UTF-8 is refused, in a field and in a map's key"):
+    val file  = parsed("syntax = \"proto3\"; message T { string s = 1; map<string, int32> m = 2; }")
+    val field = dynamic(file).decode("T", Chunk[Byte](0x0a, 1, 0xff.toByte))
+    assert(field.left.exists(_.contains("is not UTF-8")), field)
+    val key = dynamic(file).decode("T", Chunk[Byte](0x12, 3, 0x0a, 1, 0xff.toByte))
+    assert(key.left.exists(_.contains("is not UTF-8")), key)

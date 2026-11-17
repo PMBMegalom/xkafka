@@ -52,11 +52,13 @@ object ProtobufFormat:
         override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
           protobuf(writer).map(_ => bytes => ProtobufWire.readIndexes(bytes).flatMap((_, message) => codec.decode(message)))
 
-  /** The format of messages named `message`, its full name, of `schema`, a file that imports only the well-known types. */
+  /** The format of messages named `message`, its full name, of `schema`, a file that imports only the files Confluent's serializers know. */
   def generic(schema: ProtobufSchema.File, message: String): Either[String, SchemaFormat[ProtobufValue]] =
     for
-      pool <- Pool.of(schema, Map.empty).leftMap(reason => s"$reason; a generic serde registers files that import only the well-known types")
-      _    <- schema.message(message).toRight(s"the schema declares no message $message")
+      pool <-
+        Pool.of(schema, Map.empty)
+          .leftMap(reason => s"$reason; a generic serde registers files that import only the files Confluent's serializers know")
+      _ <- schema.message(message).toRight(s"the schema declares no message $message")
     yield
       val dynamic = new Dynamic(pool)
       val text    = ProtobufSchemaText.render(schema)
@@ -101,10 +103,10 @@ object ProtobufSerde:
   )(using F: Concurrent[F]): F[Serde[F, A]] =
     F.fromEither(ProtobufFormat[A].leftMap(new RegistryException.NoSchema(_))).flatMap(RegistrySerde.of(registry, _, part, naming, writing))
 
-  /** Serdes of messages named `message`, its full name, of `schema`, a file known only as the program runs, which may import the well-known types.
-    * Values are [[ProtobufValue.Message]]s, and one that does not fit the message fails to write. Reading takes a record's fields by number, whatever
-    * version of the schema it was written with. Fails with [[RegistryException.NoSchema]] where `schema` declares no such message or imports other
-    * files.
+  /** Serdes of messages named `message`, its full name, of `schema`, a file known only as the program runs, which may import the files Confluent's
+    * serializers know. Values are [[ProtobufValue.Message]]s, and one that does not fit the message fails to write. Reading takes a record's fields
+    * by number, whatever version of the schema it was written with. Fails with [[RegistryException.NoSchema]] where `schema` declares no such message
+    * or imports other files.
     */
   def generic[F[_]](
       registry: SchemaRegistry[F],
@@ -118,7 +120,7 @@ object ProtobufSerde:
       .flatMap(RegistrySerde.of(registry, _, part, naming, writing))
 
   /** Reads each record as it was written, with the schema and message it names: for tools that show or copy any record. The schemas a schema names
-    * under other subjects are fetched from the registry, and the well-known types are known without them.
+    * under other subjects are fetched from the registry, and the files Confluent's serializers know are known without them.
     */
   def asWritten[F[_]](registry: SchemaRegistry[F])(using F: Concurrent[F]): F[Deserializer[F, ProtobufWritten]] =
     RegistrySerde.resolving(

@@ -1,0 +1,2 @@
+{"type": "record", "name": "Pointer", "namespace": "example", "doc": "A record naming a type in the package audit, which the package example.audit would hide",
+ "fields": [{"name": "entry", "type": {"type": "record", "name": "Remote", "namespace": "audit", "fields": [{"name": "id", "type": "int"}]}}]}

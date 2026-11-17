@@ -14,8 +14,20 @@ its progress together in one transaction, every 100ms. Each record then counts
 exactly once in the application's stores and output topics, even when work
 moves between members. Input is read with `IsolationLevel.ReadCommitted`.
 
-These are the same intervals Java Kafka Streams uses. Change them with
-`withCommitInterval`.
+A transaction that fails in a way worth retrying, such as one whose commit
+times out, is finished as the producer allows, and the member's tasks start
+again from what the group last committed, as Java's do. They keep trying for up
+to `taskTimeout` before the application stops with the failure. A producer
+fenced by another with its transactional id, refused for its epoch, or whose
+producer id has expired is made anew, and the tasks start again the same way.
+Any other failure stops the application at once.
+
+Under at-least-once, a write that fails in a way worth retrying starts the
+tasks again from what the group last committed the same way, within
+`taskTimeout`.
+
+Change these intervals with `withCommitInterval`. Every setting and its default
+is listed in [Streams settings](../settings.md#streams-settings).
 
 @:callout(warning)
 Under either guarantee, an effectful step can run more than once for the same
@@ -33,11 +45,11 @@ start and stop.
 
 ## Concurrency
 
-By default a member processes one task at a time, like a single Java Kafka
-Streams thread. `withConcurrency(n)` processes up to `n` tasks at once. Records within each task stay in order. This helps when an effectful step
-waits on something outside Kafka.
+By default a member processes one task at a time. `withConcurrency(n)` processes
+up to `n` tasks at once, which helps when an effectful step waits on something
+outside Kafka. Records within each task stay in order.
 
-## State
+## Watching the application
 
 `state` streams the application's current phase, and then each change to it:
 
@@ -48,10 +60,13 @@ waits on something outside Kafka.
 | `Running` | processing |
 | `Lost` | its work was taken away, and it is joining again |
 
-Each state also lists the `problems` the broker reports, such as a missing
-input topic or the application not being allowed to use its topics
-(`StreamsProblem.TopicAuthorizationFailed`). Like Java Kafka Streams, a member
-keeps going for as long as it can. To stop on a problem, watch for it:
+Each state also lists `problems`. Most are reported by the broker, such as a
+missing input topic or the application not being allowed to use its topics
+(`StreamsProblem.TopicAuthorizationFailed`). One is xkafka's own:
+`StreamsProblem.JavaMembersMayBeRefused`, which an application whose members all
+run xkafka can ignore (see
+[Mixing with Java Kafka Streams](java-kafka-streams.md#the-warning-in-state)). A
+member keeps going for as long as it can. To stop on a problem, watch for it:
 
 ```scala mdoc:compile-only
 // Run the application, and stop it if the broker says it may not use its topics
@@ -65,12 +80,13 @@ def runUntilRefused(streams: KafkaStreams[IO]): IO[Unit] =
   IO.race(streams.run, refused).void  // Whichever ends first stops the other
 ```
 
-Some brokers are configured to ask applications for a description of their
-topology. A member sends the program's description when asked, as Java Kafka
-Streams does, and the broker keeps it for whoever describes the group, such as
-Java's `Admin.describeStreamsGroups` with `includeTopologyDescription`.
-`StreamsSettings`' `withoutTopologyDescriptionPush` stops members sending it:
-the application keeps working, and the group's description has none.
+### Sending the program's description to the broker
+
+If the broker asks for it, each member sends the program's description, which
+the broker shows to whoever describes the group, such as Java's
+`Admin.describeStreamsGroups` with `includeTopologyDescription`. To stop this,
+use `StreamsSettings`' `withoutTopologyDescriptionPush`. The application keeps
+working, and the group's description has none.
 
 ## Stores and standbys
 
@@ -98,13 +114,13 @@ goes for work that moves to another member and comes back. Give each running
 member a directory of its own: a second member started over a directory already
 in use fails to start.
 
-Stores on disk are kept by RocksDB 10.1.3. What each platform needs:
+Stores on disk are kept by RocksDB 10.10.1. What each platform needs:
 
 - **JVM:** add RocksDB to the application's dependencies. Without it, an
   application given a state directory fails to start, saying what to add.
   ```scala
   // In build.sbt
-  libraryDependencies += "org.rocksdb" % "rocksdbjni" % "10.1.3"
+  libraryDependencies += "org.rocksdb" % "rocksdbjni" % "10.10.1.1"
   ```
 - **Scala.js:** nothing; RocksDB comes from npm with xkafka.
 - **Scala Native:** the RocksDB library file where the application runs, as
@@ -112,7 +128,7 @@ Stores on disk are kept by RocksDB 10.1.3. What each platform needs:
 
 ### Keeping a store in memory
 
-A small store that is quick to refill, or one you would rather not write to disk,
+A small store that is quick to refill, or one you prefer not to write to disk,
 can stay in memory while the others go to disk. Name it with `inMemory`:
 
 ```scala mdoc:compile-only
@@ -126,7 +142,7 @@ def counts(orders: Topic, views: Topic, orderCounts: Topic, viewCounts: Topic): 
   val text = Serde.utf8[IO]
   List(
     KStream(Named("read-orders"), orders, text, text).groupByKey(text, text)
-      .count(Named("count-orders"), Store("orders"))                  // On disk, where a state directory is given
+      .count(Named("count-orders"), Store("orders"))                  // On disk, if a state directory is given
       .toStream(Named("orders-changes")).to(Named("write-orders"), orderCounts, text, Serde.long[IO]),
     KStream(Named("read-views"), views, text, text).groupByKey(text, text)
       .count(Named("count-views"), Store("views").inMemory)           // In memory, refilled from its changelog on each start
@@ -142,7 +158,7 @@ kept in memory.
 If the broker's `streams.num.standby.replicas` setting asks for standby
 replicas, members also keep up-to-date copies of other members' stores. When
 work moves to a member holding a copy, it only needs to catch up on what the
-copy has not yet read.
+copy has not read.
 
 @:callout(info)
 A copy that is no longer needed is kept for 10 minutes, in case the work comes

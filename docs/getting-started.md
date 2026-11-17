@@ -7,11 +7,12 @@
 libraryDependencies += "io.github.pmbmegalom" %%% "xkafka-client" % "@VERSION@"
 ```
 
-The `%%%` operator selects the artifact for the platform being built. The same
-code then compiles against the JVM, Scala.js, and Scala Native artifacts, and
-each one runs on its platform's Kafka client.
+The same code compiles for the JVM, Scala.js and Scala Native, and each
+runs on its platform's Kafka client.
 
-Most applications need `xkafka-client` alone. The other modules are:
+## Modules
+
+Most applications need `xkafka-client` only. The other modules are:
 
 - `xkafka-kernel` holds the data types, serializers, deserializers and serdes,
   the producer, consumer, and administration interfaces, and the streams DSL,
@@ -19,15 +20,26 @@ Most applications need `xkafka-client` alone. The other modules are:
   add it yourself for code that must not depend on a client.
 - `xkafka-avro`, `xkafka-json-schema` and `xkafka-protobuf` write and read Avro,
   JSON Schema and Protobuf with the schemas a Confluent Schema Registry keeps.
-  Each brings in `xkafka-schema-registry`, the registry client, and
-  `xkafka-schema-registry-http4s` lets it reach the registry through an http4s
-  client.
-  See [Schema registry](schema-registry.md).
+  Each brings in the registry client, `xkafka-schema-registry`. To reach the
+  registry through http4s, also add `xkafka-schema-registry-http4s` and an
+  http4s client such as Ember. See [Schema registry](schema-registry.md).
+- `xkafka-protobuf-scalapb` writes and reads the Protobuf messages
+  [ScalaPB](https://scalapb.github.io) generates, with the registry's schemas.
+  See [ScalaPB messages](other-libraries.md#scalapb-messages).
+- `xkafka-smithy4s` writes and reads the types smithy4s generates from Smithy
+  files, as smithy4s's JSON or Protobuf, with the registry's schemas. See
+  [smithy4s types as JSON](other-libraries.md#smithy4s-types-as-json).
+- `xkafka-avro-vulcan` and `xkafka-avro4s` write and read the types vulcan and
+  avro4s have codecs for, with the registry's schemas, on the JVM only. See
+  [vulcan or avro4s codecs](other-libraries.md#vulcan-or-avro4s-codecs).
+- `sbt-xkafka-codegen` generates Scala classes from Avro and JSON Schema files
+  while sbt compiles; `xkafka-codegen` is the generator it runs. See
+  [Generating classes from schema files](code-generation.md).
 - `xkafka-streams-http4s` lets the members of a streams application query each
   other's stores over http4s. See [Queries](streams/queries.md).
 - `xkafka-streams-java`, on the JVM only, lets streams programs use code written
   for Java Kafka Streams, such as its partitioners. It depends on Java Kafka
-  Streams itself.
+  Streams itself. See [Java Kafka Streams](streams/java-kafka-streams.md).
 
 ## Versioning
 
@@ -58,18 +70,22 @@ import xkafka.*
 val client = KafkaClient[IO]
 ```
 
-This line is the same on every platform. What each platform needs at runtime is
-described below. Once it builds, [Producing](producing.md) and
-[Consuming](consuming.md) show how to write and read records, and
-[Settings](settings.md) covers what you can configure.
+What each platform needs at run time is described below. Once your project
+builds, [Producing](producing.md) and [Consuming](consuming.md) show how to
+write and read records, and [Settings](settings.md) covers what you can
+configure.
+
+## JVM
+
+Nothing else is needed. xkafka brings in the Apache Kafka Java client, and runs
+on Java 17 or newer.
 
 ## Scala.js
 
-xkafka uses librdkafka here, the same release as on Scala Native, and runs on
-Node.js 24, not in browsers. It comes from npm as `@xkafka/librdkafka`, with a
-prebuilt library for the platform it runs on, so nothing else needs installing.
-sbt-scalajs-bundler installs the npm package, so enable that plugin in the
-Scala.js project:
+On Scala.js, xkafka runs on Node.js 24, not in browsers. It uses librdkafka from
+the npm package `@xkafka/librdkafka`, which ships a prebuilt library for each
+platform it supports, so you install nothing else. The sbt-scalajs-bundler
+plugin installs the package. Add it, and enable it in your Scala.js project:
 
 ```scala
 // In project/plugins.sbt: add the plugin that installs the npm package
@@ -87,6 +103,6 @@ npm installs.
 
 ## Scala Native
 
-xkafka uses librdkafka 2.16.0 here, which must be installed where the
-application's compiler and linker can find it. See [Platform notes](platform-notes.md) for the linking recipes,
-including the flags a static link requires.
+On Scala Native, xkafka links librdkafka 2.16.0. Install it where your
+compiler and linker can find it. [Platform notes](platform-notes.md) gives the
+linking recipes, including the flags a static link needs.

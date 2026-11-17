@@ -31,14 +31,13 @@ import com.google.protobuf.DynamicMessage
 import com.google.protobuf.util.JsonFormat
 import fs2.Chunk
 import io.circe.Json
-import io.circe.parser.parse
+import io.circe.jawn.parse
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient
-import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException
 import io.confluent.kafka.schemaregistry.protobuf.{ProtobufSchema, ProtobufSchemaProvider}
 import io.confluent.kafka.serializers.protobuf.{KafkaProtobufDeserializer, KafkaProtobufSerializer}
 import munit.CatsEffectSuite
 import xkafka.{Headers, Topic}
-import xkafka.schemaregistry.{Compatibility, Part, Registered, Schema, SchemaId, SchemaName, SchemaRegistry, SchemaType, Subject}
+import xkafka.schemaregistry.{Part, SchemaName}
 
 @SchemaName("Line")
 final case class Grown(
@@ -59,6 +58,40 @@ final case class Retyped(
 ) derives ProtobufCodec
 
 /** xkafka's Protobuf schemas, records and serdes against Confluent's Protobuf support and protobuf-java. */
+/** A message in a package with a `google` part, where a name starting `google.` would be looked for in that part. */
+@xkafka.schemaregistry.SchemaNamespace("com.acme.google.ads")
+final case class Placed(
+    @ProtobufField(1)
+    at: Instant
+) derives ProtobufCodec
+
+/** A message that holds itself, a sealed trait whose case holds it, and a map of it, for how deep protobuf-java reads each. */
+final case class Deep(
+    @ProtobufField(1)
+    next: Option[Deep]
+) derives ProtobufCodec
+
+sealed trait Chain derives ProtobufCodec
+@ProtobufField(1)
+final case class Link(
+    @ProtobufField(1)
+    next: Chain
+) extends Chain
+@ProtobufField(2)
+final case class End() extends Chain
+
+final case class Kids(
+    @ProtobufField(1)
+    kids: Map[String, Kids]
+) derives ProtobufCodec
+
+final case class Stamped(
+    @ProtobufField(1)
+    next: Option[Stamped],
+    @ProtobufField(2)
+    at: Option[Instant]
+) derives ProtobufCodec
+
 class ConfluentProtobufSuite extends CatsEffectSuite:
   private val topic = Topic.from("orders").toOption.get
 
@@ -104,6 +137,42 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
     val (node, nested) = java(ProtobufCodec[Node], Node(1, Some(Node(2))))
     assertEquals(Chunk.array(nested.toByteArray), node)
 
+  private def dynamicOf[A](codec: ProtobufCodec[A]): Dynamic =
+    new Dynamic(ProtobufSchemaText.parse(codec.schema.fold(fail(_), identity)).flatMap(Pool.of(_, Map.empty)).fold(fail(_), identity))
+
+  test("records are read and written as deep as protobuf-java reads them, a oneof's message and a map's entries counted as it counts them"):
+    def message(number: Int, inner: Chunk[Byte]) = ProtobufWire.field(number, Raw.Bytes(inner))
+    def deep(levels: Int)                        = (0 until levels).foldLeft(Chunk.empty[Byte])((inner, _) => message(1, inner))
+    def chain(links: Int)                        = (0 until links).foldLeft(message(2, Chunk.empty))((inner, _) => message(1, message(1, inner)))
+    def kids(levels: Int)                        = (0 until levels)
+      .foldLeft(Chunk.empty[Byte])((inner, _) => message(1, message(1, Chunk.array("k".getBytes)) ++ message(2, inner)))
+    def agrees[A](codec: ProtobufCodec[A], full: String, bytes: Chunk[Byte], label: String): Unit =
+      val schema    = codec.schema.fold(fail(_), identity)
+      val javaReads = scala.util.Try(DynamicMessage.parseFrom(new ProtobufSchema(schema).toDescriptor, bytes.toArray)).isSuccess
+      val dynamic   = dynamicOf(codec)
+      val read      = codec.decode(bytes)
+      assertEquals(read.isRight, javaReads, s"$label: read")
+      assertEquals(dynamic.decode(full, bytes).isRight, javaReads, s"$label: read as a value")
+      read.foreach(value => assertEquals(codec.encode(value), Right(bytes), s"$label: written"))
+    List(99, 100, 101).foreach(levels => agrees(ProtobufCodec[Deep], "xkafka.protobuf.Deep", deep(levels), s"$levels nested"))
+    List(48, 49, 50).foreach(links => agrees(ProtobufCodec[Chain], "xkafka.protobuf.Chain", chain(links), s"$links links"))
+    List(49, 50, 51).foreach(levels => agrees(ProtobufCodec[Kids], "xkafka.protobuf.Kids", kids(levels), s"$levels levels of entries"))
+    // A Timestamp is a message, so it is a level too; a map entry's value left out is none.
+    def stamped(levels: Int) = (0 until levels).foldLeft(message(2, ProtobufWire.field(1, Raw.Varint(1L))))((inner, _) => message(1, inner))
+    List(99, 100).foreach(levels => agrees(ProtobufCodec[Stamped], "xkafka.protobuf.Stamped", stamped(levels), s"$levels nested, then a Timestamp"))
+    def keyOnly(levels: Int) = (0 until levels).foldLeft(message(1, message(1, Chunk.array("k".getBytes))))((inner, _) =>
+      message(1, message(1, Chunk.array("k".getBytes)) ++ message(2, inner))
+    )
+    List(49, 50).foreach(levels =>
+      assertEquals(
+        dynamicOf(ProtobufCodec[Kids]).decode("xkafka.protobuf.Kids", keyOnly(levels)).isRight,
+        scala.util.Try(DynamicMessage.parseFrom(confluent(ProtobufCodec[Kids]).toDescriptor, keyOnly(levels).toArray)).isSuccess,
+        s"$levels levels of entries, the last without its value"
+      )
+    )
+    def links(count: Int): Chain = (0 until count).foldLeft[Chain](End())((inner, _) => Link(inner))
+    assert(ProtobufCodec[Chain].encode(links(50)).isLeft, "a chain protobuf-java refuses to read is refused when written")
+
   test("xkafka reads what protobuf-java writes"):
     val descriptor = confluent(ProtobufCodec[Order]).toDescriptor
     val builder    = DynamicMessage.newBuilder(descriptor)
@@ -124,6 +193,10 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
         counts = List(7)
       ))
     )
+
+  test("a well-known type is named from the root, so a package with a google part does not hide it from protobuf-java"):
+    val descriptor = confluent(ProtobufCodec[Placed]).toDescriptor
+    assertEquals(descriptor.findFieldByName("at").getMessageType.getFullName, "google.protobuf.Timestamp")
 
   test("adding a field is a compatible change under Confluent's rules, and changing a field's type is not"):
     val older = confluent(ProtobufCodec[Line])
@@ -239,21 +312,6 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
       val rendered = ProtobufSchemaText.render(ProtobufSchemaText.parse(text).fold(fail(_), identity))
       assertEquals(new ProtobufSchema(rendered).canonicalString, new ProtobufSchema(text).canonicalString)
 
-  /** xkafka's registry operations on Confluent's registry in memory. */
-  private def bridged(mock: MockSchemaRegistryClient): SchemaRegistry[IO] =
-    def missing[A](run: => A): IO[Option[A]] = IO.blocking(Option(run)).recover { case error: RestClientException if error.getStatus == 404 => None }
-    new SchemaRegistry[IO]:
-      override def schema(id: SchemaId): IO[Schema] = IO.blocking(Schema(mock.getSchemaById(id.value).canonicalString, SchemaType.Protobuf))
-      override def register(subject: Subject, schema: Schema): IO[SchemaId] =
-        IO.blocking(SchemaId(mock.register(subject.value, new ProtobufSchema(schema.text))))
-      override def lookup(subject: Subject, schema: Schema): IO[Option[Registered]] =
-        missing(mock.getId(subject.value, new ProtobufSchema(schema.text))).map(_.map(id => Registered(SchemaId(id), subject, 1, schema)))
-      override def latest(subject: Subject): IO[Option[Registered]] =
-        missing(mock.getLatestSchemaMetadata(subject.value))
-          .map(_.map(meta => Registered(SchemaId(meta.getId), subject, meta.getVersion, Schema(meta.getSchema, SchemaType.Protobuf))))
-      override def version(subject: Subject, version: Int): IO[Option[Registered]]    = IO.pure(None)
-      override def compatibility(subject: Subject, schema: Schema): IO[Compatibility] = IO.pure(Compatibility.Compatible)
-
   test("Confluent's deserializer reads what xkafka writes, and xkafka reads what Confluent's serializer writes"):
     val mock         = new MockSchemaRegistryClient(List(new ProtobufSchemaProvider()).asJava)
     val serializer   = new KafkaProtobufSerializer[DynamicMessage](mock)
@@ -262,7 +320,7 @@ class ConfluentProtobufSuite extends CatsEffectSuite:
     deserializer.configure(Map("schema.registry.url" -> "mock://xkafka").asJava, false)
     val theirs = order.copy(payment = Card("9"), note = None)
     for
-      serde   <- ProtobufSerde.of[IO, Order](bridged(mock), Part.Value)
+      serde   <- ProtobufSerde.of[IO, Order](ConfluentProtobufRegistry.bridged(mock), Part.Value)
       ours    <- serde.serializer.serialize(topic, Headers.empty, order)
       read    <- IO.blocking(deserializer.deserialize("orders", ours.get.toArray))
       written <- IO.blocking(serializer.serialize("orders", java(ProtobufCodec[Order], theirs)._2))

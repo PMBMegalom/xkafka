@@ -64,3 +64,10 @@ final class CompletionsSuite extends CatsEffectSuite:
     yield
       assert(!whileRunning, "a running call's argument was collected")
       assert(afterwards, "an argument was still kept after its call ended")
+
+  test("a call whose start throws, as koffi throws for arguments it cannot pass, is forgotten with its arguments"):
+    val before = Completions.outstanding
+    val token  = Completions.expect(Seq(Buffers.alloc(1)))(() => ())
+    val thrown = scala.util.Try(Completions.guarded(token)(throw new js.JavaScriptException(js.Error("cannot pass"))))
+    assert(thrown.isFailure, thrown)
+    assertEquals(Completions.outstanding, before)

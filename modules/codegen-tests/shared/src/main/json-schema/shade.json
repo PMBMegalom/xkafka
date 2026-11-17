@@ -1,0 +1,5 @@
+{
+  "title": "example.json.Shade_",
+  "description": "An enum whose name ends with an underscore",
+  "enum": ["light", "dark"]
+}

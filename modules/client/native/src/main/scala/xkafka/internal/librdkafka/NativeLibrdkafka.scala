@@ -187,9 +187,9 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
               errorCode
             )
           result match
-            case 0 => true
-            case 1 => false
-            case _ => throw nativeError(error, errorCode)
+            case 0      => true
+            case 1      => false
+            case answer => throw Failures.delivery(fromCString(error), !errorCode, answer)
         Enqueued(records.iterator.takeWhile(taken).size, gaveUp = false)
 
   private def nativeHeaders(headers: Headers, error: CString, errorCode: Ptr[CInt])(using Zone): CVoidPtr =
@@ -222,8 +222,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         given Zone             = zone
         val (error, errorCode) = errorSlots
         Vector.tabulate(Bindings.xkafka_batch_count(batch).toInt): index =>
-          if Bindings.xkafka_batch_error_at(producer, batch, index.toUSize, error, ErrorBufferSize.toUSize, errorCode) != 0 then
-            Left(nativeError(error, errorCode))
+          val answer = Bindings.xkafka_batch_error_at(producer, batch, index.toUSize, error, ErrorBufferSize.toUSize, errorCode)
+          if answer != 0 then Left(Failures.delivery(fromCString(error), !errorCode, answer))
           else
             Right(Delivery(
               Bindings.xkafka_batch_partition_at(batch, index.toUSize),
@@ -242,8 +242,10 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     )
 
   override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
-    transactional((error, code, fatal, retriable, abort) =>
-      Bindings.xkafka_producer_commit_transaction(producer, timeoutMillis, error, ErrorBufferSize.toUSize, code, fatal, retriable, abort)
+    transactional(
+      (error, code, fatal, retriable, abort) =>
+        Bindings.xkafka_producer_commit_transaction(producer, timeoutMillis, error, ErrorBufferSize.toUSize, code, fatal, retriable, abort),
+      committing = true
     )
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
@@ -259,8 +261,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
   ): F[Unit] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone                                         = zone
-        val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
+        given Zone                                                = zone
+        val (topics, partitions, values, epochs, comments, sizes) = commitArrays(offsets)
         failOnClassified((error, code, fatal, retriable, abort) =>
           Bindings.xkafka_producer_send_offsets(
             producer,
@@ -270,6 +272,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             values,
             epochs,
             comments,
+            sizes,
             offsets.size.toUSize,
             timeoutMillis,
             error,
@@ -426,10 +429,10 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     F.blocking:
       Zone.acquire: zone =>
-        given Zone                                         = zone
-        val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
-        val (error, errorCode)                             = errorSlots
-        val result                                         =
+        given Zone                                                = zone
+        val (topics, partitions, values, epochs, comments, sizes) = commitArrays(offsets)
+        val (error, errorCode)                                    = errorSlots
+        val result                                                =
           Bindings.xkafka_consumer_commit(
             consumer,
             topics,
@@ -437,6 +440,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
             values,
             epochs,
             comments,
+            sizes,
             offsets.size.toUSize,
             timeoutMillis,
             error,
@@ -923,7 +927,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       timeoutMillis: Int
   ): F[Vector[Either[KafkaException, Unit]]] =
     codedCall(offsets.map(_._1), _.show): (codes, error, errorCode) =>
-      val (topics, partitions, values, epochs, comments) = commitArrays(offsets)
+      val (topics, partitions, values, epochs, comments, sizes) = commitArrays(offsets)
       Bindings.xkafka_admin_alter_group_offsets(
         admin,
         toCString(group.value),
@@ -932,6 +936,7 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         values,
         epochs,
         comments,
+        sizes,
         offsets.size.toUSize,
         timeoutMillis,
         codes,
@@ -1053,19 +1058,26 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       epochs(index) = start.leaderEpoch
     (topics, partitions, offsets, epochs)
 
-  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
+  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata: each one's UTF-8 bytes after the one before, and how many
+    * there are of each, so a metadata holding NUL is passed whole.
+    */
   private def commitArrays(offsets: Vector[(TopicPartition, OffsetAndMetadata)])(using
       Zone
-  ): (Ptr[CString], Ptr[CInt], Ptr[CLongLong], Ptr[CInt], Ptr[CString]) =
+  ): (Ptr[CString], Ptr[CInt], Ptr[CLongLong], Ptr[CInt], CString, Ptr[CInt]) =
     val (topics, partitions) = partitionArrays(offsets.map(_._1))
     val values               = alloc[CLongLong](offsets.size)
     val epochs               = alloc[CInt](offsets.size)
-    val metadata             = alloc[CString](offsets.size)
+    val encoded              = offsets.map(_._2.metadata.getBytes(StandardCharsets.UTF_8))
+    val bytes                = alloc[CChar](encoded.map(_.length).sum.max(1))
+    val sizes                = alloc[CInt](offsets.size)
     offsets.iterator.zipWithIndex.foreach: (entry, index) =>
       values(index) = entry._2.offset.value
       epochs(index) = entry._2.leaderEpoch.fold(-1)(_.value)
-      metadata(index) = toCString(entry._2.metadata)
-    (topics, partitions, values, epochs, metadata)
+    val starts = encoded.scanLeft(0)(_ + _.length)
+    encoded.iterator.zipWithIndex.foreach: (text, index) =>
+      text.indices.foreach(offset => bytes(starts(index) + offset) = text(offset))
+      sizes(index) = text.length
+    (topics, partitions, values, epochs, bytes, sizes)
 
   /** A call that names partitions and reports a failure through the usual out-parameters. */
   private def partitionCall(partitions: Vector[TopicPartition])(call: (Ptr[CString], Ptr[CInt], CSize, CString, Ptr[CInt]) => CInt): F[Unit] =
@@ -1076,10 +1088,10 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
         val (error, errorCode) = errorSlots
         if call(topics, values, partitions.size.toUSize, error, errorCode) != 0 then throw nativeError(error, errorCode)
 
-  private def transactional(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt): F[Unit] =
-    F.blocking(Zone.acquire(zone => failOnClassified(call)(using zone)))
+  private def transactional(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt, committing: Boolean = false): F[Unit] =
+    F.blocking(Zone.acquire(zone => failOnClassified(call, committing)(using zone)))
 
-  private def failOnClassified(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt)(using Zone): Unit =
+  private def failOnClassified(call: (CString, Ptr[CInt], Ptr[CInt], Ptr[CInt], Ptr[CInt]) => CInt, committing: Boolean = false)(using Zone): Unit =
     val (error, code) = errorSlots
     val fatal         = alloc[CInt](1)
     val retriable     = alloc[CInt](1)
@@ -1087,7 +1099,9 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     !fatal = -1
     !retriable = -1
     !abort = -1
-    if call(error, code, fatal, retriable, abort) != 0 then throw Failures.classified(fromCString(error), !code, !fatal, !abort)
+    if call(error, code, fatal, retriable, abort) != 0 then
+      throw if committing then Failures.committing(fromCString(error), !code, !fatal, !retriable, !abort)
+      else Failures.classified(fromCString(error), !code, !fatal, !abort)
 
   /** Builds a failure from the message and code the call wrote into its own out-parameters. */
   private def nativeError(error: CString, code: Ptr[CInt]): KafkaException.BackendFailure = Failures.coded(fromCString(error), !code)

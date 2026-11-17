@@ -1,0 +1,1 @@
+{"type": "record", "name": "Graded", "namespace": "com.example.shop", "fields": [{"name": "grade", "type": {"type": "enum", "name": "Grade", "symbols": ["A", "B"], "default": "A"}}]}

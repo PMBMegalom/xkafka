@@ -1,0 +1,10 @@
+[
+  {"type": "record", "name": "Defaults", "namespace": "example.times", "fields": [
+    {"name": "time", "type": {"type": "long", "logicalType": "time-micros"}, "default": 1000001},
+    {"name": "at", "type": {"type": "long", "logicalType": "timestamp-millis"}, "default": 1700000000001},
+    {"name": "local", "type": {"type": "long", "logicalType": "local-timestamp-micros"}, "default": 1700000000000001}
+  ]},
+  {"type": "record", "name": "Nanos", "namespace": "example.times", "fields": [
+    {"name": "at", "type": {"type": "long", "logicalType": "timestamp-nanos"}, "default": 1700000000000000001}
+  ]}
+]

@@ -1,0 +1,42 @@
+{
+  "type": "record",
+  "name": "Order",
+  "namespace": "example.shop",
+  "doc": "An order a customer placed",
+  "aliases": ["Purchase"],
+  "fields": [
+    {"name": "id", "type": "string", "doc": "The order's \"id\"", "aliases": ["key"]},
+    {"name": "quantity", "type": "int", "default": 1},
+    {"name": "total", "type": "long", "default": -5},
+    {"name": "ratio", "type": "float", "default": 0.5},
+    {"name": "weight", "type": "double", "default": 1.25},
+    {"name": "paid", "type": "boolean", "default": false},
+    {"name": "greeting", "type": "string", "default": "say \"hi\"\né"},
+    {"name": "blob", "type": "bytes", "default": "\u0000ÿ"},
+    {"name": "note", "type": ["null", "string"], "default": null},
+    {"name": "label", "type": ["string", "null"], "default": "none"},
+    {"name": "tags", "type": {"type": "array", "items": "string"}, "default": ["a", "b"]},
+    {"name": "counts", "type": {"type": "map", "values": "long"}, "default": {"x": 1}},
+    {"name": "status", "type": "example.shop.Status", "default": "NEW"},
+    {"name": "line", "type": "example.shop.Line", "default": {"sku": "none", "quantity": 0}},
+    {"name": "lines", "type": {"type": "array", "items": "example.shop.Line"}},
+    {"name": "hash", "type": {"type": "fixed", "name": "Hash", "aliases": ["Digest"], "size": 4}},
+    {"name": "previous", "type": ["null", "Hash"], "default": null},
+    {"name": "payment", "type": [
+      {"type": "record", "name": "Cash", "fields": [{"name": "cents", "type": "long"}]},
+      {"type": "record", "name": "Card", "fields": [{"name": "number", "type": "string"}]}
+    ]},
+    {"name": "refund", "type": ["null", "Cash", "Card"], "default": null},
+    {"name": "code", "type": ["int", "string"], "default": 7},
+    {"name": "either", "type": ["int", "null", "string"], "default": 3},
+    {"name": "price", "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2}, "default": "\u0004Ò"},
+    {"name": "discount", "type": ["null", {"type": "bytes", "logicalType": "decimal", "precision": 4, "scale": 1}], "default": null},
+    {"name": "ref", "type": {"type": "string", "logicalType": "uuid"}, "default": "123e4567-e89b-12d3-a456-426614174000"},
+    {"name": "day", "type": {"type": "int", "logicalType": "date"}, "default": 20000},
+    {"name": "opens", "type": {"type": "int", "logicalType": "time-millis"}, "default": 32400000},
+    {"name": "placed", "type": {"type": "long", "logicalType": "timestamp-micros"}, "default": 1700000000000001},
+    {"name": "local", "type": {"type": "long", "logicalType": "local-timestamp-millis"}, "default": 1700000000000},
+    {"name": "type", "type": "string", "default": "keyword"},
+    {"name": "copy", "type": "int", "default": 2}
+  ]
+}

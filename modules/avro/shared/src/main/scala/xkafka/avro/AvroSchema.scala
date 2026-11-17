@@ -40,8 +40,8 @@ enum LogicalType derives CanEqual:
   /** A decimal number of at most `precision` digits, `scale` of them after the point, written as the bytes of its unscaled value. */
   case Decimal(precision: scala.Int, scale: scala.Int)
 
-  /** A decimal number written as the `size` bytes of the fixed type `fixedName`. */
-  case FixedDecimal(fixedName: FullName, size: scala.Int, precision: scala.Int, scale: scala.Int)
+  /** A decimal number written as the `size` bytes of the fixed type `fixedName`, which a reader also takes for any of its `aliases`. */
+  case FixedDecimal(fixedName: FullName, size: scala.Int, precision: scala.Int, scale: scala.Int, aliases: List[FullName] = Nil)
 
   /** A UUID, written as text. */
   case Uuid
@@ -77,7 +77,7 @@ enum LogicalType derives CanEqual:
   def underlying: AvroSchema =
     this match
       case Decimal(_, _)                                  => AvroSchema.Bytes
-      case FixedDecimal(name, size, _, _)                 => AvroSchema.Fixed(name, size)
+      case FixedDecimal(name, size, _, _, aliases)        => AvroSchema.Fixed(name, size, aliases)
       case Uuid                                           => AvroSchema.String
       case Date | TimeMillis                              => AvroSchema.Int
       case TimeMicros | TimestampMillis | TimestampMicros => AvroSchema.Long
@@ -87,17 +87,17 @@ enum LogicalType derives CanEqual:
   /** How Avro names it. */
   def name: scala.Predef.String =
     this match
-      case Decimal(_, _) | FixedDecimal(_, _, _, _) => "decimal"
-      case Uuid                                     => "uuid"
-      case Date                                     => "date"
-      case TimeMillis                               => "time-millis"
-      case TimeMicros                               => "time-micros"
-      case TimestampMillis                          => "timestamp-millis"
-      case TimestampMicros                          => "timestamp-micros"
-      case TimestampNanos                           => "timestamp-nanos"
-      case LocalTimestampMillis                     => "local-timestamp-millis"
-      case LocalTimestampMicros                     => "local-timestamp-micros"
-      case LocalTimestampNanos                      => "local-timestamp-nanos"
+      case Decimal(_, _) | FixedDecimal(_, _, _, _, _) => "decimal"
+      case Uuid                                        => "uuid"
+      case Date                                        => "date"
+      case TimeMillis                                  => "time-millis"
+      case TimeMicros                                  => "time-micros"
+      case TimestampMillis                             => "timestamp-millis"
+      case TimestampMicros                             => "timestamp-micros"
+      case TimestampNanos                              => "timestamp-nanos"
+      case LocalTimestampMillis                        => "local-timestamp-millis"
+      case LocalTimestampMicros                        => "local-timestamp-micros"
+      case LocalTimestampNanos                         => "local-timestamp-nanos"
 
 /** A record's field: its name and schema, and the value a reader takes for it where what it reads was written without it. */
 final case class AvroField(
@@ -160,9 +160,11 @@ object AvroSchema:
           fields.foldLeft(found.updated(name, record))((sofar, field) => from(field.schema, sofar))
         case named @ (Enum(_, _, _, _, _) | Fixed(_, _, _)) => named.fullName
             .fold(found)(name => if found.contains(name) then found else found.updated(name, named))
-        case Logical(logicalType) => from(logicalType.underlying, found)
-        case Array(items)         => from(items, found)
-        case Map(values)          => from(values, found)
-        case Union(branches)      => branches.foldLeft(found)((sofar, branch) => from(branch, sofar))
-        case _                    => found
+        // A decimal held in a fixed type is defined as the decimal, so a field naming it keeps its scale.
+        case logical @ Logical(LogicalType.FixedDecimal(name, _, _, _, _)) => if found.contains(name) then found else found.updated(name, logical)
+        case Logical(logicalType)                                          => from(logicalType.underlying, found)
+        case Array(items)                                                  => from(items, found)
+        case Map(values)                                                   => from(values, found)
+        case Union(branches)                                               => branches.foldLeft(found)((sofar, branch) => from(branch, sofar))
+        case _                                                             => found
     from(schema, scala.collection.immutable.Map.empty)

@@ -26,7 +26,7 @@ import scala.annotation.StaticAnnotation
 /** The name a derived schema gives a type or field in place of its Scala name, in every schema language. */
 final class SchemaName(val name: String) extends StaticAnnotation
 
-/** The namespace a derived schema puts a type in, in place of its Scala package. */
+/** The namespace a derived schema puts a type in, in place of its Scala package; an empty one puts it in none. */
 final class SchemaNamespace(val namespace: String) extends StaticAnnotation
 
 /** The documentation a derived schema gives a type or field. */
@@ -37,3 +37,8 @@ final class SchemaAlias(val alias: String) extends StaticAnnotation
 
 /** Leaves a field's Scala default out of its schema, so a reader requires the field to have been written. */
 final class SchemaNoDefault extends StaticAnnotation
+
+/** Makes the `BigDecimal`s of a field decimal numbers of at most `precision` digits, `scale` of them after the point, in the schema languages that
+  * record those.
+  */
+final class SchemaDecimal(val precision: Int, val scale: Int) extends StaticAnnotation

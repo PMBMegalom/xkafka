@@ -47,3 +47,9 @@ final class PartitionTimeSuite extends FunSuite:
     val second = PartitionTime.encode(20L, Map("a" -> 7L, "c" -> 1L))
     assertEquals(PartitionTime.merged(List(first, second)), Map("a" -> 7L, "b" -> 9L, "c" -> 1L))
     assertEquals(PartitionTime.merged(List(second, first)), Map("a" -> 7L, "b" -> 9L, "c" -> 1L))
+
+  test("a length past the bytes left, in processor metadata or a held change, reads as nothing, without making room for it"):
+    val metadata = java.nio.ByteBuffer.allocate(17).put(2.toByte).putLong(42L).putInt(1).putInt(Int.MaxValue).array
+    assertEquals(PartitionTime.processors(java.util.Base64.getEncoder.encodeToString(metadata)), Map.empty)
+    val held = java.nio.ByteBuffer.allocate(20).putLong(1L).putLong(2L).putInt(Int.MaxValue).array
+    assertEquals(Held.decode(fs2.Chunk.array(held)), None)

@@ -21,6 +21,8 @@
 
 package xkafka.protobuf
 
+import java.nio.charset.StandardCharsets
+
 import scala.annotation.tailrec
 
 import cats.syntax.all.*
@@ -30,7 +32,9 @@ import xkafka.protobuf.ProtobufSchema.{Enum, Field, FieldType, File, Label, Mess
 private enum Token derives CanEqual:
   case Word(text: String)
   case Number(text: String)
-  case Text(value: String)
+
+  /** Quoted text, read, and as it is written, quotes and escapes and all. */
+  case Text(value: String, written: String)
   case Symbol(char: Char)
 
 /** A step of reading tokens from a position, giving a value and the position after it. */
@@ -86,8 +90,11 @@ object ProtobufSchemaText:
       case FieldType.Map(key, value) => s"map<${typeName(key)}, ${typeName(value)}>"
       case scalar                    => scalar.toString.toLowerCase
 
+  // protoc refuses two values of one number unless the enum allows aliases, which it says where it has them.
   private def enumeration(declared: Enum, indent: String): String =
-    s"${indent}enum ${declared.name} {\n${declared.values.map((name, number) => s"$indent  $name = $number;\n").mkString}$indent}"
+    val aliased = declared.values.map(_._2).distinct.size < declared.values.size
+    val option  = if aliased then s"$indent  option allow_alias = true;\n" else ""
+    s"${indent}enum ${declared.name} {\n$option${declared.values.map((name, number) => s"$indent  $name = $number;\n").mkString}$indent}"
 
   private[protobuf] def escape(text: String): String =
     text.flatMap:
@@ -98,6 +105,8 @@ object ProtobufSchemaText:
 
   private def tokens(text: String): Either[String, Vector[Token]] =
     def wordChar(char: Char): Boolean = char.isLetterOrDigit || char == '_' || char == '.'
+    // The escapes of control characters, by the letter after the backslash.
+    val controls = Map('a' -> 7, 'b' -> 8, 'f' -> 12, 'n' -> 10, 'r' -> 13, 't' -> 9, 'v' -> 11).view.mapValues(_.toByte).toMap
     @tailrec
     def go(at: Int, read: Vector[Token]): Either[String, Vector[Token]] =
       if at >= text.length then Right(read)
@@ -126,25 +135,44 @@ object ProtobufSchemaText:
           .getOrElse(text.length)
           go(end, read :+ Token.Number(text.substring(at, end)))
         else if char == '"' || char == '\'' then
-          quoted(at + 1, char, new StringBuilder) match
-            case Right((value, end)) => go(end, read :+ Token.Text(value))
+          quoted(at + 1, char, Vector.empty) match
+            case Right((value, end)) => go(end, read :+ Token.Text(value, text.substring(at, end)))
             case Left(reason)        => Left(reason)
         else go(at + 1, read :+ Token.Symbol(char))
+    // The digits of `radix` at `at`, at most `most` of them.
+    def digits(at: Int, radix: Int, most: Int): String = text.slice(at, at + most).takeWhile(char => Character.digit(char, radix) >= 0)
+    def utf8(codePoint: Int): Vector[Byte]             = new String(Character.toChars(codePoint)).getBytes(StandardCharsets.UTF_8).toVector
+    // Quoted text is bytes, as protobuf reads it: a character is its UTF-8, and an octal or hex escape one byte.
     @tailrec
-    def quoted(at: Int, quote: Char, value: StringBuilder): Either[String, (String, Int)] =
+    def quoted(at: Int, quote: Char, bytes: Vector[Byte]): Either[String, (String, Int)] =
       if at >= text.length then Left("quoted text is not closed")
       else
         text(at) match
-          case `quote`                      => Right((value.result(), at + 1))
+          case `quote`                      => Right((new String(bytes.toArray, StandardCharsets.UTF_8), at + 1))
           case '\\' if at + 1 < text.length =>
-            val escaped =
+            val escaped: Either[String, (Vector[Byte], Int)] =
               text(at + 1) match
-                case 'n'   => '\n'
-                case 't'   => '\t'
-                case 'r'   => '\r'
-                case other => other
-            quoted(at + 2, quote, value.append(escaped))
-          case char => quoted(at + 1, quote, value.append(char))
+                case char if controls.contains(char)       => Right((Vector(controls(char)), at + 2))
+                case char if "\\'\"?".contains(char)       => Right((Vector(char.toByte), at + 2))
+                case char if Character.digit(char, 8) >= 0 =>
+                  val octal = digits(at + 1, 8, 3)
+                  Right((Vector(Integer.parseInt(octal, 8).toByte), at + 1 + octal.length))
+                case 'x' | 'X' => digits(at + 2, 16, 2) match
+                    case ""  => Left("\\x is not followed by a hex digit")
+                    case hex => Right((Vector(Integer.parseInt(hex, 16).toByte), at + 2 + hex.length))
+                case 'u' | 'U' =>
+                  val size = if text(at + 1) == 'u' then 4 else 8
+                  digits(at + 2, 16, size) match
+                    case hex if hex.length == size && java.lang.Long.parseLong(hex, 16) <= Character.MAX_CODE_POINT =>
+                      Right((utf8(java.lang.Long.parseLong(hex, 16).toInt), at + 2 + size))
+                    case _ => Left(s"\\${text(at + 1)} is not followed by $size hex digits of a character")
+                case other => Left(s"'\\$other' is no escape")
+            escaped match
+              case Right((more, next)) => quoted(next, quote, bytes ++ more)
+              case Left(reason)        => Left(reason)
+          case _ =>
+            val codePoint = text.codePointAt(at)
+            quoted(at + Character.charCount(codePoint), quote, bytes ++ utf8(codePoint))
     go(0, Vector.empty)
 
   /** Reads a file's tokens, by recursive descent. */
@@ -153,11 +181,11 @@ object ProtobufSchemaText:
 
     private def describe(at: Int): String =
       peek(at) match
-        case Some(Token.Word(text))   => s"'$text'"
-        case Some(Token.Number(text)) => s"'$text'"
-        case Some(Token.Text(value))  => s"\"$value\""
-        case Some(Token.Symbol(char)) => s"'$char'"
-        case None                     => "the end of the file"
+        case Some(Token.Word(text))       => s"'$text'"
+        case Some(Token.Number(text))     => s"'$text'"
+        case Some(Token.Text(_, written)) => written
+        case Some(Token.Symbol(char))     => s"'$char'"
+        case None                         => "the end of the file"
 
     private def fail[A](at: Int, expected: String): Either[String, A] = Left(s"expected $expected at token ${at + 1}, found ${describe(at)}")
 
@@ -173,8 +201,8 @@ object ProtobufSchemaText:
     private val text: Step[String] =
       Step: at =>
         peek(at) match
-          case Some(Token.Text(value)) => Right((value, at + 1))
-          case _                       => fail(at, "quoted text")
+          case Some(Token.Text(value, _)) => Right((value, at + 1))
+          case _                          => fail(at, "quoted text")
 
     private val integer: Step[Int] =
       Step: at =>
@@ -182,7 +210,7 @@ object ProtobufSchemaText:
         peek(start) match
           case Some(Token.Number(digits)) =>
             val value =
-              if digits.startsWith("0x") || digits.startsWith("0X") then BigInt(digits.drop(2), 16).some
+              if digits.startsWith("0x") || digits.startsWith("0X") then scala.util.Try(BigInt(digits.drop(2), 16)).toOption
               else if digits.length > 1 && digits.startsWith("0") then scala.util.Try(BigInt(digits.drop(1), 8)).toOption
               else scala.util.Try(BigInt(digits)).toOption
             value.map(number => if negative then -number else number).filter(_.isValidInt) match
@@ -194,10 +222,10 @@ object ProtobufSchemaText:
     private val constant: Step[String] =
       Step: at =>
         peek(at) match
-          case Some(Token.Word(text))   => Right((text, at + 1))
-          case Some(Token.Number(text)) => Right((text, at + 1))
-          case Some(Token.Text(value))  => Right((s"\"${escape(value)}\"", at + 1))
-          case Some(Token.Symbol('-'))  => peek(at + 1) match
+          case Some(Token.Word(text))       => Right((text, at + 1))
+          case Some(Token.Number(text))     => Right((text, at + 1))
+          case Some(Token.Text(_, written)) => Right((written, at + 1))
+          case Some(Token.Symbol('-'))      => peek(at + 1) match
               case Some(Token.Number(text)) => Right((s"-$text", at + 2))
               case Some(Token.Word(text))   => Right((s"-$text", at + 2))
               case _                        => fail(at + 1, "a number")
@@ -258,7 +286,7 @@ object ProtobufSchemaText:
             val start = if peek(at + 1).exists(token => token == Token.Word("public") || token == Token.Word("weak")) then at + 2 else at + 1
             (text <* symbol(';')).run(start).map((name, next) => (file.copy(imports = name :: file.imports), next))
           case Some(Token.Word("option"))  => skipPast(';').run(at).map((_, next) => (file, next))
-          case Some(Token.Word("message")) => message(file.syntax).run(at).map((read, next) => (file.copy(messages = read :: file.messages), next))
+          case Some(Token.Word("message")) => message(file.syntax, 1).run(at).map((read, next) => (file.copy(messages = read :: file.messages), next))
           case Some(Token.Word("enum"))    => enumeration.run(at).map((read, next) => (file.copy(enums = read :: file.enums), next))
           case Some(Token.Word("service")) => (word >> word >> symbol('{') >> skipPast('}')).run(at).map((_, next) => (file, next))
           case Some(Token.Word("extend"))  => Left("the file extends a message, and xkafka does not read extensions")
@@ -270,12 +298,17 @@ object ProtobufSchemaText:
       case Nested(message: Message)
       case NestedEnum(declared: Enum)
 
-    private def message(syntax: Syntax): Step[Message] =
+    // Nesting is bounded as records' is, so a file nested past it is refused, not read until the stack runs out.
+    private def message(syntax: Syntax, depth: Int): Step[Message] =
       for
+        _ <-
+          Step(at =>
+            if depth > ProtobufWire.MaxDepth then Left(s"the file's messages are nested more than ${ProtobufWire.MaxDepth} deep") else Right(((), at))
+          )
         _    <- word
         name <- word
         _    <- symbol('{')
-        read <- items(messageItem(syntax))
+        read <- items(messageItem(syntax, depth))
       yield Message(
         name,
         read.flatMap { case Item.Fields(fields) => fields; case _ => Nil },
@@ -283,10 +316,10 @@ object ProtobufSchemaText:
         read.collect { case Item.NestedEnum(nested) => nested }
       )
 
-    private def messageItem(syntax: Syntax): Step[Option[Item]] =
+    private def messageItem(syntax: Syntax, depth: Int): Step[Option[Item]] =
       Step: at =>
         peek(at) match
-          case Some(Token.Word("message"))                            => message(syntax).map(read => Some(Item.Nested(read))).run(at)
+          case Some(Token.Word("message"))                            => message(syntax, depth + 1).map(read => Some(Item.Nested(read))).run(at)
           case Some(Token.Word("enum"))                               => enumeration.map(read => Some(Item.NestedEnum(read))).run(at)
           case Some(Token.Word("oneof"))                              => oneof(syntax).map(read => Some(Item.Fields(read))).run(at)
           case Some(Token.Word("option" | "reserved" | "extensions")) => skipPast(';').run(at).map((_, next) => (None, next))
@@ -339,17 +372,23 @@ object ProtobufSchemaText:
             Left(s"field ${read.name} is numbered ${read.number}, which Protobuf does not allow")
           else Right((read, next))
 
+    private def mapAt(at: Int): Boolean = peek(at).contains(Token.Word("map")) && peek(at + 1).contains(Token.Symbol('<'))
+
+    // A map's values are refused as a map before they are read, so maps nested however deep are not read until the stack runs out.
+    private val mapValue: Step[FieldType] =
+      Step(at => if mapAt(at) then Left("a map's values are a map, which Protobuf does not allow") else fieldType.run(at))
+
     private val fieldType: Step[FieldType] =
       Step: at =>
         peek(at) match
-          case Some(Token.Word("group"))                                           => Left("the file declares a group, which xkafka does not read")
-          case Some(Token.Word("map")) if peek(at + 1).contains(Token.Symbol('<')) =>
+          case Some(Token.Word("group")) => Left("the file declares a group, which xkafka does not read")
+          case _ if mapAt(at)            =>
             (for
               _     <- word
               _     <- symbol('<')
               key   <- word
               _     <- symbol(',')
-              value <- fieldType
+              value <- mapValue
               _     <- symbol('>')
             yield (key, value)).run(at).flatMap:
               case ((key, value), next) => ProtobufSchema.scalars.get(key)
@@ -368,11 +407,12 @@ object ProtobufSchemaText:
           def go(at: Int, packed: Option[Boolean], default: Option[String]): Either[String, ((Option[Boolean], Option[String]), Int)] =
             val option =
               peek(at) match
+                // Of the options named plainly, `packed` and `default` are kept, and any other's value, which may be an aggregate, is skipped.
                 case Some(Token.Word(name)) => (for
                     _     <- word
                     _     <- symbol('=')
-                    value <- constant
-                  yield (name, value)).run(at).map((pair, next) => (Some(pair), next))
+                    value <- if name == "packed" || name == "default" then constant.map(Some(_)) else Step(skipOptionValue).map(_ => None)
+                  yield value.map(name -> _)).run(at)
                 // A custom option, named in parentheses, is skipped.
                 case _ => skipPast('=').flatMap(_ => Step(skipOptionValue)).run(at).map((_, next) => (None, next))
             option match
@@ -391,7 +431,15 @@ object ProtobufSchemaText:
 
     /** Skips an option's value: a constant, or a message's value in braces. */
     private def skipOptionValue(at: Int): Either[String, (Unit, Int)] =
-      if peek(at).contains(Token.Symbol('{')) then skipPast('}').run(at + 1) else constant.run(at).map((_, next) => ((), next))
+      // An aggregate's braces may hold others, so they are counted to its end.
+      @tailrec
+      def closing(at: Int, open: Int): Either[String, (Unit, Int)] =
+        peek(at) match
+          case None                    => Left("an option's value is not closed")
+          case Some(Token.Symbol('{')) => closing(at + 1, open + 1)
+          case Some(Token.Symbol('}')) => if open == 1 then Right(((), at + 1)) else closing(at + 1, open - 1)
+          case _                       => closing(at + 1, open)
+      if peek(at).contains(Token.Symbol('{')) then closing(at + 1, 1) else constant.run(at).map((_, next) => ((), next))
 
     private val enumeration: Step[Enum] =
       for

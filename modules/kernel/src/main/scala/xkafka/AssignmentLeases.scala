@@ -21,7 +21,7 @@
 
 package xkafka
 
-import cats.effect.Concurrent
+import cats.effect.{Concurrent, Outcome, Poll}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.concurrent.SignallingRef
@@ -150,14 +150,23 @@ private[xkafka] object AssignmentLeases:
           release: GroupHandle => F[Unit],
           onCommitted: Option[Map[TopicPartition, OffsetAndMetadata] => F[Unit]]
       ): GroupMembership[F] =
-        val acquire =
+        // The lease is counted in flight before the handle is taken, and given back where taking it fails or is cancelled, so a revocation does not
+        // wait for a transaction that never recorded its offsets.
+        def acquiring(poll: Poll[F]): F[GroupHandle] =
           lease.fold(F.raiseError[GroupHandle](revokedAssignment)): held =>
-            leases.modify(_.acquire(held)).ifM(handle.onError(_ => leases.update(_.release(held))), F.raiseError(revokedAssignment))
+            leases.modify(_.acquire(held)).ifM(
+              poll(handle).guaranteeCase:
+                case Outcome.Succeeded(_) => F.unit
+                case _                    => leases.update(_.release(held))
+              ,
+              F.raiseError(revokedAssignment)
+            )
         new GroupMembership.Backend(
           owner -> lease,
-          acquire,
+          F.uncancelable(acquiring),
           value => release(value).guarantee(lease.traverse_(held => leases.update(_.release(held)))),
-          onCommitted
+          onCommitted,
+          Some(acquiring)
         )
 
       override def holding[A](held: List[Option[Lease]])(attempt: F[A]): F[A] =

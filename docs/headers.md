@@ -57,6 +57,11 @@ val cleaned = headers.remove("trace")        // No "trace" headers
 | `Long` | eight bytes, most significant first |
 | `Chunk[Byte]` | the bytes themselves |
 
+## Header names
+
+A header name cannot hold the character NUL (`\u0000`). Sending a record with
+such a name fails with an `IllegalArgumentException`, before anything is sent.
+
 ## Headers with no value
 
 Kafka allows a header to have no value, which is `Header(name, None)`. Every platform
@@ -97,5 +102,4 @@ given HeaderDeserializer[Tenant] = HeaderDeserializer.utf8.map(Tenant(_))   // R
 val tenant = Headers.empty.append("tenant", Tenant("acme")).get[Tenant]("tenant")
 ```
 
-These are plain functions, not effects, because a header value is already in memory
-by the time one is applied.
+Header codecs are plain functions, not effects.

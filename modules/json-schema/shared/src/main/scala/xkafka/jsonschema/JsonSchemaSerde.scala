@@ -26,9 +26,9 @@ import java.nio.charset.StandardCharsets
 import cats.effect.Concurrent
 import cats.syntax.all.*
 import fs2.Chunk
-import io.circe.{parser, Json}
+import io.circe.{jawn, Json}
 import xkafka.{Deserializer, Serde}
-import xkafka.schemaregistry.{Part, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Writing}
+import xkafka.schemaregistry.{Part, RegistryException, RegistrySerde, Schema, SchemaFormat, SchemaRegistry, SchemaType, SubjectNaming, Utf8, Writing}
 
 /** A record as it was written: the schema its writer registered, and its JSON. */
 final case class JsonSchemaWritten(schema: Json, value: Json)
@@ -37,24 +37,48 @@ final case class JsonSchemaWritten(schema: Json, value: Json)
   * field it lacks takes its default, and properties the codec does not know are ignored.
   */
 object JsonSchemaFormat:
+  /** How deep a record's arrays and objects may be nested before it is refused instead of read. */
+  private[jsonschema] val MaxDepth = 100
+
   def apply[A](using codec: JsonSchemaCodec[A]): SchemaFormat[A] =
     new SchemaFormat[A]:
       override val schema: Schema             = Schema(codec.schema.noSpaces, SchemaType.Json)
       override val recordName: Option[String] = codec.name
 
       override def writer(target: Schema): Either[String, A => Either[String, Chunk[Byte]]] =
-        json(target).map(_ => value => codec.encode(value).map(written => Chunk.array(written.noSpaces.getBytes(StandardCharsets.UTF_8))))
+        // What is written is held to the depth reading takes, so nothing is written that reading refuses.
+        codec.refusal.toLeft(()) *> json(target).map(_ =>
+          value =>
+            codec.encode(value).filterOrElse(shallow, s"the record is nested more than $MaxDepth deep")
+              .map(written => Chunk.array(written.noSpaces.getBytes(StandardCharsets.UTF_8)))
+        )
 
       override def reader(writer: Schema): Either[String, Chunk[Byte] => Either[String, A]] =
-        json(writer).map(_ => bytes => read(bytes).flatMap(codec.decode))
+        codec.refusal.toLeft(()) *> json(writer).map(_ => bytes => read(bytes).flatMap(codec.decode))
 
   private[jsonschema] def json(schema: Schema): Either[String, Json] =
     if schema.schemaType != SchemaType.Json then Left(s"the schema is ${schema.schemaType.name}, not JSON Schema")
     else if schema.references.nonEmpty then Left("the schema names schemas registered under other subjects, which xkafka does not read yet")
-    else parser.parse(schema.text).leftMap(error => s"the schema is not JSON: ${error.message}")
+    else jawn.parse(schema.text).leftMap(error => s"the schema is not JSON: ${error.message}")
 
   private[jsonschema] def read(bytes: Chunk[Byte]): Either[String, Json] =
-    parser.parse(new String(bytes.toArray, StandardCharsets.UTF_8)).leftMap(error => s"the record is not JSON: ${error.message}")
+    Utf8.decode(bytes.toArray).leftMap(_ => "the record is not UTF-8")
+      .flatMap(text => jawn.parse(text).leftMap(error => s"the record is not JSON: ${error.message}"))
+      .filterOrElse(shallow, s"the record is nested more than $MaxDepth deep")
+
+  /** Whether no array or object in `json` is inside `MaxDepth` others, found without recursion, so that no record runs the stack out. */
+  private def shallow(json: Json): Boolean =
+    @scala.annotation.tailrec
+    def within(pending: List[(Json, Int)]): Boolean =
+      pending match
+        case Nil                        => true
+        case (value, enclosing) :: rest =>
+          val inner = value.asArray.map(_.toList).orElse(value.asObject.map(_.values.toList))
+          inner match
+            case None                             => within(rest)
+            case Some(_) if enclosing >= MaxDepth => false
+            case Some(values)                     => within(values.map(_ -> (enclosing + 1)) ++ rest)
+    within(List(json -> 0))
 
 /** Serdes writing and reading JSON with the schemas the registry keeps, in Confluent's wire format, as Confluent's `KafkaJsonSchemaSerializer` does:
   * the schema's id, then the JSON as UTF-8 text.
@@ -65,7 +89,9 @@ object JsonSchemaSerde:
       part: Part,
       naming: SubjectNaming = SubjectNaming.TopicName,
       writing: Writing = Writing.Register
-  ): F[Serde[F, A]] = RegistrySerde.of(registry, JsonSchemaFormat[A], part, naming, writing)
+  ): F[Serde[F, A]] =
+    Concurrent[F].fromEither(JsonSchemaCodec[A].refusal.map(new RegistryException.NoSchema(_)).toLeft(())) *>
+      RegistrySerde.of(registry, JsonSchemaFormat[A], part, naming, writing)
 
   /** Serdes of JSON values of `schema`, a schema known only as the program runs. Values are written as they are, without checking them against it. */
   def generic[F[_]: Concurrent](

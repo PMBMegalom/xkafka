@@ -48,6 +48,8 @@ private[xkafka] object PlatformStateDirectory:
     def write(store: Store, writes: Vector[RocksdbWrite]): F[Unit]               = F.blocking(NativeRocksdb.write(store, writes))
     def range(store: Store, family: Int, from: Option[Array[Byte]], to: Option[Array[Byte]]): F[Vector[(Array[Byte], Array[Byte])]] =
       F.blocking(NativeRocksdb.range(store, family, from, to, 0))
+    def page(store: Store, family: Int, from: Option[Array[Byte]], limit: Int): F[Vector[(Array[Byte], Array[Byte])]] =
+      F.blocking(NativeRocksdb.range(store, family, from, None, limit))
     def close(store: Store): F[Unit] = F.blocking(NativeRocksdb.close(store))
 
   /** The file operations, through `java.nio.file`. */

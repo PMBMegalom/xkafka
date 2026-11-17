@@ -46,11 +46,36 @@ private[xkafka] object Meta:
   /** Each constructor parameter's default, written as the format whose codecs are `C` writes it, once asked for, in order. */
   inline def defaults[A, C[_], Out]: List[Option[() => Either[String, Out]]] = ${ defaultsOf[A, C, Out] }
 
-  private def text(using Quotes)(annotations: List[quotes.reflect.Term], annotation: String): List[String] =
+  /** The constant an annotation's argument gives, in place or named: a literal, or anything the compiler folds to one, such as a `final val`. */
+  private[xkafka] def constant(using Quotes)(argument: quotes.reflect.Term): Option[quotes.reflect.Constant] =
+    import quotes.reflect.*
+    argument match
+      case NamedArg(_, value)    => constant(value)
+      case Inlined(_, Nil, body) => constant(body)
+      case Typed(value, _)       => constant(value)
+      case Literal(value)        => Some(value)
+      case _                     => argument.tpe.widenTermRefByName.dealias match
+          case ConstantType(value) => Some(value)
+          case _                   => None
+
+  /** The text an annotation's argument gives as a constant. */
+  private[xkafka] def constantText(using Quotes)(argument: quotes.reflect.Term): Option[String] =
+    import quotes.reflect.*
+    constant(argument).collect { case StringConstant(value) => value }
+
+  /** The number an annotation's argument gives as a constant. */
+  private[xkafka] def constantNumber(using Quotes)(argument: quotes.reflect.Term): Option[Int] =
+    import quotes.reflect.*
+    constant(argument).collect { case IntConstant(value) => value }
+
+  /** The text each annotation `annotation` of these gives, in place or named; an argument that is no constant is refused as the code is compiled. */
+  private[xkafka] def text(using Quotes)(annotations: List[quotes.reflect.Term], annotation: String): List[String] =
     import quotes.reflect.*
     annotations.collect:
-      case Apply(Select(New(tpt), _), List(Literal(StringConstant(value)))) if tpt.tpe.typeSymbol.fullName == s"xkafka.schemaregistry.$annotation" =>
-        value
+      case applied @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == s"xkafka.schemaregistry.$annotation" =>
+        arguments match
+          case List(argument) => constantText(argument).getOrElse(report.errorAndAbort(s"@$annotation takes constant text", applied.pos))
+          case _              => report.errorAndAbort(s"@$annotation takes constant text", applied.pos)
 
   private def marked(using Quotes)(annotations: List[quotes.reflect.Term], annotation: String): Boolean =
     annotations.exists(_.tpe.typeSymbol.fullName == s"xkafka.schemaregistry.$annotation")
@@ -69,24 +94,65 @@ private[xkafka] object Meta:
       case TermRef(_, _) => Nil
       case other         => other.typeSymbol.primaryConstructor.paramSymss.flatten.filterNot(_.isTypeParam)
 
+  /** The Scala names of the fields of `tpe`. */
+  def fieldNamesOf(using Quotes)(tpe: quotes.reflect.TypeRepr): List[String] = parametersOf(tpe).map(_.name)
+
+  /** The precision and scale [[SchemaDecimal]] gives each field of `tpe`, where it marks the field. */
+  def decimalsOf(using Quotes)(tpe: quotes.reflect.TypeRepr): List[Option[(Int, Int)]] =
+    import quotes.reflect.*
+    parametersOf(tpe).map: parameter =>
+      parameter.annotations.collectFirst:
+        case annotation @ Apply(Select(New(tpt), _), arguments) if tpt.tpe.typeSymbol.fullName == "xkafka.schemaregistry.SchemaDecimal" =>
+          val numbers =
+            arguments
+              .map(argument => constantNumber(argument).getOrElse(report.errorAndAbort("@SchemaDecimal takes constant numbers", annotation.pos)))
+          numbers match
+            case List(precision, scale) if precision >= 1 && scale >= 0 && scale <= precision => (precision, scale)
+            case List(precision, scale)                                                       => report.errorAndAbort(
+                s"@SchemaDecimal($precision, $scale) on ${parameter.name}: the precision must be at least 1 and the scale from 0 to the precision",
+                annotation.pos
+              )
+            case _ => report.errorAndAbort("@SchemaDecimal takes a precision and a scale", annotation.pos)
+
+  /** `tpe` with each `BigDecimal` in it a [[Decimals.Decimal]] of `decimal`'s precision and scale; `field` names it where it holds none. */
+  def withDecimal(using Quotes)(tpe: quotes.reflect.TypeRepr, decimal: (Int, Int), field: String): quotes.reflect.TypeRepr =
+    import quotes.reflect.*
+    val (precision, scale) = decimal
+    val decimalType        = TypeRepr.of[Decimals.Decimal].appliedTo(List(ConstantType(IntConstant(precision)), ConstantType(IntConstant(scale))))
+    def replace(inside: TypeRepr): TypeRepr =
+      if inside =:= TypeRepr.of[BigDecimal] then decimalType
+      else
+        inside.dealias match
+          case AppliedType(constructor, arguments) => constructor.appliedTo(arguments.map(replace))
+          case other                               => other
+    val replaced = replace(tpe)
+    if replaced =:= tpe then report.errorAndAbort(s"@SchemaDecimal on $field, which holds no BigDecimal") else replaced
+
   private def namedOf[A: Type](using Quotes): Expr[Named] =
     import quotes.reflect.*
     val tpe         = TypeRepr.of[A]
     val symbol      = symbolOf(tpe)
     val annotations = symbol.annotations
-    val arguments   =
-      tpe.dealias match
-        case AppliedType(_, args) => args.map(arg => symbolOf(arg).name.stripSuffix("$"))
-        case _                    => Nil
-    // A generic type's name carries its type arguments, so Box[Int] and Box[String] are two records.
-    val scalaName = symbol.name.stripSuffix("$") + (if arguments.isEmpty then "" else arguments.mkString("__", "_", ""))
-    val packages  =
-      Iterator.iterate(symbol.owner)(_.owner).takeWhile(owner => !owner.isNoSymbol && owner != defn.RootClass).filter(_.isPackageDef).map(_.name)
-        .toList.reverse.filterNot(_ == "<empty>")
-    val name: String              = text(annotations, "SchemaName").headOption.getOrElse(scalaName)
-    val namespace: Option[String] = text(annotations, "SchemaNamespace").headOption.orElse(Option.when(packages.nonEmpty)(packages.mkString(".")))
-    val doc: Option[String]       = text(annotations, "SchemaDoc").headOption
-    val aliases: List[String]     = text(annotations, "SchemaAlias")
+    // A generic type's name carries its type arguments in full, so Box[Int], Box[String] and Box[List[Int]] are three records.
+    def written(of: TypeRepr): String =
+      val name = symbolOf(of).name.stripSuffix("$")
+      of.dealias match
+        case AppliedType(_, args) => name + args.map(written).mkString("__", "_", "")
+        case _                    => name
+    val scalaName = written(tpe)
+    // The namespace is the packages and the objects the type is in, so two types of one name in two objects are two types; the object Scala makes
+    // around a file's top-level definitions is left out, and so is a package object, named `package`.
+    def packageObject(name: String) = name == "package" || name.endsWith("$package")
+    val packages                    =
+      Iterator.iterate(symbol.owner)(_.owner).takeWhile(owner => !owner.isNoSymbol && owner != defn.RootClass)
+        .filter(owner => owner.isPackageDef || owner.flags.is(Flags.Module) && !packageObject(owner.name.stripSuffix("$")))
+        .map(_.name.stripSuffix("$")).toList.reverse.filterNot(_ == "<empty>")
+    val name: String = text(annotations, "SchemaName").headOption.getOrElse(scalaName)
+    // An empty namespace given is none, as a schema file that names none has.
+    val namespace: Option[String] =
+      text(annotations, "SchemaNamespace").headOption.fold(Option.when(packages.nonEmpty)(packages.mkString(".")))(Some(_).filter(_.nonEmpty))
+    val doc: Option[String]   = text(annotations, "SchemaDoc").headOption
+    val aliases: List[String] = text(annotations, "SchemaAlias")
     '{ Named(${ Expr(name) }, ${ Expr(namespace) }, ${ Expr(doc) }, ${ Expr(aliases) }) }
 
   private def fieldsOf[A: Type](using Quotes): Expr[List[Field]] =
@@ -110,12 +176,16 @@ private[xkafka] object Meta:
         case AppliedType(_, args) => args
         case _                    => Nil
     Expr.ofList(
-      parametersOf(tpe).zipWithIndex.map: (parameter, index) =>
-        tpe.memberType(symbol.fieldMember(parameter.name)).asType match
-          case '[field] => symbol.companionClass.declaredMethod(s"$$lessinit$$greater$$default$$${index + 1}").headOption match
+      parametersOf(tpe).lazyZip(decimalsOf(tpe)).lazyZip(parametersOf(tpe).indices).map: (parameter, decimal, index) =>
+        val declared = tpe.memberType(symbol.fieldMember(parameter.name))
+        // A default of a field marked SchemaDecimal is written as the decimal its field is, not as any BigDecimal.
+        (declared.asType, decimal.fold(declared)(withDecimal(declared, _, parameter.name)).asType) match
+          case ('[field], '[derived]) => symbol.companionClass.declaredMethod(s"$$lessinit$$greater$$default$$${index + 1}").headOption match
               case Some(method) if parameter.flags.is(Flags.HasDefault) =>
                 val call  = Select(Ref(symbol.companionModule), method)
                 val value = (if arguments.isEmpty then call else call.appliedToTypes(arguments)).asExprOf[field]
-                '{ Some(() => scala.compiletime.summonInline[DefaultOf[C, Out, field]].write($value)) }
+                '{ Some(() => scala.compiletime.summonInline[DefaultOf[C, Out, derived]].write($value.asInstanceOf[derived])) }
               case _ => '{ None }
+          // Every type matches a type pattern, which the compiler cannot see.
+          case _ => '{ None }
     )

@@ -1,0 +1,11 @@
+{
+  "title": "example.web.Visit",
+  "type": "object",
+  "properties": {
+    "id": { "type": "string" },
+    "seconds": { "type": "number", "default": 1.5 },
+    "tag": { "$ref": "#/definitions/Tag" }
+  },
+  "required": ["id"],
+  "definitions": { "Tag": { "enum": ["new", "back"] } }
+}

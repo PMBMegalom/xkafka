@@ -137,7 +137,7 @@ private[xkafka] object JsRocksdb extends RocksdbLibrary:
       case Right(shim)   =>
         val promise = Promise[A]()
         val token   = Completions.expect(arguments)(() => promise.complete(Try(read(shim))))
-        val code    = function(shim)((arguments ++ Seq[js.Any](Completions.done, js.BigInt(token.toString)))*)
+        val code    = Completions.guarded(token)(function(shim)((arguments ++ Seq[js.Any](Completions.done, js.BigInt(token.toString)))*))
         if integer(code) != 0 then
           Completions.forget(token)
           promise.failure(new RocksdbException("could not start a thread for a RocksDB call"))

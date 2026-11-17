@@ -1,0 +1,2 @@
+{"type": "enum", "name": "Status", "namespace": "example.shop", "doc": "Where an order is", "aliases": ["State"],
+ "symbols": ["NEW", "PAID", "type", "values"], "default": "NEW"}

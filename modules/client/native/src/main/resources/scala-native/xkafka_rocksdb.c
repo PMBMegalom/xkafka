@@ -17,7 +17,7 @@
  *
  *   Opens the RocksDB library at `path` once for the process, finds its
  *   functions, and checks that it is the RocksDB release `expected` names,
- *   such as "10.1.3". With no path, it tries in turn the file the
+ *   such as "10.10.1". With no path, it tries in turn the file the
  *   XKAFKA_ROCKSDB_LIBRARY environment variable names, where one is set and
  *   nothing else; the platform's file from the rocksdbjni jar, such as
  *   librocksdbjni-linux64.so, in the directory of the running executable; and
@@ -32,7 +32,7 @@
  *   const char *xkafka_rocksdb_identity(void)
  *
  *   The RocksDB release and the shim's identity the build gave it, such as
- *   "10.1.3-0123456789ab", which the JavaScript backend compares with its own
+ *   "10.10.1-0123456789ab", which the JavaScript backend compares with its own
  *   so it refuses a library built from other sources. Empty where the build
  *   gave none, as Scala Native's does.
  *
@@ -128,6 +128,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Each job thread's stack, glibc's default, set so a thread has it on musl too, whose default is 128 KiB. */
+#define XKAFKA_ROCKSDB_JOB_STACK_SIZE ((size_t)8 * 1024 * 1024)
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
@@ -874,6 +877,7 @@ static int xkafka_rocksdb_job_start(xkafka_rocksdb_job_t *job, xkafka_rocksdb_do
         job->token = token;
         if (pthread_attr_init(&attributes) == 0) {
                 pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+                pthread_attr_setstacksize(&attributes, XKAFKA_ROCKSDB_JOB_STACK_SIZE);
                 started = pthread_create(&thread, &attributes, xkafka_rocksdb_job_thread, job) == 0;
                 pthread_attr_destroy(&attributes);
         }

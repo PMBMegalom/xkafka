@@ -147,13 +147,38 @@ final class ClientSuite extends FunSuite:
       ))
     )
 
+  test("durations that are not whole milliseconds are refused, as both backends count in milliseconds"):
+    val serializer   = Serializer.const[IO, String](None)
+    val deserializer = Deserializer.utf8[IO]
+    val partial      = 500.micros
+    assertEquals(
+      ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = partial).toEither,
+      Left(NonEmptyList.one(SettingsError.PartialMilliseconds(SettingsError.DurationField.MetadataRefreshInterval, partial)))
+    )
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, closeTimeout = 1500.micros).toEither,
+      Left(NonEmptyList.one(SettingsError.PartialMilliseconds(SettingsError.DurationField.CloseTimeout, 1500.micros)))
+    )
+    assertEquals(
+      ConsumerSettings.from(clientSettings, group, deserializer, deserializer, pollTimeout = partial, maxPollInterval = 1001.micros).toEither,
+      Left(NonEmptyList.of(
+        SettingsError.PartialMilliseconds(SettingsError.DurationField.PollTimeout, partial),
+        SettingsError.PartialMilliseconds(SettingsError.DurationField.MaxPollInterval, 1001.micros)
+      ))
+    )
+    assertEquals(
+      ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get.withFetchWait(partial).toEither,
+      Left(NonEmptyList.one(SettingsError.PartialMilliseconds(SettingsError.DurationField.FetchWait, partial)))
+    )
+    assert(ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get.withFetchWait(Duration.Zero).isValid)
+
   test("every duration accepts the largest portable millisecond value"):
     val serializer   = Serializer.const[IO, String](None)
     val deserializer = Deserializer.utf8[IO]
     val id           = TransactionalId.from("writer").toOption.get
     val maximum      = SettingsError.MaxDuration
 
-    assert(ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = maximum).isValid)
+    assert(ClientSettings.from(NonEmptyList.one("localhost:9092"), metadataRefreshInterval = ClientSettings.MetadataRefreshIntervalLimit).isValid)
     assert(ProducerSettings.from(clientSettings, serializer, serializer, closeTimeout = maximum).isValid)
     assert(TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = maximum).isValid)
     assert(
@@ -206,6 +231,14 @@ final class ClientSuite extends FunSuite:
       ))
     )
 
+  test("the names librdkafka also reads a managed property under are rejected too"):
+    val client   = ClientSettings.from(NonEmptyList.one("localhost:9092"), properties = Map("metadata.broker.list" -> "other:9092"))
+    val consumer =
+      ConsumerSettings.from(clientSettings, group, Deserializer.utf8[IO], Deserializer.utf8[IO], properties = Map("auto.commit.enable" -> "true"))
+
+    assertEquals(client.toEither, Left(NonEmptyList.one(SettingsError.ManagedProperty("metadata.broker.list", SettingsError.PropertyScope.Client))))
+    assertEquals(consumer.toEither, Left(NonEmptyList.one(SettingsError.ManagedProperty("auto.commit.enable", SettingsError.PropertyScope.Consumer))))
+
   test("managed property rejection is scoped to the settings that declared it"):
     val serializer = Serializer.const[IO, String](None)
     val producer   = ProducerSettings.from(clientSettings, serializer, serializer, Map("enable.auto.commit" -> "true"))
@@ -228,6 +261,9 @@ final class ClientSuite extends FunSuite:
       ))
     )
     assert(ClientSettings.from(NonEmptyList.of("localhost:9092", "[::1]:9092", "10.0.0.1:1")).isValid)
+    // Neither a character other than a colon after an IPv6 literal's bracket, nor a digit outside ASCII, makes an endpoint the clients can reach.
+    List("[::1]x9092", "[::1]]9092", "localhost:\u0669\u0660\u0669\u0662").foreach: server =>
+      assertEquals(ClientSettings.from(NonEmptyList.one(server)).toEither, Left(NonEmptyList.one(SettingsError.InvalidBootstrapServer(0, server))))
 
   test("TLS settings reject a blank certificate authority"):
     assertEquals(TlsSettings.from(CertificateAuthority.PemFile("  ")).toEither, Left(NonEmptyList.one(SettingsError.BlankCertificateAuthority)))
@@ -682,7 +718,7 @@ final class ClientSuite extends FunSuite:
 
     assertEquals(settings.closeTimeout, ProducerSettings.DefaultCloseTimeout)
     assertEquals(updated.closeTimeout, 5.seconds)
-    assertEquals(updated.withClient(clientSettings).closeTimeout, 5.seconds)
+    assertEquals(updated.withClient(clientSettings).map(_.closeTimeout).toOption, Some(5.seconds))
     assertEquals(updated.withProperty("retry.backoff.ms", "5").toOption.get.closeTimeout, 5.seconds)
 
   test("compression and linger default to what both backends do, and are carried by their withers"):
@@ -703,19 +739,115 @@ final class ClientSuite extends FunSuite:
     // The names both backends read from the same property.
     assertEquals(Compression.values.toList.map(_.property), List("none", "gzip", "snappy", "lz4", "zstd"))
 
-  test("linger runs from zero to the longest librdkafka accepts"):
+  test("linger runs from zero to below librdkafka's message timeout, and a transaction's linger below its timeout"):
     val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
     val settings   = ProducerSettings.from(clientSettings, serializer, serializer).toOption.get
-    val tooLong    = ProducerSettings.LingerLimit + 1.milli
+    val limit      = ProducerSettings.LingerLimit
 
-    assert(settings.withLinger(ProducerSettings.LingerLimit).isValid)
+    assertEquals(limit, 5.minutes)
+    assert(settings.withLinger(limit - 1.milli).isValid)
     assertEquals(
       settings.withLinger((-1).milli).toEither,
       Left(NonEmptyList.one(SettingsError.NegativeDuration(SettingsError.DurationField.Linger, (-1).milli)))
     )
     assertEquals(
-      ProducerSettings.from(clientSettings, serializer, serializer, linger = tooLong).toEither,
-      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(SettingsError.DurationField.Linger, tooLong, ProducerSettings.LingerLimit)))
+      ProducerSettings.from(clientSettings, serializer, serializer, linger = limit).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, limit, limit)))
+    )
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = 10.seconds).toOption.get
+    assertEquals(
+      transactional.withLinger(10.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(10.seconds, 10.seconds)))
+    )
+    assertEquals(
+      transactional.withLinger(9.seconds).andThen(_.withTransactionTimeout(9.seconds)).toEither,
+      Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(9.seconds, 9.seconds)))
+    )
+    assertEquals(
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, linger = 2.seconds, transactionTimeout = 2.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.LingerNotBelowTransactionTimeout(2.seconds, 2.seconds)))
+    )
+
+  test("a producer's settings are checked again under the client they are moved to, as the client's properties may refuse their linger"):
+    val serializer = Serializer.const[IO, String](None)
+    val timed      = clientSettings.withProperty("message.timeout.ms", "5000").toOption.get
+    val producer   = ProducerSettings.from(clientSettings, serializer, serializer, linger = 10.seconds).toOption.get
+    val refused    = NonEmptyList.one(SettingsError.DurationNotBelowLimit(SettingsError.DurationField.Linger, 10.seconds, 5.seconds))
+    assertEquals(producer.withClient(timed).toEither, Left(refused))
+    assert(producer.withClient(clientSettings).isValid)
+    val id            = TransactionalId.from("writer").toOption.get
+    val transactional = TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, linger = 10.seconds).toOption.get
+    assertEquals(transactional.withClient(timed).toEither, Left(refused))
+
+  test("a delivery timeout the properties set leaves room for linger and a request, as the Java client refuses one that does not"):
+    val serializer = Serializer.const[IO, String](None)
+    assertEquals(
+      ProducerSettings.from(clientSettings, serializer, serializer, Map("delivery.timeout.ms" -> "20000")).toEither,
+      Left(NonEmptyList.one(SettingsError.PropertyDurationBelowMinimum("delivery.timeout.ms", 20.seconds, 30.seconds + 5.millis)))
+    )
+    assert(
+      ProducerSettings.from(clientSettings, serializer, serializer, Map("delivery.timeout.ms" -> "20000", "request.timeout.ms" -> "10000")).isValid
+    )
+
+  test(
+    "a transactional producer's message and socket timeouts the properties set fit its transaction timeout, as librdkafka refuses them otherwise, however they are set"
+  ):
+    val serializer                          = Serializer.const[IO, String](None)
+    val id                                  = TransactionalId.from("writer").toOption.get
+    def made(properties: (String, String)*) =
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, properties = properties.toMap, transactionTimeout = 60.seconds)
+        .toEither
+    assertEquals(
+      made("message.timeout.ms" -> "120000"),
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 120.seconds, 60.seconds)))
+    )
+    assertEquals(
+      made("socket.timeout.ms" -> "60101"),
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("socket.timeout.ms", 60101.millis, 60100.millis)))
+    )
+    assert(made("message.timeout.ms" -> "60000", "socket.timeout.ms" -> "60100").isRight)
+    val valid = made().toOption.get
+    assertEquals(
+      valid.withProperty("message.timeout.ms", "120000").toEither,
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("message.timeout.ms", 120.seconds, 60.seconds)))
+    )
+    assertEquals(
+      valid.withProperties(Map("socket.timeout.ms" -> "60101")).toEither,
+      Left(NonEmptyList.one(SettingsError.PropertyDurationAboveLimit("socket.timeout.ms", 60101.millis, 60100.millis)))
+    )
+
+  test("linger is below a message or delivery timeout the properties set, as both clients refuse it otherwise"):
+    val serializer = Serializer.const[IO, String](None)
+    val field      = SettingsError.DurationField
+    List("message.timeout.ms", "delivery.timeout.ms").foreach: name =>
+      assertEquals(
+        ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "10000"), linger = 30.seconds).toEither,
+        Left(NonEmptyList.one(SettingsError.DurationNotBelowLimit(field.Linger, 30.seconds, 10.seconds))),
+        name
+      )
+      // With a request timeout that leaves room for linger, as Java's delivery timeout needs.
+      assert(
+        ProducerSettings.from(clientSettings, serializer, serializer, Map(name -> "10000", "request.timeout.ms" -> "5000"), linger = 1.second)
+          .isValid,
+        name
+      )
+    val viaClient = clientSettings.withProperty("message.timeout.ms", "10000").toOption.get
+    assert(ProducerSettings.from(viaClient, serializer, serializer, linger = 30.seconds).isInvalid)
+
+  test("a transaction timeout is at least a second, and the metadata refresh interval at most an hour, as librdkafka accepts"):
+    val serializer = Serializer.const[IO, String](None)
+    val id         = TransactionalId.from("writer").toOption.get
+    val field      = SettingsError.DurationField
+    assertEquals(
+      TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = 999.millis).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationBelowMinimum(field.TransactionTimeout, 999.millis, 1.second)))
+    )
+    assert(TransactionalProducerSettings.from(clientSettings, id, serializer, serializer, transactionTimeout = 1.second).isValid)
+    assertEquals(ClientSettings.MetadataRefreshIntervalLimit, 1.hour)
+    assertEquals(
+      clientSettings.withMetadataRefreshInterval(1.hour + 1.milli).toEither,
+      Left(NonEmptyList.one(SettingsError.DurationAboveLimit(field.MetadataRefreshInterval, 1.hour + 1.milli, 1.hour)))
     )
 
   test("the enqueue timeout is a minute unless set, must be positive, and owns max.block.ms"):
@@ -823,6 +955,26 @@ final class ClientSuite extends FunSuite:
     val field        = SettingsError.DurationField
 
     assertEquals(settings.withGroupInstanceId(" ").toEither, Left(NonEmptyList.one(SettingsError.BlankGroupInstanceId)))
+    // The Java client holds a static member's id to the rules of topic names.
+    List("a b", ".", "..", "x" * 250, "é").foreach: id =>
+      assertEquals(settings.withGroupInstanceId(id).toEither, Left(NonEmptyList.one(SettingsError.InvalidGroupInstanceId(id))), id)
+    assert(settings.withGroupInstanceId("member-1.a_b").isValid)
+    // Under the consumer protocol the broker decides the session, so the poll interval is not held to the default one there.
+    val consumerProtocol = settings.withProperty("group.protocol", "CONSUMER").toOption.get
+    assert(consumerProtocol.withMaxPollInterval(10.seconds).isValid)
+    // Set for the whole client, the protocol counts as well.
+    val clientWide = clientSettings.withProperty("group.protocol", "consumer").toOption.get
+    assert(ConsumerSettings.from(clientWide, group, deserializer, deserializer, maxPollInterval = 10.seconds).isValid)
+    // Moving settings to another client checks them against it.
+    val consumerWide = ConsumerSettings.from(clientWide, group, deserializer, deserializer, maxPollInterval = 10.seconds).toOption.get
+    assertEquals(
+      consumerWide.withClient(clientSettings).toEither,
+      Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(10.seconds, ConsumerSettings.DefaultSessionTimeout)))
+    )
+    assertEquals(
+      settings.withMaxPollInterval(10.seconds).toEither,
+      Left(NonEmptyList.one(SettingsError.MaxPollIntervalBelowSessionTimeout(10.seconds, ConsumerSettings.DefaultSessionTimeout)))
+    )
     assertEquals(
       settings.withSessionTimeout(Duration.Zero).toEither,
       Left(NonEmptyList.one(SettingsError.NonPositiveDuration(field.SessionTimeout, Duration.Zero)))

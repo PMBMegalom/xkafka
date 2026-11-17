@@ -7,8 +7,8 @@ import scala.sys.process.ProcessLogger
 import laika.helium.config.{HeliumIcon, IconLink}
 import org.typelevel.sbt.gha.{Permissions, PermissionValue}
 
-ThisBuild / scalaVersion     := "3.3.9"
-ThisBuild / tlBaseVersion    := "0.7"
+ThisBuild / scalaVersion     := "3.9.0"
+ThisBuild / tlBaseVersion    := "0.8"
 ThisBuild / organization     := "io.github.pmbmegalom"
 ThisBuild / organizationName := "Piermatteo Barambani Megalom"
 ThisBuild / homepage         := Some(url("https://github.com/PMBMegalom/xkafka"))
@@ -27,23 +27,28 @@ ThisBuild / licenses        := Seq("MIT" -> url("https://opensource.org/license/
 ThisBuild / tlJdkRelease    := Some(17)
 ThisBuild / tlFatalWarnings := true
 
-val catsEffectVersion      = "3.7.1"
-val catsTaglessVersion     = "0.16.5"
-val fs2Version             = "3.14.0"
-val circeVersion           = "0.14.17"
-val http4sVersion          = "0.23.38"
-val apacheAvroVersion      = "1.12.2"
-val confluentVersion       = "8.4.1"
-val scalaJavaTimeVersion   = "2.7.0"     // 2.8.0 and later are built with Scala 3.9, which xkafka on Scala 3.3 cannot read.
-val kafkaClientsVersion    = "4.4.0"
-val koffiVersion           = "3.3.3"
-val lz4JavaVersion         = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
-val snappyJavaVersion      = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which has security advisories fixed in 1.1.10.9.
-val nodeVersion            = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
-val librdkafkaVersion      = "2.16.0"
-val librdkafkaSha256       = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
-val rocksdbVersion         = "10.1.3"    // rocksdbjni on the JVM, and the libraries its jar carries on the others
-val rocksdbSha256          = "e7f925287d9fe2574fb7c7a86f7facaa9b8ab602a2eed0e598bf633528121498"
+val catsEffectVersion    = "3.7.1"
+val catsTaglessVersion   = "0.16.6"
+val fs2Version           = "3.14.0"
+val circeVersion         = "0.14.17"
+val http4sVersion        = "0.23.38"
+val apacheAvroVersion    = "1.12.2"
+val confluentVersion     = "8.4.1"
+val scalapbVersion       = "0.11.21"
+val vulcanVersion        = "1.14.1"
+val avro4sVersion        = "5.0.15"
+val scalaJavaTimeVersion = "2.11.0"
+val kafkaClientsVersion  = "4.4.0"
+val koffiVersion         = "3.3.3"
+val lz4JavaVersion       = "1.14.0"    // kafka-clients asks for 1.11.2, which has security advisories fixed in 1.11.4.
+val snappyJavaVersion    = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which has security advisories fixed in 1.1.10.9.
+val nodeVersion          = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
+val librdkafkaVersion    = "2.16.0"
+val librdkafkaSha256     = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
+val rocksdbVersion       = "10.10.1.1" // rocksdbjni on the JVM, and the libraries its jar carries on the others
+val rocksdbSha256        = "e862cc37a22df8f1e7c12556f5141ce65d782af77e30aee1bd7d488d7c554fde"
+// The RocksDB release that jar carries, which the library reports of itself: a jar's version may add a fourth number for a build of one release.
+val rocksdbRelease         = rocksdbVersion.split('.').take(3).mkString(".")
 val munitVersion           = "1.3.6"
 val munitCatsEffectVersion = "2.2.1"
 val munitScalacheckVersion = "1.3.1"
@@ -140,6 +145,8 @@ ThisBuild / githubWorkflowBuildPreamble += setupNode.withCond(
 )
 // Linking the Native tests takes more than sbt's default heap of 1 GB.
 ThisBuild / githubWorkflowEnv += "SBT_OPTS" -> "-Xmx4g"
+// Each Native link holds its whole program in memory, so at most two run at once, which keeps the links of every test project within that heap.
+Global / concurrentRestrictions += Tags.limit(NativeTags.Link, 2)
 
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
@@ -247,8 +254,9 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
     setupNode,
     cacheLibrdkafkaLibrary.value,
     cacheRocksdb,
-    // The shim test prints the stacks of a harness that hangs, through gdb on Linux.
-    WorkflowStep.Run(List("sudo apt-get install --yes gdb"), name = Some("Install gdb"), cond = Some("runner.os == 'Linux'")),
+    // The shim test prints the stacks of a harness that hangs, through gdb on Linux. The runner's package index can name versions the mirrors no
+    // longer hold, so it is refreshed first.
+    WorkflowStep.Run(List("sudo apt-get update", "sudo apt-get install --yes gdb"), name = Some("Install gdb"), cond = Some("runner.os == 'Linux'")),
     WorkflowStep.Sbt(List("clientJS/rocksdbShimTest"), name = Some("Test the shim in C under a leak checker")),
     WorkflowStep.Sbt(
       List("clientJS/testOnly xkafka.internal.rocksdb.*"),
@@ -365,13 +373,28 @@ ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
   steps = githubWorkflowJobSetup.value.toList ++ List(
     setupNode,
     installNativeDependencies,
-    WorkflowStep.Run(List("sudo apt-get install --yes llvm"), name = Some("Install LeakSanitizer symbolizer")),
+    WorkflowStep.Run(List("sudo apt-get update", "sudo apt-get install --yes llvm"), name = Some("Install LeakSanitizer symbolizer")),
     WorkflowStep.Run(List("scripts/native-leak-check.sh"), name = Some("Check the Native downstream application for leaks"))
   ),
   oses = List("ubuntu-24.04"),
   scalas = Nil,
   javas = List(JavaSpec.temurin("17")),
   timeoutMinutes = Some(45)
+)
+
+ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
+  id = "sbt-plugin",
+  name = "sbt plugin",
+  steps = githubWorkflowJobSetup.value.toList ++ List(
+    WorkflowStep.Run(
+      List("sbt sbtCodegen/scripted '++3.9.0 sbtCodegen/scripted'"),
+      name = Some("Generate classes from schema files in a build on sbt 1 and on sbt 2")
+    )
+  ),
+  oses = List("ubuntu-24.04"),
+  scalas = Nil,
+  javas = List(JavaSpec.temurin("17")),
+  timeoutMinutes = Some(30)
 )
 
 ThisBuild / githubWorkflowAddedJobs += WorkflowJob(
@@ -442,7 +465,7 @@ def uploadsArtifact(ref: UseRef): Boolean = ref match {
 
 // sbt-typelevel builds its dependency submission and site jobs with the plugin's own default runner, which
 // stays on ubuntu-22.04. Both earn their keep, so only their runner is corrected.
-val publishWaitsFor = List("integration", "streams-integration", "native-leaks", "js-leaks", "npm-publish", "npm-publish-rocksdb")
+val publishWaitsFor = List("integration", "streams-integration", "native-leaks", "js-leaks", "sbt-plugin", "npm-publish", "npm-publish-rocksdb")
 ThisBuild / githubWorkflowGeneratedCI := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
     if (job.id == "publish")
@@ -674,7 +697,9 @@ val rocksdbShimId = {
     repositoryRoot / "modules" / "client" / "js" / "npm" / "rocksdb" / "LICENSES.txt"
   )
   inputs.foreach(source => digest.update(IO.readBytes(source)))
-  s"$rocksdbVersion-${digest.digest().iterator.map(byte => f"${byte & 0xff}%02x").mkString.take(12)}"
+  // The jar the libraries are taken from, so that another build of the same release makes other packages. npm takes a release's three numbers only.
+  digest.update(rocksdbSha256.getBytes("UTF-8"))
+  s"$rocksdbRelease-${digest.digest().iterator.map(byte => f"${byte & 0xff}%02x").mkString.take(12)}"
 }
 
 /** The command that builds the RocksDB shim into the shared library the npm packages carry. */
@@ -701,7 +726,7 @@ def writeRocksdbPlatformPackage(root: File, platform: String, shim: File, librar
     npmPackageJson(
       s"@xkafka/rocksdb-$platform",
       rocksdbShimId,
-      s"RocksDB $rocksdbVersion from rocksdbjni, with the shim xkafka opens it through, on $label",
+      s"RocksDB $rocksdbRelease from rocksdbjni $rocksdbVersion, with the shim xkafka opens it through, on $label",
       "MIT AND Apache-2.0 AND BSD-3-Clause AND BSD-2-Clause AND Zlib AND bzip2-1.0.6",
       Seq("os" -> JSON.arr(JSON.str(os)), "cpu" -> JSON.arr(JSON.str(cpu))) ++
         libc.map(value => "libc" -> JSON.arr(JSON.str(value))) :+
@@ -721,7 +746,7 @@ def writeRocksdbUmbrellaPackage(directory: File, clientBase: File, platforms: Se
     npmPackageJson(
       "@xkafka/rocksdb",
       rocksdbShimId,
-      s"RocksDB $rocksdbVersion for xkafka on Node.js, prebuilt for each supported platform",
+      s"RocksDB $rocksdbRelease for xkafka on Node.js, prebuilt for each supported platform",
       "MIT",
       "main"                 -> JSON.str("index.js"),
       "files"                -> JSON.arr(JSON.str("index.js")),
@@ -773,7 +798,7 @@ lazy val schemaRegistry = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .settings(
     name        := "xkafka-schema-registry",
     description := "Serdes that keep their schemas in a schema registry, for xkafka",
-    libraryDependencies ++= Seq("io.circe" %%% "circe-core" % circeVersion, "io.circe" %%% "circe-parser" % circeVersion)
+    libraryDependencies ++= Seq("io.circe" %%% "circe-core" % circeVersion, "io.circe" %%% "circe-jawn" % circeVersion)
   )
 
 // The registry is reached through an HTTP client the application chooses; this module adapts http4s's.
@@ -861,6 +886,86 @@ lazy val protobuf = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   // The JVM has java.time, which dates and times are read into; JavaScript and Native take it from scala-java-time.
   .platformsSettings(JSPlatform, NativePlatform)(libraryDependencies += "io.github.cquiroz" %%% "scala-java-time" % scalaJavaTimeVersion)
 
+lazy val protobufScalapb = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .in(file("modules/protobuf-scalapb"))
+  .dependsOn(protobuf % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name                := "xkafka-protobuf-scalapb",
+    description         := "Protobuf messages generated by ScalaPB, written and read with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    libraryDependencies ++= Seq(
+      "com.thesamet.scalapb" %%% "scalapb-runtime" % scalapbVersion,
+      // The well-known types' files, which the tests' .proto files import.
+      "com.thesamet.scalapb" %%% "scalapb-runtime" % scalapbVersion % "protobuf"
+    ),
+    // The tests' messages are generated from the .proto files every platform shares.
+    Test / PB.protoSources := Seq((ThisBuild / baseDirectory).value / "modules/protobuf-scalapb/shared/src/test/protobuf"),
+    Test / PB.targets      := Seq(scalapb.gen(scala3Sources = true) -> (Test / sourceManaged).value / "scalapb"),
+    // The code ScalaPB generates is not held to xkafka's warnings.
+    Test / scalacOptions += "-Wconf:src=src_managed/.*:s"
+  )
+  // Confluent's Protobuf serializer, which the messages are checked against, runs on the JVM alone.
+  .jvmSettings(
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies += "io.confluent" % "kafka-protobuf-serializer" % confluentVersion % Test
+  )
+
+// Types smithy4s generates from Smithy files, written and read by smithy4s's own codecs; the tests' types are generated from shared Smithy files.
+lazy val xkafkaSmithy4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .in(file("modules/smithy4s"))
+  .enablePlugins(Smithy4sCodegenPlugin)
+  .dependsOn(jsonSchema % "compile->compile;test->test", protobuf % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(Smithy4sCodegenPlugin.defaultSettings(Test))
+  .settings(
+    name                := "xkafka-smithy4s",
+    description         := "Types smithy4s generates, written and read by smithy4s with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    libraryDependencies ++= Seq("json", "protobuf").map(module => "com.disneystreaming.smithy4s" %%% s"smithy4s-$module" % smithy4sVersion.value),
+    Test / smithy4sInputDirs := Seq((ThisBuild / baseDirectory).value / "modules/smithy4s/shared/src/test/smithy"),
+    // The code smithy4s generates is not held to xkafka's warnings.
+    Test / scalacOptions += "-Wconf:src=src_managed/.*:s"
+  )
+  // Confluent's JSON Schema and Protobuf serializers, which check values and files against schemas, run on the JVM alone.
+  .jvmSettings(
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies ++= Seq("json-schema", "protobuf").map(format => "io.confluent" % s"kafka-$format-serializer" % confluentVersion % Test)
+  )
+
+// vulcan, and the Apache Avro it writes with, run on the JVM alone.
+lazy val avroVulcan = project
+  .in(file("modules/avro-vulcan"))
+  .dependsOn(avro.jvm % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name                := "xkafka-avro-vulcan",
+    description         := "Avro values that vulcan's codecs write and read, with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies ++= Seq(
+      "com.github.fd4s" %% "vulcan"                % vulcanVersion,
+      "org.apache.avro"  % "avro"                  % apacheAvroVersion,
+      "io.confluent"     % "kafka-avro-serializer" % confluentVersion % Test
+    )
+  )
+
+// avro4s, and the Apache Avro it writes with, run on the JVM alone. avro4s asks for Apache Avro 1.11, which the module is built with.
+lazy val avro4s = project
+  .in(file("modules/avro4s"))
+  .dependsOn(avro.jvm % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    name                := "xkafka-avro4s",
+    description         := "Avro values that avro4s's encoders and decoders write and read, with the schemas a schema registry keeps",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies ++= Seq(
+      "com.sksamuel.avro4s" %% "avro4s-core"           % avro4sVersion,
+      "io.confluent"         % "kafka-avro-serializer" % confluentVersion % Test
+    )
+  )
+
 lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("modules/client"))
   .enablePlugins(BuildInfoPlugin)
@@ -872,7 +977,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     Compile / packageBin / mappings += (repositoryRoot / "THIRD_PARTY_NOTICES.md" -> "META-INF/THIRD_PARTY_NOTICES.md"),
     // The release the group connection names to the broker.
     buildInfoPackage := "xkafka.internal",
-    buildInfoKeys    := Seq[BuildInfoKey](version, "rocksdb" -> rocksdbVersion),
+    buildInfoKeys    := Seq[BuildInfoKey](version, "rocksdb" -> rocksdbRelease, "rocksdbjni" -> rocksdbVersion),
     buildInfoOptions ++= Seq(BuildInfoOption.PackagePrivate, BuildInfoOption.ConstantValue)
   )
   .jsConfigure(
@@ -977,7 +1082,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       val check    =
         s"mkdir -p /tmp/koffi && npm install --silent --no-audit --no-fund --prefix /tmp/koffi koffi@$koffiVersion && " +
           s"node ${(repositoryRoot / "scripts" / "check-rocksdb-library.cjs").getAbsolutePath} /tmp/koffi ${output.getAbsolutePath} " +
-          s"${library.getAbsolutePath} $rocksdbShimId $rocksdbVersion"
+          s"${library.getAbsolutePath} $rocksdbShimId $rocksdbRelease"
       runCommand(
         log,
         Seq(
@@ -1002,7 +1107,7 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
       val script = (repositoryRoot / "scripts" / "rocksdb-shim-test.sh").getAbsolutePath
       runCommand(
         streams.value.log,
-        Seq(script, sharedRocksdb.value.getAbsolutePath, prepareRocksdb.value.getAbsolutePath, rocksdbVersion, rocksdbShimId),
+        Seq(script, sharedRocksdb.value.getAbsolutePath, prepareRocksdb.value.getAbsolutePath, rocksdbRelease, rocksdbShimId),
         repositoryRoot
       )
     },
@@ -1140,18 +1245,136 @@ lazy val client = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     )
   )
 
-// The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it.
+// Scala sources generated from schema files where a build compiles, so it runs on the JVM alone; the sources need only the format's module.
+lazy val codegen = project
+  .in(file("modules/codegen"))
+  .dependsOn(avro.jvm)
+  .settings(commonSettings)
+  .settings(
+    name                := "xkafka-codegen",
+    description         := "Scala sources generated from Avro and JSON Schema files, for xkafka",
+    tlVersionIntroduced := Map("3" -> "0.8.0"),
+    libraryDependencies ++= Seq(
+      "org.apache.avro" % "avro"     % apacheAvroVersion,
+      "org.apache.avro" % "avro-idl" % apacheAvroVersion,
+      // Apache Avro logs through SLF4J, which otherwise says it has nowhere to log; the generator says what it has to say itself.
+      "org.slf4j" % "slf4j-nop" % slf4jVersion
+    ),
+    // So that a launcher such as Coursier's runs the generator from its jar.
+    Compile / packageBin / packageOptions += Package.MainClass("xkafka.codegen.Main")
+  )
+
+// The sbt plugin that runs xkafka-codegen where a build compiles, for sbt 1, whose plugins are in Scala 2.12, and sbt 2, whose plugins are in Scala 3.
+lazy val sbtCodegen = project
+  .in(file("modules/sbt-codegen"))
+  .enablePlugins(SbtPlugin)
+  .settings(
+    name                          := "sbt-xkafka-codegen",
+    description                   := "Scala classes generated from Avro and JSON Schema files by xkafka-codegen, where sbt compiles",
+    headerLicense                 := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
+    scalaVersion                  := "2.12.21",
+    crossScalaVersions            := Seq("2.12.21", "3.9.0"),
+    pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.1.0"),
+    tlVersionIntroduced           := Map("2.12" -> "0.8.0", "3" -> "0.8.0"),
+    // The plugin takes none of the other modules' common settings, so it carries the licence as their jars do.
+    Compile / packageBin / mappings += (repositoryRoot / "LICENSE" -> "META-INF/LICENSE"),
+    // The scripted builds run on the newest sbt of each major version, with this build's xkafka-codegen and format modules published locally.
+    scriptedSbt := (if (scalaBinaryVersion.value == "2.12") "1.13.1" else "2.1.0"),
+    scriptedLaunchOpts ++= Seq("-Xmx2g", s"-Dplugin.version=${version.value}"),
+    scriptedBufferLog    := false,
+    scriptedDependencies := scriptedDependencies
+      .dependsOn(
+        kernel.jvm / publishLocal,
+        schemaRegistry.jvm / publishLocal,
+        avro.jvm / publishLocal,
+        jsonSchema.jvm / publishLocal,
+        codegen / publishLocal
+      )
+      .value,
+    // The plugin runs the xkafka-codegen of its own version.
+    Compile / sourceGenerators += Def.task {
+      val file = (Compile / sourceManaged).value / "xkafka" / "sbtcodegen" / "PluginVersion.scala"
+      IO.write(
+        file,
+        s"""package xkafka.sbtcodegen
+
+private[sbtcodegen] object PluginVersion {
+  val value = "${version.value}"
+}
+"""
+      )
+      Seq(file)
+    }.taskValue
+  )
+
+// Classes xkafka-codegen writes from the test schemas while this project compiles, run on every platform. The generator runs in a JVM of its own,
+// as builds run it.
+lazy val codegenTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .crossType(CrossType.Full)
+  .in(file("modules/codegen-tests"))
+  .enablePlugins(NoPublishPlugin)
+  .dependsOn(avro % "compile->compile;test->test", jsonSchema % "compile->compile;test->test")
+  .settings(commonSettings)
+  .settings(
+    Compile / sourceGenerators += Def.task {
+      val output                             = (Compile / sourceManaged).value / "xkafka-codegen"
+      val schemas                            = (ThisBuild / baseDirectory).value / "modules/codegen-tests/shared/src/main"
+      val run                                = new ForkRun(ForkOptions())
+      def generate(arguments: String*): Unit =
+        run.run("xkafka.codegen.Main", (codegen / Compile / fullClasspath).value.files, arguments, streams.value.log).get
+      IO.delete(output)
+      generate("--json-package", "example.json.untitled", output.toString, (schemas / "avro").toString, (schemas / "json-schema").toString)
+      generate("--json-package", "example.json.decimal", "--json-big-decimals", output.toString, (schemas / "json-schema-decimal").toString)
+      (output ** "*.scala").get
+    }.taskValue
+  )
+  // Apache Avro, which the generated classes' schemas and records are checked against, runs on the JVM alone.
+  .jvmSettings(libraryDependencies ++= Seq(
+    "org.apache.avro" % "avro"     % apacheAvroVersion % Test,
+    "org.apache.avro" % "avro-idl" % apacheAvroVersion % Test
+  ))
+
+// Classes avrohugger generates from the test schemas, set up as other-libraries.md says, whose derived schemas are checked against the files, on every
+// platform. The tests read each .avsc file's text from an object generated beside them.
+lazy val avrohuggerTests = crossProject(JVMPlatform, JSPlatform, NativePlatform)
+  .crossType(CrossType.Full)
+  .in(file("modules/avrohugger-tests"))
+  .enablePlugins(NoPublishPlugin)
+  .dependsOn(avro)
+  .settings(commonSettings)
+  .settings(
+    Compile / avroSourceDirectories := Seq((baseDirectory.value / ".." / "shared" / "src" / "main" / "avro").getCanonicalFile),
+    Compile / avroScalaCustomTypes  := avrohugger.format.Standard.defaultTypes.copy(
+      `enum` = avrohugger.types.ScalaCaseObjectEnum,
+      union = avrohugger.types.OptionScala3UnionType
+    ),
+    Compile / sourceGenerators += (Compile / avroScalaGenerate).taskValue,
+    Test / sourceGenerators += Def.task {
+      val files  = ((ThisBuild / baseDirectory).value / "modules/avrohugger-tests/shared/src/main/avro" * "*.avsc").get.sortBy(_.getName)
+      val output = (Test / sourceManaged).value / "AvroFiles.scala"
+      val quote  = "\""
+      val texts  = files.map(file => s"    $quote${file.getName}$quote -> ${quote * 3}${IO.read(file)}${quote * 3}").mkString(",\n")
+      IO.write(
+        output,
+        s"package example.avrohugger\n\n/** The test .avsc files' texts, by file name. */\nobject AvroFiles:\n  val texts: Map[String, String] = Map(\n$texts\n  )\n"
+      )
+      Seq(output)
+    }.taskValue
+  )
+
+// Java Kafka Streams' partitioners and processors in xkafka's streams programs, published for the JVM.
 lazy val streamsJava = project
   .in(file("modules/streams-java"))
   .dependsOn(client.jvm % "compile->compile;test->test")
   .settings(commonSettings)
   .settings(
-    name                   := "xkafka-streams-java",
-    description            := "Java Kafka Streams' partitioners and processors in xkafka streams programs, on the JVM",
-    tlMimaPreviousVersions := Set.empty,
+    name        := "xkafka-streams-java",
+    description := "Java Kafka Streams' partitioners and processors in xkafka streams programs, on the JVM",
     libraryDependencies ++= Seq("org.apache.kafka" % "kafka-streams" % kafkaClientsVersion)
   )
 
+// The Kafka Streams application the broker tests run beside xkafka's streams group members; scripts/integration-test.sh starts it, and only it
+// builds this project, which the root does not aggregate.
 lazy val streamsFixture = project
   .in(file("modules/streams-fixture"))
   .enablePlugins(NoPublishPlugin)
@@ -1168,7 +1391,7 @@ lazy val streamsFixture = project
 lazy val docs = project
   .in(file("site"))
   .enablePlugins(TypelevelSitePlugin)
-  .dependsOn(client.jvm, streamsJava, streamsHttp4s.jvm, schemaRegistryHttp4s.jvm, avro.jvm, jsonSchema.jvm, protobuf.jvm)
+  .dependsOn(client.jvm, streamsJava, streamsHttp4s.jvm, schemaRegistryHttp4s.jvm, avro.jvm, avroVulcan, avro4s, jsonSchema.jvm, protobuf.jvm)
   .settings(
     // The examples of querying stores show an HTTP connection between members, so the site depends on http4s's server and Ember client; of the
     // published modules, only xkafka-schema-registry-http4s depends on http4s, and on its client alone.
@@ -1187,6 +1410,14 @@ lazy val root =
     avro,
     jsonSchema,
     protobuf,
+    protobufScalapb,
+    avroVulcan,
+    avro4s,
+    xkafkaSmithy4s,
+    codegen,
+    codegenTests,
+    avrohuggerTests,
+    sbtCodegen,
     streamsHttp4s,
     streamsJava
   ).settings(name := "xkafka")

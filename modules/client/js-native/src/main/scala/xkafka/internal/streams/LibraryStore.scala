@@ -30,7 +30,7 @@ import scala.concurrent.duration.FiniteDuration
 import cats.effect.{Async, Concurrent, Ref, Resource}
 import cats.syntax.all.*
 import fs2.Chunk
-import rocksdb.RocksdbWrite
+import rocksdb.{RocksdbEncoding, RocksdbWrite}
 
 /** A platform's RocksDB calls, in `F`. */
 private[xkafka] trait RocksdbAccess[F[_]]:
@@ -42,6 +42,9 @@ private[xkafka] trait RocksdbAccess[F[_]]:
 
   /** Every entry of a family from `from`, included, to `to`, left out, in key order. */
   def range(store: Store, family: Int, from: Option[Array[Byte]], to: Option[Array[Byte]]): F[Vector[(Array[Byte], Array[Byte])]]
+
+  /** At most `limit` entries of a family from `from`, included, in key order. */
+  def page(store: Store, family: Int, from: Option[Array[Byte]], limit: Int): F[Vector[(Array[Byte], Array[Byte])]]
 
   /** Closes the store, writing out what it holds first. */
   def close(store: Store): F[Unit]
@@ -79,14 +82,20 @@ private[xkafka] object LibraryStore:
   private val ByTime   = 1
   private val Meta     = 2
 
+  /** How many keys a clear reads at a time. */
+  private val ClearPage = 1000
+
   /** Opens the store at `path`, making it where there is none, finding keys by the time `time` reads if given. */
   def open[F[_]](access: RocksdbAccess[F], path: String, time: Option[TaskStore.TimeOf])(using F: Concurrent[F]): F[TaskStore[F]] =
-    access.open(path, Families).flatMap: db =>
-      val prefix = Position.getBytes
-      (access.get(db, Meta, ClockKey), access.range(db, Meta, Some(prefix), StoreContents.past(Chunk.array(prefix)).map(_.toArray))).tupled.flatMap:
-        (clock, held) =>
-          val positions = held.flatMap((key, value) => new String(key).drop(Position.length).toIntOption.map(_ -> long(value))).toMap
-          (Ref.of[F, Long](clock.fold(WindowStore.NoTime)(long)), Ref.of[F, Map[Int, Long]](positions)).mapN(new Store(access, db, time, _, _))
+    // A store that cannot be read once open, or whose opening is cancelled, is closed again, so that RocksDB's lock on its directory goes with it.
+    F.uncancelable: _ =>
+      access.open(path, Families).flatMap: db =>
+        val prefix = Position.getBytes
+        (access.get(db, Meta, ClockKey), access.range(db, Meta, Some(prefix), StoreContents.past(Chunk.array(prefix)).map(_.toArray))).tupled.flatMap:
+          (clock, held) =>
+            val positions = held.flatMap((key, value) => new String(key).drop(Position.length).toIntOption.map(_ -> long(value))).toMap
+            (Ref.of[F, Long](clock.fold(WindowStore.NoTime)(long)), Ref.of[F, Map[Int, Long]](positions)).mapN(new Store(access, db, time, _, _))
+        .onError(_ => access.close(db))
 
   private def long(bytes: Array[Byte]): Long = ByteBuffer.wrap(bytes).getLong
 
@@ -138,6 +147,26 @@ private[xkafka] object LibraryStore:
           Option.when(after != before)(RocksdbWrite.Put(Meta, ClockKey, longBytes(after))).toVector ++
             positions.toVector.map((partition, at) => RocksdbWrite.Put(Meta, s"$Position$partition".getBytes, longBytes(at)))
         access.write(db, writes ++ meta).unlessA(writes.isEmpty && meta.isEmpty) *> clocked.set(after) *> positioned.update(_ ++ positions)
+
+    /** Deletes every entry as one range of each family, from its first key to past its last, written at once, so that a query reads the store whole
+      * or emptied. The keys are read a page at a time, holding only the first and the last.
+      */
+    def clear: F[Unit] =
+      List(Entries, ByTime, Meta).traverseFilter(family => bounds(family).map(_.map((first, last) => RocksdbWrite.DeleteRange(family, first, last))))
+        .flatMap(deletes => access.write(db, deletes.toVector).unlessA(deletes.isEmpty)) *> clocked.set(WindowStore.NoTime) *>
+        positioned.set(Map.empty)
+
+    /** A family's first key and the key just past its last. */
+    private def bounds(family: Int): F[Option[(Array[Byte], Array[Byte])]] =
+      def from(at: Option[Array[Byte]], first: Option[Array[Byte]]): F[Option[(Array[Byte], Array[Byte])]] =
+        access.page(db, family, at, ClearPage).flatMap: read =>
+          val start = first.orElse(read.headOption.map(_._1))
+          read.lastOption.map(_._1) match
+            case Some(last) if read.size == ClearPage => from(Some(RocksdbEncoding.after(last)), start)
+            case Some(last)                           => F.pure(start.map(_ -> RocksdbEncoding.after(last)))
+            // The page before was full and the last: the key just past its last is where this one started.
+            case None => F.pure((start, at).tupled)
+      from(None, None)
 
     def close: F[Unit] = access.close(db)
 
@@ -192,5 +221,5 @@ private[xkafka] object LibraryStateDirectory:
 
     def cleaned(held: Set[String], delay: FiniteDuration): F[Unit] =
       (F.realTime, files.directories(base)).tupled.flatMap: (now, owners) =>
-        owners.filterNot(owner => owner.startsWith(".") || owner == StateDirectory.Global || held(owner)).traverse_ : owner =>
+        owners.filter(owner => StateDirectory.isTask(owner) && !held(owner)).traverse_ : owner =>
           files.modified(s"$base/$owner").flatMap(at => files.removed(s"$base/$owner").whenA(now.toMillis - at >= delay.toMillis))

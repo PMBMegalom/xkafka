@@ -74,7 +74,7 @@ private[xkafka] object Describing:
       case Step.TableAggregate(store, _, _, _, _, _)               => List(store.value)
       case Step.TableSource(store, _, _)                           => List(store.value)
       case Step.ToTable(_, store, _, _)                            => List(store.value)
-      case Step.TableFilter(_, _, store)                           => store.toList.map(_._1.value)
+      case Step.TableFilter(_, _, store, _)                        => store.toList.map(_._1.value)
       case Step.TableMapValues(_, _, _, store)                     => store.toList.map(_._1.value)
       case Step.WindowedAggregate(store, _, _, _, _, _, _, _, _)   => List(store.value)
       case Step.SlidingAggregate(store, _, _, _, _, _, _, _, _)    => List(store.value)

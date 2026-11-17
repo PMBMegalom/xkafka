@@ -1,10 +1,6 @@
 # Holding back updates
 
-`suppress` holds back a table's updates and sends on only some of them, as Java
-Kafka Streams' `suppress` does. Each suppression has a name, and keeps what it
-holds in a store called `<name>-store`, with the changelog
-`<application id>-<name>-store-changelog`, so a member that takes over the work
-goes on with what the last one held.
+`suppress` holds back a table's updates and sends on only some of them.
 
 To send only each window's final result, use `Suppressed.untilWindowCloses`:
 
@@ -29,10 +25,17 @@ def finalViews(input: Topic, output: Topic): Pipeline[IO] =
     .to(Named("write-view-counts"), output, Windowed.timeSerde(user, 1.minute), Serde.long[IO])
 ```
 
-A window's result goes on once a record arrives timestamped at or after the
+A window's result is sent on once a record arrives timestamped at or after the
 window's end plus its grace. For sessions, the inactivity gap is added too,
-and a session merged into another is not sent at all. `untilWindowCloses` is
-only available on windowed tables.
+and a session merged into another is not sent at all.
+
+`untilWindowCloses` needs a table with windowed keys that windowed
+aggregations reach along every way into it, directly or through steps such as
+`toStream` and `toTable`. It uses their grace, the largest where several reach
+it; a stream joined with a table takes the stream's alone. `Topology.of`
+refuses it, with `TopologyError.InvalidSuppression`, on a table that some way
+reaches without a windowed aggregation, such as one read from a topic of
+windowed keys, or one that such a stream also sends into.
 
 To send each key's latest value at most once in a while, use
 `Suppressed.untilTimeLimit`, on any table:
@@ -43,9 +46,9 @@ To send each key's latest value at most once in a while, use
 .suppress(Suppressed.untilTimeLimit("calm-views", 1.minute))
 ```
 
-Once a key has an update, it is held. Later updates replace it. The latest goes
-on once a record arrives timestamped a minute or more after the first. Time
-here is the records' time, so while no records arrive, nothing goes on.
+Once a key has an update, it is held. Later updates replace it. The latest is
+sent on once a record arrives timestamped a minute or more after the first. Time
+here is the records' time, so while no records arrive, nothing is sent on.
 
 ## Buffer limits
 
@@ -60,6 +63,10 @@ Suppressed.untilTimeLimit("calm-views", 1.minute, BufferLimit.records(10000))
 `BufferLimit.records(n)` holds at most `n` keys, and `BufferLimit.bytes(n)` at
 most `n` bytes, counted as Java Kafka Streams counts them. Add `withMaxBytes` or
 `withMaxRecords` to limit both. When the buffer holds more, the earliest updates
-go on early. To stop the application with an error instead, add
+are sent on early. To stop the application with an error instead, add
 `shutDownWhenFull`. `untilWindowCloses` only accepts limits that never send
 early: none, or one with `shutDownWhenFull`. Any other does not compile.
+
+Each suppression keeps what it holds in the store `<name>-store`, with the
+changelog `<application id>-<name>-store-changelog`, so a member that takes over
+the work continues from what was held.

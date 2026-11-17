@@ -1,0 +1,8 @@
+// A message that holds itself, which a record may nest as deep as it likes.
+syntax = "proto3";
+
+package example.node;
+
+message Node {
+  Node next = 1;
+}

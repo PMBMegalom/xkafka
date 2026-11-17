@@ -99,6 +99,9 @@ private[xkafka] enum MemberEvent:
   /** Leave the group. */
   case Leave
 
+  /** Leave the group without waiting for the engine to give back the active tasks, which it no longer runs. */
+  case Abandoned
+
 private[xkafka] enum MemberAction derives CanEqual:
   /** Send this heartbeat now. */
   case Send(request: StreamsGroupHeartbeatRequest)
@@ -114,8 +117,10 @@ private[xkafka] enum MemberAction derives CanEqual:
   /** Finish these active tasks, commit them and stop them, then answer `Revoked(round)`. */
   case Revoke(round: Long, tasks: Set[TaskId])
 
-  /** Run exactly this assignment, then answer `Assigned(round)`. */
-  case Assign(round: Long, assignment: Assignment)
+  /** Run exactly this assignment, then answer `Assigned(round)`. `epoch` is the member's when it was given, which commits for these tasks carry, so
+    * that the coordinator refuses those of tasks the member has since lost.
+    */
+  case Assign(round: Long, assignment: Assignment, epoch: Int)
 
   /** Stop every task without committing: the group no longer counts them as this member's. */
   case LoseAll
@@ -158,7 +163,9 @@ private[xkafka] final case class Member(
     statuses: List[StreamsGroup.Status],
     unauthorized: Option[String] = None,
     taskOffsetInterval: Option[FiniteDuration] = None,
-    endpoints: List[StreamsGroup.EndpointPartitions] = Nil
+    endpoints: List[StreamsGroup.EndpointPartitions] = Nil,
+    // Whether the engine has been told an assignment since the member last joined, which it runs only once told one, even one of no tasks.
+    announced: Boolean = false
 ):
   import Member.*
   import MemberAction.*
@@ -166,22 +173,25 @@ private[xkafka] final case class Member(
 
   def next(event: MemberEvent): (Member, List[MemberAction]) =
     (phase, event) match
-      case (Phase.Left | Phase.Failed, _) => (this, Nil)
-      case (Phase.Idle, Start)            => copy(phase = Phase.Joining).heartbeat
-      case (Phase.Idle, Leave)            => (copy(phase = Phase.Left), List(Done))
-      case (Phase.Idle, _)                => (this, Nil)
-      case (_, Start)                     => (this, Nil)
-      case (_, Due)                       => if inFlight then (this, Nil) else heartbeat
-      case (_, Answered(response))        => copy(inFlight = false).answered(response)
-      case (_, RequestFailed(error))      => copy(inFlight = false).failed(error)
-      case (_, Revoked(round))            => step match
+      case (Phase.Left | Phase.Failed, _)  => (this, Nil)
+      case (Phase.Idle, Start)             => copy(phase = Phase.Joining).heartbeat
+      case (Phase.Idle, Leave | Abandoned) => (copy(phase = Phase.Left), List(Done))
+      case (Phase.Idle, _)                 => (this, Nil)
+      case (_, Start)                      => (this, Nil)
+      case (_, Due)                        => if inFlight then (this, Nil) else heartbeat
+      case (_, Answered(response))         => copy(inFlight = false).answered(response)
+      case (_, RequestFailed(error))       => copy(inFlight = false).failed(error)
+      case (_, Revoked(round))             => step match
           case Some(Step.Revoking(`round`, tasks)) => copy(owned = owned.copy(active = owned.active -- tasks), step = None).settle(None)
           case _                                   => (this, Nil)
       case (_, Assigned(round)) => step match
           case Some(Step.Assigning(`round`, assignment)) => copy(owned = assignment, step = None).settle(None)
           case _                                         => (this, Nil)
-      case (Phase.Leaving(_), Leave) => (this, Nil)
-      case (_, Leave)                => copy(phase = Phase.Leaving(false), target = None).settle(None)
+      case (Phase.Leaving(_), Leave)        => (this, Nil)
+      case (_, Leave)                       => copy(phase = Phase.Leaving(false), target = None).settle(None)
+      case (Phase.Leaving(true), Abandoned) => (this, Nil)
+      // A revocation under way is no longer answered, so the member stops waiting for it and has no active tasks left to give back.
+      case (_, Abandoned) => copy(phase = Phase.Leaving(false), target = None, step = None, owned = owned.copy(active = Set.empty)).settle(None)
 
   /** Sends a heartbeat now, unless one is in flight: its answer settles the member again, which sends what is still wanted. */
   private def heartbeat: (Member, List[MemberAction]) =
@@ -228,7 +238,8 @@ private[xkafka] final case class Member(
             copy(unauthorized = Some(detail)).retry(rediscover = false, backoff = true)
           case code =>
             val detail = response.errorMessage.getOrElse(s"the coordinator refused the heartbeat with error $code")
-            fail(new KafkaException.BackendFailure(detail, Some(ErrorCode.fromProtocol(code)), Some(false)))
+            val known  = ErrorCode.fromProtocol(code)
+            fail(new KafkaException.BackendFailure(detail, Some(known), Some(known.retriable)))
 
   private def accepted(response: StreamsGroupHeartbeatResponse): (Member, List[MemberAction]) =
     val known   = identity.topology.subtopologies.map(_.id).toSet
@@ -281,7 +292,10 @@ private[xkafka] final case class Member(
         case Some(wanted) =>
           val giveBack = owned.active -- wanted.active
           if giveBack.nonEmpty then (copy(step = Some(Step.Revoking(round + 1, giveBack)), round = round + 1), List(Revoke(round + 1, giveBack)))
-          else if wanted != owned then (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1), List(Assign(round + 1, wanted)))
+          else if wanted != owned then
+            (copy(step = Some(Step.Assigning(round + 1, wanted)), round = round + 1, announced = true), List(Assign(round + 1, wanted, epoch)))
+          // An assignment of no tasks changes none, so the engine is told it without a step to wait for, its answer to the round being one past.
+          else if !announced && phase == Phase.Joined then (copy(announced = true), List(Assign(round, wanted, epoch)))
           else (this, Nil)
 
   private def retry(rediscover: Boolean, backoff: Boolean): (Member, List[MemberAction]) =
@@ -300,7 +314,8 @@ private[xkafka] final case class Member(
     phase match
       case Phase.Leaving(_) => (copy(phase = Phase.Left, owned = Assignment.empty, step = None), List(LoseAll, Done))
       case _                =>
-        val (joining, send) = copy(phase = Phase.Joining, epoch = 0, owned = Assignment.empty, target = None, step = None, reported = None).heartbeat
+        val (joining, send) =
+          copy(phase = Phase.Joining, epoch = 0, owned = Assignment.empty, target = None, step = None, reported = None, announced = false).heartbeat
         (joining, LoseAll :: send)
 
   private def fail(error: KafkaException): (Member, List[MemberAction]) =

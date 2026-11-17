@@ -52,3 +52,6 @@ private[xkafka] trait StateDirectory[F[_]]:
 private[xkafka] object StateDirectory:
   /** The owner of the global tables' stores. */
   val Global: String = "global"
+
+  /** Whether `owner` names a task's directory, as `Engine.ownerOf` names them: only those are the application's to remove. */
+  def isTask(owner: String): Boolean = owner.matches("[0-9]+_[0-9]+")

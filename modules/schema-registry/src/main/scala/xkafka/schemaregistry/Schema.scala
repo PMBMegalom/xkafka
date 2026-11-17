@@ -35,8 +35,10 @@ object SchemaId:
 opaque type Subject = String
 
 object Subject:
-  /** The subject named `value`, refused where it is empty. */
-  def from(value: String): Either[SchemaRegistryError, Subject] = Either.cond(value.nonEmpty, value, SchemaRegistryError.EmptySubject)
+  /** The subject named `value`, refused where it is empty or a dot or two, which no URL path can name. */
+  def from(value: String): Either[SchemaRegistryError, Subject] =
+    if value.isEmpty then Left(SchemaRegistryError.EmptySubject)
+    else Either.cond(value != "." && value != "..", value, SchemaRegistryError.DotSubject(value))
 
   extension (subject: Subject) def value: String = subject
 

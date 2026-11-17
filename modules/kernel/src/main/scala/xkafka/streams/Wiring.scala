@@ -37,15 +37,22 @@ private[xkafka] object Wiring:
       globals: List[(Int, GlobalStore[F])],
       problems: List[TopologyError],
       steps: List[String],
-      inputs: List[Topic]
+      inputs: List[Topic],
+      generated: List[String],
+      joinNames: List[String],
+      // Each repartitioning's name as the program gave it, by the name its topic takes, the first given.
+      asked: Map[String, String] = Map.empty,
+      // The names of nodes the program makes that Java checks as it makes them: a join's, each its name with a suffix.
+      checked: List[String] = Nil
   ):
     def subtopologies: List[Subtopology[F]] = numbered.map(_._2)
 
   /** Where a node's records have come from, as far as the walk has followed them: a topic of its sub-topology; the node they came out of; the topics
     * a join copartitions for these records, which Java's streams and tables pass on from step to step, the sides' or parents' together after a join
     * or a merge, and none after a suppression, which Java takes for their source; every topic joined for them so far; whether sub-topologies are
-    * numbered before and after theirs; whether any of them may have a new key; the topics they read whose sources Java has not made yet; and whether
-    * they run beside what reads a table rather than as a program's own.
+    * numbered before and after theirs; whether any of them may have a new key; the topics they read whose sources Java has not made yet; whether they
+    * run beside what reads a table rather than as a program's own; and the grace of the windows they come out of, which Java finds for a suppression
+    * until windows close, if a windowed aggregation is before them on every way they came.
     */
   private final case class Path(
       home: Source,
@@ -56,13 +63,14 @@ private[xkafka] object Wiring:
       after: Boolean,
       rekeyed: Boolean,
       unwritten: List[Source],
-      pulled: Boolean
+      pulled: Boolean,
+      grace: Option[Long] = None
   ):
     /** It after `step`. */
     def through[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): Path =
       step match
         case Step.Suppress(_, _, _, _) => copy(sources = Nil, rekeyed = rekeyed || step.rekeys)
-        case _                         => copy(rekeyed = rekeyed || step.rekeys)
+        case _                         => copy(rekeyed = rekeyed || step.rekeys, grace = Path.graceOf(step).orElse(grace))
 
     /** The topics of it and `other` together. */
     def topics(other: Path): List[Source] = (sources ++ other.sources).distinct
@@ -79,7 +87,9 @@ private[xkafka] object Wiring:
         after || other.before || other.after,
         rekeyed || other.rekeyed,
         unwritten ++ other.unwritten,
-        pulled && other.pulled
+        pulled && other.pulled,
+        // Java takes the largest of the graces of what meets, and none unless each has one.
+        grace.zip(other.grace).map(_ max _)
       )
 
     /** Whether Java could number their sub-topologies otherwise, by building the other first. */
@@ -88,6 +98,15 @@ private[xkafka] object Wiring:
   private object Path:
     def of(sources: List[Source], node: String, pulled: Boolean): Path =
       Path(sources.head, List(node), sources, Nil, false, false, false, Nil, pulled)
+
+    /** The grace a windowed aggregation gives what comes out of it: the windows', and for sessions also their gap, as Java waits for. */
+    def graceOf[F[_], K, V, K2, V2](step: Step[F, K, V, K2, V2]): Option[Long] =
+      step match
+        case Step.WindowedAggregate(_, windows, _, _, _, _, _, _, _)   => Some(windows.graceMillis)
+        case Step.SlidingAggregate(_, windows, _, _, _, _, _, _, _)    => Some(windows.graceMillis)
+        case Step.SessionAggregate(_, windows, _, _, _, _, _, _, _, _) => Some(windows.graceMillis + windows.gapMillis)
+        case Step.Cogrouped(_, folded)                                 => graceOf(folded)
+        case _                                                         => None
 
   /** The stores and topics of the program's own pipelines. */
   private final case class Own(stores: Set[String], sources: Set[Source])
@@ -106,24 +125,24 @@ private[xkafka] object Wiring:
     if seen then added
     else
       consumer.expanded match
-        case Consumer.Then(_, step, next)                          => linked(next, added.keeping(step.kept))
-        case Consumer.Repartitioning(_, _, _, _, _, next, _, _, _) => linked(next, added)
-        case Consumer.Beside(table, _, next)                       => linked(next, added.copy(tables = added.tables ++ table))
-        case Consumer.Fan(children)                                => children.foldLeft(added)((graph, child) => linked(child, graph))
-        case Consumer.Merged(_, next)                              => linked(next, added)
-        case Consumer.Cogroup(_, _, next)                          => linked(next, added)
-        case Consumer.Copartitioned(next)                          => linked(next, added)
-        case Consumer.Splitting(_, branches)                       => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
-        case Consumer.Refused(_, next)                             => linked(next, added)
-        case Consumer.LeftTable(join)                              => onward(join.id, join.kept, join.next)
-        case Consumer.RightTable(join)                             => onward(join.id, join.kept, join.next)
-        case Consumer.LeftStream(join)                             => onward(join.id, join.kept, join.next)
-        case Consumer.RightStream(join)                            => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignLeft(join)                            => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignRight(join)                           => onward(join.id, join.kept, join.next)
-        case Consumer.ForeignSubscribed(_)                         => added
-        case Consumer.ForeignAnswered(_)                           => added
-        case _                                                     => added
+        case Consumer.Then(_, step, next)                             => linked(next, added.keeping(step.kept))
+        case Consumer.Repartitioning(_, _, _, _, _, next, _, _, _, _) => linked(next, added)
+        case Consumer.Beside(table, _, next)                          => linked(next, added.copy(tables = added.tables ++ table))
+        case Consumer.Fan(children)                                   => children.foldLeft(added)((graph, child) => linked(child, graph))
+        case Consumer.Merged(_, next)                                 => linked(next, added)
+        case Consumer.Cogroup(_, _, next)                             => linked(next, added)
+        case Consumer.Copartitioned(next)                             => linked(next, added)
+        case Consumer.Splitting(_, branches)                          => branches.foldLeft(added)((graph, branch) => linked(branch.next, graph))
+        case Consumer.Refused(_, next)                                => linked(next, added)
+        case Consumer.LeftTable(join)                                 => onward(join.id, join.kept, join.next)
+        case Consumer.RightTable(join)                                => onward(join.id, join.kept, join.next)
+        case Consumer.LeftStream(join)                                => onward(join.id, join.kept, join.next)
+        case Consumer.RightStream(join)                               => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignLeft(join)                               => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignRight(join)                              => onward(join.id, join.kept, join.next)
+        case Consumer.ForeignSubscribed(_)                            => added
+        case Consumer.ForeignAnswered(_)                              => added
+        case _                                                        => added
 
   /** Whether `entry` only reads into a store the program's own topics keep from the same topic, as the table a join reads does where the program also
     * uses that table.
@@ -174,7 +193,17 @@ private[xkafka] object Wiring:
       unstartable: Vector[List[Source]],
       globals: Vector[GlobalStore[F]],
       problems: Vector[TopologyError],
-      steps: Vector[String]
+      steps: Vector[String],
+      // The names of the nodes the program makes that no step of its names, such as a repartition's and a join's own.
+      generated: Vector[String] = Vector.empty,
+      // Each suppression until windows close by its name, with the grace it waits.
+      closes: Map[String, Long] = Map.empty,
+      // The names of the joins of two streams, which Java names no node of its own, only the nodes it makes after them.
+      joinNames: Vector[String] = Vector.empty,
+      // Each repartitioning's name, as its topic takes it and as the program gave it.
+      asked: Vector[(String, String)] = Vector.empty,
+      // The names of nodes the program makes that Java checks as it makes them.
+      checked: Vector[String] = Vector.empty
   ):
     def writing(sources: List[Source]): Walk[F] = copy(written = written ++ sources)
 
@@ -191,7 +220,11 @@ private[xkafka] object Wiring:
 
     /** The node made, in the step `named` if the program names one. */
     def making(at: Path, node: Describing.Made, named: Boolean = true): Walk[F] =
-      copy(nodes = nodes :+ (at.home, node), steps = if named then steps :+ node.name else steps)
+      copy(
+        nodes = nodes :+ (at.home, node),
+        steps = if named then steps :+ node.name else steps,
+        generated = if named then generated else generated :+ node.name
+      )
 
     /** `stores` kept at `at`. A store processors share is kept once, and the processors sharing it are in one sub-topology, as Java's are. */
     def keeping(at: Path, stores: List[KeptStore]): Walk[F] =
@@ -200,6 +233,16 @@ private[xkafka] object Wiring:
         same.fold(walk.copy(kept = walk.kept :+ (at.home -> store)))(walk.united(at.home, _))
 
     def refusing(found: List[TopologyError]): Walk[F] = copy(problems = problems ++ found)
+
+    /** For a suppression until windows close, the grace it waits, which the windowed aggregations before it on every way give, and Java refuses one
+      * with none on some way.
+      */
+    def closing[K, V, K2, V2](step: Step[F, K, V, K2, V2], at: Path): Walk[F] =
+      step match
+        case Step.Suppress(suppressed, _, _, Release.WindowCloses(_)) => at.grace.fold(refusing(
+            List(TopologyError.InvalidSuppression(suppressed.name, "no windowed aggregation reaches the table, so its windows have no close time"))
+          ))(grace => copy(closes = closes.updated(suppressed.name, grace)))
+        case _ => this
 
     /** `first` and `second` meeting in one node, noting where that decides which Java numbers first. */
     def meeting(first: Path, second: Path): (Path, Walk[F]) =
@@ -264,7 +307,8 @@ private[xkafka] object Wiring:
         walked.unstartable.toList.filter(inside),
         of(walked.kept, home),
         of(walked.repartitions, home),
-        of(walked.nodes, home)
+        of(walked.nodes, home),
+        walked.closes
       )
     val homes =
       walked.found.flatMap(_._1.origin.sources).map(walked.homeOf).distinct.map: home =>
@@ -277,7 +321,11 @@ private[xkafka] object Wiring:
       placed.collect { case (Right(global), id) => id -> global },
       walked.problems.toList ++ unfed,
       walked.steps.toList,
-      inputs
+      inputs,
+      walked.generated.toList,
+      walked.joinNames.toList,
+      walked.asked.reverse.toMap,
+      walked.checked.toList
     )
 
   /** The copartition groups each join's topics make, as Java makes them: a join's topics go in the group of the first it finds already in one, and
@@ -314,50 +362,17 @@ private[xkafka] object Wiring:
 
   private def followed[F[_], K, V](consumer: Consumer[F, K, V], at: Path, walk: Walk[F]): Walk[F] =
     consumer match
-      case Consumer.Then(named, step, next) =>
-        val after = at.through(step).copy(last = List(named.value))
-        // A global table is made where the program first joins it.
-        val tabled =
-          step.global.filterNot(global => walk.globals.exists(_.identity eq global.identity)).fold(walk): global =>
-            walk.copy(globals = walk.globals :+ global, steps = walk.steps ++ List(s"${global.named.value}-source", global.named.value))
-              .writing(List(Source.Input(global.topic)))
-        val made =
-          tabled.making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last)).keeping(at, step.kept)
-            .refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
-            .refusing(step.kept.flatMap(held => held.problems.map(TopologyError.InvalidStore(held.store.value, _))))
-        arrive(next, after, made.coming(named.value, after))
+      case Consumer.Then(named, step, next)       => stepped(named, step, next, at, walk)
       case Consumer.Output(named, topic, _, _, _) => walk
           .making(at, Describing.Made(named.value, Describing.Kind.Writes(Source.Input(topic)), at.last))
-      case Consumer.Done()                                                                                  => walk
-      case Consumer.Repartitioning(repartition, key, value, atJoin, always, next, aggregate, partitions, _) =>
-        val read         = Entry(Origin.Repartitioned(repartition, key, value, aggregate, partitions), next)
-        val counted      = partitions.filter(_ < 1).map(TopologyError.InvalidPartitionCount(repartition.value, _)).toList
-        val source       = Source.Repartitioned(repartition)
-        val (node, name) = Describing.source(read.origin)
-        val filter       = s"${repartition.value}-repartition-filter"
-        val sink         = s"${repartition.value}-repartition-sink"
-        val written      =
-          aggregate match
-            case Some(named) => walk.making(at, Describing.Made(s"${named.value}-sink", Describing.Kind.Writes(source), at.last))
-            case None        => walk.making(at, Describing.Made(filter, Describing.Kind.Processor(Nil), at.last), named = false)
-                .making(at, Describing.Made(sink, Describing.Kind.Writes(source), List(filter)), named = false)
-        val closed =
-          written.copy(
-            repartitions = walk.repartitions :+ (at.home, source),
-            found = walk.found :+ (read, at.pulled),
-            entered = walk.entered + identified(read),
-            steps = written.steps ++ read.origin.names.map(_.value)
-          )
-        val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil)
-        val refused =
-          if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(repartition.value))
-        val placed = (if atJoin then refused else refused.writing(List(source))).copy(nodes = refused.nodes :+ (source, node)).refusing(counted)
-        arrive(next, after, placed.coming(name, after))
-      case Consumer.Beside(table, last, next) =>
+      case Consumer.Done()                                                        => walk
+      case repartitioning @ Consumer.Repartitioning(_, _, _, _, _, _, _, _, _, _) => repartitioned(repartitioning, at, walk)
+      case Consumer.Beside(table, last, next)                                     =>
         val pulled = table.fold(walk)(_.entries.foldLeft(walk)((walking, entry) => entered(entry, true, walking)))
         def reading(rows: Path, reader: Walk[F]): Walk[F] =
           val (joined, met) = reader.joining(at, rows)
-          arrive(next, joined.copy(last = at.last), met)
+          // Java's join of a stream with a table has the stream alone before it, so it takes the stream's grace.
+          arrive(next, joined.copy(last = at.last, grace = at.grace), met)
         pulled.came.get(last) match
           case Some(rows) => reading(rows, pulled)
           case None       => pulled.copy(readers = pulled.readers.updated(last, pulled.readers.getOrElse(last, Vector.empty) :+ reading))
@@ -366,19 +381,9 @@ private[xkafka] object Wiring:
       case Consumer.Merged(named, next) =>
         val after = at.copy(last = List(named.value))
         arrive(next, after, walk.making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last)).coming(named.value, after))
-      case Consumer.Cogroup(named, together, next) =>
-        val after  = at.copy(last = List(named.value), sources = Nil, unwritten = Nil)
-        val joined = if together then walk.copy(joins = walk.joins :+ at.sources) else walk
-        // Java cannot start a cogroup of several groups with a repartition topic at all, so which sub-topology it numbers first does not come into it.
-        val judged =
-          if together && at.unwritten.nonEmpty then
-            joined
-              .copy(unsure = joined.unsure.filterNot(_.forall((at.joined ++ at.sources).contains)), unstartable = joined.unstartable :+ at.sources)
-          else joined
-        val made = judged.writing(at.unwritten).making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last))
-        arrive(next, after, made.coming(named.value, after))
-      case Consumer.Copartitioned(next)        => arrive(next, at, walk.copy(joins = walk.joins :+ at.sources))
-      case Consumer.Splitting(named, branches) =>
+      case Consumer.Cogroup(named, together, next) => cogrouped(named, together, next, at, walk)
+      case Consumer.Copartitioned(next)            => arrive(next, at, walk.copy(joins = walk.joins :+ at.sources))
+      case Consumer.Splitting(named, branches)     =>
         val made  = walk.making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last))
         val after =
           branches.foldLeft(made): (walking, branch) =>
@@ -395,6 +400,67 @@ private[xkafka] object Wiring:
       case Consumer.ForeignSubscribed(_)     => walk
       case Consumer.ForeignAnswered(_)       => walk
       case mapped @ Consumer.Mapped(_, _, _) => followed(mapped.expanded, at, walk)
+
+  // The larger cases of `followed` are methods of their own, so each step of the walk, which recurses through `followed` once a node, takes a small
+  // frame of the stack: Scala.js on Node has far less of it than the JVM.
+  private def stepped[F[_], K, V, K2, V2](named: Named, step: Step[F, K, V, K2, V2], next: Consumer[F, K2, V2], at: Path, walk: Walk[F]): Walk[F] =
+    val after = at.through(step).copy(last = List(named.value))
+    // A global table is made where the program first joins it.
+    val tabled =
+      step.global.filterNot(global => walk.globals.exists(_.identity eq global.identity)).fold(walk): global =>
+        walk.copy(globals = walk.globals :+ global, steps = walk.steps ++ List(s"${global.named.value}-source", global.named.value))
+          .writing(List(Source.Input(global.topic)))
+    val made =
+      tabled.closing(step, at).making(at, Describing.Made(named.value, Describing.Kind.Processor(Describing.kept(step)), at.last))
+        .keeping(at, step.kept).refusing(step.punctuationProblems.map(TopologyError.InvalidPunctuation(named.value, _)))
+        .refusing(step.kept.flatMap(held => held.problems.map(TopologyError.InvalidStore(held.store.value, _))))
+    arrive(next, after, made.coming(named.value, after))
+
+  private def repartitioned[F[_], K, V](repartitioning: Consumer.Repartitioning[F, K, V], at: Path, walk: Walk[F]): Walk[F] =
+    val Consumer.Repartitioning(repartition, key, value, atJoin, always, next, aggregate, partitions, _, asked) = repartitioning
+    // Refusals name the repartitioning as the program did, as Java checks the name it is given.
+    val shown        = asked.getOrElse(repartition).value
+    val read         = Entry(Origin.Repartitioned(repartition, key, value, aggregate, partitions), next)
+    val counted      = partitions.filter(_ < 1).map(TopologyError.InvalidPartitionCount(shown, _)).toList ++ Topology.invalid(shown)
+    val source       = Source.Repartitioned(repartition)
+    val (node, name) = Describing.source(read.origin)
+    val filter       = s"${repartition.value}-repartition-filter"
+    val sink         = s"${repartition.value}-repartition-sink"
+    val written      =
+      aggregate match
+        case Some(named) => walk.making(at, Describing.Made(s"${named.value}-sink", Describing.Kind.Writes(source), at.last))
+        case None        => walk.making(at, Describing.Made(filter, Describing.Kind.Processor(Nil), at.last), named = false)
+            .making(at, Describing.Made(sink, Describing.Kind.Writes(source), List(filter)), named = false)
+    val closed =
+      written.copy(
+        repartitions = walk.repartitions :+ (at.home, source),
+        found = walk.found :+ (read, at.pulled),
+        entered = walk.entered + identified(read),
+        steps = written.steps ++ read.origin.names.map(_.value)
+      )
+    // Java's graph goes on through the repartition, so the grace of the windows before it carries across.
+    val after   = Path.of(List(source), name, at.pulled).copy(before = true, unwritten = if atJoin then List(source) else Nil, grace = at.grace)
+    val refused = if always || at.rekeyed then closed else closed.copy(problems = closed.problems :+ TopologyError.UnusedRepartition(shown))
+    // The source of a repartition that is not a grouped table's is a node the program makes, which no step may also be named; a grouped
+    // table's is named after its aggregate, a step's name already.
+    val placed =
+      (if atJoin then refused else refused.writing(List(source))).copy(
+        nodes = refused.nodes :+ (source, node),
+        generated = if aggregate.isEmpty then refused.generated :+ name else refused.generated,
+        asked = refused.asked :+ (repartition.value -> shown)
+      ).refusing(counted)
+    arrive(next, after, placed.coming(name, after))
+
+  private def cogrouped[F[_], K, V](named: Named, together: Boolean, next: Consumer[F, K, V], at: Path, walk: Walk[F]): Walk[F] =
+    val after  = at.copy(last = List(named.value), sources = Nil, unwritten = Nil)
+    val joined = if together then walk.copy(joins = walk.joins :+ at.sources) else walk
+    // Java cannot start a cogroup of several groups with a repartition topic at all, so which sub-topology it numbers first does not come into it.
+    val judged =
+      if together && at.unwritten.nonEmpty then
+        joined.copy(unsure = joined.unsure.filterNot(_.forall((at.joined ++ at.sources).contains)), unstartable = joined.unstartable :+ at.sources)
+      else joined
+    val made = judged.writing(at.unwritten).making(at, Describing.Made(named.value, Describing.Kind.Processor(Nil), at.last))
+    arrive(next, after, made.coming(named.value, after))
 
   /** A side reaching the join `id`, its left where `left` says: it waits if the other has not reached it yet, and otherwise `next` goes on from the
     * two, left first.
@@ -417,7 +483,9 @@ private[xkafka] object Wiring:
     val joinThis      = Made(s"$named-join-this", Kind.Processor(join.right.view.fold(Nil)(Describing.stores)), left.last)
     val joinOther     = Made(s"$named-join-other", Kind.Processor(join.left.view.fold(Nil)(Describing.stores)), right.last)
     val merge         = Made(named, Kind.Processor(join.store.toList.map(_._1.value)), List(joinThis.name, joinOther.name))
-    val made = met.making(after, joinThis, named = false).making(after, joinOther, named = false).making(after, merge).keeping(after, join.kept)
+    val made          =
+      met.making(after, joinThis, named = false).making(after, joinOther, named = false).making(after, merge).keeping(after, join.kept)
+        .copy(checked = met.checked :+ joinThis.name :+ joinOther.name)
     arrive(join.next, after, made.coming(named, after))
 
   /** A foreign-key join: the left table's side sends subscriptions to the other table's side, which keeps them and answers, and the answers come back
@@ -436,18 +504,26 @@ private[xkafka] object Wiring:
     val subscribed   = Entry(Origin.Exchanged[F](join.subscriptions, s"$named-subscription-registration-source"), Consumer.ForeignSubscribed(join))
     val answered     = Entry(Origin.Exchanged[F](join.responses, s"$named-subscription-response-source"), Consumer.ForeignAnswered(join))
     val store        = join.subscribed.value
-    val after        = left.copy(last = List(s"$named-result"), sources = left.sources :+ response, unwritten = Nil, rekeyed = false)
-    val send         = Made(s"$named-subscription-registration-processor", Kind.Processor(Nil), left.last)
-    val sink         = Made(s"$named-subscription-registration-sink", Kind.Writes(subscription), List(send.name))
-    val readRequest  = Made(s"$named-subscription-registration-source", Kind.Reads(List(subscription)), Nil)
-    val receive      = Made(s"$named-subscription-receive", Kind.Processor(List(store)), List(readRequest.name))
-    val lookup       = Made(s"$named-subscription-join-foreign", Kind.Processor(join.right.view.fold(Nil)(Describing.stores)), List(receive.name))
-    val changed      = Made(s"$named-foreign-join-subscription", Kind.Processor(List(store)), right.last)
-    val answer       = Made(s"$named-subscription-response-sink", Kind.Writes(response), List(lookup.name, changed.name))
-    val readAnswer   = Made(s"$named-subscription-response-source", Kind.Reads(List(response)), Nil)
+    // Java's response has both tables before it, so the result has a grace only where both do, the larger.
+    val after =
+      left.copy(
+        last = List(s"$named-result"),
+        sources = left.sources :+ response,
+        unwritten = Nil,
+        rekeyed = false,
+        grace = left.grace.zip(right.grace).map(_ max _)
+      )
+    val send        = Made(s"$named-subscription-registration-processor", Kind.Processor(Nil), left.last)
+    val sink        = Made(s"$named-subscription-registration-sink", Kind.Writes(subscription), List(send.name))
+    val readRequest = Made(s"$named-subscription-registration-source", Kind.Reads(List(subscription)), Nil)
+    val receive     = Made(s"$named-subscription-receive", Kind.Processor(List(store)), List(readRequest.name))
+    val lookup      = Made(s"$named-subscription-join-foreign", Kind.Processor(join.right.view.fold(Nil)(Describing.stores)), List(receive.name))
+    val changed     = Made(s"$named-foreign-join-subscription", Kind.Processor(List(store)), right.last)
+    val answer      = Made(s"$named-subscription-response-sink", Kind.Writes(response), List(lookup.name, changed.name))
+    val readAnswer  = Made(s"$named-subscription-response-source", Kind.Reads(List(response)), Nil)
     val resolve = Made(s"$named-subscription-response-resolver", Kind.Processor(join.left.view.fold(Nil)(Describing.stores)), List(readAnswer.name))
     val result  = Made(s"$named-result", Kind.Processor(join.store.toList.map(_._1.value)), List(resolve.name))
-    val unkept  = Option.when(join.store.isEmpty && join.next.requests)(TopologyError.UnkeptForeignKeyJoin(named)).toList
+    val unkept  = Option.when(join.store.isEmpty && join.next.needs)(TopologyError.UnkeptForeignKeyJoin(named)).toList
     val placed  =
       walk.writing(left.unwritten ++ right.unwritten ++ List(subscription, response)).united(subscription, right.home).united(response, left.home)
         .copy(
@@ -458,8 +534,12 @@ private[xkafka] object Wiring:
           kept = walk.kept :+ (right.home, KeptStore(join.subscribed))
         )
     val onRight = List(readRequest, receive, lookup, changed, answer).foldLeft(placed)(_.making(right, _, named = false))
-    val onLeft  = List(send, sink, readAnswer, resolve).foldLeft(onRight)(_.making(left, _, named = false))
-    val made    = onLeft.making(after, result).keeping(after, join.store.toList.map((stored, _) => KeptStore(stored))).refusing(unkept)
+    val onLeft  =
+      List(send, sink, readAnswer, resolve).foldLeft(onRight)(_.making(left, _, named = false)).copy(checked =
+        onRight.checked ++ List(send, sink, readRequest, lookup, changed, answer, readAnswer, resolve).map(_.name) ++
+          List(s"$named-subscription-registration-topic", s"$named-subscription-response-topic", named)
+      )
+    val made = onLeft.making(after, result).keeping(after, join.store.toList.map((stored, _) => KeptStore(stored))).refusing(unkept)
     arrive(join.next, after, made.coming(result.name, after))
 
   /** Streams joined: each side's records are kept in its window store, then joined with the other side's, and the merge passes on what either makes.
@@ -479,6 +559,7 @@ private[xkafka] object Wiring:
       Made(s"$named-${if leftOuter then "outer-" else ""}other-join", Kind.Processor(held.left :: held.shared.toList), List(otherWindowed.name))
     val merge = Made(s"$named-merge", Kind.Processor(Nil), List(thisJoin.name, otherJoin.name))
     val made  =
-      List(thisWindowed, otherWindowed, thisJoin, otherJoin, merge).foldLeft(met)(_.making(after, _, named = false)).copy(steps = met.steps :+ named)
+      List(thisWindowed, otherWindowed, thisJoin, otherJoin, merge).foldLeft(met)(_.making(after, _, named = false))
+        .copy(joinNames = met.joinNames :+ named, checked = met.checked ++ List(thisWindowed, otherWindowed, merge).map(_.name))
         .keeping(after, join.kept)
     arrive(join.next, after, made.coming(s"$named-merge", after))

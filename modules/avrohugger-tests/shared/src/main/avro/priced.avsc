@@ -1,0 +1,1 @@
+{"type": "record", "name": "Priced", "namespace": "com.example.shop", "fields": [{"name": "amount", "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2}}]}

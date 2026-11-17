@@ -25,6 +25,8 @@ package streams
 
 import java.nio.file.Files
 
+import scala.jdk.CollectionConverters.*
+
 import cats.effect.IO
 import fs2.Chunk
 
@@ -53,3 +55,23 @@ final class RocksdbTaskStoreSuite extends TaskStoreLaws("on disk"):
       assertEquals(found.map(_._1), Vector(key(3, 1)))
       assertEquals(clock, 9L)
       assertEquals(position, Some(42L))
+
+  test("a store that fails to open after RocksDB opened it lets go of it, so that it can be opened again"):
+    def damage(directory: java.nio.file.Path): Unit =
+      val names   = List(org.rocksdb.RocksDB.DEFAULT_COLUMN_FAMILY, "time".getBytes, "meta".getBytes)
+      val handles = new java.util.ArrayList[org.rocksdb.ColumnFamilyHandle]()
+      val db      = org.rocksdb.RocksDB.open(directory.toString, names.map(new org.rocksdb.ColumnFamilyDescriptor(_)).asJava, handles)
+      // A clock is eight bytes, so one of three cannot be read.
+      try db.put(handles.get(2), "clock".getBytes, Array[Byte](1, 2, 3))
+      finally
+        handles.forEach(_.close())
+        db.close()
+    for
+      directory <- IO.blocking(Files.createTempDirectory("xkafka-rocksdb"))
+      _         <- RocksdbStore.open[IO](directory, None).flatMap(_.close)
+      _         <- IO.blocking(damage(directory))
+      first     <- RocksdbStore.open[IO](directory, None).attempt
+      again     <- RocksdbStore.open[IO](directory, None).attempt
+    yield
+      assert(first.left.exists(_.isInstanceOf[java.nio.BufferUnderflowException]), first)
+      assert(again.left.exists(_.isInstanceOf[java.nio.BufferUnderflowException]), again)

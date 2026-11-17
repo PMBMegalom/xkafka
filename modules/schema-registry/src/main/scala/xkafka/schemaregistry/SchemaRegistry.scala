@@ -30,7 +30,7 @@ import cats.effect.{Ref, Temporal}
 import cats.syntax.all.*
 import cats.tagless.FunctorK
 import fs2.Chunk
-import io.circe.{parser, Decoder, Json}
+import io.circe.{jawn, Decoder, Json}
 
 /** The schema registry's operations, as Confluent's REST API offers them, with every answer that cannot change kept once given. */
 trait SchemaRegistry[F[_]]:
@@ -151,10 +151,10 @@ object SchemaRegistry:
           case refused                                                              => F.raiseError(refused)
 
     private def read[A](response: RegistryResponse, decoder: Decoder[A]): Either[RegistryException, A] =
-      parser.decode(text(response))(using decoder).leftMap(error => new RegistryException.Unreadable(response.status, error.getMessage))
+      jawn.decode(text(response))(using decoder).leftMap(error => new RegistryException.Unreadable(response.status, error.getMessage))
 
     private def refusal(response: RegistryResponse): RegistryException =
-      parser.decode(text(response))(using refusalAnswer).fold(
+      jawn.decode(text(response))(using refusalAnswer).fold(
         _ => new RegistryException.Unreadable(response.status, text(response).take(200)),
         (code, reason) => new RegistryException.Refused(response.status, code, reason)
       )

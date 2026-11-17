@@ -96,12 +96,13 @@ int xkafka_async_producer_commit_transaction(rd_kafka_t *producer, int timeout_m
 int xkafka_async_producer_abort_transaction(rd_kafka_t *producer, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result,
                                             DONE_ARGUMENTS);
 int xkafka_async_producer_send_offsets(rd_kafka_t *producer, void *metadata, const char *const *topics, const int32_t *partitions,
-                                       const int64_t *offset_values, const int32_t *leader_epochs, const char *const *offset_metadata,
-                                       size_t count, int timeout_ms, ERROR_ARGUMENTS, FLAG_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+                                       const int64_t *offset_values, const int32_t *leader_epochs, const char *offset_metadata,
+                                       const int32_t *offset_metadata_sizes, size_t count, int timeout_ms, ERROR_ARGUMENTS,
+                                       FLAG_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_consumer_poll(rd_kafka_t *consumer, int timeout_ms, int *status, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
 int xkafka_async_consumer_commit(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions,
-                                 const int64_t *offset_values, const int32_t *leader_epochs, const char *const *metadata, size_t count,
-                                 int timeout_ms, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
+                                 const int64_t *offset_values, const int32_t *leader_epochs, const char *metadata,
+                                 const int32_t *metadata_sizes, size_t count, int timeout_ms, ERROR_ARGUMENTS, int32_t *result, DONE_ARGUMENTS);
 int xkafka_async_consumer_committed(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, size_t count,
                                     int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
 int64_t xkafka_committed_offset_at(const void *committed, size_t index);
@@ -144,8 +145,9 @@ int xkafka_async_admin_elect_preferred_leaders(rd_kafka_t *client, const char *c
 int xkafka_async_admin_list_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
                                           size_t count, int timeout_ms, ERROR_ARGUMENTS, void **result, DONE_ARGUMENTS);
 int xkafka_async_admin_alter_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
-                                           const int64_t *offset_values, const int32_t *leader_epochs, const char *const *metadata,
-                                           size_t count, int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result,
+                                           const int64_t *offset_values, const int32_t *leader_epochs, const char *metadata,
+                                           const int32_t *metadata_sizes, size_t count, int timeout_ms, int32_t *codes,
+                                           ERROR_ARGUMENTS, int32_t *result,
                                            DONE_ARGUMENTS);
 int xkafka_async_admin_delete_group_offsets(rd_kafka_t *client, const char *group, const char *const *topics, const int32_t *partitions,
                                             size_t count, int timeout_ms, int32_t *codes, ERROR_ARGUMENTS, int32_t *result,
@@ -395,7 +397,9 @@ int main(int argc, char **argv) {
         void *subscription, *metadata, *configs, *group_metadata;
         int64_t next, committed, low, high, found, low_watermark;
         const int32_t no_epoch[1] = {-1};
-        const char *const notes[1] = {"leak check"};
+        /* One note, holding NUL, which goes through whole. */
+        const char notes[] = "leak\0check";
+        const int32_t note_sizes[1] = {sizeof notes - 1};
         const char *const eof_names[1] = {"enable.partition.eof"};
         const char *const eof_values[1] = {"true"};
         void *stored;
@@ -497,7 +501,7 @@ int main(int argc, char **argv) {
         xkafka_subscription_destroy(subscription);
         next = consume(consumer, RECORDS);
 
-        CALL(xkafka_async_consumer_commit, consumer, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS, ERRORS, &result);
+        CALL(xkafka_async_consumer_commit, consumer, topics, first_partition, &next, no_epoch, notes, note_sizes, 1, TIMEOUT_MS, ERRORS, &result);
         stored = NULL;
         await_answer("xkafka_async_consumer_committed", xkafka_async_consumer_committed(consumer, topics, first_partition, 1,
                                                                                         TIMEOUT_MS, ERRORS, &stored, done, next_token()));
@@ -505,7 +509,7 @@ int main(int argc, char **argv) {
                 fail("xkafka_async_consumer_committed");
         committed = xkafka_committed_offset_at(stored, 0);
         note = xkafka_committed_metadata_at(stored, 0, &note_size);
-        if (committed != next || note_size != strlen(notes[0]) || memcmp(note, notes[0], note_size) != 0) {
+        if (committed != next || note_size != (size_t)note_sizes[0] || memcmp(note, notes, note_size) != 0) {
                 fprintf(stderr, "committed %lld, expected %lld\n", (long long)committed, (long long)next);
                 return 1;
         }
@@ -529,7 +533,8 @@ int main(int argc, char **argv) {
         if (xkafka_producer_begin_transaction(producer, ERRORS, FLAGS) != 0)
                 fail("xkafka_producer_begin_transaction");
         produce(producer, topic, 1);
-        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS,
+        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, no_epoch, notes,
+             note_sizes, 1, TIMEOUT_MS,
              ERRORS, FLAGS, &result);
         CALL(xkafka_async_producer_abort_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
         xkafka_consumer_group_metadata_destroy(group_metadata);
@@ -543,7 +548,8 @@ int main(int argc, char **argv) {
         if (xkafka_producer_begin_transaction(producer, ERRORS, FLAGS) != 0)
                 fail("xkafka_producer_begin_transaction");
         produce(producer, topic, 1);
-        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS,
+        CALL(xkafka_async_producer_send_offsets, producer, group_metadata, topics, first_partition, &next, no_epoch, notes,
+             note_sizes, 1, TIMEOUT_MS,
              ERRORS, FLAGS, &result);
         CALL(xkafka_async_producer_abort_transaction, producer, TIMEOUT_MS, ERRORS, FLAGS, &result);
         xkafka_consumer_group_metadata_destroy(group_metadata);
@@ -567,7 +573,8 @@ int main(int argc, char **argv) {
                 describe_group(admin, group, 0);
                 group_offsets(admin, group, NULL, NULL, 0, 1);
                 group_offsets(admin, group, topics, first_partition, 1, 1);
-                CALL(xkafka_async_admin_alter_group_offsets, admin, group, topics, first_partition, &next, no_epoch, notes, 1, TIMEOUT_MS,
+                CALL(xkafka_async_admin_alter_group_offsets, admin, group, topics, first_partition, &next, no_epoch, notes,
+                     note_sizes, 1, TIMEOUT_MS,
                      codes, ERRORS, &result);
                 if (codes[0] != 0)
                         fail("xkafka_async_admin_alter_group_offsets");

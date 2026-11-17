@@ -61,7 +61,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     shim.flatMap: loaded =>
       F.async_[Unit]: callback =>
         val token   = Completions.expect(arguments)(() => callback(Right(())))
-        val started = function(loaded)((arguments ++ Seq[js.Any](Completions.done, bigInt(token)))*)
+        val started = Completions.guarded(token)(function(loaded)((arguments ++ Seq[js.Any](Completions.done, bigInt(token)))*))
         if started.asInstanceOf[Int] != 0 then
           Completions.forget(token)
           callback(Left(Failures.plain("could not start a thread for a librdkafka call")))
@@ -164,9 +164,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
             error.code
           )
         result.asInstanceOf[Int] match
-          case 0 => true
-          case 1 => false
-          case _ => throw error.failure
+          case 0      => true
+          case 1      => false
+          case answer => throw Failures.delivery(error.text, error.codeValue, answer)
       Enqueued(records.iterator.takeWhile(taken).size, gaveUp = false)
 
   private def nativeHeaders(shim: Shim, headers: Headers, error: ErrorSlot): js.Any =
@@ -196,8 +196,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
   override def deliveries(producer: Client, batch: Batch): F[Vector[Either[KafkaException, Delivery]]] =
     direct: shim =>
       Vector.tabulate(shim.batchCount(batch).asInstanceOf[Double].toInt): index =>
-        val error = ErrorSlot()
-        if shim.batchErrorAt(producer, batch, index, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then Left(error.failure)
+        val error  = ErrorSlot()
+        val answer = shim.batchErrorAt(producer, batch, index, error.message, ErrorBufferSize, error.code).asInstanceOf[Int]
+        if answer != 0 then Left(Failures.delivery(error.text, error.codeValue, answer))
         else
           Right(Delivery(
             shim.batchPartitionAt(batch, index).asInstanceOf[Int],
@@ -218,8 +219,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         if result.asInstanceOf[Int] != 0 then F.raiseError(error.classifiedFailure) else F.unit
 
   override def commitTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
-    transactional((error, result) =>
-      background(_.commitTransaction)((Seq[js.Any](producer, timeoutMillis) ++ error.classifiedArguments :+ result.value)*)
+    transactional(
+      (error, result) => background(_.commitTransaction)((Seq[js.Any](producer, timeoutMillis) ++ error.classifiedArguments :+ result.value)*),
+      committing = true
     )
 
   override def abortTransaction(producer: Client, timeoutMillis: Int): F[Unit] =
@@ -234,11 +236,11 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       timeoutMillis: Int
   ): F[Unit] =
     F.defer:
-      val (topics, partitions)       = partitionArrays(offsets.map(_._1))
-      val (values, epochs, comments) = commitArrays(offsets.map(_._2))
+      val (topics, partitions)              = partitionArrays(offsets.map(_._1))
+      val (values, epochs, comments, sizes) = commitArrays(offsets.map(_._2))
       transactional((error, result) =>
         background(_.sendOffsets)(
-          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, epochs, comments, offsets.size, timeoutMillis) ++
+          (Seq[js.Any](producer, metadata.pointer, topics, partitions, values, epochs, comments, sizes, offsets.size, timeoutMillis) ++
             error.classifiedArguments :+ result.value)*
         )
       )
@@ -349,10 +351,10 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
   override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): F[Unit] =
     F.defer:
-      val (topics, partitions)       = partitionArrays(offsets.map(_._1))
-      val (values, epochs, comments) = commitArrays(offsets.map(_._2))
-      val error                      = ErrorSlot()
-      val result                     = Result()
+      val (topics, partitions)              = partitionArrays(offsets.map(_._1))
+      val (values, epochs, comments, sizes) = commitArrays(offsets.map(_._2))
+      val error                             = ErrorSlot()
+      val result                            = Result()
       background(_.commit)(
         consumer,
         topics,
@@ -360,6 +362,7 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         values,
         epochs,
         comments,
+        sizes,
         offsets.size,
         timeoutMillis,
         error.message,
@@ -782,12 +785,12 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       offsets: Vector[(TopicPartition, OffsetAndMetadata)],
       timeoutMillis: Int
   ): F[Vector[Either[KafkaException, Unit]]] =
-    val (topics, partitions)       = partitionArrays(offsets.map(_._1))
-    val (values, epochs, comments) = commitArrays(offsets.map(_._2))
+    val (topics, partitions)              = partitionArrays(offsets.map(_._1))
+    val (values, epochs, comments, sizes) = commitArrays(offsets.map(_._2))
     codedCall(offsets.map(_._1), _.show)((codes, error, result) =>
       background(_.alterGroupOffsets)(
-        (Seq[js.Any](admin, group.value, topics, partitions, values, epochs, comments, offsets.size, timeoutMillis, codes) ++ errorArguments(error) :+
-          result.value)*
+        (Seq[js.Any](admin, group.value, topics, partitions, values, epochs, comments, sizes, offsets.size, timeoutMillis, codes) ++
+          errorArguments(error) :+ result.value)*
       )
     )
 
@@ -857,10 +860,11 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     val error            = ErrorSlot()
     direct(function(_)(consumer, topics, values, partitions.size, error.message, ErrorBufferSize, error.code)).flatMap(error.check)
 
-  private def transactional(call: (ErrorSlot, Result) => F[Unit]): F[Unit] =
+  private def transactional(call: (ErrorSlot, Result) => F[Unit], committing: Boolean = false): F[Unit] =
     val error  = ErrorSlot()
     val result = Result()
-    call(error, result) *> F.defer(if result.int != 0 then F.raiseError(error.classifiedFailure) else F.unit)
+    call(error, result) *> F.defer:
+      if result.int == 0 then F.unit else F.raiseError(if committing then error.committingFailure else error.classifiedFailure)
 
   /** What a call that ran on its own thread returned: an `int` or a pointer. */
   private final class Result:
@@ -897,6 +901,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
 
     def classifiedFailure: KafkaException.BackendFailure = Failures.classified(text, codeValue, fatal.readInt32LE(0), abort.readInt32LE(0))
 
+    def committingFailure: Throwable = Failures.committing(text, codeValue, fatal.readInt32LE(0), retriable.readInt32LE(0), abort.readInt32LE(0))
+
     /** A handle, or the failure the call reported in place of one. */
     def orFail(handle: js.Any): js.Any = if handle == null then throw failure else handle
 
@@ -922,8 +928,14 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
     Seq[js.Any](topics, partitions, longs(starts.map(_.offset)), ints(starts.map(_.leaderEpoch)), starts.size)
 
   /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata. */
-  private def commitArrays(offsets: Vector[OffsetAndMetadata]): (Buffer, Buffer, js.Array[String]) =
-    (longs(offsets.map(_.offset.value)), ints(offsets.map(_.leaderEpoch.fold(-1)(_.value))), strings(offsets.map(_.metadata)))
+  /** Offsets to commit, with each one's leader epoch, negative for none, and its metadata: each one's UTF-8 bytes after the one before, and how many
+    * there are of each, so a metadata holding NUL is passed whole.
+    */
+  private def commitArrays(offsets: Vector[OffsetAndMetadata]): (Buffer, Buffer, Buffer, Buffer) =
+    val encoded = offsets.map(_.metadata.getBytes(UTF_8))
+    val bytes   = Buffers.alloc(encoded.map(_.length).sum.max(1))
+    bytes.set(byteArray2Int8Array(Array.concat(encoded*)), 0)
+    (longs(offsets.map(_.offset.value)), ints(offsets.map(_.leaderEpoch.fold(-1)(_.value))), bytes, ints(encoded.map(_.length)))
 
   private def ints(values: Vector[Int]): Buffer =
     val buffer = Buffers.alloc(4 * values.size.max(1))

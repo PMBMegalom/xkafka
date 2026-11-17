@@ -116,6 +116,14 @@ final class TopologySuite extends CatsEffectSuite:
       Right(List[Short](3, 3))
     )
 
+  test("an empty repartition name is refused, as Java refuses it, though no step carries it"):
+    def repartitioned(in: String) =
+      KStream(Named(s"$in-read"), topic(in), text, text).repartition(Repartition(""), text, text)
+        .to(Named(s"$in-write"), topic(s"$in-out"), text, text)
+    val refused = Topology.of(repartitioned("a"), repartitioned("b")).left.map(_.toList.toSet)
+    assert(refused.left.exists(_.contains(TopologyError.InvalidName("", "it is empty"))), refused)
+    assert(refused.left.exists(_.contains(TopologyError.DuplicateRepartition(""))), refused)
+
   test("a program is refused with every reason at once: names reused, a topic read twice, and names no topic can carry or Java refuses"):
     val refused = Topology.of(counting("in", "same", "counts"), counting("in", "same", "counts"), counting("other", "bad name", ""))
     assertEquals(
@@ -139,6 +147,25 @@ final class TopologySuite extends CatsEffectSuite:
     assertEquals(named(".."), Left(List(TopologyError.InvalidName("..", "it may not be . or .."))))
     assertEquals(named("out"), Left(List(TopologyError.DuplicateName("out"))))
     assertEquals(named("in put"), Left(List(TopologyError.InvalidName("in put", "it may contain only [a-zA-Z0-9._-]"))))
+
+  test("a foreign-key join's name and a cogroup's are refused where Java's Named refuses them, though no node takes either alone"):
+    val left                 = KTable(Named("read-left"), topic("left"), text, text, Store("left-store"))
+    val other                = KTable(Named("read-other"), topic("other"), text, text, Store("other-store"))
+    def joined(name: String) =
+      Topology.of(
+        left.joinOnForeignKey(Named(name), other, text, text, text)((_, value) => Some(value))((l, r) => s"$l+$r").toStream(Named("changes"))
+          .to(Named("write"), topic("out"), text, text.option)
+      ).left.map(_.toList)
+    def cogrouped(name: String) =
+      Topology.of(
+        KStream(Named("read"), topic("in"), text, text).groupByKey(text, text).cogroup((_, v: String, total: String) => total + v)
+          .aggregate(Named(name), Store("kept"), text)("").toStream(Named("changes")).to(Named("write"), topic("out"), text, text)
+      ).left.map(_.toList)
+    List(".", "..").foreach: name =>
+      assertEquals(joined(name), Left(List(TopologyError.InvalidName(name, "it may not be . or .."))), name)
+      assertEquals(cogrouped(name), Left(List(TopologyError.InvalidName(name, "it may not be . or .."))), name)
+    assert(joined("fk").isRight)
+    assert(cogrouped("co").isRight)
 
   test("a name longer than Java allows is refused"):
     val long = "n" * (Topology.MaxNameLength + 1)

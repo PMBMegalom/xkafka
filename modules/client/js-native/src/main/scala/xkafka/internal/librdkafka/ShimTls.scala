@@ -33,7 +33,10 @@ private[xkafka] final case class ShimTls(
     keyPem: Option[String],
     keyPassword: Option[String],
     verifyHostname: Boolean
-)
+):
+  override def toString: String =
+    s"ShimTls($caLocation,$caPem,$certificateLocation,$keyLocation,$certificatePem,${keyPem.map(_ => "<redacted>")},${keyPassword
+        .map(_ => "<redacted>")},$verifyHostname)"
 
 private[xkafka] object ShimTls:
   def apply(settings: Option[TlsSettings]): ShimTls =

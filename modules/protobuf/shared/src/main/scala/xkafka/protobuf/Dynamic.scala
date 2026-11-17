@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets
 import cats.syntax.all.*
 import fs2.Chunk
 import xkafka.protobuf.ProtobufSchema.{Enum, Field, FieldType, File, Label, Message, Syntax}
+import xkafka.schemaregistry.{Shown, Utf8}
 
 /** The messages and enums of a file and the files it imports, by full name without a leading dot. */
 private[protobuf] final class Pool(messages: Map[String, (Message, Syntax)], enums: Map[String, Enum]):
@@ -42,14 +43,14 @@ private[protobuf] final class Pool(messages: Map[String, (Message, Syntax)], enu
       .toRight(s"type $name in $scope is declared in none of the files")
 
 private[protobuf] object Pool:
-  /** The pool of `root` and the files it imports, transitively, from `files` and the well-known types. */
+  /** The pool of `root` and the files it imports, transitively, from `files` and the files Confluent's serializers know. */
   def of(root: File, files: Map[String, File]): Either[String, Pool] =
     def gather(pending: List[String], seen: Map[String, File]): Either[String, List[File]] =
       pending match
         case Nil                                 => Right(seen.values.toList)
         case name :: rest if seen.contains(name) => gather(rest, seen)
         case name :: rest                        => files.get(name).orElse(WellKnown.files.get(name))
-            .toRight(s"the schema imports $name, which neither its references nor the well-known types hold")
+            .toRight(s"the schema imports $name, which neither its references nor the files Confluent's serializers know hold")
             .flatMap(file => gather(rest ++ file.imports, seen.updated(name, file)))
     gather(root.imports, Map.empty).map: imported =>
       val all                                                                                              = root :: imported
@@ -70,9 +71,13 @@ private[protobuf] object Pool:
 private[protobuf] final class Dynamic(pool: Pool):
   private def described(full: String): Either[String, (Message, Syntax)] = pool.message(full).toRight(s"no message is named $full")
 
-  def encode(full: String, value: ProtobufValue): Either[String, Chunk[Byte]] =
+  def encode(full: String, value: ProtobufValue): Either[String, Chunk[Byte]] = encode(full, value, 0)
+
+  /** A message written inside as many others as `depth` says, refused past `ProtobufWire.MaxDepth`, as reading refuses it. */
+  private def encode(full: String, value: ProtobufValue, depth: Int): Either[String, Chunk[Byte]] =
     value match
-      case ProtobufValue.Message(name, fields, unknown) => described(full).flatMap: (message, syntax) =>
+      case ProtobufValue.Message(_, _, _) if depth > ProtobufWire.MaxDepth => Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+      case ProtobufValue.Message(name, fields, unknown)                    => described(full).flatMap: (message, syntax) =>
           val declared = message.fields.map(_.name).toSet
           val named    = fields.map(_._1)
           if name != full then Left(s"a message $name is given where $full is written")
@@ -87,27 +92,30 @@ private[protobuf] final class Dynamic(pool: Pool):
                   fields.collectFirst { case (field.name, set) => set } match
                     case None if field.label == Label.Required => Left(s"required field ${field.name} of $full is not given")
                     case None                                  => Right(Chunk.empty[Byte])
-                    case Some(set) => writeField(full, syntax, field, set).leftMap(reason => s"field ${field.name} of $full: $reason")
+                    case Some(set) => writeField(full, syntax, field, set, depth + 1).leftMap(reason => s"field ${field.name} of $full: $reason")
                 .map(written => (written ++ unknown.map(_.bytes)).foldLeft(Chunk.empty[Byte])(_ ++ _))
-      case other => Left(s"expected a message $full, found $other")
+      case other => Left(s"expected a message $full, found ${Shown(other)}")
 
-  private def writeField(scope: String, syntax: Syntax, field: Field, value: ProtobufValue): Either[String, Chunk[Byte]] =
+  private def writeField(scope: String, syntax: Syntax, field: Field, value: ProtobufValue, depth: Int): Either[String, Chunk[Byte]] =
     (field.fieldType, value) match
+      // Each entry is a message of its own, which protobuf-java counts as a level.
+      case (FieldType.Map(_, _), ProtobufValue.Map(entries)) if entries.nonEmpty && depth > ProtobufWire.MaxDepth =>
+        Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
       case (FieldType.Map(key, item), ProtobufValue.Map(entries)) => entries.traverse: (entryKey, entryValue) =>
-          (single(scope, key, entryKey), single(scope, item, entryValue)).mapN((written, valueWritten) =>
+          (single(scope, key, entryKey, depth + 1), single(scope, item, entryValue, depth + 1)).mapN((written, valueWritten) =>
             ProtobufWire.field(field.number, Raw.Bytes(ProtobufWire.field(1, written) ++ ProtobufWire.field(2, valueWritten)))
           )
         .map(_.foldLeft(Chunk.empty[Byte])(_ ++ _))
       case (_, ProtobufValue.List(values)) if field.label == Label.Repeated =>
-        values.traverse(single(scope, field.fieldType, _)).map: raws =>
+        values.traverse(single(scope, field.fieldType, _, depth)).map: raws =>
           val packable = raws.headOption.exists(raw => ProtobufWire.wireOf(raw) != ProtobufWire.BytesType)
           if raws.isEmpty then Chunk.empty
           else if packable && field.packed.getOrElse(syntax == Syntax.Proto3) then
             ProtobufWire.field(field.number, Raw.Bytes(raws.foldLeft(Chunk.empty[Byte])(_ ++ ProtobufWire.payload(_))))
           else raws.foldLeft(Chunk.empty[Byte])(_ ++ ProtobufWire.field(field.number, _))
-      case (FieldType.Map(_, _), other)                => Left(s"expected a map, found $other")
-      case (_, other) if field.label == Label.Repeated => Left(s"expected a list, found $other")
-      case (fieldType, set)                            => single(scope, fieldType, set).map: raw =>
+      case (FieldType.Map(_, _), other)                => Left(s"expected a map, found ${Shown(other)}")
+      case (_, other) if field.label == Label.Repeated => Left(s"expected a list, found ${Shown(other)}")
+      case (fieldType, set)                            => single(scope, fieldType, set, depth).map: raw =>
           // A field without presence is left out where it is zero.
           if field.label == Label.Implicit && zero(raw, fieldType) then Chunk.empty else ProtobufWire.field(field.number, raw)
 
@@ -123,7 +131,7 @@ private[protobuf] final class Dynamic(pool: Pool):
 
   private val maxUInt64 = (BigInt(1) << 64) - 1
 
-  private def single(scope: String, fieldType: FieldType, value: ProtobufValue): Either[String, Raw] =
+  private def single(scope: String, fieldType: FieldType, value: ProtobufValue, depth: Int): Either[String, Raw] =
     (fieldType, value) match
       case (FieldType.Double, ProtobufValue.Double(number))  => Right(Raw.Fixed64(java.lang.Double.doubleToRawLongBits(number)))
       case (FieldType.Float, ProtobufValue.Float(number))    => Right(Raw.Fixed32(java.lang.Float.floatToRawIntBits(number)))
@@ -145,47 +153,92 @@ private[protobuf] final class Dynamic(pool: Pool):
       case (FieldType.String, ProtobufValue.String(text))    => Right(Raw.Bytes(Chunk.array(text.getBytes(StandardCharsets.UTF_8))))
       case (FieldType.Bytes, ProtobufValue.Bytes(bytes))     => Right(Raw.Bytes(bytes))
       case (FieldType.Named(name), set)                      => pool.resolve(scope, name).flatMap:
-          case Right(full)              => encode(full, set).map(Raw.Bytes(_))
+          case Right(full)              => encode(full, set, depth).map(Raw.Bytes(_))
           case Left((full, enumerated)) => set match
               case ProtobufValue.Enum(value) => enumerated.values.collectFirst { case (`value`, number) => Raw.Varint(number.toLong) }
-                  .toRight(s"$value is not a value of $full")
+                  .toRight(s"${Shown(value)} is not a value of $full")
               case ProtobufValue.EnumNumber(number) => Right(Raw.Varint(number.toLong))
-              case other                            => Left(s"expected a value of $full, found $other")
-      case (expected, other) => Left(s"expected a value of ${expected.toString.toLowerCase}, found $other")
+              case other                            => Left(s"expected a value of $full, found ${Shown(other)}")
+      case (expected, other) => Left(s"expected a value of ${expected.toString.toLowerCase}, found ${Shown(other)}")
 
-  def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] =
-    described(full).flatMap: (message, _) =>
-      ProtobufWire.fields(bytes).flatMap: read =>
-        val byNumber = read.groupMap(_._1)(_._2)
-        val numbers  = message.fields.map(_.number).toSet
-        val unknown  = read.collect { case (number, raw) if !numbers.contains(number) => UnknownField(number, ProtobufWire.field(number, raw)) }
-        message.fields.flatTraverse: field =>
-          readField(full, field, byNumber.getOrElse(field.number, Vector.empty))
-            .bimap(reason => s"field ${field.name} of $full: $reason", _.map(field.name -> _).toList)
-        .map(fields => ProtobufValue.Message(full, fields.toVector, unknown))
+  /** Whether no message in a record of the message `full` is more than `ProtobufWire.MaxDepth` below its own, as protobuf-java counts them, a map's
+    * entries among them: found without recursion, so that a library that reads messages by recursion and counts no depth, such as ScalaPB, is given
+    * no record that would run the stack out. Bytes that are no message are left for that library to refuse.
+    */
+  def shallow(full: String, bytes: Chunk[Byte]): Either[String, Unit] =
+    val tooDeep = Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    @scala.annotation.tailrec
+    def within(pending: List[(String, Chunk[Byte], Int)]): Either[String, Unit] =
+      pending match
+        case Nil                                                 => Right(())
+        case (_, _, depth) :: _ if depth > ProtobufWire.MaxDepth => tooDeep
+        case (scope, written, depth) :: rest                     =>
+          val types = pool.message(scope).toList.flatMap(_._1.fields.map(field => field.number -> field.fieldType)).toMap
+          // Bytes that are no message are refused here, since a library reading them would read the fields before them first, however deep.
+          ProtobufWire.fields(written).flatMap(_.toList.flatTraverse {
+            case (number, Raw.Bytes(value)) => types.get(number).fold(Right(Nil))(nested(scope, _, value, depth + 1))
+            case _                          => Right(Nil)
+          }) match
+            case Left(reason) => Left(s"the record is not a message $scope can be read from: $reason")
+            case Right(inner) => within(inner ++ rest)
+    def nested(scope: String, fieldType: FieldType, value: Chunk[Byte], depth: Int): Either[String, List[(String, Chunk[Byte], Int)]] =
+      fieldType match
+        case FieldType.Named(name) => Right(pool.resolve(scope, name).toOption.flatMap(_.toOption).map(full => (full, value, depth)).toList)
+        // An entry is a message of its own, holding its value a level deeper.
+        case FieldType.Map(_, item) =>
+          if depth > ProtobufWire.MaxDepth then Right(List(("", Chunk.empty, depth)))
+          else
+            ProtobufWire.fields(value).flatMap(_.toList.collect { case (2, Raw.Bytes(held)) => held }.flatTraverse(nested(scope, item, _, depth + 1)))
+        case _ => Right(Nil)
+    within(List((full, bytes, 0)))
+
+  def decode(full: String, bytes: Chunk[Byte]): Either[String, ProtobufValue.Message] = decode(full, bytes, 0)
+
+  /** A message inside as many others as `depth` says, refused past `ProtobufWire.MaxDepth`, so that no record runs the stack out. */
+  private def decode(full: String, bytes: Chunk[Byte], depth: Int): Either[String, ProtobufValue.Message] =
+    if depth > ProtobufWire.MaxDepth then Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+    else
+      described(full).flatMap: (message, _) =>
+        ProtobufWire.fields(bytes).flatMap: read =>
+          val byNumber = read.groupMap(_._1)(_._2)
+          val numbers  = message.fields.map(_.number).toSet
+          val unknown  = read.collect { case (number, raw) if !numbers.contains(number) => UnknownField(number, ProtobufWire.field(number, raw)) }
+          // Of a oneof's fields written, the one written last is the oneof's, as protobuf reads it.
+          val numberOf = message.fields.map(field => field.name -> field.number).toMap
+          val position = read.zipWithIndex.map((written, at) => written._1 -> at).toMap
+          message.fields.flatTraverse: field =>
+            readField(full, field, byNumber.getOrElse(field.number, Vector.empty), depth + 1)
+              .bimap(reason => s"field ${field.name} of $full: $reason", _.map(field -> _).toList)
+          .map: fields =>
+            val chosen =
+              fields.groupBy(_._1.oneof).flatMap:
+                case (Some(_), members) => members.maxByOption((field, _) => position.getOrElse(numberOf(field.name), -1)).toList
+                case (None, plain)      => plain
+              .toSet
+            ProtobufValue.Message(full, fields.filter(chosen).map((field, value) => field.name -> value).toVector, unknown)
 
   /** A field's value from what was written under its number; none where it is absent and records presence. */
-  private def readField(scope: String, field: Field, found: Vector[Raw]): Either[String, Option[ProtobufValue]] =
+  private def readField(scope: String, field: Field, found: Vector[Raw], depth: Int): Either[String, Option[ProtobufValue]] =
     field.fieldType match
       case FieldType.Map(key, item) => found.traverse:
-          case Raw.Bytes(entry) => ProtobufWire.fields(entry).flatMap: fields =>
+          case Raw.Bytes(_) if depth > ProtobufWire.MaxDepth => Left(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")
+          case Raw.Bytes(entry)                              => ProtobufWire.fields(entry).flatMap: fields =>
               def at(number: Int): Option[Raw] = fields.collect { case (`number`, raw) => raw }.lastOption
-              (at(1).fold(zeroOf(scope, key))(take(scope, key, _)), at(2).fold(zeroOf(scope, item))(take(scope, item, _))).tupled
+              // A value left out is its type's zero, and for a message, the message with nothing written, as protobuf reads it.
+              // One left out is no message on the wire, so it is no level deeper, as protobuf-java counts it.
+              val absent = if message(scope, item) then take(scope, item, Raw.Bytes(Chunk.empty), depth) else zeroOf(scope, item)
+              (at(1).fold(zeroOf(scope, key))(take(scope, key, _, depth + 1)), at(2).fold(absent)(take(scope, item, _, depth + 1))).tupled
           case _ => Left("expected a map's entry")
-        .map(entries =>
-          Some(
-            ProtobufValue
-              .Map(entries.foldLeft(Vector.empty[(ProtobufValue, ProtobufValue)])((kept, entry) => kept.filterNot(_._1 == entry._1) :+ entry))
-          )
-        )
+        // Of two entries with one key, the later is read, in its place.
+        .map(entries => Some(ProtobufValue.Map(entries.reverse.distinctBy(_._1).reverse)))
       case fieldType if field.label == Label.Repeated =>
         found.flatTraverse:
           case Raw.Bytes(packed) if packable(scope, fieldType) =>
-            ProtobufWire.packed(packed, wireOf(fieldType)).flatMap(_.traverse(take(scope, fieldType, _)))
-          case raw => take(scope, fieldType, raw).map(Vector(_))
+            ProtobufWire.packed(packed, wireOf(fieldType)).flatMap(_.traverse(take(scope, fieldType, _, depth)))
+          case raw => take(scope, fieldType, raw, depth).map(Vector(_))
         .map(values => Some(ProtobufValue.List(values)))
-      case fieldType => found.lastOption match
-          case Some(raw) => take(scope, fieldType, raw).map(Some(_))
+      case fieldType => ProtobufWire.last(found, message(scope, fieldType)) match
+          case Some(raw) => take(scope, fieldType, raw, depth).map(Some(_))
           // A message has presence of its own, even in a field without a label.
           case None if field.label == Label.Implicit && !message(scope, fieldType) => zeroOf(scope, fieldType).map(Some(_))
           case None                                                                => Right(None)
@@ -214,17 +267,18 @@ private[protobuf] final class Dynamic(pool: Pool):
       case FieldType.String      => Right(ProtobufValue.String(""))
       case FieldType.Bytes       => Right(ProtobufValue.Bytes(Chunk.empty))
       case FieldType.Named(name) => pool.resolve(scope, name).flatMap:
-          case Left(_)     => take(scope, fieldType, Raw.Varint(0))
+          case Left(_)     => take(scope, fieldType, Raw.Varint(0), 0)
           case Right(full) => Left(s"a message $full has presence, so it has no zero")
       case scalar => take(
           scope,
           scalar,
           if wireOf(scalar) == ProtobufWire.Fixed64Type then Raw.Fixed64(0)
           else if wireOf(scalar) == ProtobufWire.Fixed32Type then Raw.Fixed32(0)
-          else Raw.Varint(0)
+          else Raw.Varint(0),
+          0
         )
 
-  private def take(scope: String, fieldType: FieldType, raw: Raw): Either[String, ProtobufValue] =
+  private def take(scope: String, fieldType: FieldType, raw: Raw, depth: Int): Either[String, ProtobufValue] =
     (fieldType, raw) match
       case (FieldType.Double, Raw.Fixed64(bits))    => Right(ProtobufValue.Double(java.lang.Double.longBitsToDouble(bits)))
       case (FieldType.Float, Raw.Fixed32(bits))     => Right(ProtobufValue.Float(java.lang.Float.intBitsToFloat(bits)))
@@ -239,11 +293,11 @@ private[protobuf] final class Dynamic(pool: Pool):
       case (FieldType.UInt64, Raw.Varint(value))    => Right(ProtobufValue.UInt64(BigInt(java.lang.Long.toUnsignedString(value))))
       case (FieldType.Fixed64, Raw.Fixed64(value))  => Right(ProtobufValue.UInt64(BigInt(java.lang.Long.toUnsignedString(value))))
       case (FieldType.Bool, Raw.Varint(value))      => Right(ProtobufValue.Bool(value != 0))
-      case (FieldType.String, Raw.Bytes(bytes))     => Right(ProtobufValue.String(new String(bytes.toArray, StandardCharsets.UTF_8)))
+      case (FieldType.String, Raw.Bytes(bytes))     => Utf8.decode(bytes.toArray).map(ProtobufValue.String(_))
       case (FieldType.Bytes, Raw.Bytes(bytes))      => Right(ProtobufValue.Bytes(bytes))
       case (FieldType.Named(name), _)               => pool.resolve(scope, name).flatMap:
           case Right(full) => raw match
-              case Raw.Bytes(bytes) => decode(full, bytes)
+              case Raw.Bytes(bytes) => decode(full, bytes, depth)
               case _                => Left(s"expected a message $full, found another wire type")
           case Left((_, enumerated)) => raw match
               case Raw.Varint(value) => Right(

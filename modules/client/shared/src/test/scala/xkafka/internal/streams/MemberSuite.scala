@@ -87,7 +87,7 @@ final class MemberSuite extends FunSuite:
   /** A member that has joined and runs `active`. */
   private def joined(active: Set[TaskId]): Member =
     val (member, actions) = run(Member(identity), Start, Answered(answer(1, Some(active))))
-    val round             = actions.last.collectFirst { case Assign(round, _) => round }
+    val round             = actions.last.collectFirst { case Assign(round, _, _) => round }
     round.fold(member)(round => run(member, Assigned(round), Answered(answer(1)))._1)
 
   test("joining sends the topology and everything else said once, with epoch 0 and no tasks"):
@@ -123,11 +123,20 @@ final class MemberSuite extends FunSuite:
     val (moved, _) = run(kept, Due, Answered(answer(3, endpointEpoch = 2, endpoints = Some(List(there)))))
     assertEquals((first.endpoints, kept.endpoints, moved.endpoints), (List(here, there), List(here, there), List(there)))
 
+  test("a member given no tasks still tells the engine so once it has joined, and again after it joins anew, so that the engine runs"):
+    val (member, actions) = run(Member(identity), Start, Answered(answer(1, Some(Set.empty))))
+    // It changes no tasks, so it is told at the round the member is at, with no step to wait for.
+    assertEquals(actions(1).collect { case assign: Assign => assign }, List(Assign(0, Assignment.empty, 1)))
+    val (_, again) = run(member, Assigned(0), Due, Answered(answer(1, Some(Set.empty))))
+    assertEquals(again.flatten.collect { case assign: Assign => assign }, Nil, "told once while nothing changes")
+    val (_, rejoined) = run(member, Assigned(0), Due, Answered(answer(1, error = 110)), Answered(answer(2, Some(Set.empty))))
+    assertEquals(rejoined.flatten.collect { case assign: Assign => assign.epoch }, List(2), "told again after joining anew")
+
   test("a joined member runs what it is given, then reports it at once, then sends only the epochs until something changes"):
     val handed            = Set(task("0", 0), task("1", 2))
     val (member, actions) = run(Member(identity), Start, Answered(answer(3, Some(handed), standby = Set(task("0", 1)), endpointEpoch = 4)))
     val assignment        = Assignment(handed, Set(task("0", 1)), Set.empty)
-    assertEquals(actions(1), List(Assign(1, assignment), Wait(5.seconds)))
+    assertEquals(actions(1), List(Assign(1, assignment, 3), Wait(5.seconds)))
     val (later, after) = run(member, Assigned(1), Answered(answer(3, interval = 2000)), Due)
     val ack            = sent(after(0)).head
     assertEquals((ack.memberEpoch, ack.endpointInformationEpoch, ack.topology, ack.processId, ack.rebalanceTimeoutMs), (3, 4, None, None, -1))
@@ -145,7 +154,7 @@ final class MemberSuite extends FunSuite:
     val (_, actions) = run(member, Answered(answer(2, Some(Set(task("0", 0), task("0", 2))))), Revoked(2), Assigned(3))
     val target       = Assignment(Set(task("0", 0), task("0", 2)), Set.empty, Set.empty)
     assertEquals(actions(0), List(Revoke(2, Set(task("0", 1))), Wait(5.seconds)))
-    assertEquals(actions(1), List(Assign(3, target)))
+    assertEquals(actions(1), List(Assign(3, target, 2)))
     assertEquals(sent(actions(2)).flatMap(_.activeTasks), List(List(StreamsGroup.Tasks("0", List(0, 2)))))
 
   test("nothing is reported while active tasks are being given back"):
@@ -157,7 +166,7 @@ final class MemberSuite extends FunSuite:
     val (member, actions) = run(Member(identity), Start, Answered(answer(1, Some(Set(task("0", 0))), standby = Set(task("0", 1)))), Assigned(1))
     val (_, after)        = run(member, Answered(answer(2, Some(Set(task("0", 0))))))
     assertEquals(actions(2).map(_.getClass.getSimpleName), List("Send"))
-    assertEquals(after(0), List(Assign(2, Assignment(Set(task("0", 0)), Set.empty, Set.empty)), Wait(5.seconds)))
+    assertEquals(after(0), List(Assign(2, Assignment(Set(task("0", 0)), Set.empty, Set.empty), 2), Wait(5.seconds)))
 
   test("an assignment that arrives while one is being carried out is carried out next, and only the last is reported"):
     val member       = joined(Set.empty)
@@ -165,7 +174,7 @@ final class MemberSuite extends FunSuite:
       run(member, Answered(answer(2, Some(Set(task("0", 0))))), Answered(answer(3, Some(Set(task("0", 1))))), Assigned(1), Revoked(2), Assigned(3))
     assertEquals(actions(1), List(Wait(5.seconds)))
     assertEquals(actions(2), List(Revoke(2, Set(task("0", 0)))))
-    assertEquals(actions(3), List(Assign(3, Assignment(Set(task("0", 1)), Set.empty, Set.empty))))
+    assertEquals(actions(3), List(Assign(3, Assignment(Set(task("0", 1)), Set.empty, Set.empty), 3)))
     assertEquals(sent(actions(4)).flatMap(_.activeTasks), List(List(StreamsGroup.Tasks("0", List(1)))))
 
   test("an answer that leaves the tasks unchanged keeps the assignment"):
@@ -241,11 +250,21 @@ final class MemberSuite extends FunSuite:
       assertEquals(sent(actions(1)).map(_.memberEpoch), List(-1))
       assertEquals(actions(2), List(Done))
 
+  test("abandoning, even while a leave waits for the tasks to be given back, sends epoch -1 at once without them, and is done"):
+    val tasks          = Set(task("0", 0), task("1", 1))
+    val (_, abandoned) = run(joined(tasks), Abandoned, Answered(answer(-1)))
+    assertEquals(sent(abandoned(0)).map(_.memberEpoch), List(-1))
+    assertEquals(abandoned(1), List(Done))
+    val (_, waiting) = run(joined(tasks), Leave, Abandoned)
+    assertEquals(waiting(0), List(Revoke(2, tasks)))
+    assertEquals(sent(waiting(1)).map(_.memberEpoch), List(-1))
+    assertEquals(Member(identity).next(Abandoned)._2, List(Done))
+
   test("leaving while a heartbeat is in flight sends epoch -1 after its answer, ignoring any new assignment"):
     val member       = joined(Set.empty)
     val (_, actions) = run(member, Due, Leave, Answered(answer(2, Some(Set(task("0", 0))))))
     assertEquals(actions(1), Nil)
-    assertEquals(actions(2).collect { case Send(request) => request.memberEpoch; case Assign(_, _) => -99 }, List(-1))
+    assertEquals(actions(2).collect { case Send(request) => request.memberEpoch; case Assign(_, _, _) => -99 }, List(-1))
 
   test("a leave that gets no answer is done all the same"):
     val down         = new KafkaException.BackendFailure("down", Some(ErrorCode.NetworkException), Some(true))

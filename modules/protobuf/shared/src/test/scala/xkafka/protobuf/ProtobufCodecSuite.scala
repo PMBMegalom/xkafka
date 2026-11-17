@@ -52,6 +52,33 @@ enum Status derives ProtobufCodec:
   @ProtobufField(1)
   case Paid
 
+/** An enum two of whose values Protobuf would give one name. */
+enum Doubled derives ProtobufCodec:
+  @ProtobufField(0)
+  case OpenNow
+  @ProtobufField(1)
+  case Open_Now
+
+enum Gate derives ProtobufCodec:
+  @ProtobufField(0)
+  case OpenNow
+
+enum GateOpen derives ProtobufCodec:
+  @ProtobufField(0)
+  case Now
+
+final case class HoldsDoubled(
+    @ProtobufField(1)
+    doubled: Doubled
+) derives ProtobufCodec
+
+final case class HoldsGates(
+    @ProtobufField(1)
+    gate: Gate,
+    @ProtobufField(2)
+    open: GateOpen
+) derives ProtobufCodec
+
 sealed trait Payment derives ProtobufCodec
 
 @ProtobufField(1)
@@ -160,6 +187,37 @@ final case class Both(
     other: OtherLine
 ) derives ProtobufCodec
 
+/** Derived once for every type argument, so each use is named alike though they differ. */
+final case class Page[A](
+    @ProtobufField(1)
+    items: List[A]
+) derives ProtobufCodec
+
+final case class Feed(
+    @ProtobufField(1)
+    users: Page[String],
+    @ProtobufField(2)
+    counts: Page[Int]
+) derives ProtobufCodec
+
+final case class Pages(
+    @ProtobufField(1)
+    first: Page[String],
+    @ProtobufField(2)
+    second: Page[String]
+) derives ProtobufCodec
+
+final case class Piece(
+    @ProtobufField(1)
+    a: Int,
+    @ProtobufField(2)
+    b: Int
+) derives ProtobufCodec
+final case class Whole(
+    @ProtobufField(1)
+    piece: Piece
+) derives ProtobufCodec
+
 object Zigzag:
   given ProtobufCodec[Int] = ProtobufCodec.sint32
 
@@ -202,6 +260,14 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         |}
         |""".stripMargin
     )
+
+  test("a field marked SchemaDecimal is text as any BigDecimal is, with its default"):
+    final case class Priced(
+        @ProtobufField(1) @SchemaDecimal(10, 2)
+        price: BigDecimal = BigDecimal("1.5")
+    ) derives ProtobufCodec
+    assert(schema(ProtobufCodec[Priced]).contains("message Priced {\n  optional string price = 1;\n}"), schema(ProtobufCodec[Priced]))
+    assertEquals(ProtobufCodec[Priced].encode(Priced(BigDecimal("2.25"))).flatMap(ProtobufCodec[Priced].decode), Right(Priced(BigDecimal("2.25"))))
 
   test("fields are written in order of their numbers, one with a default even where it is zero, and one without left out where it is zero"):
     assertEquals(ProtobufCodec[Line].encode(Line("apple", 3)), Right(bytes(0x0a, 5, 'a', 'p', 'p', 'l', 'e', 0x10, 3)))
@@ -266,7 +332,7 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         |// An order
         |message Order {
         |  string id = 1;
-        |  google.protobuf.Timestamp placed_at = 2;
+        |  .google.protobuf.Timestamp placed_at = 2;
         |  string day = 3;
         |  repeated Line lines = 4;
         |  Status status = 5;
@@ -307,7 +373,7 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         |message Transfer {
         |  string iban = 1;
         |  // When it cleared
-        |  google.protobuf.Timestamp cleared = 2;
+        |  .google.protobuf.Timestamp cleared = 2;
         |}
         |""".stripMargin
     )
@@ -331,6 +397,23 @@ class ProtobufCodecSuite extends CatsEffectSuite:
     assertEquals(ProtobufCodec[Zigzag.Delta].encode(Zigzag.Delta(-1)), Right(bytes(0x08, 1)))
     assertEquals(ProtobufCodec[Zigzag.Delta].decode(bytes(0x08, 3)), Right(Zigzag.Delta(-2)))
 
+  // A record holds its own message and at most `MaxDepth` more below it, as protobuf-java reads it.
+  test("messages nested deeper than the limit are refused when written too, so nothing is written that reading refuses"):
+    def nodes(count: Int) = (1 until count).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    val refused           = s"the record is nested more than ${ProtobufWire.MaxDepth} deep"
+    assert(ProtobufCodec[Node].encode(nodes(ProtobufWire.MaxDepth + 2)).left.exists(_.endsWith(refused)))
+    assert(ProtobufCodec[Node].encode(nodes(5000)).left.exists(_.endsWith(refused)))
+    assert(ProtobufCodec[Node].encode(nodes(ProtobufWire.MaxDepth + 1)).isRight)
+
+  test("messages nested deeper than the limit are refused, not read until the stack runs out"):
+    val nested = (1 to ProtobufWire.MaxDepth + 1).foldLeft(Chunk.empty[Byte])((inner, _) => ProtobufWire.field(2, Raw.Bytes(inner)))
+    assert(
+      ProtobufCodec[Node].decode(nested).left.exists(_.endsWith(s"the record is nested more than ${ProtobufWire.MaxDepth} deep")),
+      ProtobufCodec[Node].decode(nested).left.map(_.takeRight(80))
+    )
+    val deepest = (1 to ProtobufWire.MaxDepth).foldLeft(Node(0))((inner, value) => Node(value, Some(inner)))
+    assertEquals(ProtobufCodec[Node].encode(deepest).flatMap(ProtobufCodec[Node].decode), Right(deepest))
+
   test("a type that holds itself is a message whose field names it"):
     assert(schema(ProtobufCodec[Node]).contains("message Node {\n  int32 value = 1;\n  Node next = 2;\n}"))
     val node = Node(1, Some(Node(2, Some(Node(3)))))
@@ -351,6 +434,13 @@ class ProtobufCodecSuite extends CatsEffectSuite:
     )
     assertEquals(ProtobufCodec[Int].schema, Left("int32 is not a message, and a Protobuf record is one"))
     assertEquals(ProtobufCodec[Both].schema, Left("xkafka.protobuf.Line and com.other.Line would both be declared as Line"))
+
+  test("two types given one name are refused, since one declaration cannot say what each is, and one type used twice is declared once"):
+    assert(ProtobufCodec[Feed].schema.left.exists(_.contains("two types are named xkafka.protobuf.Page__A")), ProtobufCodec[Feed].schema)
+    assert(ProtobufCodec[Pages].schema.isRight, ProtobufCodec[Pages].schema)
+
+  test("a message field written twice is read as the two merged, as protobuf merges them"):
+    assertEquals(ProtobufCodec[Whole].decode(Chunk[Byte](0x0a, 0x02, 0x08, 0x01, 0x0a, 0x02, 0x10, 0x02)), Right(Whole(Piece(1, 2))))
 
   test("an instant outside the years a Timestamp holds is refused"):
     final case class When(
@@ -447,6 +537,11 @@ class ProtobufCodecSuite extends CatsEffectSuite:
       read    <- serde.deserializer.deserialize(topic, Headers.empty, written)
     yield assertEquals(read, Line("fig", 2))
 
+  test("two enum values Protobuf would give one name are refused, in one enum or in two, as its enums' values share the scope holding them"):
+    assertEquals(ProtobufCodec.file(ProtobufCodec[HoldsDoubled]), Left("two enum values are named DOUBLED_OPEN_NOW, in one scope"))
+    assertEquals(ProtobufCodec.file(ProtobufCodec[HoldsGates]), Left("two enum values are named GATE_OPEN_NOW, in one scope"))
+    assert(ProtobufCodec.file(ProtobufCodec[Line]).isRight)
+
   test("a serde of a type Protobuf cannot declare fails, saying why"):
     for
       fake   <- FakeRegistry()
@@ -458,3 +553,16 @@ class ProtobufCodecSuite extends CatsEffectSuite:
         case Left(error: RegistryException.NoSchema) => assert(error.reason.contains("a list holding lists"), error.reason)
         case other                                   => fail(s"expected no schema, got $other")
       assertEquals(asked, Vector.empty, "nothing is registered")
+
+  test("text that is not UTF-8 is refused, not read with its bad bytes replaced"):
+    val read = ProtobufCodec[Line].decode(bytes(0x0a, 2, 'a', 0xff))
+    assert(read.left.exists(_.contains("is not UTF-8")), read)
+    assertEquals(ProtobufCodec[Line].decode(bytes(0x0a, 2, 0xc3, 0xa9)), Right(Line("é", 1)))
+
+  test("a large value an error names is cut short, saying how long it was"):
+    final case class Day(
+        @ProtobufField(1)
+        day: LocalDate
+    ) derives ProtobufCodec
+    val refused = ProtobufCodec[Day].decode(bytes(0x0a, 0xe8, 0x07) ++ Chunk.array(Array.fill(1000)('x'.toByte)))
+    assert(refused.left.exists(reason => reason.length < 300 && reason.contains("... (1000 characters)")), refused)

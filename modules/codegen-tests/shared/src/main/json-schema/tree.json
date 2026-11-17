@@ -1,0 +1,9 @@
+{
+  "title": "Tree",
+  "type": "object",
+  "properties": {
+    "value": { "type": "integer" },
+    "children": { "type": "array", "items": { "$ref": "#" }, "default": [] }
+  },
+  "required": ["value"]
+}

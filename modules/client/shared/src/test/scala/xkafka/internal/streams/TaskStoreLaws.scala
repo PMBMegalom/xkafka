@@ -53,6 +53,24 @@ abstract class TaskStoreLaws(kind: String) extends CatsEffectSuite:
   private def filled(keys: Chunk[Byte]*): IO[TaskStore[IO]] =
     fresh(None).flatTap(_.write(StoreContents.unchanged ++ keys.zipWithIndex.map((key, at) => key -> Some(held(at.toLong)))))
 
+  test(s"$kind: a store cleared holds nothing, at no position, and its clock starts again, as a store made anew"):
+    val time: TaskStore.TimeOf = key => key(0).toLong
+    for
+      store   <- fresh(Some(time))
+      _       <- store.write(StoreContents.unchanged.updated(bytes(9), Some(held(1L))).updated(bytes(3), Some(held(2L))), Map(0 -> 42L))
+      _       <- store.clear
+      emptied <- (store.all, store.positions, store.clock, store.timed(0L, 100L)).tupled
+      _       <- store.write(StoreContents.unchanged.updated(bytes(2), Some(held(3L))))
+      after   <- store.clock
+    yield
+      assertEquals(emptied, (Vector.empty, Map.empty, WindowStore.NoTime, Vector.empty))
+      assertEquals(after, 2L)
+
+  test(s"$kind: a store of more keys than a clear reads at a time, the greatest of them all 0xff bytes, is cleared of every one"):
+    val keys = (0 until 2500).map(n => Chunk.array(java.nio.ByteBuffer.allocate(4).putInt(n).array)) ++ List(bytes(0xff), bytes(0xff, 0xff, 0xff))
+    filled(keys*).flatMap: store =>
+      (store.clear *> store.all).map(left => assertEquals(left, Vector.empty))
+
   test(s"$kind: a range holds the keys from its start to before its end, by their bytes taken as unsigned, either end open"):
     val keys = List(bytes(0x01), bytes(0x01, 0x00), bytes(0x02), bytes(0x7f), bytes(0x80), bytes(0xff), bytes(0xff, 0xff))
     filled(keys.reverse*).flatMap: store =>

@@ -51,6 +51,36 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
   // Checking that no failed poll is lost takes 80,000 consumers, which a CI runner needs more than munit's default 30 seconds for.
   override val munitIOTimeout: Duration = 3.minutes
 
+  test("a producer's look-up of a topic keeps looking past max.block.ms to its own time limit, and fails as an unknown topic"):
+    for
+      client   <- ClientSettings.from(NonEmptyList.one("localhost:1"), metadataRefreshInterval = 5.seconds).liftTo[IO]
+      settings <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO], enqueueTimeout = 1.second).liftTo[IO]
+      started  <- IO.monotonic
+      outcome  <- KafkaClient[IO].producer(settings).use(_.partitionsFor(Topic.from("nowhere").toOption.get)).attempt.timeout(30.seconds)
+      took     <- IO.monotonic.map(_ - started)
+    yield
+      assert(took >= 4.seconds, s"took $took")
+      assert(
+        outcome.left
+          .exists { case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.UnknownTopicOrPartition); case _ => false },
+        outcome
+      )
+
+  test("a producer's look-up of a topic gives up within its client's metadata refresh interval, as on every backend, not after max.block.ms"):
+    for
+      client   <- ClientSettings.from(NonEmptyList.one("localhost:1"), metadataRefreshInterval = 1.second).liftTo[IO]
+      settings <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+      started  <- IO.monotonic
+      outcome  <- KafkaClient[IO].producer(settings).use(_.partitionsFor(Topic.from("nowhere").toOption.get)).attempt.timeout(30.seconds)
+      took     <- IO.monotonic.map(_ - started)
+    yield
+      assert(took < 10.seconds, s"took $took")
+      assert(
+        outcome.left
+          .exists { case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.UnknownTopicOrPartition); case _ => false },
+        outcome
+      )
+
   test("reads Java configuration entries, withholding sensitive values and naming their sources"):
     def entry(value: String | Null, source: JavaConfigEntry.ConfigSource, sensitive: Boolean = false, readOnly: Boolean = false) =
       JavaConfiguration
@@ -119,6 +149,24 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       assertEquals(attempted.toList.map(_.outcome.leftMap(timedOut).void), List(Right(()), Left(true), Left(true)))
       assertEquals(mock.history.size, 1, "only the record before the full buffer should be sent")
 
+  test("a record the Java client reports twice, as it can when a transaction fails while the record is sent, is answered once"):
+    val mock =
+      new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer):
+        override def send(record: JavaProducerRecord[Array[Byte], Array[Byte]], callback: Callback): Future[JavaRecordMetadata] =
+          if new String(record.value(), StandardCharsets.UTF_8) != "twice" then super.send(record, callback)
+          else
+            val aborted = new org.apache.kafka.common.KafkaException("aborted")
+            callback.onCompletion(null, aborted)
+            callback.onCompletion(null, aborted)
+            CompletableFuture.failedFuture(aborted)
+    val utf8     = Serializer.utf8[IO]
+    val client   = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val settings = ProducerSettings.from(client, utf8, utf8).toOption.get
+    val records  = NonEmptyList.of("a", "twice").map(value => ProducerRecord(Topic.from("events").toOption.get, "key", value))
+
+    mocked(producer = _ => mock).producer(settings).use(_.produceAttemptEachAndAwait(records)).timeout(10.seconds).map: attempted =>
+      assertEquals(attempted.toList.map(_.outcome.isRight), List(true, false))
+
   test("a produce waiting on the Java client can be cancelled"):
     val client   = ClientSettings.from(NonEmptyList.one("127.0.0.1:1")).toOption.get
     val settings = ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).toOption.get.withCloseTimeout(100.millis).toOption.get
@@ -139,6 +187,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     interceptIO[KafkaException.BackendFailure](mocked(producer = _ => throw cause).producer(settings).use(_ => IO.unit)).map: error =>
       assertEquals(error.retriable, Some(true))
       assertEquals(error.getCause, cause)
+
+  test("a Java client failure while the consumer closes reaches the application as one of xkafka's"):
+    val cause    = new TimeoutException("closing timed out")
+    val consumer =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        override def close(): Unit = throw cause
+    consumer.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
+    interceptIO[KafkaException.BackendFailure](consuming(consumer)(_ => IO.unit)).map(error => assertEquals(error.getCause, cause))
 
   test("producer delegates serialization and production to the Java producer"):
     val mock    = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
@@ -270,6 +326,38 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         )
     .timeout(5.seconds)
 
+  test("pausing, resuming and asking the position of a partition not assigned do nothing and answer none, as librdkafka does"):
+    val (mock, _) = subscribedMock()
+    val other     = TopicPartition(topic, Partition.from(1).toOption.get)
+    consuming(mock): consumer =>
+      val pausing = consumer.pausing.orNoop
+      (pausing.pause(Set(other)).attempt, pausing.resume(Set(other)).attempt, consumer.position(other).attempt).tupled
+    .map: (paused, resumed, position) =>
+      assertEquals(paused, Right(()))
+      assertEquals(resumed, Right(()))
+      assertEquals(position, Right(None))
+
+  test("a commit the Java client runs out of time for fails as a timed out request, worth retrying"):
+    val (_, partition) = subscribedMock()
+    val slow           =
+      new MockConsumer[Array[Byte], Array[Byte]]("earliest"):
+        override def commitSync(offsets: JavaMap[JavaTopicPartition, OffsetAndMetadata], timeout: java.time.Duration): Unit =
+          throw new org.apache.kafka.common.errors.TimeoutException("Timeout of 1ms expired before successfully committing offsets")
+    slow.updatePartitions(topic.value, JavaList.of(new PartitionInfo(topic.value, 0, null, Array.empty, Array.empty)))
+    slow.schedulePollTask(() =>
+      slow.rebalance(JavaList.of(partition))
+      slow.updateBeginningOffsets(JavaMap.of(partition, Long.box(0L)))
+      addRecord(slow, 0L)
+    )
+    val client  = ClientSettings.from(NonEmptyList.one("unused:9092")).toOption.get
+    val utf8    = Deserializer.utf8[IO]
+    val reading = ConsumerSettings.from(client, group, utf8, utf8, AutoOffsetReset.Earliest).toOption.get.withCommitRecovery(CommitRecovery.none)
+    mocked(consumer = _ => slow).consumer(reading, Selection.Topics(NonEmptySet.one(topic)))
+      .use(_.records.take(1).evalMap(_.offset.commit).compile.drain).attempt.timeout(10.seconds).map:
+        case Left(failure: KafkaException.BackendFailure) =>
+          assertEquals((failure.code, failure.retriable), (Some(ErrorCode.RequestTimedOut), Some(true)), failure.getMessage)
+        case other => fail(s"expected a timed out commit, got $other")
+
   test("a failed poll fails the record stream and the partitioned one on every run"):
     // fs2-kafka, which this backend used to delegate to, lost the failure about once in two thousand runs.
     def outcomes(read: KafkaConsumer[IO, String, String] => Stream[IO, Any]): IO[List[Either[Throwable, Unit]]] =
@@ -286,8 +374,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         val missed = results.filterNot(resetRequired)
         assert(missed.isEmpty, s"$name ended ${missed.size} of ${results.size} runs without the poll's failure, first ${missed.head}")
 
-  test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after the partition returns can"):
+  test("an offset read under a revoked assignment cannot be recorded in a transaction, one not yet handed out is not, and one read after can"):
     val (consumer, partition) = subscribedMock()
+    val handedOut             = new CountDownLatch(1)
     val reassigned            = new CountDownLatch(1)
     // MockConsumer runs one task at the start of each poll, so the first poll returns two records and the second revokes the partition and
     // assigns it again before its own record.
@@ -297,7 +386,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       addRecord(consumer, 0L)
       addRecord(consumer, 1L)
     )
+    // This poll waits until the first record is handed out: revoking before then would drop both records, and the stream would wait for a second.
     consumer.schedulePollTask(() =>
+      handedOut.await(5, TimeUnit.SECONDS)
       consumer.rebalance(JavaList.of())
       consumer.rebalance(JavaList.of(partition))
       addRecord(consumer, 2L)
@@ -307,13 +398,14 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
     withMocks(consumer, producer): (transactional, reading) =>
       // Nothing after the first record is taken until the partition has been assigned again, so a record that took the lease current when it
-      // was taken would carry the new one.
-      reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(3).compile.toList.flatMap: records =>
-        records.traverse(record => transactional.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(record.offset))).attempt)
-          .map: outcomes =>
-            assertEquals(records.map(_.record.offset.value), List(0L, 1L, 2L))
-            assert(outcomes.take(2).forall(illegalGeneration), s"offsets read before the revocation should be rejected, got $outcomes")
-            assertEquals(outcomes.lift(2), Some(Right(())))
+      // was taken would carry the new one. The second, read under the revoked assignment and not yet handed out, is dropped.
+      reading.records.evalTap(_ => IO(handedOut.countDown()) *> IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(2).compile.toList.flatMap:
+        records =>
+          records.traverse(record => transactional.transactionally(_.commitOffsets(CommittableOffsetBatch.empty[IO].updated(record.offset))).attempt)
+            .map: outcomes =>
+              assertEquals(records.map(_.record.offset.value), List(0L, 2L))
+              assert(outcomes.headOption.exists(illegalGeneration), s"an offset read before the revocation should be rejected, got $outcomes")
+              assertEquals(outcomes.lift(1), Some(Right(())))
 
   test("a transactional producer reaches the Java client with its close timeout, every replica acknowledging, and idempotence"):
     val properties = new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
@@ -339,6 +431,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
 
   test("a plain commit of an offset read under a revoked assignment is refused before it reaches the consumer"):
     val (consumer, partition) = subscribedMock()
+    val handedOut             = new CountDownLatch(1)
     val reassigned            = new CountDownLatch(1)
     consumer.schedulePollTask(() =>
       consumer.rebalance(JavaList.of(partition))
@@ -346,7 +439,9 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
       addRecord(consumer, 0L)
       addRecord(consumer, 1L)
     )
+    // This poll waits until the first record is handed out: revoking before then would drop both records, and the stream would wait for a second.
     consumer.schedulePollTask(() =>
+      handedOut.await(5, TimeUnit.SECONDS)
       consumer.rebalance(JavaList.of())
       consumer.rebalance(JavaList.of(partition))
       addRecord(consumer, 2L)
@@ -355,17 +450,19 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val producer = new MockProducer[Array[Byte], Array[Byte]](knownEvents, true, null: Partitioner, new ByteArraySerializer, new ByteArraySerializer)
 
     withMocks(consumer, producer): (_, reading) =>
-      reading.records.evalTap(_ => IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(3).compile.toList.flatMap: records =>
-        for
-          stale     <- records(1).offset.commit.attempt
-          untouched <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)))
-          current   <- records(2).offset.commit.attempt
-          moved     <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)).map(_.offset))
-        yield
-          assert(illegalGeneration(stale), s"a plain commit from a revoked assignment should be refused, got $stale")
-          assertEquals(untouched, None, "the refused commit should not have reached the consumer")
-          assertEquals(current, Right(()))
-          assertEquals(moved, Some(3L))
+      // The first record is handed out under the assignment the poll then revokes; the second, not yet handed out then, is dropped.
+      reading.records.evalTap(_ => IO(handedOut.countDown()) *> IO.blocking(reassigned.await(5, TimeUnit.SECONDS))).take(2).compile.toList.flatMap:
+        records =>
+          for
+            stale     <- records(0).offset.commit.attempt
+            untouched <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)))
+            current   <- records(1).offset.commit.attempt
+            moved     <- IO(Option(consumer.committed(java.util.Set.of(partition)).get(partition)).map(_.offset))
+          yield
+            assert(illegalGeneration(stale), s"a plain commit from a revoked assignment should be refused, got $stale")
+            assertEquals(untouched, None, "the refused commit should not have reached the consumer")
+            assertEquals(current, Right(()))
+            assertEquals(moved, Some(3L))
 
   test("a revocation waits for a transaction recording one of its offsets before the group hears of it"):
     val (consumer, partition) = subscribedMock()
@@ -419,8 +516,10 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
         new CommitFailedException(
           "Offset commit cannot be completed since the consumer is not part of an active group for auto partition assignment; it is likely that the consumer was kicked out of the group."
         ) -> Some(ErrorCode.UnknownMemberId),
+        // The Java client's own wording, for a plain commit the group refuses as ILLEGAL_GENERATION or UNKNOWN_MEMBER_ID, which it does not tell apart.
+        new CommitFailedException() -> Some(ErrorCode.IllegalGeneration),
         // Any other wording is left as before: Kafka's table has no entry for the exception, so it stays an unknown error.
-        new CommitFailedException("the group has already rebalanced") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
+        new CommitFailedException("refused for some other reason") -> Some(ErrorCode.fromProtocol(Errors.UNKNOWN_SERVER_ERROR.code.toInt))
       )
     val transactionalId = TransactionalId.from("writer").toOption.get
     val serializer      = Serializer.const[IO, String](None)

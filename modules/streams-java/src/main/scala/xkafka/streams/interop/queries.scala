@@ -34,12 +34,14 @@ import scala.util.{Failure, Success, Try, Using}
 import fs2.Chunk
 import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.common.serialization.Serde as JavaSerde
-import org.apache.kafka.streams.{KafkaStreams as JavaKafkaStreams, KeyValue as JavaKeyValue, Topology as JavaTopology, TopologyDescription}
+import org.apache.kafka.streams.{
+  KafkaStreams as JavaKafkaStreams, KeyValue as JavaKeyValue, StoreQueryParameters, Topology as JavaTopology, TopologyDescription
+}
 import org.apache.kafka.streams.errors.{InvalidStateStoreException, StreamsNotStartedException, UnknownStateStoreException}
 import org.apache.kafka.streams.kstream.Windowed as JavaWindowed
 import org.apache.kafka.streams.kstream.internals.{SessionWindow, TimeWindow}
 import org.apache.kafka.streams.query.{FailureReason, KeyQuery, Query as JavaQuery, RangeQuery, StateQueryRequest, WindowKeyQuery, WindowRangeQuery}
-import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, ValueAndTimestamp, WindowStoreIterator}
+import org.apache.kafka.streams.state.{HostInfo, KeyValueIterator, QueryableStoreTypes, ReadOnlyKeyValueStore, ValueAndTimestamp, WindowStoreIterator}
 import internal.streams.{Answered, Asked, Murmur2, QueryWire}
 
 /** Lets a Java Kafka Streams instance answer the queries xkafka members of its application forward to it, for the stores registered here, through
@@ -175,19 +177,31 @@ final class JavaQuerying private (
 ):
   /** What the key-value store `store` holds for `key`, if anything. */
   def get[K, V](store: String, key: K, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.Optional[V] =
-    val bytes = keyBytes(store, keySerde, key)
-    keyed(store, key, keySerde, QueryRequest.Get(store, bytes)).headOption
-      .fold(java.util.Optional.empty[V]())((_, v) => java.util.Optional.of(read(store, valueSerde, v)))
+    if global(store) then java.util.Optional.ofNullable(globally[K, V](store).get(key))
+    else
+      val bytes = keyBytes(store, keySerde, key)
+      keyed(store, key, keySerde, QueryRequest.Get(store, bytes)).headOption
+        .fold(java.util.Optional.empty[V]())((_, v) => java.util.Optional.of(read(store, valueSerde, v)))
 
   /** The keys of the key-value store `store` from `from` to `to`, both included, with their values, in the order of their serialized bytes. */
   def range[K, V](store: String, from: K, to: K, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.List[JavaKeyValue[K, V]] =
-    everywhere(store, QueryRequest.Range(store, Some(keyBytes(store, keySerde, from)), Some(keyBytes(store, keySerde, to))))
-      .map((k, v) => JavaKeyValue.pair(read(store, keySerde, k), read(store, valueSerde, v))).asJava
+    if global(store) then Using.resource(globally[K, V](store).range(from, to))(_.asScala.toList.asJava)
+    else
+      everywhere(store, QueryRequest.Range(store, Some(keyBytes(store, keySerde, from)), Some(keyBytes(store, keySerde, to))))
+        .map((k, v) => JavaKeyValue.pair(read(store, keySerde, k), read(store, valueSerde, v))).asJava
 
   /** Every key of the key-value store `store` with its value, in the order of their serialized bytes. */
   def all[K, V](store: String, keySerde: JavaSerde[K], valueSerde: JavaSerde[V]): java.util.List[JavaKeyValue[K, V]] =
-    everywhere(store, QueryRequest.Range(store, None, None)).map((k, v) => JavaKeyValue.pair(read(store, keySerde, k), read(store, valueSerde, v)))
-      .asJava
+    if global(store) then Using.resource(globally[K, V](store).all())(_.asScala.toList.asJava)
+    else
+      everywhere(store, QueryRequest.Range(store, None, None)).map((k, v) => JavaKeyValue.pair(read(store, keySerde, k), read(store, valueSerde, v)))
+        .asJava
+
+  /** Whether `store` is a global table's, which every member holds whole, so that this member answers it from its own. */
+  private def global(store: String): Boolean = topology.globalStores.asScala.exists(_.processor.stores.contains(store))
+
+  private def globally[K, V](store: String): ReadOnlyKeyValueStore[K, V] =
+    settled(streams.store(StoreQueryParameters.fromNameAndType(store, QueryableStoreTypes.keyValueStore[K, V]())))
 
   /** The windows of `key` in the window store `store` starting from `from` to `to`, both included, each by its start in epoch milliseconds, earliest
     * first.
@@ -218,12 +232,16 @@ final class JavaQuerying private (
       keySerde: JavaSerde[K],
       valueSerde: JavaSerde[V]
   ): java.util.List[JavaKeyValue[JavaWindowed[K], V]] =
+    if windowSize.toMillis < 1 then throw new IllegalArgumentException(s"a window's size must be at least a millisecond, was $windowSize")
     // A window store's key is the key, then the window's start in eight bytes and a sequence number in four.
     everywhere(store, QueryRequest.Windows(store, None, from.toEpochMilli, to.toEpochMilli)).map: (stored, v) =>
       val start = ByteBuffer.wrap(stored.drop(stored.size - 12).take(8).toArray).getLong
       (start, stored.take(stored.size - 12), v)
     .sortBy((start, key, _) => (start, key))(using Ordering.Tuple2(using Ordering.Long, QueryRequest.unsigned)).map: (start, key, v) =>
-      JavaKeyValue.pair(new JavaWindowed(read(store, keySerde, key), new TimeWindow(start, start + windowSize.toMillis)), read(store, valueSerde, v))
+      JavaKeyValue.pair(
+        new JavaWindowed(read(store, keySerde, key), new TimeWindow(start, JavaQuerying.windowEnd(start, windowSize.toMillis))),
+        read(store, valueSerde, v)
+      )
     .asJava
 
   /** The sessions of `key` in the session store `store`, the earliest ending first. */
@@ -254,24 +272,33 @@ final class JavaQuerying private (
     * counts only the partitions some member holds, which miss one while it moves (KAFKA-20887).
     */
   private def keyed[K](store: String, key: K, serde: JavaSerde[K], request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
-    val holders        = holdersOf(store)
-    val (topic, count) = sourcesOf(store).toList.map(topic => topic -> partitions(topic)).maxBy(_._2)
-    val partition      = Murmur2.partition(Chunk.array(serde.serializer.serialize(topic, key)), count)
+    val (topics, holders) = holdersOf(store)
+    val (topic, count)    = topics.toList.map(topic => topic -> partitions(topic)).maxBy(_._2)
+    val partition         = Murmur2.partition(Chunk.array(serde.serializer.serialize(topic, key)), count)
     JavaQuerying.holderOf(partition, holders)
       .fold(throw new QueryProblemException(QueryProblem.Rebalancing))(at => asked(at, Asked(request, List(partition), false)))
 
   /** The entries every member holding part of `store` finds for `request`, each asked for its partitions of the topic the store is filled from. */
   private def everywhere(store: String, request: QueryRequest): Vector[(Chunk[Byte], Chunk[Byte])] =
-    val holders = holdersOf(store)
-    if !JavaQuerying.covers(sourcesOf(store).toList.map(partitions).max, holders) then throw new QueryProblemException(QueryProblem.Rebalancing)
+    val (topics, holders) = holdersOf(store)
+    if !JavaQuerying.covers(topics.toList.map(partitions).max, holders) then throw new QueryProblemException(QueryProblem.Rebalancing)
     holders.toVector.flatMap((at, partitions) => asked(at, Asked(request, partitions, false))).sortBy(_._1)(using QueryRequest.unsigned)
 
-  /** The members Java's metadata says hold part of `store`, each with the partitions it holds as an active task. */
-  private def holdersOf(store: String): List[(HostInfo, List[Int])] =
-    val topics = sourcesOf(store)
-    settled(streams.streamsMetadataForStore(store)).asScala.toList
-      .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(held => topics(held.topic)).map(_.partition).toList.sorted.distinct)
-      .filter((at, held) => held.nonEmpty && at.port >= 0)
+  /** The topics `store` is filled from, as the brokers name them, and the members Java's metadata says hold part of it, each with the partitions it
+    * holds as an active task. Java describes a topic of the application's own, as a repartition topic, without the application id the brokers name it
+    * by, which its metadata gives; while no member is known to hold the store, it is moving.
+    */
+  private def holdersOf(store: String): (Set[String], List[(HostInfo, List[Int])]) =
+    val described = sourcesOf(store)
+    val metadata  = settled(streams.streamsMetadataForStore(store)).asScala.toList
+    val held      = metadata.flatMap(_.topicPartitions.asScala.map(_.topic)).toSet
+    val topics    = JavaQuerying.brokerNames(application, described, held)
+    val holders   =
+      metadata
+        .map(at => at.hostInfo -> at.topicPartitions.asScala.filter(partition => topics(partition.topic)).map(_.partition).toList.sorted.distinct)
+        .filter((at, partitions) => partitions.nonEmpty && at.port >= 0)
+    if holders.isEmpty then throw new QueryProblemException(QueryProblem.Rebalancing)
+    (topics, holders)
 
   /** The topics the sub-topology keeping `store` reads. */
   private def sourcesOf(store: String): Set[String] =
@@ -279,7 +306,10 @@ final class JavaQuerying private (
       case processor: TopologyDescription.Processor => processor.stores.contains(store)
       case _                                        => false
     }).fold(throw new QueryProblemException(QueryProblem.UnknownStore(store))): subtopology =>
-      subtopology.nodes.asScala.collect { case source: TopologyDescription.Source => source.topicSet.asScala }.flatten.toSet
+      // A source reading a pattern of topics has no set of them, and xkafka reads no patterns, so it cannot tell which partitions hold the store.
+      subtopology.nodes.asScala.collect { case source: TopologyDescription.Source =>
+        Option(source.topicSet).fold(throw new QueryProblemException(QueryProblem.FedByPattern(store)))(_.asScala)
+      }.flatten.toSet
 
   private def asked(at: HostInfo, query: Asked): Vector[(Chunk[Byte], Chunk[Byte])] =
     val member = Endpoint.from(at.host, at.port).getOrElse(throw new QueryProblemException(QueryProblem.Rebalancing))
@@ -319,6 +349,15 @@ object JavaQuerying:
           identity
         )
       )
+
+  /** The topics a store is filled from, as the brokers name them: each by its own name where the members hold that topic, or else by the application
+    * id and its name, as Java names a topic of the application's own, such as a repartition topic, that its topology describes without the id.
+    */
+  private[interop] def brokerNames(application: String, described: Set[String], held: Set[String]): Set[String] =
+    described.map(topic => Some(topic).filter(held).orElse(Some(s"$application-$topic").filter(held)).getOrElse(topic))
+
+  /** A window's end, its start and its size, or the largest time where that would pass it, as Java ends a window. */
+  private[interop] def windowEnd(start: Long, size: Long): Long = if start > Long.MaxValue - size then Long.MaxValue else start + size
 
   /** The member holding `partition`, of `holders` each with the partitions it holds. */
   private[interop] def holderOf(partition: Int, holders: List[(HostInfo, List[Int])]): Option[HostInfo] =

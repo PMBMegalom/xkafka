@@ -105,6 +105,15 @@ final class DriverClientSuite extends CatsEffectSuite:
         .use(producer => producer.produce(values("a", "never")).timeout(500.millis).attempt <* producer.flush).timeout(10.seconds)
     .map(outcome => assert(outcome.left.exists(_.isInstanceOf[java.util.concurrent.TimeoutException]), s"the wait should be cancelled, got $outcome"))
 
+  test("a produce waiting for room when its producer is released fails, as the client is closed, and does not wait for ever"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings).allocated.flatMap: (producer, release) =>
+        for
+          waiting <- producer.produce(values("never")).start
+          _       <- IO.sleep(200.millis) *> release
+          outcome <- waiting.joinWithNever.attempt.timeout(5.seconds)
+        yield assert(outcome.left.exists(_.isInstanceOf[IllegalStateException]), s"the wait should fail, got $outcome")
+
   test("where the client gives up waiting for room for a record, the records after it time out without waiting again"):
     FakeDriver().flatMap: fake =>
       new DriverClient[IO](fake).producer(producerSettings).use(_.produceAttemptEachAndAwait(values("a", "given up", "b", "c"))).timeout(5.seconds)
@@ -187,8 +196,60 @@ final class DriverClientSuite extends CatsEffectSuite:
           assert(rounds > 0, rounds)
           assertEquals(later, rounds)
 
+  test("waiting on a delivery after the producer is released fails, as the client is closed, and does not wait for ever"):
+    FakeDriver().flatMap: fake =>
+      val settings = producerSettings.withCloseTimeout(100.millis).toOption.get
+      new DriverClient[IO](fake).producer(settings).use(_.produce(values("stuck"))).flatMap(_.timeout(5.seconds).attempt)
+    .map: outcome =>
+      assert(outcome.left.exists(error => error.isInstanceOf[IllegalStateException] && error.getMessage == "the client is closed"), outcome)
+
   private def values(first: String, rest: String*): NonEmptyList[ProducerRecord[String, String]] =
     NonEmptyList(first, rest.toList).map(ProducerRecord(events, "k", _))
+
+  test("a time before 1970, which Kafka cannot hold, is refused before it reaches the client, whether searched for or written"):
+    val before1970 = Timestamp.fromEpochMillis(-1L)
+    FakeDriver().flatMap: fake =>
+      val client = new DriverClient[IO](fake)
+      val search = client.consumer(consumerSettings, topics).use(_.offsetsForTimes(Map(eventsZero -> before1970)).attempt)
+      val write  = client.producer(producerSettings).use(_.produceAndAwait(values("a").map(_.copy(timestamp = Some(before1970)))).attempt)
+      (search, write).tupled.timeout(10.seconds)
+    .map: (searched, written) =>
+      assert(searched.left.exists(_.isInstanceOf[IllegalArgumentException]), searched)
+      assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+
+  test("a record timed at 1970-01-01T00:00:00Z itself is refused, which librdkafka would write as the time it sends it, unless streams write it"):
+    def producing(client: DriverClient[IO], fake: FakeDriver) =
+      val records = values("a").map(_.copy(timestamp = Some(Timestamp.fromEpochMillis(0L))))
+      (client.producer(producerSettings).use(_.produceAndAwait(records).attempt).timeout(10.seconds), fake.enqueued).tupled
+    FakeDriver().flatMap(fake => producing(new DriverClient[IO](fake), fake)).map: (written, enqueued) =>
+      assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+      assertEquals(enqueued, Vector.empty, "nothing reached the driver")
+    *> FakeDriver().flatMap(fake => producing(new DriverClient[IO](fake, forStreams = true), fake)).map: (written, enqueued) =>
+      assert(written.isRight, written)
+      assertEquals(enqueued.size, 1)
+
+  test("a header name holding NUL, which librdkafka cuts there, is refused before it reaches the client"):
+    FakeDriver().flatMap: fake =>
+      val client  = new DriverClient[IO](fake)
+      val records = values("a").map(_.copy(headers = Headers(Header("trace\u0000id", None))))
+      (client.producer(producerSettings).use(_.produceAndAwait(records).attempt).timeout(10.seconds), fake.enqueued).tupled
+    .map: (written, enqueued) =>
+      assert(written.left.exists(_.isInstanceOf[IllegalArgumentException]), written)
+      assertEquals(enqueued, Vector.empty, "nothing reached the driver")
+
+  test("records waiting in a partition's stream when it seeks are not handed out after the seek, as no record fetched before it is"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          opened  <- Deferred[IO, PartitionRecords[IO, String, String]]
+          routing <- consumer.partitionedRecords(100).evalMap(opened.complete(_)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+          _       <- (0L until 5L).toList.traverse_(fake.deliver) *> fake.drained *> IO.sleep(100.millis)
+          stream  <- opened.get
+          _       <- consumer.seek(eventsZero, Offset.from(10L).toOption.get) *> fake.deliver(10L)
+          first   <- stream.records.take(1).compile.lastOrError.timeout(10.seconds)
+          _       <- routing.cancel
+        yield assertEquals(first.record.offset.value, 10L)
 
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
@@ -239,6 +300,25 @@ final class DriverClientSuite extends CatsEffectSuite:
           assertEquals(current, Right(()))
           assertEquals(committed, 1, "only the offset read under the current assignment should reach the client")
 
+  test("a rebalance raised after one the client failed to apply is still applied as the consumer is released"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake)(_ => fake.unappliable *> IO.sleep(200.millis) *> fake.revoke *> IO.sleep(200.millis)).attempt *> fake.calls
+    .map(calls => assert(calls.contains("unassign"), calls))
+
+  test("with fencing, a record read before its partition was revoked is not handed out after, since no commit of it could be taken"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake): consumer =>
+        for
+          _     <- fake.assign *> fake.until(_.contains("assign"))
+          _     <- fake.deliver(0L) *> IO.sleep(200.millis)
+          _     <- fake.revoke *> fake.until(_.contains("unassign"))
+          stale <- consumer.records.take(1).compile.last.timeout(500.millis).attempt
+          _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
+          fresh <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError.map(_.record.offset.value)
+        yield
+          assert(stale.isLeft, s"a record read under the revoked assignment was handed out: $stale")
+          assertEquals(fresh, 1L)
+
   test("a revocation waits for a plain commit the client has not reported yet"):
     FakeDriver(holdCommits = true).flatMap: fake =>
       consuming(fake): consumer =>
@@ -273,20 +353,47 @@ final class DriverClientSuite extends CatsEffectSuite:
           assert(!early, "the partition was unassigned while a transaction was still recording its offset")
           assertEquals(outcome, Right(()))
 
-  test("a revocation during a poll leaves the records it returns unable to be recorded in a transaction"):
+  test("a rebalance that clears the assignment waits for a transaction recording one of its offsets, as a lost assignment does"):
+    FakeDriver(holdOffsets = true).flatMap: fake =>
+      transactional(fake, consumerSettings): (producer, consumer) =>
+        for
+          _         <- fake.assign *> fake.until(_.contains("assign"))
+          held      <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          recording <- recorded(producer, held).start
+          _         <- fake.until(_.contains("send"))
+          _         <- fake.resynchronise *> IO.sleep(200.millis)
+          early     <- fake.calls.map(_.contains("resynchronise"))
+          _         <- fake.release
+          _         <- recording.joinWithNever
+          _         <- fake.until(_.contains("resynchronise"))
+        yield assert(!early, "the assignment was cleared while a transaction was still recording its offset")
+
+  test("a partition revoked and assigned again while no one looked shows its later number, though the partitions assigned are the same"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          gate    <- Deferred[IO, Unit]
+          seen    <- Ref[IO].of(Vector.empty[Map[TopicPartition, Long]])
+          looking <- consumer.assignmentNumbers.evalMap(numbers => seen.update(_ :+ numbers) *> gate.get.whenA(numbers.nonEmpty)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1) *> IO.sleep(100.millis)
+          _       <- fake.revoke *> fake.assign *> fake.until(_.count(_ == "assign") == 2) *> IO.sleep(100.millis)
+          _       <- gate.complete(()) *> IO.sleep(200.millis)
+          numbers <- seen.get
+          _       <- looking.cancel
+        yield assertEquals(numbers.filter(_.nonEmpty).map(_.values.toList), Vector(List(1L), List(2L)))
+
+  test("a record from a poll a revocation interrupted is not handed out, and the next, read under the new assignment, is and can be recorded"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
         for
-          _       <- fake.assign *> fake.until(_.contains("assign"))
-          spanned <-
-          fake.duringNextPoll(fake.revoke *> fake.assign *> IO.sleep(100.millis) *> fake.deliver(0L)) *> consumer.records.take(1).compile.lastOrError
-          _      <- fake.until(_.count(_ == "assign") == 2)
-          after  <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError
-          first  <- recorded(producer, spanned)
-          second <- recorded(producer, after)
+          _     <- fake.assign *> fake.until(_.contains("assign"))
+          _     <- fake.duringNextPoll(fake.revoke *> fake.assign *> IO.sleep(100.millis) *> fake.deliver(0L))
+          _     <- fake.until(_.count(_ == "assign") == 2)
+          after <- fake.deliver(1L) *> consumer.records.take(1).compile.lastOrError
+          made  <- recorded(producer, after)
         yield
-          assert(illegalGeneration(first), s"a record from a poll the revocation interrupted should be rejected, got $first")
-          assertEquals(second, Right(()))
+          assertEquals(after.record.offset.value, 1L)
+          assertEquals(made, Right(()))
 
   test("a group handle from one client is recorded by a transactional producer from another"):
     FakeDriver().flatMap: fake =>
@@ -310,6 +417,18 @@ final class DriverClientSuite extends CatsEffectSuite:
         .timeout(10.seconds)
       calls <- fake.calls
     yield assert(calls.contains("unassign"), s"the revocation was taken from the driver but never applied: $calls")
+
+  test("a commit refused because the group is gone, as the broker answers its only member once it is removed, says the member is unknown"):
+    val gone = new KafkaException.BackendFailure("Broker: The group id does not exist", Some(ErrorCode.GroupIdNotFound), Some(false))
+    FakeDriver(offsetCommitFailure = Some(gone)).flatMap: fake =>
+      consuming(fake): consumer =>
+        for
+          _      <- fake.assign *> fake.until(_.contains("assign"))
+          record <- fake.deliver(0L) *> consumer.records.take(1).compile.lastOrError
+          commit <- record.offset.commit.attempt
+        yield
+          val code = commit.left.toOption.collect { case failure: KafkaException.BackendFailure => failure.code }.flatten
+          assertEquals(code, Some(ErrorCode.UnknownMemberId), commit)
 
   test("with rebalance-safe commits, a revocation waits for the records handed out to be committed, with their partition paused meanwhile"):
     FakeDriver().flatMap: fake =>
@@ -349,6 +468,19 @@ final class DriverClientSuite extends CatsEffectSuite:
           _     <- fake.assign *> fake.until(_.count(_ == "assign") == 2)
           after <- fake.deliver(1L) *> fake.deliver(2L) *> consumer.records.take(2).compile.toList
         yield assertEquals(after.map(_.record.offset.value), List(1L, 2L))
+
+  test("with rebalance-safe commits, records a partition's stream dropped for a seek are not waited for, as the application never had them"):
+    FakeDriver().flatMap: fake =>
+      consuming(fake, safe(10.seconds, RebalanceSafeCommits.AtLimit.Fail)): consumer =>
+        for
+          opened  <- Deferred[IO, PartitionRecords[IO, String, String]]
+          routing <- consumer.partitionedRecords(100).evalMap(opened.complete(_)).compile.drain.start
+          _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+          _       <- (0L until 5L).toList.traverse_(fake.deliver) *> fake.drained *> IO.sleep(100.millis)
+          _       <- opened.get *> consumer.seek(eventsZero, Offset.from(10L).toOption.get)
+          waited  <- (fake.revoke *> fake.until(_.contains("unassign"))).timed.map(_._1).timeout(5.seconds).attempt
+          _       <- routing.cancel
+        yield assert(waited.exists(_ < 2.seconds), s"the revocation waited for records never handed out: $waited")
 
   test("with rebalance-safe commits, a revocation goes ahead at its limit and the consumer carries on"):
     FakeDriver().flatMap: fake =>
@@ -472,6 +604,21 @@ final class DriverClientSuite extends CatsEffectSuite:
       assertEquals(one, NonEmptyMap.one(eventsAt(0), Right(())))
       assert(two.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]), s"a short answer should be refused, got $two")
 
+  test("offsets the backend answers for a different number of partitions than asked fail as an invalid response"):
+    def invalid(outcome: Either[Throwable, ?]) = outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse])
+    FakeDriver().flatMap: fake =>
+      val client = new DriverClient[IO](fake)
+      val named  = Selection.Partitions(NonEmptySet.one(eventsZero))
+      (
+        client.consumer(consumerSettings, topics).use(_.committed(Set(eventsZero))).attempt,
+        client.consumer(consumerSettings, topics).use(_.offsetsForTimes(Map(eventsZero -> Timestamp.fromEpochMillis(0L)))).attempt,
+        client.consumer(consumerSettings, named).use_.attempt
+      ).tupled.timeout(10.seconds)
+    .map: (committed, searched, started) =>
+      assert(invalid(committed), committed)
+      assert(invalid(searched), searched)
+      assert(invalid(started), started)
+
   test("a topic's partitions are never empty: one the backend knows none for is unknown, and a listing with such a topic is an invalid response"):
     FakeDriver().flatMap: fake =>
       consuming(fake): consumer =>
@@ -490,6 +637,85 @@ final class DriverClientSuite extends CatsEffectSuite:
         s"a listed topic without partitions should be refused, got $listed"
       )
 
+  private def failure(retriable: Boolean, fatal: Boolean, abortRequired: Boolean) =
+    new KafkaException.BackendFailure("commit failed", None, Some(retriable), Some(fatal), Some(abortRequired))
+
+  /** Two transactions in a row on one producer, the first failing to commit as `failures` say, with the calls each made. */
+  private def twoTransactions(failures: Throwable*): IO[(Either[Throwable, Unit], Either[Throwable, Unit], Vector[String])] =
+    FakeDriver(commitFailures = failures.toList).flatMap: fake =>
+      new DriverClient[IO](fake).transactionalProducer(transactionalSettings).use: producer =>
+        (producer.transactionally(_ => IO.unit).attempt, producer.transactionally(_ => IO.unit).attempt).tupled
+      .flatMap((first, second) => fake.calls.map(calls => (first, second, calls.filter(_.endsWith("Transaction")))))
+
+  test("a transaction cancelled while it begins is aborted once it has begun"):
+    (Deferred[IO, Unit], Deferred[IO, Unit]).tupled.flatMap: (began, release) =>
+      FakeDriver(beginGate = Some((began, release))).flatMap: fake =>
+        new DriverClient[IO](fake).transactionalProducer(transactionalSettings).use: producer =>
+          producer.transactionally(_ => IO.unit).start.flatMap: fiber =>
+            began.get *> fiber.cancel.start.flatMap(cancelling => IO.sleep(50.millis) *> release.complete(()) *> cancelling.join) *> fiber.join
+        .flatMap(outcome => fake.calls.map(calls => (outcome, calls.filter(_.endsWith("Transaction")))))
+      .map: (outcome, calls) =>
+        assert(outcome.isCanceled, outcome)
+        assertEquals(calls, Vector("beginTransaction", "abortTransaction"))
+
+  test("a commit that fails as the transaction must be aborted is aborted, so the producer begins the next transaction"):
+    val abortable = failure(retriable = false, fatal = false, abortRequired = true)
+    twoTransactions(abortable).map: (first, second, calls) =>
+      assertEquals(first, Left(abortable))
+      assertEquals(second, Right(()))
+      assertEquals(calls, Vector("beginTransaction", "commitTransaction", "abortTransaction", "beginTransaction", "commitTransaction"))
+
+  test("a commit that fails for any other reason it names no remedy for is aborted too"):
+    val refused = failure(retriable = false, fatal = false, abortRequired = false)
+    twoTransactions(refused).map: (first, second, calls) =>
+      assertEquals((first, second), (Left(refused), Right(())))
+      assertEquals(calls.count(_ == "abortTransaction"), 1)
+
+  test("a commit that timed out, which may still be completing, is tried once more and never aborted"):
+    val timedOut = failure(retriable = true, fatal = false, abortRequired = false)
+    twoTransactions(timedOut).map: (first, _, calls) =>
+      assertEquals(first, Right(()))
+      assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
+    *> twoTransactions(timedOut, timedOut).map: (first, second, calls) =>
+      assertEquals(first, Left(timedOut))
+      // The commit is left for the clients to finish, which refuse to begin another until it is asked for again.
+      assertEquals(second, Right(()))
+      assertEquals(
+        calls,
+        Vector("beginTransaction", "commitTransaction", "commitTransaction", "commitTransaction", "beginTransaction", "commitTransaction")
+      )
+
+  test("a commit the client says to ask for again is tried once more and never aborted, whatever its code says"):
+    val refused = failure(retriable = false, fatal = false, abortRequired = false)
+    twoTransactions(CommitToRetry(refused), CommitToRetry(refused)).map: (first, second, calls) =>
+      assertEquals(first, Left(refused))
+      assertEquals(second, Right(()))
+      assert(!calls.contains("abortTransaction"), calls)
+      assertEquals(calls.take(3), Vector("beginTransaction", "commitTransaction", "commitTransaction"))
+
+  test("an abort that fails, after the transaction failed or was cancelled, is asked for again before the next transaction begins"):
+    val boom                                                                     = new RuntimeException("boom")
+    val timedOut                                                                 = failure(retriable = true, fatal = false, abortRequired = false)
+    def after(first: KafkaTransactionalProducer[IO, String, String] => IO[Unit]) =
+      FakeDriver(abortFailures = List(timedOut)).flatMap: fake =>
+        new DriverClient[IO](fake).transactionalProducer(transactionalSettings).use: producer =>
+          first(producer) *> producer.transactionally(_ => IO.unit).attempt
+        .flatMap(second => fake.calls.map(calls => (second, calls.filter(_.endsWith("Transaction")))))
+    val expected = Vector("beginTransaction", "abortTransaction", "abortTransaction", "beginTransaction", "commitTransaction")
+    after(producer => producer.transactionally(_ => IO.raiseError[Unit](boom)).attempt.void).map: (second, calls) =>
+      assertEquals(second, Right(()))
+      assertEquals(calls, expected)
+    *> after(producer => producer.transactionally(_ => IO.never[Unit]).timeoutTo(100.millis, IO.unit)).map: (second, calls) =>
+      assertEquals(second, Right(()))
+      assertEquals(calls, expected)
+
+  test("a commit that fails fatally is neither tried again nor aborted, since the producer can do nothing more"):
+    val fenced = failure(retriable = false, fatal = true, abortRequired = false)
+    twoTransactions(fenced).map: (first, _, calls) =>
+      assertEquals(first, Left(fenced))
+      assertEquals(calls.take(2), Vector("beginTransaction", "commitTransaction"))
+      assert(!calls.contains("abortTransaction"), calls)
+
   test("a producer asked about a topic the broker is still creating waits for it"):
     FakeDriver().flatMap: fake =>
       new DriverClient[IO](fake).producer(producerSettings).use(_.partitionsFor(Topic.from("creating").toOption.get)).timeout(10.seconds)
@@ -497,6 +723,19 @@ final class DriverClientSuite extends CatsEffectSuite:
     .map: (partitions, lookups) =>
       assertEquals(partitions, NonEmptySet.one(Partition.from(0).toOption.get))
       assertEquals(lookups, 3)
+
+  test("a producer waits for a topic being created no longer than its client's metadata refresh interval"):
+    val quick = client.withMetadataRefreshInterval(1.milli).toOption.get
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).producer(producerSettings.withClient(quick).toOption.get).use(_.partitionsFor(Topic.from("creating").toOption.get))
+        .attempt.timeout(10.seconds).product(fake.count("metadata"))
+    .map: (outcome, lookups) =>
+      assert(
+        outcome.left
+          .exists { case failure: KafkaException.BackendFailure => failure.code.contains(ErrorCode.UnknownTopicOrPartition); case _ => false },
+        outcome
+      )
+      assert(lookups < 3, lookups)
 
   private val group = ConsumerGroup.from("fake").toOption.get
 
@@ -553,7 +792,11 @@ final class DriverClientSuite extends CatsEffectSuite:
       servings: Ref[IO, Int],
       servingTakes: FiniteDuration,
       holdCommits: Boolean,
-      holdOffsets: Boolean
+      holdOffsets: Boolean,
+      commitFailures: Ref[IO, List[Throwable]],
+      beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])],
+      abortFailures: Ref[IO, List[Throwable]],
+      offsetCommitFailure: Option[Throwable]
   ) extends KafkaDriver[IO]:
     type Client        = String
     type Batch         = Int
@@ -561,6 +804,9 @@ final class DriverClientSuite extends CatsEffectSuite:
     type GroupMetadata = FakeGroupMetadata
 
     val calls: IO[Vector[String]] = log.get
+
+    /** Every record enqueued so far. */
+    val enqueued: IO[Vector[EncodedRecord]] = batches.get.map(_.values.toVector.flatten)
 
     def count(call: String): IO[Int] = calls.map(_.count(_ == call))
 
@@ -572,6 +818,12 @@ final class DriverClientSuite extends CatsEffectSuite:
     def revoke: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(0, 0, List(partition)))
 
     def lose: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(2, 2, List(partition)))
+
+    /** Raises a rebalance of another kind, which librdkafka raises to clear the assignment and resynchronise. */
+    def resynchronise: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(3, 3, Nil))
+
+    /** Raises an assignment the client fails to apply. */
+    def unappliable: IO[Unit] = pendingRebalances.update(_ :+ Rebalance(9, 1, List(partition)))
 
     /** Completes once every delivered record has been polled. */
     def drained: IO[Unit] = queued.get.map(_.isEmpty).flatMap(done => if done then IO.unit else IO.sleep(5.millis) *> drained)
@@ -676,11 +928,15 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def initTransactions(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
 
-    override def beginTransaction(producer: Client): IO[Unit] = IO.unit
+    /** Begins, as the backends do, without heeding a cancellation; where gated, it says it began and waits to be let go. */
+    override def beginTransaction(producer: Client): IO[Unit] =
+      IO.uncancelable(_ => record("beginTransaction") *> beginGate.traverse_((began, release) => began.complete(()) *> release.get))
 
-    override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
+    override def commitTransaction(producer: Client, timeoutMillis: Int): IO[Unit] =
+      record("commitTransaction") *> commitFailures.modify(failures => (failures.drop(1), failures.headOption)).flatMap(_.traverse_(IO.raiseError))
 
-    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] = IO.unit
+    override def abortTransaction(producer: Client, timeoutMillis: Int): IO[Unit] =
+      record("abortTransaction") *> abortFailures.modify(failures => (failures.drop(1), failures.headOption)).flatMap(_.traverse_(IO.raiseError))
 
     override def sendOffsets(
         producer: Client,
@@ -719,7 +975,8 @@ final class DriverClientSuite extends CatsEffectSuite:
     def pauseNextTake(taken: Deferred[IO, Unit]): IO[Unit] = pauseTake.set(Some(taken))
 
     override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): IO[Unit] =
-      starts.traverse_(started) *> record(if event == 1 then "assign" else "unassign")
+      if event == 9 then IO.raiseError(new RuntimeException("cannot apply"))
+      else starts.traverse_(started) *> record(if event == 1 then "assign" else if event == 3 then "resynchronise" else "unassign")
 
     private def started(start: StartAt): IO[Unit] =
       record(s"start ${start.partition.topic.value}-${start.partition.partition.value} at ${start.offset} in epoch ${start.leaderEpoch}")
@@ -730,22 +987,24 @@ final class DriverClientSuite extends CatsEffectSuite:
       calls.map(log => if log.lastIndexOf("assign") > log.lastIndexOf("unassign") then Vector("events" -> 0) else Vector.empty)
 
     override def commit(consumer: Client, offsets: Vector[(TopicPartition, OffsetAndMetadata)], timeoutMillis: Int): IO[Unit] =
-      record("commit") *> held(holdCommits)
+      record("commit") *> held(holdCommits) *> offsetCommitFailure.traverse_(IO.raiseError)
 
     override def pause(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = record("pause")
 
     override def resume(consumer: Client, partitions: Vector[TopicPartition]): IO[Unit] = record("resume")
 
-    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] = unused("committed")
+    // Answers for one partition fewer than asked, as no backend should.
+    override def committed(consumer: Client, partitions: Vector[TopicPartition], timeoutMillis: Int): IO[Vector[StoredOffset]] =
+      IO.pure(partitions.drop(1).map(_ => StoredOffset(1L, -1, "")))
 
     override def watermarks(consumer: Client, partition: TopicPartition, timeoutMillis: Int): IO[(Long, Long)] = unused("watermarks")
 
     override def offsetsForTimes(consumer: Client, searches: Vector[(TopicPartition, Timestamp)], timeoutMillis: Int): IO[Vector[Long]] =
-      unused("offsetsForTimes")
+      IO.pure(searches.drop(1).map(_ => 1L))
 
     override def positions(consumer: Client, partitions: Vector[TopicPartition]): IO[Vector[Long]] = unused("positions")
 
-    override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): IO[Unit] = unused("seek")
+    override def seek(consumer: Client, partition: TopicPartition, offset: Long, timeoutMillis: Int): IO[Unit] = record("seek")
 
     /** Knows `events` with one partition, and lists `bare` without any, which no Kafka cluster answers. `creating` has its partition from the third
       * lookup on, as a topic the broker creates when asked about does.
@@ -826,7 +1085,15 @@ final class DriverClientSuite extends CatsEffectSuite:
       unused("deleteGroups")
 
   private object FakeDriver:
-    def apply(holdCommits: Boolean = false, holdOffsets: Boolean = false, servingTakes: FiniteDuration = 5.millis): IO[FakeDriver] =
+    def apply(
+        holdCommits: Boolean = false,
+        holdOffsets: Boolean = false,
+        servingTakes: FiniteDuration = 5.millis,
+        commitFailures: List[Throwable] = Nil,
+        beginGate: Option[(Deferred[IO, Unit], Deferred[IO, Unit])] = None,
+        abortFailures: List[Throwable] = Nil,
+        offsetCommitFailure: Option[Throwable] = None
+    ): IO[FakeDriver] =
       (
         Ref.of[IO, Map[Int, Vector[EncodedRecord]]](Map.empty),
         Ref.of[IO, Set[Int]](Set.empty),
@@ -836,7 +1103,26 @@ final class DriverClientSuite extends CatsEffectSuite:
         Ref.of[IO, Option[IO[Unit]]](None),
         Ref.of[IO, List[Deferred[IO, Unit]]](Nil),
         Ref.of[IO, Option[Deferred[IO, Unit]]](None),
-        Ref.of[IO, Int](0)
-      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings) =>
-        new FakeDriver(batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, servingTakes, holdCommits, holdOffsets)
+        Ref.of[IO, Int](0),
+        Ref.of[IO, List[Throwable]](commitFailures),
+        Ref.of[IO, List[Throwable]](abortFailures)
+      ).mapN((batches, flushed, log, queued, rebalances, inPoll, holds, pauseTake, servings, failures, aborts) =>
+        new FakeDriver(
+          batches,
+          flushed,
+          log,
+          queued,
+          rebalances,
+          inPoll,
+          holds,
+          pauseTake,
+          servings,
+          servingTakes,
+          holdCommits,
+          holdOffsets,
+          failures,
+          beginGate,
+          aborts,
+          offsetCommitFailure
+        )
       )

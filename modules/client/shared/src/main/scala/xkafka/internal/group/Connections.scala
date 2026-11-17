@@ -132,6 +132,11 @@ private[xkafka] object Connections:
 
   private val UnsupportedVersion: Short = 35
 
+  /** The largest answer a client reads, as the largest request a broker takes by default (`socket.request.max.bytes`); a larger size is not an
+    * answer, as where a client without TLS reads a TLS alert.
+    */
+  val MaxAnswer: Int = 100 * 1024 * 1024
+
   /** A bootstrap server as host and port, with the brackets of an IPv6 address removed. */
   def address(server: String): (String, Int) =
     val trimmed   = server.trim
@@ -161,4 +166,7 @@ private final class Exchange[F[_]](socket: Socket[F], clientId: String, lock: Mu
 
   private def answer: F[ByteVector] =
     socket.read(4).map(_.toInt()).flatMap: size =>
-      if size < 0 then F.raiseError(invalid(s"the broker announced an answer of $size bytes")) else socket.read(size)
+      if size < 0 then F.raiseError(invalid(s"the broker announced an answer of $size bytes"))
+      else if size > Connections.MaxAnswer then
+        F.raiseError(invalid(s"the broker announced an answer of $size bytes, more than the ${Connections.MaxAnswer} a client reads"))
+      else socket.read(size)

@@ -28,7 +28,7 @@ import scala.concurrent.duration.*
 
 import cats.{Functor, Monad}
 import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
-import cats.effect.std.{NonEmptyHotswap, Queue, Random, Supervisor, UUIDGen}
+import cats.effect.std.{Mutex, NonEmptyHotswap, Queue, Random, Supervisor, UUIDGen}
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Signal, SignallingRef}
@@ -56,6 +56,9 @@ private[xkafka] trait GroupMember[F[_]]:
   /** Gives back the active tasks through `changes`, tells the coordinator the member leaves and waits until it has answered. */
   def leave: F[Unit]
 
+  /** Leaves without waiting for the engine to give back its tasks, which it no longer runs, as once it has stopped on a failure. */
+  def abandon: F[Unit]
+
   /** The member's epoch: 0 until the coordinator has taken it in, and again after it was fenced, until it is taken in again. */
   def epoch: F[Int]
 
@@ -64,10 +67,11 @@ private[xkafka] trait GroupMember[F[_]]:
     */
   def reports: Signal[F, Member]
 
-  /** Commits offsets for the group under the member's id and current epoch, through its connection to the coordinator, answering each partition's
-    * error code, or 0. The coordinator checks the epoch, not which tasks the member runs, so the engine commits only for its own.
+  /** Commits offsets for the group under the member's id and `epoch`, the one its tasks were given at, through its connection to the coordinator,
+    * answering each partition's error code, or 0. The coordinator takes any partition at the member's current epoch, and at an older one only those
+    * it still gives the member, so a member that lost its tasks and joined again since has the commit of theirs refused.
     */
-  def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]]
+  def commit(topics: List[OffsetCommitRequest.Topic], epoch: Int): F[List[OffsetCommitRequest.Answer]]
 
   /** The offsets the group stored for these partitions, read under the member's id and current epoch. A partition whose offsets a transaction has yet
     * to settle answers an error to ask again with.
@@ -97,8 +101,9 @@ private[xkafka] object GroupMember:
       F: Async[F]
   ): Resource[F, GroupMember[F]] =
     for
-      // The connection is closed only once every fiber that might use it has stopped.
+      // A connection is closed only once every request on it is answered: each runs while it holds the connection, which a swap waits for.
       held       <- NonEmptyHotswap.empty[F, Connection[F]]
+      making     <- Resource.eval(Mutex[F])
       supervisor <- Supervisor[F](await = false)
       random     <- Resource.eval(Random.scalaUtilRandom[F])
       events     <- Resource.eval(Queue.unbounded[F, MemberEvent])
@@ -110,7 +115,7 @@ private[xkafka] object GroupMember:
       offsetsAt  <- Resource.eval(F.ref(Option.empty[FiniteDuration]))
       sent       <- Resource.eval(F.ref(Option.empty[TaskOffsets]))
       pushing    <- Resource.eval(F.ref(false))
-      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, current, offsets, offsetsAt, sent, pushing)
+      loop = Loop(coordinator, supervisor, random, events, out, ended, timer, held, making, current, offsets, offsetsAt, sent, pushing)
       _ <- Resource.make(supervisor.supervise(loop.run(Member(identity)).void))(_ => leaving(events, ended, closeTimeout))
       _ <- Resource.eval(events.offer(MemberEvent.Start))
     yield new GroupMember[F]:
@@ -118,11 +123,12 @@ private[xkafka] object GroupMember:
       def revoked(round: Long): F[Unit]    = events.offer(MemberEvent.Revoked(round))
       def assigned(round: Long): F[Unit]   = events.offer(MemberEvent.Assigned(round))
       def leave: F[Unit]                   = events.offer(MemberEvent.Leave) *> ended.get.rethrow
+      def abandon: F[Unit]                 = events.offer(MemberEvent.Abandoned) *> ended.get.rethrow
       def epoch: F[Int]                    = current.get.map(_.epoch)
       def reports: Signal[F, Member]       = current
 
-      def commit(topics: List[OffsetCommitRequest.Topic]): F[List[OffsetCommitRequest.Answer]] =
-        current.get.flatMap(member => loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, member.epoch, None, topics)))
+      def commit(topics: List[OffsetCommitRequest.Topic], epoch: Int): F[List[OffsetCommitRequest.Answer]] =
+        loop.send(OffsetCommitRequest(identity.groupId, identity.memberId, epoch, None, topics))
 
       def offsetsFrom(read: F[TaskOffsets]): F[Unit] = offsets.set(Some(read))
 
@@ -151,13 +157,16 @@ private[xkafka] object GroupMember:
     val exponent = math.min(attempt - 1, math.log(MaxBackoff / Backoff) / math.log(2))
     random.betweenDouble(0.8, 1.2).map(factor => (Backoff.toMillis * math.pow(2, exponent) * factor).toLong.millis.min(MaxBackoff))
 
-  /** A failure the connection's contract does not name, which stops the member. */
-  private def unexpected(error: Throwable): KafkaException =
-    new KafkaException.BackendFailure(s"the heartbeat failed: $error", retriable = Some(false), cause = error)
+  /** A failure the connection's contract does not name, which stops the member; with no code, it says nothing of retrying. */
+  private def unexpected(error: Throwable): KafkaException = new KafkaException.BackendFailure(s"the heartbeat failed: $error", cause = error)
 
+  /** Released, the member leaves at once: the engine it serves is gone, so none of its tasks is given back or waited for. */
   private def leaving[F[_]](events: Queue[F, MemberEvent], ended: Deferred[F, Either[Throwable, Unit]], timeout: FiniteDuration)(using
       F: Temporal[F]
-  ): F[Unit] = events.offer(MemberEvent.Leave) *> F.timeoutTo(ended.get.void, timeout, F.unit)
+  ): F[Unit] = events.offer(MemberEvent.Abandoned) *> F.timeoutTo(ended.get.void, timeout, F.unit)
+
+  /** The longest a heartbeat waits for the task offsets it carries. */
+  private val OffsetsWait: FiniteDuration = 1.second
 
   private final class Loop[F[_]](
       coordinator: Resource[F, Connection[F]],
@@ -168,6 +177,7 @@ private[xkafka] object GroupMember:
       ended: Deferred[F, Either[Throwable, Unit]],
       timer: Ref[F, Long],
       held: NonEmptyHotswap[F, Option[Connection[F]]],
+      making: Mutex[F],
       current: SignallingRef[F, Member],
       offsets: Ref[F, Option[F[TaskOffsets]]],
       offsetsAt: Ref[F, Option[FiniteDuration]],
@@ -182,13 +192,13 @@ private[xkafka] object GroupMember:
         current.set(next) *> actions.traverse_(perform) *> run(next)
 
     /** Sends a request of the engine's over the member's connection, which it gives up, to be made again, if the request fails. */
-    def send[R](request: Request[R]): F[R] = connection.flatMap(_.send(request)).onError(_ => drop)
+    def send[R](request: Request[R]): F[R] = sent(request).onError(_ => drop)
 
     private def perform(action: MemberAction): F[Unit] =
       action match
         case Send(heartbeat) =>
           val answer =
-            withOffsets(heartbeat).flatMap(request => connection.flatMap(_.send(request))).attempt.flatMap:
+            withOffsets(heartbeat).flatMap(sent).attempt.flatMap:
               case Right(response) => events.offer(MemberEvent.Answered(response)) *> described.whenA(response.topologyDescriptionRequired)
               case Left(error: KafkaException) => drop *> events.offer(MemberEvent.RequestFailed(error))
               case Left(other)                 => drop *> events.offer(MemberEvent.RequestFailed(unexpected(other)))
@@ -196,9 +206,9 @@ private[xkafka] object GroupMember:
         case Wait(after)                         => due(after)
         case Retry(attempt, rediscover, delayed) => drop.whenA(rediscover) *>
             (if delayed then backoff(attempt, random).flatMap(due) else due(Duration.Zero))
-        case change @ (Revoke(_, _) | Assign(_, _) | LoseAll) => out.offer(Some(Right(change)))
-        case Fail(error)                                      => out.offer(Some(Left(error))) *> ended.complete(Left(error)).void
-        case Done                                             => out.offer(None) *> ended.complete(Right(())).void
+        case change @ (Revoke(_, _) | Assign(_, _, _) | LoseAll) => out.offer(Some(Right(change)))
+        case Fail(error)                                         => out.offer(Some(Left(error))) *> ended.complete(Left(error)).void
+        case Done                                                => out.offer(None) *> ended.complete(Right(())).void
 
     /** The heartbeat with the task offsets, as Java's member adds them: always when joining; otherwise, when it reports tasks or once the
       * coordinator's interval for them has passed, each of the two lists that changed since it was last sent. A member leaving sends none.
@@ -209,7 +219,8 @@ private[xkafka] object GroupMember:
         // A joining heartbeat always reports the member's tasks.
         val due = heartbeat.activeTasks.isDefined || member.taskOffsetInterval.exists(interval => at.forall(now - _ >= interval))
         read.filter(_ => due && heartbeat.memberEpoch >= 0).fold(F.pure(heartbeat)): reading =>
-          reading.attempt.flatMap:
+          // Offsets only help the coordinator place tasks, so a heartbeat does not wait long for them, nor for a read it cannot stop.
+          F.timeoutAndForget(reading, OffsetsWait).attempt.flatMap:
             case Right(read @ TaskOffsets(positions, ends)) =>
               val newPositions = Option.when(joining || !last.exists(_.positions == positions))(positions)
               val newEnds      = Option.when(joining || !last.exists(_.ends == ends))(ends)
@@ -238,7 +249,7 @@ private[xkafka] object GroupMember:
         drop.whenA(rediscover) *> backoff(attempt, random).flatMap(wait => F.sleep(wait.max(throttled.millis))) *> pushed(request, attempt + 1)
       current.get.flatMap: member =>
         val joined = member.phase == Phase.Joining || member.phase == Phase.Joined
-        connection.flatMap(_.send(request)).attempt.flatMap:
+        sent(request).attempt.flatMap:
           case Right(answer) if answer.errorCode == Member.NotCoordinator || answer.errorCode == Member.NotAvailable =>
             again(rediscover = true, answer.throttleTimeMs)
           case Right(answer) if answer.errorCode == Member.LoadInProgress                       => again(rediscover = false, answer.throttleTimeMs)
@@ -252,6 +263,11 @@ private[xkafka] object GroupMember:
       timer.updateAndGet(_ + 1).flatMap: planned =>
         supervisor.supervise(F.sleep(after) *> timer.get.flatMap(now => events.offer(MemberEvent.Due).whenA(now == planned))).void
 
-    private def connection: F[Connection[F]] = held.get.use(F.pure).flatMap(_.fold(held.swap(coordinator.map(Some(_))) *> connection)(F.pure))
+    /** `request` sent over the connection to the coordinator, made first where there is none, which stays open until it is answered. */
+    private def sent[R](request: Request[R]): F[R] = held.get.use(_.traverse(_.send(request))).flatMap(_.fold(made *> sent(request))(F.pure))
+
+    /** A connection to the coordinator where there is none, made by one fiber at a time, so that two do not each make one and close the other's. */
+    private def made: F[Unit] =
+      making.lock.surround(held.get.use(current => F.pure(current.isEmpty)).flatMap(held.swap(coordinator.map(Some(_))).whenA(_)))
 
     private def drop: F[Unit] = held.swap(Resource.pure(None))

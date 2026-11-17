@@ -173,8 +173,8 @@ object WindowStore:
   ): DeclaredStore[F, WindowStore[F, K, V]] =
     val problems =
       List(
-        Option.when(size < 1.milli)(s"its window size of $size is less than a millisecond"),
-        Option.when(retention < size)(s"its retention of $retention is less than its window size of $size")
+        Option.when(size < 1.milli)(s"its window size of $size is less than a millisecond").orElse(partial("window size", size)),
+        Option.when(retention < size)(s"its retention of $retention is less than its window size of $size").orElse(partial("retention", retention))
       ).flatten
     new DeclaredStore(
       store,
@@ -201,7 +201,7 @@ object WindowStore:
       private def many(found: F[Vector[(Chunk[Byte], Long, Chunk[Byte])]]): Stream[F, (Windowed[K], V)] =
         Stream.eval(found).flatMap(Stream.emits).evalMap: (k, start, held) =>
           // As Java, a window ending past the largest time ends at the largest time.
-          val end = if start + size < 0 then Long.MaxValue else start + size
+          val end = Window.ending(start, size)
           (key.deserializer.deserialize(access.topic, Headers.empty, Some(k)), read(held))
             .mapN((keyRead, v) => Windowed(keyRead, Window(start, end)) -> v)
 
@@ -298,7 +298,7 @@ object SessionStore:
       access => opened(store, access, key, value, retention.toMillis),
       StoreAccess.idle(store),
       Some(retention.toMillis),
-      Option.when(retention < 1.milli)(s"its retention of $retention is less than a millisecond").toList,
+      Option.when(retention < 1.milli)(s"its retention of $retention is less than a millisecond").orElse(partial("retention", retention)).toList,
       session = true
     )
 
@@ -475,10 +475,15 @@ private[xkafka] object StoreAccess:
           latestStart: Long
       ): F[Vector[(Chunk[Byte], Long, Long, Chunk[Byte])]] = refused
 
+/** Why a duration a processor is given, `what`, cannot be used where it holds a part of a millisecond, which Kafka's times cannot. */
+private def partial(what: String, duration: FiniteDuration): Option[String] =
+  Option.when(duration.toNanos % 1000000L != 0L)(s"its $what of $duration is not a whole number of milliseconds")
+
 /** When a punctuator runs. */
 final class Punctuation private (private[xkafka] val wallClock: Boolean, val interval: FiniteDuration):
   /** Why it cannot be used, if it cannot. */
-  private[xkafka] def problem: Option[String] = Option.when(interval < 1.milli)(s"its interval of $interval is less than a millisecond")
+  private[xkafka] def problem: Option[String] =
+    Option.when(interval < 1.milli)(s"its interval of $interval is less than a millisecond").orElse(partial("interval", interval))
 
   /** The interval in milliseconds. */
   private[xkafka] def millis: Long = interval.toMillis

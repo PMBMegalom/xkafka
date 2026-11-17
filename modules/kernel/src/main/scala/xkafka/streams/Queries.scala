@@ -59,6 +59,9 @@ enum QueryProblem derives CanEqual:
   /** The program has no store of this name of the kind queried: key-value, window or session. */
   case UnknownStore(store: String)
 
+  /** A Java program fills the store from topics a pattern names, which xkafka cannot find the members holding it for. */
+  case FedByPattern(store: String)
+
 /** A question for one store of the application, whose answer is an `A`, as [[QueryableStore]] makes one. */
 final class Query[F[_], A] private[xkafka] (
     private[xkafka] val store: Store,
@@ -185,7 +188,8 @@ final class WindowQueries[F[_], K, V] private[streams] (store: Store, key: Serde
             Ordering.Tuple2(using Ordering.Long, QueryRequest.unsigned)
           )
         F.fromOption(answering.windowSize, new IllegalStateException(s"the store ${store.value} has no window size")).flatMap: size =>
-          windows(answering.topic, ordered).map(_.map((k, start, v) => (Windowed(k, Window(start, start + size)), v)))
+          // An end past the largest time is the largest time, as Java's windowed keys give it.
+          windows(answering.topic, ordered).map(_.map((k, start, v) => (Windowed(k, Window(start, Window.ending(start, size))), v)))
     )
 
 /** The queries of a session store, whose keys are each key and its session's end and start. */

@@ -6,10 +6,15 @@
 sbt test
 ```
 
-That runs the ordinary JVM, Scala.js, and Scala Native suites. Use Node.js 24
-for Scala.js, as `.nvmrc` records. Tests which need a broker or a schema
-registry are skipped unless the environment names one, which the scripts below
-do.
+That runs the ordinary JVM, Scala.js, and Scala Native suites. A change usually
+has to work on all three. Tests that need a broker or a schema registry are
+skipped unless the environment names one, which the scripts below do.
+
+Scala.js uses Node.js 24, the version `.nvmrc` records:
+
+```sh
+nvm use
+```
 
 The Avro, JSON Schema and Protobuf suites on the JVM also check what xkafka
 writes and reads against Apache Avro and Confluent's own serializers, which
@@ -73,7 +78,12 @@ scripts/integration-test.sh --streams
 ## librdkafka for the Native build
 
 The build downloads librdkafka, verifies its SHA-256 checksum, builds it, and
-links it statically for the Native tests. To prepare it explicitly:
+links it statically for the Native tests. librdkafka is built with TLS and
+compression, which need OpenSSL, zlib and zstd: `libssl-dev`, `zlib1g-dev` and
+`libzstd-dev` on Debian and Ubuntu, or `brew install openssl@3 zstd zlib` on
+macOS.
+
+To prepare librdkafka explicitly:
 
 ```sh
 sbt clientNative/prepareLibrdkafka
@@ -87,10 +97,10 @@ XKAFKA_LIBRDKAFKA_PREFIX=/path/to/librdkafka-prefix sbt test
 
 The prefix must contain `include/librdkafka/rdkafka.h` and `lib/librdkafka.a`.
 
-## RocksDB for the Scala.js and Native builds
+## RocksDB for the Scala.js and Scala Native builds
 
 The build downloads the pinned `rocksdbjni` jar once, verifies its checksum, and
-extracts the RocksDB library for this platform, which the Scala.js and Native
+extracts the RocksDB library for this platform, which the Scala.js and Scala Native
 tests of stores kept on disk use.
 
 ## The C shims
@@ -121,17 +131,35 @@ RocksDB library found each way a Native application finds it.
 ## Published artifacts
 
 ```sh
-XKAFKA_VERSION=0.7.0 scripts/downstream-test.sh
+XKAFKA_VERSION=<version> scripts/downstream-test.sh
 ```
 
 Builds a separate application against the published `xkafka-client` artifacts
 of the version `XKAFKA_VERSION` names, and runs it against a broker the script
 starts, including both ways a Native application reaches librdkafka.
 
-## Formatting
+## Formatting and checks
+
+Before opening a pull request, run:
 
 ```sh
-sbt scalafmtAll scalafmtSbt
+sbt prePR test mimaReportBinaryIssues doc docs/tlSite
 ```
 
-Verify without mutating using `scalafmtCheckAll` and `scalafmtSbtCheck`.
+`prePR` regenerates the CI workflow, adds missing license headers and formats
+the code, so commit what it changes; continuous integration checks all three.
+The rest runs the tests, the binary compatibility check, the API docs and the
+site, whose examples are compiled, as continuous integration does. Continuous
+integration also tests the sbt plugin on sbt 1 and sbt 2; to do the same, run
+`sbt sbtCodegen/scripted '++3.9.0 sbtCodegen/scripted'`.
+
+## Changes to the build
+
+The continuous integration workflow is generated from `build.sbt`. After
+changing anything that affects it, such as adding a module:
+
+```sh
+sbt githubWorkflowGenerate
+```
+
+`githubWorkflowCheck` fails the build if the committed workflow is stale.

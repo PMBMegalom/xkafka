@@ -47,13 +47,24 @@ object Store:
   given CanEqual[Store, Store] = CanEqual.derived
   given Show[Store]            = Show.show(_.value)
 
-/** The name of a repartitioning, from which its topic `<application id>-<name>-repartition` is named. */
+/** The name of a repartitioning, from which its topic `<application id>-<name>-repartition` is named; a stream's whose name already ends in
+  * `-repartition` is `<application id>-<name>`, as Java names it.
+  */
 opaque type Repartition = String
 
 object Repartition:
   def apply(name: String): Repartition = name
 
-  extension (repartition: Repartition) def value: String = repartition
+  extension (repartition: Repartition)
+    def value: String = repartition
+
+    /** The repartitioning Java makes where it repartitions a stream: a name that already ends in `-repartition` names its topic as it is, as
+      * `<application id>-<name>`, and its nodes after it, `-repartition` alone too. A grouped table's repartitioning always adds the suffix, as
+      * Java's does.
+      */
+    private[xkafka] def ofStream: Repartition = repartition.stripSuffix(Suffix)
+
+  private val Suffix = "-repartition"
 
   given CanEqual[Repartition, Repartition] = CanEqual.derived
   given Show[Repartition]                  = Show.show(_.value)

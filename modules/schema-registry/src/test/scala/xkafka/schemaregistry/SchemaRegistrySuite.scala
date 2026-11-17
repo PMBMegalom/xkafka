@@ -51,6 +51,19 @@ class SchemaRegistrySuite extends CatsEffectSuite:
     assertEquals(settings.withLatestCachedFor(1.minute).map(_.withoutLatestExpiry), Right(settings))
     assertEquals(Subject.from(""), Left(SchemaRegistryError.EmptySubject))
 
+  test("a subject of a dot or two is refused, since its path in the registry's API would name another endpoint"):
+    assertEquals(Subject.from("."), Left(SchemaRegistryError.DotSubject(".")))
+    assertEquals(Subject.from(".."), Left(SchemaRegistryError.DotSubject("..")))
+    assertEquals(Subject.from("...").map(_.value), Right("..."))
+    assertEquals(Subject.from("com.acme..Order").map(_.value), Right("com.acme..Order"))
+
+  test("a URL holding credentials is refused, naming neither them nor the URL, since no client sends them from there"):
+    List("https://user:secret@registry:8081", "ftp://user:secret@registry", "https://user:secret@registry:8081/path").foreach: url =>
+      val refused = RegistrySettings.from(NonEmptyList.one(url))
+      assertEquals(refused, Left(SchemaRegistryError.CredentialsInUrl))
+      assert(!refused.left.exists(_.message.contains("secret")), refused)
+    assert(RegistrySettings.from(NonEmptyList.one("https://registry:8081/users/a@b")).isRight, "an @ in the path is no credential")
+
   test("a refused setting is raised in an effect, carrying why"):
     RegistrySettings.from(NonEmptyList.one("registry:8081")).liftTo[IO].attempt.map:
       case Left(error: InvalidRegistrySetting) => assertEquals(error.error, SchemaRegistryError.InvalidUrl("registry:8081"))

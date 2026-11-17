@@ -1,0 +1,2 @@
+{"type": "record", "name": "Link", "namespace": "example.chain",
+ "fields": [{"name": "value", "type": "int"}, {"name": "next", "type": ["null", "Link"], "default": null}]}

@@ -38,8 +38,8 @@ import internal.protocol.OffsetFetchRequest.Stored as Fetched
 // `streams` alone names this package, so the program's own package is named in full.
 import xkafka.Serde
 import xkafka.streams.{
-  BufferLimit, GlobalKTable, KafkaStreams, KStream, KTable, Named, Repartition, SessionWindows, Store, StreamsPhase, StreamsProblem, StreamsState,
-  Suppressed, TimeWindows, Topology, Windowed
+  BufferLimit, GlobalKTable, KafkaStreams, KStream, KTable, Named, QueryableStore, QueryProblem, Repartition, SessionWindows, Store, StreamsPhase,
+  StreamsProblem, StreamsSettings, StreamsState, Suppressed, TimeWindows, Topology, Windowed
 }
 
 /** How the engine carries out its member's changes, starts, commits and gives back tasks, over a member and a data plane the tests script, in
@@ -53,7 +53,7 @@ final class EngineSuite extends CatsEffectSuite:
       OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, 3, Some(PartitionTime.encode(1234L)), 0), Fetched("in", 1, -1L, -1, None, 0)), 0)
     run(committed = _ => IO.pure(fetched)): world =>
       for
-        _ <- world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0), TaskId("0", 1)), Set.empty, Set.empty)))
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0), TaskId("0", 1)), Set.empty, Set.empty), 1))
         _ <- IO.sleep(100.millis)
         // Older than the partition time stored with the offset, which the task keeps.
         _       <- world.records(record(0, 5L, "k", 1000L))
@@ -140,10 +140,43 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(log.last, Event.Read(Vector.empty))
 
   test("a commit the coordinator cannot take yet goes again after a wait"):
-    val answers = List(113, 16, 0).map(code => List(OffsetCommitRequest.Answer("in", 0, code.toShort)))
+    val answers = List(14, 16, 0).map(code => List(OffsetCommitRequest.Answer("in", 0, code.toShort)))
     run(commit = (n, _) => IO.pure(answers(n))): world =>
       world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
         world.committedAt.get.map(times => assertEquals(times.map(_ - times.head), List(0L, 100L, 300L)))
+
+  test("commits and transactions carry the epoch the member gave the tasks at, not the member's epoch when they are sent"):
+    val at =
+      (world: World) =>
+        // The fake member's own epoch is 1.
+        world.tell(MemberAction.Assign(1, Assignment(Set(TaskId("0", 0)), Set.empty, Set.empty), 3)) *> IO.sleep(100.millis) *>
+          world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *> world.epochs.get.map(epochs => assertEquals(epochs.distinct, List(3)))
+    run()(at) *> run(failing = Some(_ => None))(at)
+
+  test("a commit refused as STALE_MEMBER_EPOCH, for a task the member no longer has at that epoch, is dropped, and the engine goes on"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 113)))): world =>
+      for
+        _         <- world.tell(assign(TaskId("0", 0)))
+        _         <- IO.sleep(100.millis)
+        _         <- world.records(record(0, 5L, "k", 1000L))
+        _         <- IO.sleep(3.seconds)
+        committed <- world.committedAt.get
+        ended     <- world.ended
+      yield
+        assertEquals(committed.size, 1)
+        assertEquals(ended, None)
+
+  test("a commit of tasks handed back that the coordinator is never ready for gives the tasks up, and the engine answers the revocation and goes on"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 14))), taskTimeout = 1.second): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _     <- world.records(record(0, 0L, "k", 1000L)) *> IO.sleep(100.millis)
+        _     <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 0)))) *> IO.sleep(3.seconds)
+        log   <- world.log.get
+        ended <- world.ended
+      yield
+        assertEquals(ended, None)
+        assert(log.contains(Event.Revoked(2)), log)
 
   test("a commit from a member the group no longer counts is dropped, and the engine goes on"):
     run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 25)))): world =>
@@ -162,6 +195,47 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(written.size, 4)
         assertEquals(ended, None)
 
+  test("a commit the coordinator is never ready for stops the engine once the task timeout has passed, with the last refusal"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 14))), taskTimeout = 10.seconds): world =>
+      for
+        _      <- world.tell(assign(TaskId("0", 0)))
+        _      <- IO.sleep(100.millis)
+        _      <- world.records(record(0, 5L, "k", 1000L))
+        _      <- IO.sleep(10.seconds)
+        before <- world.ended
+        _      <- IO.sleep(2.seconds)
+        after  <- world.ended
+      yield
+        assertEquals(before, None, "the commit started a second after the record, so its timeout has not passed")
+        assertEquals(
+          after.flatMap(_.left.toOption).collect { case error: KafkaException.BackendFailure => (error.code, error.retriable) },
+          Some((Some(ErrorCode.CoordinatorLoadInProgress), Some(true)))
+        )
+
+  test("a fetch of the group's offsets that keeps failing in a way worth retrying stops the engine with that failure after the task timeout"):
+    val unavailable = new KafkaException.BackendFailure("coordinator unreachable", Some(ErrorCode.CoordinatorNotAvailable), Some(true))
+    run(committed = _ => IO.raiseError(unavailable), taskTimeout = 5.seconds): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(6.seconds) *> world.ended.map(ended => assertEquals(ended, Some(Left(unavailable))))
+
+  test("with a task timeout of zero, a commit the coordinator is not ready for stops the engine at once"):
+    run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 14))), taskTimeout = Duration.Zero): world =>
+      world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1050.millis) *>
+        world.committedAt.get.map(times => assertEquals(times.size, 1)) *> world.ended.map(ended => assert(ended.exists(_.isLeft), ended))
+
+  test("a refusal that stops the engine says it is worth retrying exactly when its code does"):
+    def ended(code: Short) =
+      run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, code))), taskTimeout = 2.seconds): world =>
+        world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(5.seconds) *>
+          world.ended.map: ended =>
+            assertEquals(
+              ended.flatMap(_.left.toOption).collect { case error: KafkaException.BackendFailure => (error.code, error.retriable) },
+              Some((Some(ErrorCode.fromProtocol(code.toInt)), Some(ErrorCode.fromProtocol(code.toInt).retriable))),
+              s"code $code"
+            )
+    // REBALANCE_IN_PROGRESS stops a commit at once though its code is worth retrying; UNSTABLE_OFFSET_COMMIT is asked again until the timeout
+    // though its code is not.
+    ended(27) *> ended(88)
+
   test("any other refusal of a commit stops the engine with it"):
     run(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 29)))): world =>
       world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
@@ -170,6 +244,21 @@ final class EngineSuite extends CatsEffectSuite:
             ended.flatMap(_.left.toOption).collect { case error: KafkaException.BackendFailure => error.code },
             Some(Some(ErrorCode.TopicAuthorizationFailed))
           )
+
+  test("an engine stopped by a failure abandons its tasks as it is released, without waiting for them to be given back"):
+    val program =
+      World().flatMap: world =>
+        // A member that, once asked to leave, would wait for the stopped engine to give back its tasks.
+        val member = world.member(commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 0, 29))), leave = IO.never)
+        val run    =
+          Engine.running("app", counting, member, world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), TaskStore.memory[IO])
+            .use: running =>
+              world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> running.run.attempt
+        run.flatMap(stopped => (IO.monotonic, world.log.get).tupled.map((at, log) => (stopped, at, log)))
+    TestControl.executeEmbed(program.timeout(1.minute)).map: (stopped, at, log) =>
+      assert(stopped.isLeft, stopped)
+      assert(log.contains(Event.Abandon), log)
+      assert(at < CloseTimeout, s"released at $at")
 
   test("records of partitions the engine does not run are skipped, and nothing is polled while it runs no task"):
     run(): world =>
@@ -197,6 +286,7 @@ final class EngineSuite extends CatsEffectSuite:
           def timed(from: Long, to: Long): IO[Vector[(Chunk[Byte], Stored)]]                               = store.timed(from, to)
           def clock: IO[Long]                                                                              = store.clock
           def close: IO[Unit]                                                                              = store.close
+          def clear: IO[Unit]                                                                              = store.clear
           def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = batches.update(_ :+ changes) *> store.write(changes, positions)
           def positions: IO[Map[Int, Long]]                                     = store.positions
 
@@ -342,11 +432,133 @@ final class EngineSuite extends CatsEffectSuite:
         assertEquals(log.collect { case transaction: Event.Transaction => transaction.written }, List(2))
         assertEquals(ended, None)
 
-  test("exactly once, any other failure of a transaction stops the engine with it"):
-    val fenced = new KafkaException.BackendFailure("fenced", Some(ErrorCode.Other(90)), Some(false))
-    run(failing = Some(_ => Some(fenced))): world =>
-      world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis) *>
-        world.ended.map(ended => assertEquals(ended, Some(Left(fenced))))
+  test("exactly once, after a refused transaction, offsets the group refuses to read until the member has joined again are asked for again"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    // The coordinator answers UNKNOWN_MEMBER_ID, then FENCED_MEMBER_EPOCH, for a member it has not taken back yet.
+    val answers = Map(1 -> OffsetFetchRequest.Answer(Nil, 25), 2 -> OffsetFetchRequest.Answer(Nil, 110))
+    val refused = new KafkaException.BackendFailure("refused", Some(ErrorCode.UnknownMemberId), Some(false))
+    run(committed = n => IO.pure(answers.getOrElse(n, committed)), failing = Some(n => Option.when(n == 0)(refused))): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 0)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.records(record(0, 5L, "k", 1000L))
+        _       <- IO.sleep(3.seconds)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield
+        assertEquals(fetches.size, 4)
+        assertEquals(ended, None)
+
+  /** Exactly once, a transaction failing as `failure` says the first time: the fetches of committed offsets, the producers made anew, and the end. */
+  private def failedOnce(failure: Throwable, taskTimeout: FiniteDuration = StreamsSettings.DefaultTaskTimeout, always: Boolean = false) =
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    IO.ref(Option.empty[(Int, Int, Option[Either[Throwable, Unit]])]).flatMap: outcome =>
+      run(committed = _ => IO.pure(committed), failing = Some(n => Option.when(always || n == 0)(failure)), taskTimeout = taskTimeout): world =>
+        for
+          _ <- world.tell(assign(TaskId("0", 0)))
+          _ <- IO.sleep(100.millis)
+          _ <- world.records(record(0, 5L, "k", 1000L))
+          // Where every transaction fails, records keep coming, so the tasks keep trying until the task timeout has passed.
+          _       <- if always then (IO.sleep(300.millis) *> world.records(record(0, 5L, "k", 1000L))).replicateA_(8) else IO.sleep(2500.millis)
+          fetches <- world.fetches.get
+          log     <- world.log.get
+          ended   <- world.ended
+          _       <- outcome.set(Some((fetches.size, log.count(_ == Event.Renewed), ended)))
+        yield ()
+      *> outcome.get.map(_.get)
+
+  test("exactly once, a transaction that fails in a way Java recovers from starts the tasks again from what the group committed, and goes on"):
+    failedOnce(new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))).map:
+      (fetches, renewed, ended) => assertEquals((fetches, renewed, ended), (2, 0, None))
+
+  test("exactly once, a producer fenced by another with its transactional id is made anew, and the tasks start again from what the group committed"):
+    failedOnce(new KafkaException.BackendFailure("fenced", Some(ErrorCode.Fenced), Some(false), Some(true))).map: (fetches, renewed, ended) =>
+      assertEquals((fetches, renewed, ended), (2, 1, None))
+
+  test("exactly once, a producer refused for its epoch or an expired producer id is made anew, as Java takes either as its tasks having moved"):
+    val epoch   = new KafkaException.BackendFailure("epoch", Some(ErrorCode.InvalidProducerEpoch), Some(false), Some(false))
+    val expired = new KafkaException.BackendFailure("expired", Some(ErrorCode.Other(49)), Some(false), Some(true))
+    failedOnce(epoch).map((fetches, renewed, ended) => assertEquals((fetches, renewed, ended), (2, 1, None))) *> failedOnce(expired)
+      .map((fetches, renewed, ended) => assertEquals((fetches, renewed, ended), (2, 1, None)))
+
+  test("exactly once, a failure recovered from does not count against tasks the member is given after it"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0), Fetched("in", 1, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    // The first transaction fails, the one finishing it succeeds, and the next fails too, after the task timeout.
+    run(committed = _ => IO.pure(committed), failing = Some(n => Option.when(n == 0 || n == 2)(timedOut)), taskTimeout = 1.second): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0)))
+        _     <- IO.sleep(100.millis)
+        _     <- world.records(record(0, 5L, "k", 1000L))
+        _     <- IO.sleep(500.millis)
+        _     <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
+        _     <- IO.sleep(2.seconds)
+        _     <- world.records(record(1, 5L, "k", 1000L))
+        _     <- IO.sleep(500.millis)
+        ended <- world.ended
+      yield assertEquals(ended, None)
+
+  test("exactly once, a failure that is neither retriable nor fatal stops the engine at once, as Java stops for one"):
+    val tooLarge = new KafkaException.BackendFailure("too large", Some(ErrorCode.MessageTooLarge), Some(false), Some(false))
+    failedOnce(tooLarge).map((fetches, _, ended) => assertEquals((fetches, ended), (1, Some(Left(tooLarge)))))
+
+  test("at least once, a write that fails in a way worth retrying starts the tasks again from what the group committed, and the engine goes on"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed)): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 0)))
+        _       <- IO.sleep(100.millis)
+        _       <- world.failWrite(timedOut)
+        _       <- world.records(record(0, 5L, "k", 1000L))
+        _       <- IO.sleep(1500.millis)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield assertEquals((fetches.size, ended), (2, None))
+
+  test("at least once, records processed between two failures end the first one's time, though no commit came between, as Java clears it"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), taskTimeout = 500.millis): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _     <- world.failWrite(timedOut) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(100.millis)
+        _     <- (6L to 12L).toList.traverse_(offset => world.records(record(0, offset, "k", 1000L)) *> IO.sleep(100.millis))
+        _     <- world.failWrite(timedOut) *> world.records(record(0, 13L, "k", 1000L)) *> IO.sleep(200.millis)
+        ended <- world.ended
+      yield assertEquals(ended, None)
+
+  test("at least once, a write that fails for every record stops the engine after the task timeout, though commits of nothing come between"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), taskTimeout = 2.seconds): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _     <- world.failWrites(timedOut)
+        _     <- (0 until 5).toList.traverse_(_ => world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis))
+        ended <- world.ended
+      yield assertEquals(ended, Some(Left(timedOut)))
+
+  test("at least once, a failure recovered from counts no longer once the tasks commit again, so a later one starts its own task timeout"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), taskTimeout = 1.second): world =>
+      for
+        _ <- world.tell(assign(TaskId("0", 0)))
+        _ <- IO.sleep(100.millis)
+        _ <- world.failWrite(timedOut) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(500.millis)
+        // Processed well for longer than the task timeout, then a failure of its own.
+        _       <- (6L to 9L).toList.traverse_(offset => world.records(record(0, offset, "k", 1000L)) *> IO.sleep(500.millis))
+        _       <- world.failWrite(timedOut) *> world.records(record(0, 10L, "k", 1000L)) *> IO.sleep(500.millis)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield assertEquals((fetches.size, ended), (3, None))
+
+  test("exactly once, a fatal failure of a transaction stops the engine with it, and one Java recovers from does after the task timeout"):
+    val fatal = new KafkaException.BackendFailure("not authorized", Some(ErrorCode.Other(53)), Some(false), Some(true))
+    val again = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    failedOnce(fatal).map((_, _, ended) => assertEquals(ended, Some(Left(fatal)))) *> failedOnce(again, taskTimeout = 1.second, always = true)
+      .map((_, _, ended) => assertEquals(ended, Some(Left(again))))
 
   /** Feeds a task of each sub-topology of the repartitioning program, waits `seconds` and gives the purges made. */
   private def purges(world: World, seconds: Int): IO[List[Map[TopicPartition, Offset]]] =
@@ -360,6 +572,13 @@ final class EngineSuite extends CatsEffectSuite:
     yield log.collect { case Event.Purged(before) => before }
 
   private val purged = Map(partition("app-by-letter-repartition", 0) -> Offset.from(5L).orFail)
+
+  test("at least once, a commit dropped as the member no longer counts or no longer has the task purges nothing, since the group did not take it"):
+    List[Short](25, 110, 113).traverse_ : code =>
+      val refused =
+        (_: Int, topics: List[OffsetCommitRequest.Topic]) =>
+          IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, code))))
+      run(topology = byLetter, commit = refused)(world => purges(world, 5).map(made => assertEquals(made, Nil, s"code $code")))
 
   test("at least once, once the purge interval has passed, each repartition partition loses the records before where its task last committed"):
     run(topology = byLetter)(world => purges(world, 5).map(made => assertEquals(made, List(purged))))
@@ -573,10 +792,34 @@ final class EngineSuite extends CatsEffectSuite:
       Headers.empty
     )
 
+  test("a standby whose store holds a position outside its changelog, as after the topic was made anew, is emptied and follows it from the start"):
+    val stale = StoreContents.unchanged.updated(Chunk.array("gone".getBytes), Some(Stored(Chunk.array(Array[Byte](1)), 1L)))
+    MemoryStateDirectory(Map(("0_1", "counts") -> (StoreContents.empty.after(stale), Map(1 -> 50L)))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _   <- world.endsAt(Map(changelog(1) -> 10L))
+          _   <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+          _   <- IO.sleep(500.millis)
+          log <- world.log.get
+        yield assertEquals(log.collect { case followed: Event.Followed => followed }, List(Event.Followed(Vector(StartAt(changelog(1), 0L, -1)))))
+
+  test("a standby whose store holds a position waits for its changelog's bounds while the changelog's leader moves, and the engine goes on"):
+    MemoryStateDirectory(Map(("0_1", "counts") -> (StoreContents.empty, Map(1 -> 5L)))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _     <- world.endsAt(Map(changelog(1) -> 10L)) *> world.failEnds(2)
+          _     <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+          _     <- IO.sleep(1.second)
+          log   <- world.log.get
+          ended <- world.ended
+        yield
+          assertEquals(ended, None)
+          assertEquals(log.collect { case followed: Event.Followed => followed }, List(Event.Followed(Vector(StartAt(changelog(1), 5L, -1)))))
+
   test("a standby task follows its changelog from the start, and where it is and where the changelog ends are its task offsets"):
     run(): world =>
       for
-        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _       <- IO.sleep(500.millis)
         _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
         _       <- world.endsAt(Map(changelog(1) -> 5L))
@@ -591,11 +834,11 @@ final class EngineSuite extends CatsEffectSuite:
   test("a standby task made active restores only what it had not read, onto what it holds, and is no longer followed"):
     run(): world =>
       for
-        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _       <- IO.sleep(500.millis)
         _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
         _       <- IO.sleep(500.millis)
-        _       <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _       <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _       <- IO.sleep(500.millis)
         log     <- world.log.get
         from    <- world.restoredFrom.get
@@ -609,13 +852,13 @@ final class EngineSuite extends CatsEffectSuite:
   test("a changelog record read again from before where a standby task has read to is not applied again"):
     run(): world =>
       for
-        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(logged("k", 1L, 0L))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       yield
@@ -690,9 +933,60 @@ final class EngineSuite extends CatsEffectSuite:
         // The window [0, 10000) has gone on, and [20000, 30000) is held.
         assertEquals(
           logged.drop(1).map(r => (r.key.map(k => java.nio.ByteBuffer.wrap(k.toArray).getLong(k.size - 8)), r.value.isEmpty)).toSet,
-          Set((Some(0L), true), (Some(20000L), false))
+          Set[(Option[Long], Boolean)]((Some(0L), true), (Some(20000L), false))
         )
         assertEquals(written.filter(_.topic.value == "out").flatMap(_.value).map(v => java.nio.ByteBuffer.wrap(v.toArray).getLong), List(2L))
+
+  test(
+    "at least once, a write of a suppression's buffer at a commit that fails in a way worth retrying starts the tasks again, and the engine goes on"
+  ):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing): world =>
+      for
+        _ <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _ <- world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(300.millis)
+        // Processed, the buffer's change waits for the commit, whose write of it is the next.
+        _       <- world.failWrite(timedOut) *> IO.sleep(1500.millis)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield assertEquals((fetches.size, ended), (2, None))
+
+  test(
+    "at least once, a write of a suppression's buffer that fails at every commit stops the engine once the task timeout has passed, though records are processed between"
+  ):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing, taskTimeout = 1.second): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _     <- world.failWrites(timedOut)
+        _     <- (0L until 20L).toList.traverse_(offset => world.records(record(1, offset, s"k$offset", 1000L)) *> IO.sleep(150.millis))
+        ended <- world.ended
+      yield assertEquals(ended, Some(Left(timedOut)))
+
+  test("a write of a suppression's buffer that fails in a way worth retrying as its task is handed back gives the task up, and the engine goes on"):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _     <- world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(50.millis)
+        _     <- world.failWrite(timedOut) *> world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1)))) *> IO.sleep(500.millis)
+        log   <- world.log.get
+        ended <- world.ended
+      yield
+        assertEquals(ended, None)
+        assert(log.contains(Event.Revoked(2)), log)
+
+  test(
+    "at least once, a suppression's buffer that cannot be written at any commit stops the engine after the task timeout, though records processed between are written"
+  ):
+    val timedOut = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(topology = suppressing, taskTimeout = 2.seconds): world =>
+      for
+        _     <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+        _     <- world.failWritesTo(_.endsWith("final-store-changelog"), timedOut)
+        _     <- (0L until 60L).toList.traverse_(offset => world.records(record(1, offset, s"k$offset", 1000L)) *> IO.sleep(100.millis))
+        ended <- world.ended
+      yield assertEquals(ended, Some(Left(timedOut)))
 
   test("a suppression's buffer logs what it changed before the offsets are committed"):
     run(topology = suppressing, commit = (_, _) => IO.pure(List(OffsetCommitRequest.Answer("in", 1, 29)))): world =>
@@ -810,12 +1104,12 @@ final class EngineSuite extends CatsEffectSuite:
       PolledRecord("app-sessions-changelog", 1, offset, Some(end), 1, -1, Some(session(key, start, end)), Some(counted(1L).value), Headers.empty)
     run(topology = sessioning): world =>
       for
-        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _ <- IO.sleep(500.millis)
         // By its end, which a session store expires it by, [0, 25000] is not expired; read as a window's start, it would be.
         _    <- world.changelogs(sessionLogged("k", 0L, 25000L, 0L), sessionLogged("gone", 0L, 5000L, 1L), sessionLogged("other", 30000L, 30000L, 2L))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       yield assertEquals(from.map(_._2("sessions").keySet), List(Set(session("k", 0L, 25000L), session("other", 30000L, 30000L))))
@@ -838,11 +1132,11 @@ final class EngineSuite extends CatsEffectSuite:
       PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), Some(counted(1L).value), Headers.empty)
     run(topology = windowing): world =>
       for
-        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(windowLogged("k", 0L, 0L), windowLogged("other", 30000L, 1L))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       yield assertEquals(from.map(_._2("windows").keySet), List(Set(window("other", 30000L))))
@@ -852,11 +1146,11 @@ final class EngineSuite extends CatsEffectSuite:
       PolledRecord("app-windows-changelog", 1, offset, Some(start), 1, -1, Some(window(key, start)), value, Headers.empty)
     run(topology = windowing): world =>
       for
-        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _    <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _    <- IO.sleep(500.millis)
         _    <- world.changelogs(windowLogged("k", 0L, 0L, Some(counted(1L).value)), windowLogged("other", 30000L, 1L, None))
         _    <- IO.sleep(500.millis)
-        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+        _    <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
         _    <- IO.sleep(500.millis)
         from <- world.restoredFrom.get
       // The plane records only the stores holding something.
@@ -865,15 +1159,15 @@ final class EngineSuite extends CatsEffectSuite:
   /** Stands by for task 0_1, reads two of its changelog records, takes the standby away, then after `later` makes the task active. */
   private def droppedThenActive(world: World, later: FiniteDuration): IO[(List[Map[TopicPartition, Long]], TaskOffsets)] =
     for
-      _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+      _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
       _       <- IO.sleep(500.millis)
       _       <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
       _       <- IO.sleep(500.millis)
-      _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty)))
+      _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty), 1))
       _       <- IO.sleep(500.millis)
       offsets <- world.taskOffsets
       _       <- IO.sleep(later)
-      _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+      _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
       _       <- IO.sleep(500.millis)
       from    <- world.restoredFrom.get
     yield (from.map(_._1), offsets)
@@ -891,7 +1185,7 @@ final class EngineSuite extends CatsEffectSuite:
           _       <- IO.sleep(200.millis)
           offsets <- world.taskOffsets
           gaveUp  <- directory.held
-          _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _       <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
           _       <- IO.sleep(200.millis)
           from    <- world.restoredFrom.get
         yield
@@ -900,23 +1194,80 @@ final class EngineSuite extends CatsEffectSuite:
           assertEquals(from.map(_._1), List(Map.empty[TopicPartition, Long], Map(changelog(1) -> 7L)))
           assertEquals(from.map(_._2.get("counts").map(_.keySet)), List(None, Some(Set(Chunk.array("k".getBytes)))))
 
+  test("with a state directory, a task given up while its changelog's leader moves waits for the end, and the engine goes on"):
+    MemoryStateDirectory().flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _      <- world.endsAt(Map(changelog(1) -> 7L))
+          _      <- world.tell(assign(TaskId("0", 1)))
+          _      <- IO.sleep(100.millis)
+          _      <- world.records(record(1, 0L, "k", 1000L))
+          _      <- IO.sleep(200.millis)
+          _      <- world.failEnds(2)
+          _      <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1))))
+          _      <- IO.sleep(1.second)
+          gaveUp <- directory.held
+          ended  <- world.ended
+        yield
+          assertEquals(ended, None)
+          assertEquals(gaveUp, Map("0_1" -> Map("counts" -> 7L)))
+
+  test(
+    "with a state directory, a task given up after a commit the group refused does not take its changelog's end, which the next owner may write to"
+  ):
+    val refused =
+      (_: Int, topics: List[OffsetCommitRequest.Topic]) =>
+        IO.pure(topics.flatMap(topic => topic.partitions.map(p => OffsetCommitRequest.Answer(topic.name, p.index, 25.toShort))))
+    MemoryStateDirectory().flatMap: directory =>
+      run(state = Some(directory), commit = refused): world =>
+        for
+          _      <- world.endsAt(Map(changelog(1) -> 7L))
+          _      <- world.tell(assign(TaskId("0", 1)))
+          _      <- IO.sleep(100.millis)
+          _      <- world.records(record(1, 0L, "k", 1000L))
+          _      <- IO.sleep(200.millis)
+          _      <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1))))
+          _      <- IO.sleep(200.millis)
+          gaveUp <- directory.held
+        yield assert(!gaveUp.get("0_1").exists(_.get("counts").contains(7L)), gaveUp)
+
   test("with a state directory, a standby records with each batch how far it has read, kept when it is taken away, and restored from there"):
     MemoryStateDirectory().flatMap: directory =>
       run(state = Some(directory)): world =>
         for
-          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
           _      <- IO.sleep(500.millis)
           _      <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
           _      <- IO.sleep(500.millis)
-          _      <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty)))
+          _      <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty), 1))
           _      <- IO.sleep(500.millis)
           gaveUp <- directory.held
-          _      <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty)))
+          _      <- world.tell(MemberAction.Assign(3, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
           _      <- IO.sleep(500.millis)
           from   <- world.restoredFrom.get
         yield
           assertEquals(gaveUp, Map("0_1" -> Map("counts" -> 2L)))
           assertEquals(from.map(_._1), List(Map(changelog(1) -> 2L)))
+
+  test("with a state directory, a standby the member loses with all its tasks is closed and kept as given up, and restored from there"):
+    MemoryStateDirectory().flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+          _      <- IO.sleep(500.millis)
+          _      <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+          _      <- IO.sleep(500.millis)
+          _      <- world.tell(MemberAction.LoseAll)
+          _      <- IO.sleep(500.millis)
+          gaveUp <- directory.held
+          _      <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
+          _      <- IO.sleep(500.millis)
+          from   <- world.restoredFrom.get
+          opened <- directory.opened.get
+        yield
+          assertEquals(gaveUp, Map("0_1" -> Map("counts" -> 2L)))
+          assertEquals(from.map(_._1), List(Map(changelog(1) -> 2L)))
+          assertEquals(opened.count(_ == ("0_1", "counts")), 2, "opened as a standby, then again once closed")
 
   test("tasks an earlier run gave up are reported in task offsets from the start, and restored from where their stores were"):
     val held = Map(("0_1", "counts") -> (StoreContents.of(Map(Chunk.array("k".getBytes) -> counted(3L))), Map(1 -> 4L)))
@@ -932,6 +1283,18 @@ final class EngineSuite extends CatsEffectSuite:
           assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 4L)))
           assertEquals(from.map(_._1), List(Map(changelog(1) -> 4L)))
 
+  test("with a state directory, an active task the member loses with all its tasks is still reported in task offsets, as its stores stay on disk"):
+    val held = Map(("0_1", "counts") -> (StoreContents.of(Map(Chunk.array("k".getBytes) -> counted(3L))), Map(1 -> 4L)))
+    MemoryStateDirectory(held, Map("0_1" -> Map("counts" -> 4L))).flatMap: directory =>
+      run(state = Some(directory)): world =>
+        for
+          _       <- world.tell(assign(TaskId("0", 1)))
+          _       <- IO.sleep(200.millis)
+          _       <- world.tell(MemberAction.LoseAll)
+          _       <- IO.sleep(200.millis)
+          offsets <- world.taskOffsets
+        yield assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 4L)))
+
   test("a store kept in memory, and a store with no position, are not taken from the state directory"):
     val inMemory =
       KStream(Named("read"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts").inMemory)
@@ -940,11 +1303,73 @@ final class EngineSuite extends CatsEffectSuite:
       run(topology = Topology.of(inMemory).orFail, state = Some(directory)): world =>
         (world.tell(assign(TaskId("0", 1))) *> IO.sleep(200.millis) *> directory.opened.get).map(opened => assertEquals(opened, Nil))
 
+  test("with a state directory, a task given up whose stores are all kept in memory is not reported in task offsets, as nothing of it stays"):
+    val inMemory =
+      KStream(Named("read"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts").inMemory)
+        .toStream(Named("to-stream")).to(Named("write"), Topic.from("out").orFail, text, Serde.long[IO])
+    MemoryStateDirectory().flatMap: directory =>
+      run(topology = Topology.of(inMemory).orFail, state = Some(directory)): world =>
+        for
+          _       <- world.endsAt(Map(changelog(1) -> 7L))
+          _       <- world.tell(assign(TaskId("0", 1))) *> IO.sleep(100.millis)
+          _       <- world.records(record(1, 0L, "k", 1000L)) *> IO.sleep(200.millis)
+          _       <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 1)))) *> IO.sleep(200.millis)
+          offsets <- world.taskOffsets
+          held    <- directory.held
+        yield
+          assertEquals(offsets.positions, Nil)
+          assertEquals(held, Map.empty)
+
+  test(
+    "with a state directory, a standby taken away whose stores are all kept in memory is not kept, as its stores are closed with nothing of it left"
+  ):
+    val inMemory =
+      KStream(Named("read"), Topic.from("in").orFail, text, text).groupByKey(text, text).count(Named("count"), Store("counts").inMemory)
+        .toStream(Named("to-stream")).to(Named("write"), Topic.from("out").orFail, text, Serde.long[IO])
+    MemoryStateDirectory().flatMap: directory =>
+      run(topology = Topology.of(inMemory).orFail, state = Some(directory)): world =>
+        for
+          _       <- world.endsAt(Map(changelog(1) -> 7L))
+          _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1)) *> IO.sleep(500.millis)
+          standby <- world.taskOffsets.map(_.positions.map(_.partition))
+          _       <- world.tell(MemberAction.Assign(2, Assignment(Set.empty, Set.empty, Set.empty), 1))
+          // Waited for, as the engine handles the change in its own time; a standby kept would be reported for good.
+          left <- (IO.sleep(20.millis) *> world.taskOffsets.map(_.positions)).iterateUntil(_.isEmpty).timeout(5.seconds).attempt
+        yield
+          assertEquals(standby, List(1))
+          assert(left.isRight, left)
+
   test("a standby taken away keeps its store, reported in task offsets, and its task made active soon after restores only what it had not read"):
     run(): world =>
       droppedThenActive(world, 1.minute).map: (from, offsets) =>
         assertEquals(from, List(Map(changelog(1) -> 2L)))
         assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 2L)))
+
+  test("a changelog record read for a standby just before the last one went is not applied when its task stands by again from the start"):
+    run(): world =>
+      for
+        _ <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+        _ <- IO.sleep(500.millis)
+        // While the member restores an active task, and so no longer stands by, a record for the standby is still read.
+        _ <- world.restoreFor(2.seconds)
+        _ <- world.tell(MemberAction.Assign(2, Assignment(Set(TaskId("0", 0)), Set.empty, Set.empty), 1))
+        _ <- IO.sleep(500.millis)
+        _ <- world.changelogs(logged("stale", 9L, 500L))
+        _ <- IO.sleep(3.seconds)
+        _ <- world.restoreFor(Duration.Zero)
+        // Past the cleanup delay, the standby comes back from the start, and reads its changelog from there.
+        _    <- IO.sleep(Engine.StateCleanupDelay + 1.minute)
+        _    <- world.tell(MemberAction.Assign(3, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
+        _    <- IO.sleep(500.millis)
+        _    <- world.changelogs(logged("k", 1L, 0L), logged("k", 2L, 1L))
+        _    <- IO.sleep(500.millis)
+        _    <- world.tell(MemberAction.Assign(4, Assignment(Set(TaskId("0", 1)), Set.empty, Set.empty), 1))
+        _    <- IO.sleep(500.millis)
+        from <- world.restoredFrom.get
+      yield
+        val (positions, held) = from.last
+        assertEquals(positions, Map(changelog(1) -> 2L))
+        assertEquals(held.get("counts").map(_.keySet), Some(Set(Chunk.array("k".getBytes))))
 
   test("a standby taken away longer ago than Java's cleanup delay is forgotten, and its task restores from the start"):
     run(): world =>
@@ -953,7 +1378,7 @@ final class EngineSuite extends CatsEffectSuite:
   test("lost tasks are no longer stood by, but their stores are kept and reported, as Java keeps a lost task's state directory"):
     run(): world =>
       for
-        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty)))
+        _       <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 1)), Set.empty), 1))
         _       <- IO.sleep(500.millis)
         _       <- world.tell(MemberAction.LoseAll)
         _       <- IO.sleep(500.millis)
@@ -962,6 +1387,130 @@ final class EngineSuite extends CatsEffectSuite:
       yield
         assertEquals(log.collect { case followed: Event.Followed => followed }.last, Event.Followed(Vector.empty))
         assertEquals(offsets.positions, List(StreamsGroup.TaskOffset("0", 1, 0L)))
+
+  test("released, the engine closes every store though one fails to close, and fails with that failure"):
+    val boom = new RuntimeException("boom")
+    val run  =
+      (World(), IO.ref(0)).tupled.flatMap: (world, closes) =>
+        // The first store to close fails, and each counts its closes.
+        val failing: TaskStore.Open[IO] =
+          (name, time, held) =>
+            TaskStore.memory[IO].apply(name, time, held).map: store =>
+              new TaskStore[IO]:
+                export store.{clear, clock, get, positions, range, timed}
+                def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
+                def close: IO[Unit] = closes.getAndUpdate(_ + 1).flatMap(before => IO.raiseWhen(before == 0)(boom))
+        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), failing)
+          .use(_ => world.tell(assign(TaskId("0", 0), TaskId("0", 1))) *> IO.sleep(500.millis)).attempt.product(closes.get)
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (released, closes) =>
+      assertEquals(released, Left(boom))
+      assertEquals(closes, 2)
+
+  test("in memory, a standby no longer wanted has its stores closed once it has been kept past the cleanup delay"):
+    val run =
+      (World(), IO.ref(0)).tupled.flatMap: (world, closes) =>
+        val counted: TaskStore.Open[IO] =
+          (name, time, held) =>
+            TaskStore.memory[IO].apply(name, time, held).map: store =>
+              new TaskStore[IO]:
+                export store.{clear, clock, get, positions, range, timed}
+                def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
+                def close: IO[Unit]                                                   = closes.update(_ + 1) *> store.close
+        val none = Assignment(Set.empty, Set.empty, Set.empty)
+        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), counted).use:
+          _ =>
+            for
+              _      <- world.tell(MemberAction.Assign(1, Assignment(Set.empty, Set(TaskId("0", 0)), Set.empty), 1)) *> IO.sleep(500.millis)
+              _      <- world.tell(MemberAction.Assign(2, none, 1)) *> IO.sleep(500.millis)
+              kept   <- closes.get
+              _      <- IO.sleep(11.minutes) *> world.tell(MemberAction.Assign(3, none, 1)) *> IO.sleep(500.millis)
+              closed <- closes.get
+            yield (kept, closed)
+    TestControl.executeEmbed(run.timeout(1.hour)).map(counts => assertEquals(counts, (0, 1)))
+
+  test("a query reads what a task has counted since it last committed, before the commit"):
+    val key       = Chunk.array("k".getBytes)
+    val partition = Murmur2.partition(key, 4)
+    val task      = TaskId("0", partition)
+    val counts    = QueryableStore.keyValue(Store("counts"), text, Serde.long[IO])
+    World().flatMap: world =>
+      Engine
+        .running("app", counting, world.member(), world.plane, None, 1.hour, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), TaskStore.memory[IO])
+        .use: streams =>
+          for
+            _       <- world.report(_.copy(owned = Assignment(Set(task), Set.empty, Set.empty)))
+            _       <- world.tell(assign(task)) *> IO.sleep(200.millis)
+            _       <- world.records(record(partition, 0L, "k", 1000L), record(partition, 1L, "k", 1000L)) *> IO.sleep(300.millis)
+            counted <- streams.query(counts.get("k"))
+            commits <- world.commits.get
+          yield
+            assertEquals(commits, Nil)
+            assertEquals(counted, Right(Some(2L)))
+
+  test("exactly once, while tasks restarted after a failed transaction restore their stores, a query answers that the group is rebalancing"):
+    val key       = Chunk.array("k".getBytes)
+    val partition = Murmur2.partition(key, 4)
+    val task      = TaskId("0", partition)
+    val counts    = QueryableStore.keyValue(Store("counts"), text, Serde.long[IO])
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    World().flatMap: world =>
+      val transactions = world.transactions(n => Option.when(n == 0)(timedOut))
+      Engine.running(
+        "app",
+        counting,
+        world.member(),
+        world.plane,
+        Some(transactions),
+        100.millis,
+        1,
+        PurgeInterval,
+        CloseTimeout,
+        _ => IO.pure(4),
+        TaskStore.memory[IO]
+      ).use: streams =>
+        for
+          _      <- world.report(_.copy(owned = Assignment(Set(task), Set.empty, Set.empty)))
+          _      <- world.tell(assign(task)) *> IO.sleep(200.millis)
+          _      <- world.restoreFor(2.seconds)
+          _      <- world.records(record(partition, 0L, "k", 1000L)) *> IO.sleep(500.millis)
+          during <- streams.query(counts.get("k"))
+        yield assertEquals(during, Left(QueryProblem.Rebalancing))
+
+  test("tasks given up together are each closed though one fails to close"):
+    val boom = new RuntimeException("boom")
+    val run  =
+      (World(), IO.ref(0)).tupled.flatMap: (world, closes) =>
+        // The first store to close fails, and each counts its closes.
+        val failing: TaskStore.Open[IO] =
+          (name, time, held) =>
+            TaskStore.memory[IO].apply(name, time, held).map: store =>
+              new TaskStore[IO]:
+                export store.{clear, clock, get, positions, range, timed}
+                def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
+                def close: IO[Unit] = closes.getAndUpdate(_ + 1).flatMap(before => IO.raiseWhen(before == 0)(boom))
+        Engine.running("app", counting, world.member(), world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), failing).use:
+          _ =>
+            world.tell(assign(TaskId("0", 0), TaskId("0", 1))) *> IO.sleep(500.millis) *>
+              world.tell(MemberAction.Revoke(2, Set(TaskId("0", 0), TaskId("0", 1)))) *> IO.sleep(500.millis) *> closes.get
+        .attempt
+    TestControl.executeEmbed(run.timeout(1.minute)).map(closed => assertEquals(closed.toOption, Some(2)))
+
+  test("a store still closing when the close timeout runs out is not closed again as the engine is released"):
+    val run =
+      (World(), IO.ref(0)).tupled.flatMap: (world, closes) =>
+        // Each store takes longer to close than the close timeout, and counts its closes.
+        val slow: TaskStore.Open[IO] =
+          (name, time, held) =>
+            TaskStore.memory[IO].apply(name, time, held).map: store =>
+              new TaskStore[IO]:
+                export store.{clear, clock, get, positions, range, timed}
+                def write(changes: StoreChanges, positions: Map[Int, Long]): IO[Unit] = store.write(changes, positions)
+                def close: IO[Unit]                                                   = closes.update(_ + 1) *> IO.sleep(CloseTimeout * 2)
+        // Leaving takes the task back, which the engine gives back by closing its store.
+        val member = world.member(leave = world.tell(MemberAction.Revoke(2, Set(TaskId("0", 0)))) *> IO.never)
+        Engine.running("app", counting, member, world.plane, None, 1.second, 1, PurgeInterval, CloseTimeout, _ => IO.pure(4), slow)
+          .use(_ => world.tell(assign(TaskId("0", 0))) *> IO.sleep(500.millis)) *> IO.sleep(CloseTimeout * 3) *> closes.get
+    TestControl.executeEmbed(run.timeout(1.minute)).map(closes => assertEquals(closes, 1))
 
   test("released, the engine asks its member to leave and waits for it no longer than the close timeout and one poll of its standby reader"):
     val run =
@@ -1058,7 +1607,7 @@ object EngineSuite:
 
   def partition(topic: String, n: Int): TopicPartition = TopicPartition(Topic.from(topic).orFail, Partition.from(n).orFail)
 
-  def assign(tasks: TaskId*): MemberAction = MemberAction.Assign(1, Assignment(tasks.toSet, Set.empty, Set.empty))
+  def assign(tasks: TaskId*): MemberAction = MemberAction.Assign(1, Assignment(tasks.toSet, Set.empty, Set.empty), 1)
 
   def record(
       partition: Int,
@@ -1089,9 +1638,11 @@ object EngineSuite:
     case Assigned(round: Long)
     case Revoked(round: Long)
     case Leave
+    case Abandon
     case Transaction(written: Int, offsets: Map[TopicPartition, OffsetAndMetadata])
     case Purged(before: Map[TopicPartition, Offset])
     case Followed(starts: Vector[StartAt])
+    case Renewed
 
   /** A member and a data plane the tests script, recording what the engine does with them. */
   final class World(
@@ -1107,21 +1658,26 @@ object EngineSuite:
       transacted: Ref[IO, Int],
       outcome: Ref[IO, Option[Either[Throwable, Unit]]],
       val wroteAt: Ref[IO, List[(Long, List[String])]],
-      purging: Ref[IO, IO[Unit]],
+      // A purge's outcome, the next write's, and a failure of every write to a topic a test names.
+      purging: Ref[IO, (IO[Unit], IO[Unit], Option[(String => Boolean, Throwable)])],
       reported: SignallingRef[IO, Member],
       restoring: Ref[IO, FiniteDuration],
       val states: Ref[IO, List[StreamsState]],
       standingBy: Queue[IO, PolledRecord],
-      ending: Ref[IO, Map[TopicPartition, Long]],
+      ending: Ref[IO, (Map[TopicPartition, Long], Int)],
       val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, StoreContents])]],
       offsetsRead: Ref[IO, IO[TaskOffsets]],
-      val restoredAlso: Ref[IO, Map[String, StoreContents]]
+      val restoredAlso: Ref[IO, Map[String, StoreContents]],
+      val epochs: Ref[IO, List[Int]]
   ):
     /** Changelog records for the standby tasks to follow. */
     def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
 
     /** Where changelog partitions end. */
-    def endsAt(ends: Map[TopicPartition, Long]): IO[Unit] = ending.set(ends)
+    def endsAt(ends: Map[TopicPartition, Long]): IO[Unit] = ending.update(_.copy(_1 = ends))
+
+    /** Makes the next `times` asks for where changelogs end fail, as librdkafka's does while a partition's leader moves. */
+    def failEnds(times: Int): IO[Unit] = ending.update(_.copy(_2 = times))
 
     /** The task offsets the engine gives its member to send. */
     def taskOffsets: IO[TaskOffsets] = offsetsRead.get.flatten
@@ -1133,7 +1689,16 @@ object EngineSuite:
     def restoreFor(time: FiniteDuration): IO[Unit] = restoring.set(time)
 
     /** Makes each purge fail after it is logged. */
-    def failPurges: IO[Unit] = purging.set(IO.raiseError(new RuntimeException("purge refused")))
+    def failPurges: IO[Unit] = purging.update(_.copy(_1 = IO.raiseError(new RuntimeException("purge refused"))))
+
+    /** Makes the next write fail with `failure`, once. */
+    def failWrite(failure: Throwable): IO[Unit] = purging.update(_.copy(_2 = IO.raiseError(failure)))
+
+    /** Fails every write to a topic `to` takes from now on, the others written. */
+    def failWritesTo(to: String => Boolean, failure: Throwable): IO[Unit] = purging.update(_.copy(_3 = Some(to -> failure)))
+
+    /** Fails every write from now on, each failure arming the next. */
+    def failWrites(failure: Throwable): IO[Unit] = purging.update(_.copy(_2 = failWrites(failure) *> IO.raiseError(failure)))
 
     def tell(change: MemberAction): IO[Unit]                = changes.offer(Some(change))
     def records(polled: PolledRecord*): IO[Unit]            = polled.toList.traverse_(incoming.offer)
@@ -1152,27 +1717,31 @@ object EngineSuite:
       val (fetch, send) = (committed, commit)
       val leaving       = leave
       new GroupMember[IO]:
-        def changes: Stream[IO, MemberAction]                                                     = Stream.fromQueueNoneTerminated(World.this.changes)
-        def revoked(round: Long): IO[Unit]                                                        = logged(Event.Revoked(round))
-        def assigned(round: Long): IO[Unit]                                                       = logged(Event.Assigned(round))
-        def leave: IO[Unit]                                                                       = logged(Event.Leave) *> leaving
-        def epoch: IO[Int]                                                                        = IO.pure(1)
-        def reports: Signal[IO, Member]                                                           = reported
-        def offsetsFrom(read: IO[TaskOffsets]): IO[Unit]                                          = offsetsRead.set(read)
-        def commit(topics: List[OffsetCommitRequest.Topic]): IO[List[OffsetCommitRequest.Answer]] =
-          (now.flatMap(at => committedAt.update(_ :+ at)) *> commits.modify(before => (before :+ topics, before.size))).flatMap: n =>
-            send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
+        def changes: Stream[IO, MemberAction]            = Stream.fromQueueNoneTerminated(World.this.changes)
+        def revoked(round: Long): IO[Unit]               = logged(Event.Revoked(round))
+        def assigned(round: Long): IO[Unit]              = logged(Event.Assigned(round))
+        def leave: IO[Unit]                              = logged(Event.Leave) *> leaving
+        def abandon: IO[Unit]                            = logged(Event.Abandon)
+        def epoch: IO[Int]                               = IO.pure(1)
+        def reports: Signal[IO, Member]                  = reported
+        def offsetsFrom(read: IO[TaskOffsets]): IO[Unit] = offsetsRead.set(read)
+        def commit(topics: List[OffsetCommitRequest.Topic], epoch: Int): IO[List[OffsetCommitRequest.Answer]] =
+          (now.flatMap(at => committedAt.update(_ :+ at)) *> epochs.update(_ :+ epoch) *> commits.modify(before => (before :+ topics, before.size)))
+            .flatMap: n =>
+              send(n, topics).flatTap(answers => logged(Event.Committed(topics)).whenA(answers.forall(_.errorCode == 0)))
         def committed(topics: List[OffsetFetchRequest.Topic]): IO[OffsetFetchRequest.Answer] =
           (now.flatMap(at => fetchedAt.update(_ :+ at)) *> fetches.modify(before => (before :+ topics, before.size))).flatMap(fetch)
 
     /** Transactions that record what they wrote and the offsets they took, failing as `failing` says for the `n`th. */
     def transactions(failing: Int => Option[Throwable]): Engine.Transactions[IO] =
       new Engine.Transactions[IO]:
-        def apply[A](body: Engine.Writer[IO] => IO[(A, Map[TopicPartition, OffsetAndMetadata])]): IO[A] =
-          IO.ref(0).flatMap: count =>
+        def apply[A](epoch: Int)(body: Engine.Writer[IO] => IO[(A, Map[TopicPartition, OffsetAndMetadata])]): IO[A] =
+          epochs.update(_ :+ epoch) *> IO.ref(0).flatMap: count =>
             body(records => count.update(_ + records.size)).flatMap: (result, offsets) =>
               transacted.modify(n => (n + 1, n)).flatMap: n =>
                 failing(n).fold(count.get.flatMap(written => logged(Event.Transaction(written, offsets))).as(result))(IO.raiseError)
+
+        def renew: IO[Unit] = logged(Event.Renewed)
 
     val plane: Engine.Plane[IO] =
       new Engine.Plane[IO]:
@@ -1189,11 +1758,20 @@ object EngineSuite:
         def follow(starts: Vector[StartAt]): IO[Unit] = logged(Event.Followed(starts))
         def followed: IO[List[PolledRecord]]          =
           standingBy.tryTakeN(None).flatMap(taken => if taken.isEmpty then IO.sleep(Engine.PollMillis.millis).as(Nil) else IO.pure(taken))
-        def ends(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, Long]] = ending.get.map(_.view.filterKeys(partitions.toSet).toMap)
+        // Each changelog starts at its first offset, 0, and ends where `endsAt` says.
+        // Each fails while `failEnds` says, as while a leader moves.
+        def bounds(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, (Long, Long)]] = ends(partitions).map(_.view.mapValues(0L -> _).toMap)
+        def ends(partitions: Vector[TopicPartition]): IO[Map[TopicPartition, Long]]           =
+          ending.modify((ends, failing) => ((ends, (failing - 1).max(0)), failing)).flatMap: failing =>
+            if failing > 0 then IO.raiseError(new KafkaException.BackendFailure("no leader", Some(ErrorCode.NotLeaderOrFollower), Some(true)))
+            else ending.get.map(_._1.view.filterKeys(partitions.toSet).toMap)
         def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] =
           val values = records.toList.flatMap(_.value).map(value => new String(value.toArray))
-          written.update(_ ++ records.toList) *> now.flatMap(at => wroteAt.update(_ :+ (at, values)))
-        def purge(before: Map[TopicPartition, Offset]): IO[Unit] = logged(Event.Purged(before)) *> purging.get.flatten
+          purging.get
+            .flatMap(_._3.filter((to, _) => records.exists(record => to(record.topic.value))).traverse_((_, failure) => IO.raiseError(failure))) *>
+            purging.getAndUpdate(_.copy(_2 = IO.unit)).flatMap(_._2) *> written.update(_ ++ records.toList) *>
+            now.flatMap(at => wroteAt.update(_ :+ (at, values)))
+        def purge(before: Map[TopicPartition, Offset]): IO[Unit] = logged(Event.Purged(before)) *> purging.get.flatMap(_._1)
 
   private val identity = MemberIdentity("app", "member", "process", StreamsGroup.Topology(0, Nil), 300000, None, Nil, None)
 
@@ -1212,16 +1790,17 @@ object EngineSuite:
         IO.ref(0),
         IO.ref(Option.empty[Either[Throwable, Unit]]),
         IO.ref(List.empty[(Long, List[String])]),
-        IO.ref(IO.unit),
+        IO.ref((IO.unit, IO.unit, Option.empty[(String => Boolean, Throwable)])),
         SignallingRef[IO].of(Member(identity)),
         IO.ref(Duration.Zero: FiniteDuration),
         IO.ref(List.empty[StreamsState]),
         Queue.unbounded[IO, PolledRecord],
-        IO.ref(Map.empty[TopicPartition, Long]),
+        IO.ref((Map.empty[TopicPartition, Long], 0)),
         IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, StoreContents])]),
         IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
-        IO.ref(Map.empty[String, StoreContents])
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
+        IO.ref(Map.empty[String, StoreContents]),
+        IO.ref(List.empty[Int])
+      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.
@@ -1234,7 +1813,8 @@ object EngineSuite:
       topology: Topology[IO] = counting,
       concurrency: Int = 1,
       open: TaskStore.Open[IO] = TaskStore.memory[IO],
-      state: Option[StateDirectory[IO]] = None
+      state: Option[StateDirectory[IO]] = None,
+      taskTimeout: FiniteDuration = StreamsSettings.DefaultTaskTimeout
   )(script: World => IO[Unit]): IO[Unit] =
     val program =
       World().flatMap: world =>
@@ -1253,7 +1833,8 @@ object EngineSuite:
           _ => IO.pure(4),
           open,
           None,
-          state
+          state,
+          taskTimeout = taskTimeout
         ).use: running =>
           running.run.attempt.flatMap(world.finished).start *> script(world)
     TestControl.executeEmbed(program.timeout(15.minutes))

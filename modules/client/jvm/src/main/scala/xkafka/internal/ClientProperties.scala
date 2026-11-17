@@ -34,10 +34,25 @@ private[xkafka] object ClientProperties:
 
   /** The Java consumer bounds the calls given no timeout of their own, such as reading a position, by its default API timeout. */
   def consumer[F[_], K, V](settings: ConsumerSettings[F, K, V]): Map[String, String] =
-    Map("default.api.timeout.ms" -> settings.requestTimeout.toMillis.toString) ++ fetchWait(settings.fetchWait)
+    Map("default.api.timeout.ms" -> settings.requestTimeout.toMillis.toString) ++
+      fetchWait(settings.fetchWait, settings.client.properties ++ settings.properties)
 
-  /** The Java consumer names the fetch wait `fetch.max.wait.ms`. */
-  def fetchWait(value: FiniteDuration): Map[String, String] = Map("fetch.max.wait.ms" -> value.toMillis.toString)
+  /** The Java consumer gives up on a fetch after its request timeout, 30 s unless set, so a fetch the broker may hold for nearly that long or more is
+    * given that long again past the wait, unless the properties set one.
+    */
+  private def fetchRequestTimeout(value: FiniteDuration, properties: Map[String, String]): Map[String, String] =
+    val wait = value.toMillis
+    val set  = properties.keys.exists(_.trim.equalsIgnoreCase("request.timeout.ms"))
+    if set || wait + RequestMargin <= JavaRequestTimeout then Map.empty else Map("request.timeout.ms" -> (wait + JavaRequestTimeout).toString)
+
+  private val JavaRequestTimeout = 30000L
+  private val RequestMargin      = 5000L
+
+  /** The Java consumer names the fetch wait `fetch.max.wait.ms`, and gives a fetch no longer than its request timeout, so a wait that long gets a
+    * request timeout to match, where `properties` set none.
+    */
+  def fetchWait(value: FiniteDuration, properties: Map[String, String] = Map.empty): Map[String, String] =
+    Map("fetch.max.wait.ms" -> value.toMillis.toString) ++ fetchRequestTimeout(value, properties)
 
   def security(settings: SecuritySettings): Map[String, String] = internal.security.SecurityProperties.javaClient(settings)
 

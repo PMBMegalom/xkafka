@@ -95,7 +95,9 @@ final class StreamJoinsSuite extends FunSuite:
       List(List(Source.Input(Topic.from("left").orFail), Source.Input(Topic.from("users").orFail)))
     )
 
-  test("sides that share a repartition topic, or a table's topic, are joined with themselves, and a join's name counts as a step's"):
+  test(
+    "sides that share a repartition topic, or a table's topic, are joined with themselves, and a step shares a name only with a join Java names a node so"
+  ):
     def rekeyed(from: KStream.Of[IO, String, String, KeyState.AsRead]) =
       from.groupBy(Repartition("shared"), text, text)((_, v) => v).count(Named(s"count-${from.lastNode}"), Store(s"counts-${from.lastNode}"))
         .toStream(Named(s"to-stream-${from.lastNode}"))
@@ -109,12 +111,13 @@ final class StreamJoinsSuite extends FunSuite:
         .join(Named("pairs"), KStream(Named("users-again"), Topic.from("users").orFail, text, text), within, Store("pairs"), text, text, text)(_ + _)
         .to(Named("write-15"), out, text, text)
     assert(refused(through).exists(_.contains(TopologyError.DuplicateSource(Topic.from("users").orFail))), clue(refused(through)))
+    // Java names the nodes of a join of two streams after it, `<name>-merge` the last, but none `<name>`; that of a join of two tables is `<name>`.
     assertEquals(
       refused(
         left.join(Named("pairs"), right, within, Store("pairs"), text, text, text)(_ + _).mapValues(Named("pairs"))(identity)
           .to(Named("write-16"), out, text, text)
       ),
-      Some(List(TopologyError.DuplicateName("pairs")))
+      None
     )
     assertEquals(
       refused(

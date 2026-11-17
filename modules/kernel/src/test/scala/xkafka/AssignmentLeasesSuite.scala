@@ -85,6 +85,28 @@ final class AssignmentLeasesSuite extends CatsEffectSuite:
       _ <- revoking.joinWithNever.timeout(1.second)
     yield assert(early.isLeft, "the revocation completed while an offset under its lease was still being recorded")
 
+  test("a transaction cancelled while it takes a lease's handle gives the lease back, so a revocation does not wait for it"):
+    for
+      leases  <- AssignmentLeases[IO](enabled = true)
+      _       <- leases.assign(List(first), replacing = false)
+      lease   <- leases.held.map(_(first))
+      started <- Deferred[IO, Unit]
+      nothing =
+        new OffsetCommitter[IO]:
+          override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
+      // Taking the handle waits, as fetching the group's metadata waits on the consumer's thread.
+      taking = leases.membership(this, lease, started.complete(()) *> IO.never[GroupHandle], _ => IO.unit, None)
+      offset =
+        new CommittableOffset[IO]:
+          override val topicPartition: TopicPartition                  = TopicPartition(Topic.from("t").toOption.get, Partition.from(0).toOption.get)
+          override val nextOffset: Offset                              = Offset.from(1L).toOption.get
+          override val committer: OffsetCommitter[IO]                  = nothing
+          override private[xkafka] def membership: GroupMembership[IO] = taking
+      fiber   <- GroupMembership.resolve(CommittableOffsetBatch.fromFoldable(List(offset))).use_.start
+      _       <- started.get *> fiber.cancel
+      revoked <- leases.revoke(List(first)).timeout(1.second).attempt
+    yield assertEquals(revoked, Right(()))
+
   test("an item read while its partition was revoked is left without a lease, and one read after a plain assignment keeps its lease"):
     for
       leases   <- AssignmentLeases[IO](enabled = true)

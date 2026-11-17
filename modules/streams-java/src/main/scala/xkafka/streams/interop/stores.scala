@@ -98,7 +98,8 @@ private abstract class View[F[_], K <: AnyRef, V <: AnyRef, S <: AnyRef](
   /** What a value read at its time is to the Java processor. */
   protected def held(bytes: Chunk[Byte], at: Long): F[S]
 
-  protected def prefixOf[P](prefix: P, serializer: JavaSerializer[P]): Chunk[Byte] = Chunk.array(serializer.serialize(access().topic.value, prefix))
+  // Java's stores serialize a prefix for no topic, so a serializer that writes the topic into its bytes scans as it does in Java.
+  protected def prefixOf[P](prefix: P, serializer: JavaSerializer[P]): Chunk[Byte] = Chunk.array(serializer.serialize(null, prefix))
 
 private object View:
   /** The order of keys' bytes as unsigned, as Java's stores keep them. */

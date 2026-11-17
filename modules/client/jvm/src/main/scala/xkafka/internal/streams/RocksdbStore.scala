@@ -59,12 +59,32 @@ private[xkafka] object RocksdbStore:
       val options =
         new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true).setAtomicFlush(true).setInfoLogLevel(InfoLogLevel.ERROR_LEVEL)
           .setIncreaseParallelism(math.max(Runtime.getRuntime.availableProcessors, 2))
-      val names                  = List(RocksDB.DEFAULT_COLUMN_FAMILY, "time".getBytes, "meta".getBytes)
-      val handles                = new java.util.ArrayList[ColumnFamilyHandle]()
-      val db                     = RocksDB.open(options, directory.toString, names.map(new ColumnFamilyDescriptor(_, family)).asJava, handles)
+      val names   = List(RocksDB.DEFAULT_COLUMN_FAMILY, "time".getBytes, "meta".getBytes)
+      val handles = new java.util.ArrayList[ColumnFamilyHandle]()
+      // A store that cannot be opened lets go of the options made for it.
+      val db =
+        try RocksDB.open(options, directory.toString, names.map(new ColumnFamilyDescriptor(_, family)).asJava, handles)
+        catch
+          case failure: Throwable =>
+            List(options, family, cache, filter).foreach(_.close())
+            throw failure
       def long(key: Array[Byte]) = Option(db.get(handles.get(2), key)).map(ByteBuffer.wrap(_).getLong)
-      val positions              = positionsIn(db, handles.get(2))
-      Opened(db, handles.asScala.toList, List(options, family, cache, filter), time, long(ClockKey).getOrElse(WindowStore.NoTime), positions)
+      // A store that cannot be read once open is closed again, so that RocksDB's lock on its directory goes with it.
+      try
+        Opened(
+          db,
+          handles.asScala.toList,
+          List(options, family, cache, filter),
+          time,
+          long(ClockKey).getOrElse(WindowStore.NoTime),
+          positionsIn(db, handles.get(2))
+        )
+      catch
+        case failure: Throwable =>
+          handles.asScala.foreach(_.close())
+          db.close()
+          List(options, family, cache, filter).foreach(_.close())
+          throw failure
     }.flatMap(opened => (Ref.of[F, Long](opened.clock), Ref.of[F, Map[Int, Long]](opened.positions)).mapN(new Store(opened, _, _)))
 
   /** What an open store holds open, the column families to close before the database and the options after it, and its clock and position. */
@@ -82,12 +102,16 @@ private[xkafka] object RocksdbStore:
     val cursor = db.newIterator(meta)
     try
       cursor.seek(Position.getBytes)
-      Iterator.continually(cursor).takeWhile(at => at.isValid && new String(at.key).startsWith(Position)).map: at =>
-        val partition = new String(at.key).drop(Position.length).toIntOption
-        val offset    = ByteBuffer.wrap(at.value).getLong
-        at.next()
-        partition.map(_ -> offset)
-      .toList.flatten.toMap
+      val positions =
+        Iterator.continually(cursor).takeWhile(at => at.isValid && new String(at.key).startsWith(Position)).map: at =>
+          val partition = new String(at.key).drop(Position.length).toIntOption
+          val offset    = ByteBuffer.wrap(at.value).getLong
+          at.next()
+          partition.map(_ -> offset)
+        .toList.flatten.toMap
+      // An iterator that stops being valid has reached the end, or failed, which `status` raises.
+      cursor.status()
+      positions
     finally cursor.close()
 
   /** A time as eight bytes that order as the times do: big-endian, with the sign bit flipped. */
@@ -142,6 +166,34 @@ private[xkafka] object RocksdbStore:
           finally batch.close()
         } *> clocked.set(after) *> positioned.update(_ ++ positions)
 
+    /** Deletes every entry as one range of each family, from its first key to past its last, written at once, so that a query reads the store whole
+      * or emptied, and no entry is read to do it.
+      */
+    def clear: F[Unit] =
+      F.blocking {
+        val batch = new WriteBatch()
+        try
+          opened.families.foreach(family => bounds(family).foreach((first, past) => batch.deleteRange(family, first, past)))
+          db.write(writing, batch)
+        finally batch.close()
+      } *> clocked.set(WindowStore.NoTime) *> positioned.set(Map.empty)
+
+    /** A family's first key and the key just past its last, its last with a zero byte after it. */
+    private def bounds(family: ColumnFamilyHandle): Option[(Array[Byte], Array[Byte])] =
+      // An iterator that is not valid has reached the end, or failed, which `status` raises, so a failure is not taken for an empty family.
+      val cursor = db.newIterator(family)
+      try
+        cursor.seekToFirst()
+        if !cursor.isValid then
+          cursor.status()
+          None
+        else
+          val first = cursor.key
+          cursor.seekToLast()
+          cursor.status()
+          Some(first -> (cursor.key :+ 0.toByte))
+      finally cursor.close()
+
     def close: F[Unit] =
       F.blocking:
         val flushing = new FlushOptions().setWaitForFlush(true)
@@ -162,7 +214,10 @@ private[xkafka] object RocksdbStore:
       val cursor  = db.newIterator(family, reading)
       try
         from.fold(cursor.seekToFirst())(cursor.seek)
-        Vector.unfold(())(_ => Option.when(cursor.isValid)((read(cursor.key, cursor.value), cursor.next())))
+        val entries = Vector.unfold(())(_ => Option.when(cursor.isValid)((read(cursor.key, cursor.value), cursor.next())))
+        // A scan that stops early has failed, which `status` raises, so that no store is read as holding less than it does.
+        cursor.status()
+        entries
       finally
         cursor.close()
         reading.close()

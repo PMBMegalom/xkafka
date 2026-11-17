@@ -85,6 +85,18 @@ final class JavaQueriesSuite extends FunSuite:
         assertEquals(problem(asking.all("other", JavaSerdes.String, JavaSerdes.Long)), QueryProblem.UnknownStore("other"))
     finally streams.close()
 
+  test("a Java member asking of a store fed by a pattern of topics is told the query has a problem, not failed by a null"):
+    val streams = notStarted()
+    val builder = new StreamsBuilder()
+    builder.stream[String, String](java.util.regex.Pattern.compile("in-.*")).groupByKey.count(Materialized.as("counts"))
+    try Using.resource(Admin.create(java.util.Map.of[String, AnyRef](AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1"))): admin =>
+        val asking = JavaQuerying.of(streams, builder.build(), "app", admin, (_, _) => throw new AssertionError("nothing is asked of other members"))
+        assertEquals(
+          intercept[QueryProblemException](asking.all("counts", JavaSerdes.String, JavaSerdes.Long)).problem,
+          QueryProblem.FedByPattern("counts")
+        )
+    finally streams.close()
+
   test("a partition no member holds, as while it moves, has no holder, and a store is whole only when each of its partitions is held once"):
     val (a, b) = (new HostInfo("a", 1), new HostInfo("b", 2))
     // Four partitions, the last moving: Java's metadata lists three, which a count taken from it would call whole.
@@ -95,3 +107,13 @@ final class JavaQueriesSuite extends FunSuite:
     assertEquals(JavaQuerying.covers(4, List(a -> List(0, 1), b -> List(2, 3))), true)
     assertEquals(JavaQuerying.covers(4, List(a -> List(0, 1, 2), b -> List(2, 3))), false)
     assertEquals(JavaQuerying.covers(4, Nil), false)
+
+  test("a store's topics are named as the members hold them: by their own name, or by the application id and it for the application's own topics"):
+    assertEquals(JavaQuerying.brokerNames("shop", Set("by-key-repartition"), Set("shop-by-key-repartition")), Set("shop-by-key-repartition"))
+    // A topic of the user's whose name starts with the application id is not taken for one of the application's own.
+    assertEquals(JavaQuerying.brokerNames("shop", Set("orders"), Set("orders", "shop-orders")), Set("orders"))
+    assertEquals(JavaQuerying.brokerNames("shop", Set("orders"), Set.empty), Set("orders"))
+
+  test("a window ends its size after its start, or at the largest time where that would pass it, as Java ends one"):
+    assertEquals(JavaQuerying.windowEnd(1000L, 60000L), 61000L)
+    assertEquals(JavaQuerying.windowEnd(Long.MaxValue - 10, 60000L), Long.MaxValue)

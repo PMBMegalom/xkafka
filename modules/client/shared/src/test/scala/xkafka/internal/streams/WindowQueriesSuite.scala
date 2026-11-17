@@ -23,6 +23,7 @@ package xkafka
 package internal
 package streams
 
+import scala.collection.immutable.TreeMap
 import scala.concurrent.duration.*
 
 import cats.effect.{IO, Ref}
@@ -73,7 +74,9 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       if subtopology == "0" then
         StoreContents.of(
           List(0L -> 1L, 10000L -> 2L, 20000L -> 3L).map((start, n) => WindowStore.key(bytes(key), start) -> count(n)) :+
-            (WindowStore.key(bytes(longer), 10000L) -> count(9L))
+            (WindowStore.key(bytes(longer), 10000L) -> count(9L)) :+
+            // A window so late its end would be past the largest time.
+            (WindowStore.key(bytes(s"${key}z"), Long.MaxValue - 10L) -> count(7L))
         )
       else
         StoreContents.of(List(
@@ -92,7 +95,14 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       Nil
     )
 
-  private def member(name: String, partitions: Set[Int], everyone: List[StreamsGroup.EndpointPartitions], forward: Forward[IO], at: Endpoint) =
+  private def member(
+      name: String,
+      partitions: Set[Int],
+      everyone: List[StreamsGroup.EndpointPartitions],
+      forward: Forward[IO],
+      at: Endpoint,
+      pending: Map[TaskId, Map[String, StoreChanges]] = Map.empty
+  ) =
     val identity = MemberIdentity("app", name, name, Declaration("app", topology), 300000, None, Nil, None)
     val tasks    = partitions.flatMap(partition => Set(TaskId("0", partition), TaskId("1", partition)))
     for
@@ -105,6 +115,7 @@ final class WindowQueriesSuite extends CatsEffectSuite:
       topology.numbered.map((id, s) => id.toString -> s).toMap,
       Map.empty,
       holding,
+      IO.pure(pending),
       signal,
       phased,
       _ => IO.pure(counted),
@@ -150,11 +161,49 @@ final class WindowQueriesSuite extends CatsEffectSuite:
             here.sortBy(_._1)(using byBytes).map((key, count) => (xkafka.streams.Windowed(key, Window(start, start + 10000L)), count))
         assertEquals(found, Right(expected.toVector))
 
+  test("a window whose end would be past the largest time ends at the largest time, as Java's windowed keys do"):
+    asking.flatMap: querying =>
+      querying.query(windows.fetchAll(Timestamp.fromEpochMillis(Long.MaxValue - 100L), Timestamp.fromEpochMillis(Long.MaxValue)), false).map: found =>
+        assertEquals(found.map(_.map(_._1.window).distinct), Right(Vector(Window(Long.MaxValue - 10L, Long.MaxValue))))
+
   test("a key's sessions come from the member holding the key, by their ends, without those of a longer key"):
     asking.flatMap: querying =>
       (querying.query(sessions.fetch(keys(1)), false), querying.query(sessions.fetch(keys(2)), false)).tupled.map: (local, remote) =>
         val both = Vector(Window(0L, 1000L) -> 4L, Window(30000L, 31000L) -> 5L)
         assertEquals((local, remote), (Right(both), Right(both)))
+
+  test("a task's window and session changes since it last committed are read with what its stores hold, and a longer key's are not"):
+    def changes(entries: (Chunk[Byte], Option[Stored])*): StoreChanges = TreeMap.from(entries)(using StoreContents.keys)
+    val (key, other)                                                   = (keys(0), keys(1))
+    val pending                                                        =
+      Map(
+        TaskId("0", 0) -> Map(
+          "windows" -> changes(
+            WindowStore.key(bytes(key), 10000L)        -> Some(count(7L)),
+            WindowStore.key(bytes(key), 20000L)        -> None,
+            WindowStore.key(bytes(key), 30000L)        -> Some(count(8L)),
+            WindowStore.key(bytes(s"${key}x"), 30000L) -> Some(count(9L))
+          )
+        ),
+        TaskId("1", 1) -> Map(
+          "sessions" -> changes(SessionStore.key(bytes(other), 0L, 1000L) -> None, SessionStore.key(bytes(other), 40000L, 41000L) -> Some(count(6L)))
+        )
+      )
+    member("a", Set(0, 1), Nil, Forward.none[IO], here, pending).flatMap: querying =>
+      (
+        querying.query(windows.fetch(key, Timestamp.fromEpochMillis(0L), Timestamp.fromEpochMillis(40000L)), false),
+        querying.query(sessions.fetch(other), false)
+      ).tupled.map: (windowed, sessioned) =>
+        assertEquals(windowed, Right(Vector(0L -> 1L, 10000L -> 7L, 30000L -> 8L)))
+        assertEquals(sessioned, Right(Vector(Window(30000L, 31000L) -> 5L, Window(40000L, 41000L) -> 6L)))
+
+  test("a window of the empty key a task changed since it last committed is read by a query of every key"):
+    val empty   = Murmur2.partition(Chunk.empty, counted)
+    val pending =
+      Map(TaskId("0", empty) -> Map("windows" -> TreeMap(WindowStore.key(Chunk.empty, 30000L) -> Option(count(4L)))(using StoreContents.keys)))
+    member("a", (0 until counted).toSet, Nil, Forward.none[IO], here, pending).flatMap: querying =>
+      querying.query(windows.fetchAll(Timestamp.fromEpochMillis(30000L), Timestamp.fromEpochMillis(30000L)), false).map: found =>
+        assertEquals(found.map(_.map((windowed, n) => (windowed.key, n))), Right(Vector("" -> 4L)))
 
   test("a query of another kind than its store's names the store as unknown"):
     asking.flatMap: querying =>

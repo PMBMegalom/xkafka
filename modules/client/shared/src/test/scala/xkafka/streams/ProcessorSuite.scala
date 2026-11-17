@@ -400,6 +400,10 @@ final class ProcessorSuite extends CatsEffectSuite:
     assertEquals(problems(Punctuation.wallClock(Duration.Zero)).size, 1)
     assertEquals(problems(Punctuation.wallClock((-1).second)).size, 1)
     assertEquals(problems(Punctuation.streamTime(1.milli)), Nil)
+    assertEquals(
+      problems(Punctuation.wallClock(1500.micros)),
+      List(TopologyError.InvalidPunctuation("proc", "its interval of 1500 microseconds is not a whole number of milliseconds"))
+    )
     assert(TopologyError.InvalidPunctuation("proc", reason).message.contains("step 'proc'"))
 
   test("a task is due only when a punctuator is, by each clock, and a task without any never is"):
@@ -521,6 +525,13 @@ final class ProcessorSuite extends CatsEffectSuite:
       List("the store 'tally' cannot be used: its window size of 1 microsecond is less than a millisecond")
     )
     assertEquals(refused(0.millis, 0.millis).size, 1)
+    assertEquals(
+      refused(1500.micros, 2500.micros).map(_.message),
+      List(
+        "the store 'tally' cannot be used: its window size of 1500 microseconds is not a whole number of milliseconds",
+        "the store 'tally' cannot be used: its retention of 2500 microseconds is not a whole number of milliseconds"
+      )
+    )
     assertEquals(refused((-1).second, (-2).seconds).size, 2)
 
   test("a window store's retention sets its changelog's, so a store restored loses what has expired"):
@@ -620,6 +631,10 @@ final class ProcessorSuite extends CatsEffectSuite:
     assertEquals(
       refused(0.millis).map(_.message),
       List("the store 'tally' cannot be used: its retention of 0 milliseconds is less than a millisecond")
+    )
+    assertEquals(
+      refused(1500.micros).map(_.message),
+      List("the store 'tally' cannot be used: its retention of 1500 microseconds is not a whole number of milliseconds")
     )
 
   test("a session store is declared as one, so its changelog keeps sessions for its retention and a store restored loses what has expired"):

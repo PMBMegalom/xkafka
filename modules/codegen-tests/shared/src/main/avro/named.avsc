@@ -1,0 +1,2 @@
+{"type": "record", "name": "String", "namespace": "example.named", "doc": "A record named as Scala's text is",
+ "fields": [{"name": "member", "type": {"type": "enum", "name": "Member", "symbols": ["avroSchema", "other"]}}]}

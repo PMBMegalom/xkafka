@@ -143,6 +143,128 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _        <- reading.joinWithNever.timeout(5.seconds)
     yield assertEquals(observed, expected)
 
+  test("a partition paused for its reader is resumed when it is revoked, since librdkafka keeps the pause for when it is assigned again"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls      <- Ref[IO].of(Vector.empty[String])
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit]  = calls.update(_ :+ s"pause $topicPartitions")
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] = calls.update(_ :+ s"resume $topicPartitions")
+      // The partition's records are never read, so the first fills its queue.
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- IO.sleep(100.millis)
+      _       <- assignment.set(Set(secondPartition))
+      _       <- IO.sleep(100.millis)
+      made    <- calls.get
+      _       <- reading.cancel
+    yield assertEquals(made, Vector(s"pause ${Set(firstPartition)}", s"resume ${Set(firstPartition)}"))
+
+  test("a partition paused for its reader is resumed when the partitioned records end, so the consumer's next reader gets its records"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls      <- Ref[IO].of(Vector.empty[String])
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit]  = calls.update(_ :+ s"pause $topicPartitions")
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] = calls.update(_ :+ s"resume $topicPartitions")
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- IO.sleep(100.millis)
+      _       <- reading.cancel
+      made    <- calls.get
+    yield assertEquals(made, Vector(s"pause ${Set(firstPartition)}", s"resume ${Set(firstPartition)}"))
+
+  test("a partition revoked while its pause is being made is resumed after the pause, so it is not left paused"):
+    for
+      assignment   <- Ref[IO].of(Set(firstPartition))
+      input        <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls        <- Ref[IO].of(Vector.empty[String])
+      pauseStarted <- Deferred[IO, Unit]
+      allowPause   <- Deferred[IO, Unit]
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit] =
+            pauseStarted.complete(()) >> allowPause.get >> calls.update(_ :+ "pause")
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] = calls.update(_ :+ "resume")
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- pauseStarted.get.timeout(5.seconds)
+      _       <- assignment.set(Set(secondPartition))
+      _       <- IO.sleep(100.millis)
+      _       <- allowPause.complete(())
+      _       <- IO.sleep(100.millis)
+      made    <- calls.get
+      _       <- reading.cancel
+    yield assertEquals(made, Vector("pause", "resume"))
+
+  test("a resume that fails on revocation leaves the other revoked partitions resumed, and fails the stream after"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition, secondPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      calls      <- Ref[IO].of(Vector.empty[TopicPartition])
+      pausing =
+        new PartitionPausing.Backend[IO]:
+          override def pause(topicPartitions: Set[TopicPartition]): IO[Unit]  = IO.unit
+          override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] =
+            calls.update(_ ++ topicPartitions) >> IO.raiseWhen(topicPartitions.contains(firstPartition))(new RuntimeException("resume failed"))
+      reading <- testConsumer(assignment, input, pausing).partitionedRecords(1).compile.drain.attempt.start
+      _       <- input.send(record(firstPartition, 0L, "first")).void
+      _       <- input.send(record(secondPartition, 0L, "second")).void
+      _       <- IO.sleep(100.millis)
+      _       <- assignment.set(Set.empty)
+      ended   <- reading.joinWithNever.timeout(5.seconds)
+      made    <- calls.get
+    yield
+      assertEquals(made.toSet, Set(firstPartition, secondPartition))
+      assertEquals(ended.left.map(_.getMessage), Left("resume failed"))
+
+  test("records waiting for a partition's reader when it is revoked are dropped, since the group has given them to another member"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      gate       <- Deferred[IO, Unit]
+      reading    <-
+        testConsumer(assignment, input).partitionedRecords(10).take(1)
+          .flatMap(partition => Stream.exec(gate.get) ++ partition.records.map(_.record.value)).compile.toList.start
+      _    <- IO.sleep(100.millis)
+      _    <- input.send(record(firstPartition, 0L, "a")) *> input.send(record(firstPartition, 1L, "b")) *> IO.sleep(100.millis)
+      _    <- assignment.set(Set.empty) *> IO.sleep(100.millis)
+      _    <- gate.complete(())
+      read <- reading.joinWithNever.timeout(5.seconds)
+    yield assertEquals(read, Nil)
+
+  test("a record whose lease has ended by the time it is routed opens no stream for its partition, and is not handed out"):
+    def ended(offsetValue: Long, held: IO[Boolean]): CommittableConsumerRecord[IO, String, String] =
+      val offset      = Offset.from(offsetValue).toOption.get
+      val committable =
+        new CommittableOffset[IO]:
+          override val topicPartition: TopicPartition = firstPartition
+          override val nextOffset: Offset             = offset.next.toOption.get
+          override val committer: OffsetCommitter[IO] =
+            new OffsetCommitter[IO]:
+              override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
+          override private[xkafka] def stillHeld: Option[IO[Boolean]] = Some(held)
+      CommittableConsumerRecord(ConsumerRecord(firstPartition, offset, None, "key", "v", Headers.empty), committable)
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened     <- Ref[IO].of(0)
+      read       <- Ref[IO].of(Vector.empty[Long])
+      reading    <-
+        testConsumer(assignment, input).partitionedRecords(10).evalTap(_ => opened.update(_ + 1))
+          .map(_.records.evalMap(record => read.update(_ :+ record.record.offset.value))).parJoinUnbounded.compile.drain.start
+      _ <- IO.sleep(100.millis)
+      _ <- assignment.set(Set.empty) *> IO.sleep(100.millis)
+      // Decoded only once the partition was revoked, under the lease the revocation ended.
+      _      <- input.send(ended(0L, IO.pure(false))) *> IO.sleep(100.millis)
+      counts <- (opened.get, read.get).tupled
+      _      <- reading.cancel
+    yield assertEquals(counts, (1, Vector.empty[Long]))
+
   test("cancelling before a counted record is sent rolls the count back"):
     for
       assignment   <- Ref[IO].of(Set(firstPartition))
@@ -162,6 +284,91 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       _ <- reading.cancel.timeout(5.seconds)
       _ <- resumed.get.timeout(5.seconds)
     yield ()
+
+  test("consumeChunk goes on past a chunk whose commit is refused as its partition was given to another member"):
+    def refusedOnce(refused: Ref[IO, Boolean], offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
+      val offset      = Offset.from(offsetValue).toOption.get
+      val committable =
+        new CommittableOffset[IO]:
+          override val topicPartition: TopicPartition = firstPartition
+          override val nextOffset: Offset             = offset.next.toOption.get
+          override val committer: OffsetCommitter[IO] =
+            new OffsetCommitter[IO]:
+              override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] =
+                refused.getAndSet(false).flatMap(first => IO.raiseWhen(first)(AssignmentLeases.revokedAssignment))
+      CommittableConsumerRecord(ConsumerRecord(firstPartition, offset, None, "key", value, Headers.empty), committable)
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      refused    <- Ref[IO].of(true)
+      processed  <- SignallingRef[IO].of(Vector.empty[String])
+      _          <- input.send(refusedOnce(refused, 0L, "a")) *> IO.sleep(50.millis) *> input.send(refusedOnce(refused, 1L, "b"))
+      outcome    <-
+        testConsumer(assignment, input).consumeChunk(chunk => processed.update(_ ++ chunk.toList.map(_.value)).as(CommitNow)).attempt
+          .race(processed.waitUntil(_.contains("b"))).timeout(10.seconds)
+    yield assert(outcome.isRight, s"consumeChunk stopped: $outcome")
+
+  test(
+    "a partition revoked and assigned again before the change is seen ends its first stream, opens another, and drops the old assignment's records"
+  ):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      numbers    <- SignallingRef[IO].of(Map(firstPartition -> 1L))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      seen       <- Ref[IO].of(Vector.empty[(Long, Long)])
+      ended      <- Ref[IO].of(Vector.empty[Long])
+      reading    <-
+        testConsumer(assignment, input, numbers = Some(numbers)).partitionedRecords(10).zipWithIndex.map((partition, index) =>
+          partition.records.evalMap(read => seen.update(_ :+ (index -> read.record.offset.value))).onFinalize(ended.update(_ :+ index))
+        ).parJoinUnbounded.compile.drain.start
+      _ <- input.send(record(firstPartition, 0L, "a", Some(1L))) *> IO.sleep(100.millis)
+      // Revoked and assigned again at once: the assignment never shows the partition missing.
+      _ <- numbers.set(Map(firstPartition -> 2L)) *> IO.sleep(100.millis)
+      _ <- input.send(record(firstPartition, 5L, "b", Some(2L))) *> input.send(record(firstPartition, 1L, "late", Some(1L))) *> IO.sleep(100.millis)
+      counts <- (seen.get, ended.get).tupled
+      _      <- reading.cancel
+    yield assertEquals(counts, (Vector(0L -> 0L, 1L -> 5L), Vector(0L)))
+
+  test("a record read before its partition was revoked opens no stream for it after, though nothing fences it, and the stream ended stays ended"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      numbers    <- SignallingRef[IO].of(Map(firstPartition -> 1L))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened     <- Ref[IO].of(0)
+      reading    <-
+        testConsumer(assignment, input, numbers = Some(numbers)).partitionedRecords(10).evalMap(_ => opened.update(_ + 1)).compile.drain.start
+      _ <- input.send(record(firstPartition, 0L, "a", Some(1L))) *> IO.sleep(100.millis)
+      _ <- numbers.set(Map.empty) *> IO.sleep(100.millis)
+      _ <- input.send(record(firstPartition, 1L, "late", Some(1L))) *> IO.sleep(100.millis)
+      // Assigned again, it opens a stream of its own.
+      _     <- numbers.set(Map(firstPartition -> 2L)) *> IO.sleep(100.millis)
+      count <- opened.get
+      _     <- reading.cancel
+    yield assertEquals(count, 2)
+
+  test("a consumer that does not number its assignments, as one that wraps xkafka's, has its records' numbers ignored, one stream a partition"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      opened     <- Ref[IO].of(0)
+      reading    <- testConsumer(assignment, input).partitionedRecords(10).evalMap(_ => opened.update(_ + 1)).compile.drain.start
+      _     <- IO.sleep(100.millis) *> input.send(record(firstPartition, 0L, "a", Some(1L))) *> input.send(record(firstPartition, 1L, "b", Some(2L)))
+      _     <- IO.sleep(100.millis)
+      count <- opened.get
+      _     <- reading.cancel
+    yield assertEquals(count, 1)
+
+  test("consumeChunk hands over the records waiting for a partition together, not one at a time"):
+    for
+      assignment <- Ref[IO].of(Set(firstPartition))
+      input      <- Channel.unbounded[IO, CommittableConsumerRecord[IO, String, String]]
+      sizes      <- SignallingRef[IO].of(Vector.empty[Int])
+      _          <- (0 until 50).toList.traverse_(n => input.send(record(firstPartition, n.toLong, s"v$n")).void)
+      _          <-
+        testConsumer(assignment, input).consumeChunk(chunk => sizes.update(_ :+ chunk.size).as(CommitNow), maxQueuedRecords = 100)
+          .race(sizes.waitUntil(_.sum == 50)).timeout(10.seconds)
+      seen <- sizes.get
+    yield assert(seen.max > 1, s"chunks of sizes $seen")
 
   test("consumeChunk hands over every record and commits what it processed"):
     val expected = List(firstPartition -> "a", firstPartition -> "b", secondPartition -> "c")
@@ -189,9 +396,13 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
   private def testConsumer(
       currentAssignment: Ref[IO, Set[TopicPartition]],
       input: Channel[IO, CommittableConsumerRecord[IO, String, String]],
-      partitionPausing: PartitionPausing[IO] = PartitionPausing.Absent()
+      partitionPausing: PartitionPausing[IO] = PartitionPausing.Absent(),
+      numbers: Option[SignallingRef[IO, Map[TopicPartition, Long]]] = None
   ): KafkaConsumer[IO, String, String] =
     new KafkaConsumer[IO, String, String]:
+      override private[xkafka] def assignmentNumbers: Stream[IO, Map[TopicPartition, Long]] =
+        numbers.fold(assignmentChanges.map(_.map(_ -> 0L).toMap))(_.discrete)
+      override private[xkafka] def numbersAssignments: Boolean                        = numbers.isDefined
       override val records: Stream[IO, CommittableConsumerRecord[IO, String, String]] = input.stream
       override def assignment: IO[Set[TopicPartition]]                                = currentAssignment.get
       override val assignmentChanges: Stream[IO, Set[TopicPartition]] = Stream.repeatEval(currentAssignment.get).metered(10.millis).changes
@@ -217,15 +428,21 @@ final class PartitionRecordsSuite extends CatsEffectSuite:
       override def resume(topicPartitions: Set[TopicPartition]): IO[Unit] =
         IO(assertEquals(topicPartitions, Set(firstPartition))) >> resumed.complete(()).void
 
-  private def record(topicPartition: TopicPartition, offsetValue: Long, value: String): CommittableConsumerRecord[IO, String, String] =
+  private def record(
+      topicPartition: TopicPartition,
+      offsetValue: Long,
+      value: String,
+      under: Option[Long] = None
+  ): CommittableConsumerRecord[IO, String, String] =
     val partition       = topicPartition
     val offset          = Offset.from(offsetValue).toOption.get
     val followingOffset = offset.next.toOption.get
     val committable     =
       new CommittableOffset[IO]:
-        override val topicPartition: TopicPartition = partition
-        override val nextOffset: Offset             = followingOffset
-        override val committer: OffsetCommitter[IO] =
+        override private[xkafka] val assignment: Option[Long] = under
+        override val topicPartition: TopicPartition           = partition
+        override val nextOffset: Offset                       = followingOffset
+        override val committer: OffsetCommitter[IO]           =
           new OffsetCommitter[IO]:
             override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): IO[Unit] = IO.unit
     CommittableConsumerRecord(ConsumerRecord(topicPartition, offset, None, "key", value, Headers.empty), committable)

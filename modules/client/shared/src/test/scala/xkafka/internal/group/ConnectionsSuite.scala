@@ -105,6 +105,16 @@ final class ConnectionsSuite extends CatsEffectSuite:
       connections(broker).to("broker", 9092).use(_.send(group)).attempt.map: outcome =>
         assert(outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]), outcome)
 
+  test("an answer announced larger than a client takes fails as an invalid answer before it is read, as TLS's alert read as plain bytes is"):
+    val alert = 0x15030300
+    FakeBroker(scripted(versions()) { case r if r.api == Api.FindCoordinator => IO.pure(Reply.Raw(int32(alert))) }).flatMap: broker =>
+      connections(broker).to("broker", 9092).use(_.send(group)).attempt.map: outcome =>
+        assertEquals(
+          outcome.left.toOption.collect { case invalid: KafkaException.InvalidBackendResponse => invalid.getMessage },
+          Some(s"Kafka backend returned an invalid response: the broker announced an answer of $alert bytes, more than the ${Connections
+              .MaxAnswer} a client reads")
+        )
+
   test("requests sent together each get their own answer"):
     val keys = (0 until 20).toList.map(index => s"group-$index")
     for

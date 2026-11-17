@@ -34,6 +34,8 @@ opaque type ApplicationId = String
 object ApplicationId:
   def from(value: String): Either[StreamsSettingsError, ApplicationId] =
     if value.isEmpty then Left(StreamsSettingsError.EmptyApplicationId)
+    // The names of a directory and its parent, which a state directory would take for the application's own.
+    else if value == "." || value == ".." then Left(StreamsSettingsError.ReservedApplicationId(value))
     else if value.length > Topology.MaxNameLength then Left(StreamsSettingsError.ApplicationIdTooLong(value.length))
     else if !value.forall(char => char.isLetterOrDigit && char < 128 || char == '.' || char == '_' || char == '-') then
       Left(StreamsSettingsError.InvalidApplicationIdCharacters(value))
@@ -64,6 +66,13 @@ enum StreamsSettingsError derives CanEqual:
   case EmptyStateDirectory
   case InvalidEndpoint(host: String, port: Int)
   case FetchWaitOutOfRange(value: FiniteDuration)
+  case PartialMilliseconds(setting: String, value: FiniteDuration)
+  case ReservedApplicationId(value: String)
+  case NegativeTaskTimeout(value: FiniteDuration)
+  case CommitIntervalAboveTransactionTimeout(value: FiniteDuration, transactionTimeout: FiniteDuration)
+
+  /** The client's properties make settings the application's producers refuse, as the producers would refuse them when the application starts. */
+  case ProducerSetting(error: SettingsError)
 
   def message: String =
     this match
@@ -76,6 +85,12 @@ enum StreamsSettingsError derives CanEqual:
       case EmptyStateDirectory                   => "state directory must not be empty"
       case InvalidEndpoint(host, port)           => s"an endpoint needs a host and a port from 1 to 65535, was '$host' and $port"
       case FetchWaitOutOfRange(value)            => s"fetch wait must be from 0 to ${ConsumerSettings.FetchWaitLimit}, was $value"
+      case PartialMilliseconds(setting, value)   => s"$setting must be whole milliseconds, was $value"
+      case ReservedApplicationId(value)          => s"application id must not be '$value'"
+      case NegativeTaskTimeout(value)            => s"task timeout must not be negative, was $value"
+      case CommitIntervalAboveTransactionTimeout(value, timeout) =>
+        s"commit interval must not exceed the transaction timeout of $timeout under exactly-once, was $value"
+      case ProducerSetting(error) => s"the application's producers refuse their settings: ${error.message}"
 
 object StreamsSettingsError:
   given Show[StreamsSettingsError] = Show.show(_.message)
@@ -111,6 +126,10 @@ final class InvalidStreamsSettings(val errors: NonEmptyList[StreamsSettingsError
   * @param fetchWait
   *   the longest the broker holds a fetch of the application's consumers while fewer than `fetch.min.bytes` of records wait, as `ConsumerSettings`'
   *   `fetchWait` does for a consumer
+  * @param taskTimeout
+  *   how long the application asks the group's coordinator again while it is not ready to read or commit the group's offsets, while it does not know
+  *   the member yet as the member joins again, or while a request to it fails in a way worth retrying, before it stops with the last failure, as Java
+  *   Streams' `task.timeout.ms`; with zero, it stops at the first
   */
 sealed abstract case class StreamsSettings private (
     client: ClientSettings,
@@ -122,16 +141,23 @@ sealed abstract case class StreamsSettings private (
     topologyDescriptionPush: Boolean,
     stateDirectory: Option[String],
     queryEndpoint: Option[Endpoint],
-    fetchWait: FiniteDuration
+    fetchWait: FiniteDuration,
+    taskTimeout: FiniteDuration
 ):
-  def withClient(value: ClientSettings): StreamsSettings = copy(client = value)
+  /** The client, whose properties the application's producers take too, so that what they refuse is refused here. */
+  def withClient(value: ClientSettings): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    StreamsSettings.producing(value, applicationId, guarantee).map(_ => copy(client = value))
 
   def withApplicationId(value: ApplicationId): StreamsSettings = copy(applicationId = value)
 
-  def withGuarantee(value: ProcessingGuarantee): StreamsSettings = copy(guarantee = value)
+  /** The guarantee, which exactly-once refuses with a commit interval past its transaction timeout. */
+  def withGuarantee(value: ProcessingGuarantee): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    (StreamsSettings.committing(value, commitInterval), StreamsSettings.producing(client, applicationId, value))
+      .mapN((_, _) => copy(guarantee = value))
 
   def withCommitInterval(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
-    StreamsSettings.positive(value)(StreamsSettingsError.NonPositiveCommitInterval(_)).map(valid => copy(commitInterval = Some(valid)))
+    StreamsSettings.positive(value, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_))
+      .andThen(valid => StreamsSettings.committing(guarantee, Some(valid)).map(_ => copy(commitInterval = Some(valid))))
 
   /** Commits at Java Streams' interval for the guarantee. */
   def withoutCommitInterval: StreamsSettings = copy(commitInterval = None)
@@ -140,7 +166,7 @@ sealed abstract case class StreamsSettings private (
     StreamsSettings.atLeastOne(value).map(valid => copy(concurrency = valid))
 
   def withCloseTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
-    StreamsSettings.positive(value)(StreamsSettingsError.NonPositiveCloseTimeout(_)).map(valid => copy(closeTimeout = valid))
+    StreamsSettings.positive(value, "close timeout")(StreamsSettingsError.NonPositiveCloseTimeout(_)).map(valid => copy(closeTimeout = valid))
 
   /** Sends the program's description to the group's coordinator when it asks for one. */
   def withTopologyDescriptionPush: StreamsSettings = copy(topologyDescriptionPush = true)
@@ -167,6 +193,13 @@ sealed abstract case class StreamsSettings private (
   def withFetchWait(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     StreamsSettings.fetchWaitOf(value).map(valid => copy(fetchWait = valid))
 
+  /** How long the application keeps asking the group's coordinator while it is not ready, does not know the member yet, or while asking fails in a
+    * way worth retrying, and keeps starting its tasks again after a failure worth retrying, before it stops with the last failure; with zero, it
+    * stops at the first.
+    */
+  def withTaskTimeout(value: FiniteDuration): ValidatedNel[StreamsSettingsError, StreamsSettings] =
+    StreamsSettings.taskTimeoutOf(value).map(valid => copy(taskTimeout = valid))
+
   private def copy(
       client: ClientSettings = client,
       applicationId: ApplicationId = applicationId,
@@ -177,7 +210,8 @@ sealed abstract case class StreamsSettings private (
       topologyDescriptionPush: Boolean = topologyDescriptionPush,
       stateDirectory: Option[String] = stateDirectory,
       queryEndpoint: Option[Endpoint] = queryEndpoint,
-      fetchWait: FiniteDuration = fetchWait
+      fetchWait: FiniteDuration = fetchWait,
+      taskTimeout: FiniteDuration = taskTimeout
   ): StreamsSettings =
     new StreamsSettings(
       client,
@@ -189,11 +223,15 @@ sealed abstract case class StreamsSettings private (
       topologyDescriptionPush,
       stateDirectory,
       queryEndpoint,
-      fetchWait
+      fetchWait,
+      taskTimeout
     ) {}
 
 object StreamsSettings:
   val DefaultCloseTimeout: FiniteDuration = 30.seconds
+
+  /** Java Streams' default `task.timeout.ms`. */
+  val DefaultTaskTimeout: FiniteDuration = 5.minutes
 
   def from(
       client: ClientSettings,
@@ -205,19 +243,50 @@ object StreamsSettings:
       topologyDescriptionPush: Boolean = true,
       stateDirectory: Option[String] = None,
       queryEndpoint: Option[Endpoint] = None,
-      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
+      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait,
+      taskTimeout: FiniteDuration = DefaultTaskTimeout
   ): ValidatedNel[StreamsSettingsError, StreamsSettings] =
     (
-      commitInterval.traverse(positive(_)(StreamsSettingsError.NonPositiveCommitInterval(_))),
+      commitInterval.traverse(positive(_, "commit interval")(StreamsSettingsError.NonPositiveCommitInterval(_)))
+        .andThen(interval => committing(guarantee, interval).as(interval)),
       atLeastOne(concurrency),
-      positive(closeTimeout)(StreamsSettingsError.NonPositiveCloseTimeout(_)),
+      positive(closeTimeout, "close timeout")(StreamsSettingsError.NonPositiveCloseTimeout(_)),
       stateDirectory.traverse(directory),
-      fetchWaitOf(fetchWait)
-    ).mapN((interval, tasks, timeout, kept, wait) =>
-      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait) {}
+      fetchWaitOf(fetchWait),
+      taskTimeoutOf(taskTimeout),
+      producing(client, applicationId, guarantee)
+    ).mapN((interval, tasks, timeout, kept, wait, stall, _) =>
+      new StreamsSettings(client, applicationId, guarantee, interval, tasks, timeout, topologyDescriptionPush, kept, queryEndpoint, wait, stall) {}
     )
 
-  // 0.7.0's signature, before the fetch wait, which code compiled against 0.7.0 calls.
+  /** The transaction timeout of an exactly-once application's producers, Java Streams' `transaction.timeout.ms`. */
+  val TransactionTimeout: FiniteDuration = 10.seconds
+
+  /** The settings the application's producers are made with from the client, as the engine makes them: under exactly-once, a transactional producer
+    * with the transaction timeout, which refuses more of the client's properties.
+    */
+  private def producing(
+      client: ClientSettings,
+      applicationId: ApplicationId,
+      guarantee: ProcessingGuarantee
+  ): ValidatedNel[StreamsSettingsError, Unit] =
+    val none = Serializer.const[cats.Id, Unit](None)
+    val made =
+      guarantee match
+        case ProcessingGuarantee.AtLeastOnce => ProducerSettings.from(client, none, none).void
+        case ProcessingGuarantee.ExactlyOnce => TransactionalId.from(applicationId.value).fold(
+            _ => ProducerSettings.from(client, none, none).void,
+            id => TransactionalProducerSettings.from(client, id, none, none, TransactionTimeout).void
+          )
+    made.leftMap(_.map(StreamsSettingsError.ProducerSetting(_)))
+
+  /** Exactly-once keeps a transaction open until it commits, so the broker would abort every one that waits past its timeout, as Java refuses. */
+  private def committing(guarantee: ProcessingGuarantee, interval: Option[FiniteDuration]): ValidatedNel[StreamsSettingsError, Unit] =
+    interval.filter(value => guarantee == ProcessingGuarantee.ExactlyOnce && value > TransactionTimeout) match
+      case Some(value) => StreamsSettingsError.CommitIntervalAboveTransactionTimeout(value, TransactionTimeout).invalidNel
+      case None        => ().validNel
+
+  // 0.7.x's signature, before the fetch wait, which code compiled against 0.7.x calls.
   private[streams] def from(
       client: ClientSettings,
       applicationId: ApplicationId,
@@ -239,18 +308,27 @@ object StreamsSettings:
       topologyDescriptionPush,
       stateDirectory,
       queryEndpoint,
-      ConsumerSettings.DefaultFetchWait
+      ConsumerSettings.DefaultFetchWait,
+      DefaultTaskTimeout
     )
 
   private def directory(value: String): ValidatedNel[StreamsSettingsError, String] =
     if value.trim.nonEmpty then value.validNel else StreamsSettingsError.EmptyStateDirectory.invalidNel
 
-  private def positive(value: FiniteDuration)(error: FiniteDuration => StreamsSettingsError): ValidatedNel[StreamsSettingsError, FiniteDuration] =
-    if value > Duration.Zero then value.validNel else error(value).invalidNel
+  private def positive(value: FiniteDuration, setting: String)(
+      error: FiniteDuration => StreamsSettingsError
+  ): ValidatedNel[StreamsSettingsError, FiniteDuration] = if value <= Duration.Zero then error(value).invalidNel else whole(value, setting)
 
   private def fetchWaitOf(value: FiniteDuration): ValidatedNel[StreamsSettingsError, FiniteDuration] =
-    if value >= Duration.Zero && value <= ConsumerSettings.FetchWaitLimit then value.validNel
+    if value >= Duration.Zero && value <= ConsumerSettings.FetchWaitLimit then whole(value, "fetch wait")
     else StreamsSettingsError.FetchWaitOutOfRange(value).invalidNel
+
+  private def taskTimeoutOf(value: FiniteDuration): ValidatedNel[StreamsSettingsError, FiniteDuration] =
+    if value >= Duration.Zero then whole(value, "task timeout") else StreamsSettingsError.NegativeTaskTimeout(value).invalidNel
+
+  /** The clients count durations in milliseconds, so a part of one would be dropped, and a duration under one would become none. */
+  private def whole(value: FiniteDuration, setting: String): ValidatedNel[StreamsSettingsError, FiniteDuration] =
+    if value.toNanos % 1000000L == 0L then value.validNel else StreamsSettingsError.PartialMilliseconds(setting, value).invalidNel
 
   private def atLeastOne(value: Int): ValidatedNel[StreamsSettingsError, Int] =
     if value > 0 then value.validNel else StreamsSettingsError.NonPositiveConcurrency(value).invalidNel

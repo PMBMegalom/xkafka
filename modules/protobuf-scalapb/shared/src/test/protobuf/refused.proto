@@ -1,0 +1,10 @@
+// A message whose file imports another of the application's files, which xkafka cannot register yet.
+syntax = "proto3";
+
+package example.refused;
+
+import "shop.proto";
+
+message Basket {
+  example.shop.Order order = 1;
+}

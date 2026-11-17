@@ -101,6 +101,33 @@ final class ProducerPipeSuite extends CatsEffectSuite:
       assertEquals(observed, 2, "the bound should hold, whatever the stream offers")
       assertEquals(results.size, values.size)
 
+  test("the pipe enqueues no more batches than the bound before the earliest is acknowledged"):
+    for
+      unacknowledged <- Ref[IO].of(0)
+      highest        <- Ref[IO].of(0)
+      acknowledge    <- Deferred[IO, Unit]
+      producer =
+        new KafkaProducer[IO, String, String]:
+          // Counted when the client takes the batch, which is when it waits for the broker, until its acknowledgement completes.
+          override def produce(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Produced[String, String]]]] =
+            unacknowledged.updateAndGet(_ + 1).flatMap(count => highest.update(_.max(count)))
+              .as(acknowledge.get >> unacknowledged.update(_ - 1).as(delivered(records)))
+
+          override def produceAttemptEach(records: NonEmptyList[ProducerRecord[String, String]]): IO[IO[NonEmptyList[Attempted[String, String]]]] =
+            unused
+
+          override def flush: IO[Unit] = IO.unit
+
+          override def partitionsFor(value: Topic): IO[NonEmptySet[Partition]] = IO.pure(NonEmptySet.one(partition))
+      running  <- Stream.emits(List.tabulate(10)(n => batch(n.toString))).through(producer.pipe(maxInFlight = 2)).compile.toList.start
+      _        <- unacknowledged.get.iterateUntil(_ >= 2).timeout(10.seconds) *> IO.sleep(200.millis)
+      observed <- highest.get
+      _        <- acknowledge.complete(())
+      results  <- running.joinWithNever.timeout(10.seconds)
+    yield
+      assertEquals(observed, 2)
+      assertEquals(results.size, 10)
+
   test("the pipe rejects a non-positive bound"):
     val producer =
       new KafkaProducer[IO, String, String]:

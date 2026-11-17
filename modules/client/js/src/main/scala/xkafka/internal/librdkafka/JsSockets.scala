@@ -69,7 +69,7 @@ private[xkafka] object JsSockets:
       background(_.socketOpen)(
         host,
         port,
-        timeout.toMillis.toInt,
+        timeout.toMillis.min(Int.MaxValue).toInt,
         if tls.isDefined then 1 else 0,
         c(settings.caLocation),
         c(settings.caPem),
@@ -100,7 +100,7 @@ private[xkafka] object JsSockets:
     shim.flatMap: loaded =>
       F.async_[Unit]: callback =>
         val token   = Completions.expect(arguments)(() => callback(Right(())))
-        val started = function(loaded)((arguments ++ Seq[js.Any](Completions.done, js.BigInt(token.toString)))*)
+        val started = Completions.guarded(token)(function(loaded)((arguments ++ Seq[js.Any](Completions.done, js.BigInt(token.toString)))*))
         if started.asInstanceOf[Int] != 0 then
           Completions.forget(token)
           callback(Left(Failures.plain("could not start a thread for a socket call")))

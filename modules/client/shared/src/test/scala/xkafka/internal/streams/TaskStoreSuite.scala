@@ -48,6 +48,33 @@ final class TaskStoreSuite extends CatsEffectSuite:
   private def over(pipeline: Pipeline[IO], held: Map[String, StoreContents] = Map.empty): IO[Task[IO]] =
     Task.inMemory[IO]("app", Topology.of(pipeline).orFail.subtopologies.head, 0, held)
 
+  test("a guarded store closes once the reads under way are done, and refuses a read after it closes"):
+    for
+      inner   <- TaskStore.inMemory[IO](StoreContents.of(Map(Chunk.array("k".getBytes) -> Stored(Chunk.array("v".getBytes), 1L))))
+      began   <- cats.effect.Deferred[IO, Unit]
+      release <- cats.effect.Deferred[IO, Unit]
+      closed  <- IO.ref(false)
+      slow =
+        new TaskStore[IO]:
+          export inner.{clear, clock, positions, range, timed, write}
+          def get(key: Chunk[Byte]): IO[Option[Stored]] = began.complete(()) *> release.get *> inner.get(key)
+          def close: IO[Unit]                           = closed.set(true)
+      store   <- TaskStore.guarded(slow)
+      reading <- store.get(Chunk.array("k".getBytes)).start
+      _       <- began.get
+      closing <- store.close.start
+      _       <- IO.sleep(100.millis)
+      early   <- closed.get
+      _       <- release.complete(())
+      read    <- reading.joinWithNever
+      _       <- closing.joinWithNever
+      late    <- closed.get
+      after   <- store.get(Chunk.array("k".getBytes)).attempt
+    yield
+      assert(!early, "closed while a read was under way")
+      assert(read.isDefined && late)
+      assert(after.left.exists(_ == TaskStore.Closed), after)
+
   test("a store in memory gives a key, the keys starting with a prefix in order, and all it holds, and applies changes as one"):
     val one = Stored(bytes("1"), 1L)
     val two = Stored(bytes("2"), 2L)

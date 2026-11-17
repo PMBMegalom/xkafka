@@ -452,6 +452,24 @@ final class WindowGoldenSuite extends CatsEffectSuite:
       updates
     )
 
+  test("final results of windows reached through a stream and a table of their own go on as Java's do, after the windows' grace"):
+    sameEverywhere(
+      KStream(Named("read-14b"), in, text, text).groupByKey(text, text).windowedBy(tumbling).count(Named("count-6b"), Store("counts"))
+        .toStream(Named("again")).toTable(Named("table"), Store("table"), Windowed.timeSerde(text, 10.seconds), count)
+        .suppress(Suppressed.untilWindowCloses("final")).toStream(Named("to-stream-14b"))
+        .to(Named("write-14b"), out, Windowed.timeSerde(text, 10.seconds), count.option),
+      _.stream[String, String]("in").groupByKey.windowedBy(javaWindows(10000L))
+        .count(Materialized.as("counts").withKeySerde(Serdes.String).withValueSerde(Serdes.Long)).toStream(JavaNamed.as("again")).toTable(
+          JavaNamed.as("table"),
+          Materialized
+            .as[org.apache.kafka.streams.kstream.Windowed[String], java.lang.Long, org.apache.kafka.streams.state.KeyValueStore[Bytes, Array[Byte]]](
+              "table"
+            ).withKeySerde(windowedSerde(10000L)).withValueSerde(Serdes.Long)
+        ).suppress(JavaSuppressed.untilWindowCloses(BufferConfig.unbounded()).withName("final")).toStream
+        .to("out", Produced.`with`(windowedSerde(10000L), Serdes.Long)),
+      closing
+    )
+
   test("final results of hopping windows go on as Java's do, earliest window first and then by key"):
     sameEverywhere(
       KStream(Named("read-15"), in, text, text).groupByKey(text, text).windowedBy(hopping).reduce(Named("reduce-6"), Store("joined"))(_ + _)

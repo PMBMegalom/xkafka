@@ -59,8 +59,9 @@ private[xkafka] object JavaSockets:
   private def open(host: String, port: Int, tls: Option[TlsSettings], timeout: FiniteDuration): JavaSocket =
     // The factory reads the authority and the client's key at once, so settings it cannot use fail before anything connects.
     val engines = tls.map(factory)
-    val millis  = timeout.toMillis.toInt
-    val plain   = new JavaSocket()
+    // A socket holds a timeout of at most Int.MaxValue milliseconds, about 24.8 days.
+    val millis = timeout.toMillis.min(Int.MaxValue).toInt
+    val plain  = new JavaSocket()
     try
       plain.connect(new InetSocketAddress(host, port), millis)
       plain.setSoTimeout(millis)

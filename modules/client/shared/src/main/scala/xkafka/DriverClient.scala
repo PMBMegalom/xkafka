@@ -32,7 +32,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.{Channel, SignallingRef}
 import internal.{ClientProperties, PollQueue}
-import internal.driver.{Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
+import internal.driver.{CommitToRetry, Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
 import streams.{Forward, KafkaStreams, StreamsSettings, Topology}
 
 private def isolationLevel(value: IsolationLevel): String =
@@ -41,7 +41,10 @@ private def isolationLevel(value: IsolationLevel): String =
     case IsolationLevel.ReadCommitted   => "read_committed"
 
 /** The client every backend shares, over the driver of the platform it runs on. */
-private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using F: Async[F]) extends KafkaClient[F]:
+/** The client of `driver`. `forStreams` is the streams engine's own, whose producers write the times its records carry, 1970-01-01T00:00:00Z itself
+  * among them, as Java's Kafka Streams writes them, though librdkafka writes that time as the time it sends the record at.
+  */
+private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forStreams: Boolean = false)(using F: Async[F]) extends KafkaClient[F]:
   // Records the poll loop has read but nothing has taken yet. The loop stops polling when this fills, which is
   // also when Kafka would consider the consumer stalled.
   private val RecordQueueSize = 256
@@ -130,7 +133,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     */
   private def serveDeliveries(client: NativeClient, deliveries: Deliveries): F[Unit] =
     (deliveries.waiting.waitUntil(_ > 0) *> client(driver.serveDeliveries(client.handle, DeliveryPollTimeoutMillis)) *>
-      deliveries.served.update(_ + 1)).foreverM[Unit].onError(deliveries.failure.complete(_).void)
+      deliveries.served.update(_ + 1)).foreverM[Unit].guaranteeCase:
+      // Serving stops with the producer too, when it is released, so whoever waits for room or reports is told the client is closed.
+      case Outcome.Errored(error) => deliveries.failure.complete(error).void
+      case _                      => deliveries.failure.complete(new IllegalStateException("the client is closed")).void
 
   /** How many batches are waiting for their reports, how many times the shared queue has been served, and why serving it stopped, if it has. */
   private final case class Deliveries(waiting: SignallingRef[F, Int], served: SignallingRef[F, Long], failure: Deferred[F, Throwable])
@@ -179,7 +185,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       // The commit recovery spreads its retries, so the consumer carries the randomness that does the spreading.
       random <- Resource.eval(Random.scalaUtilRandom[F])
       seeks  <- Resource.eval((Mutex[F], Ref.of[F, Map[LeaseKey, Long]](Map.empty)).mapN(Seeks(_, _)))
-      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks)
+      // How many times the group has assigned each partition, whatever the settings, which partition streams tell assignments apart by.
+      numbers <- Resource.eval(Ref.of[F, Map[LeaseKey, Long]](Map.empty))
+      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks, numbers)
+      // Released after both below stop, and before the client: a rebalance polled after `rebalancing` failed is applied here, since the client cannot
+      // close while one waits.
+      _ <- Resource.onFinalize(consumer.applyQueued)
       // Both are started after the client and cancelled before it, so neither is using the handle when it is destroyed.
       _ <- consumer.rebalancing.compile.drain.onError(failure.complete(_).void).background
       _ <- consumer.pollLoop.compile.drain.onError(failure.complete(_).void).background
@@ -213,7 +224,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
   override def streams(settings: StreamsSettings, topology: Topology[F], forward: Forward[F]): Resource[F, KafkaStreams[F]] =
     internal.streams.Engine(
-      this,
+      new DriverClient[F](driver, forStreams = true),
       driver,
       settings.client,
       settings.applicationId.value,
@@ -226,6 +237,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       stateDirectory = settings.stateDirectory,
       queryEndpoint = settings.queryEndpoint,
       fetchWait = settings.fetchWait,
+      taskTimeout = settings.taskTimeout,
       forward = Some(forward)
     )
 
@@ -245,23 +257,63 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       _ <- Resource.eval(handle.client(driver.initTransactions(handle.client.handle, timeoutMillis)))
       // One transactional id carries one transaction at a time, so this keeps concurrent callers out of each other's.
       lock <- Resource.eval(Mutex[F])
-    yield new DriverTransactionalProducer(handle.client, new DriverProducer(handle, settings.producer), lock, timeoutMillis)
+      left <- Resource.eval(F.ref(Option.empty[Unfinished]))
+    yield new DriverTransactionalProducer(handle.client, new DriverProducer(handle, settings.producer), lock, left, timeoutMillis)
 
-  private final class DriverTransactionalProducer[K, V](client: NativeClient, records: KafkaProducer[F, K, V], lock: Mutex[F], timeoutMillis: Int)
-      extends KafkaTransactionalProducer[F, K, V]:
+  /** A commit or abort of a transaction that failed in a way that leaves it to finish, which both clients refuse to begin another before. */
+  private enum Unfinished:
+    case Commit(recorded: List[CommittableOffsetBatch[F]])
+    case Abort
 
-    /** Once the transaction commits, each consumer whose offsets it recorded is told they are committed. */
+  private final class DriverTransactionalProducer[K, V](
+      client: NativeClient,
+      records: KafkaProducer[F, K, V],
+      lock: Mutex[F],
+      left: Ref[F, Option[Unfinished]],
+      timeoutMillis: Int
+  ) extends KafkaTransactionalProducer[F, K, V]:
+
+    /** Once the transaction commits, each consumer whose offsets it recorded is told they are committed. A commit or abort left unfinished by the
+      * transaction before is asked for again first, as both clients require.
+      */
     override def transactionally[A](use: Transaction[F, K, V] => F[A]): F[A] =
       lock.lock.surround(
         Ref.of[F, List[CommittableOffsetBatch[F]]](Nil).flatMap: recorded =>
-          client(driver.beginTransaction(client.handle)) *> use(transaction(recorded)).guaranteeCase:
-            case Outcome.Succeeded(_) => client(driver.commitTransaction(client.handle, timeoutMillis)) *>
-                recorded.get.flatMap(_.traverse_(GroupMembership.committed(_)))
-            case Outcome.Canceled() => client(driver.abortTransaction(client.handle, timeoutMillis))
-            // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
-            case Outcome.Errored(error) => client(driver.abortTransaction(client.handle, timeoutMillis))
-                .handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
+          // The abort is in place from the moment the transaction has begun, so a cancellation while it begins aborts it too.
+          F.uncancelable(poll =>
+            finished *> client(driver.beginTransaction(client.handle)) *> poll(use(transaction(recorded))).guaranteeCase:
+              case Outcome.Succeeded(_) => recorded.get
+                  .flatMap(batches => committed(again = true, batches) *> batches.traverse_(GroupMembership.committed(_)))
+              case Outcome.Canceled() => aborted.handleError(_ => ())
+              // The failure that caused the abort is the one worth reporting, so a failed abort is carried along with it.
+              case Outcome.Errored(error) => aborted.handleErrorWith(failure => F.delay(error.addSuppressed(failure)))
+          )
       )
+
+    /** Finishes what the transaction before left unfinished, as a commit or abort is made at first: one that fails is left to finish again, or, for a
+      * commit that cannot, aborted.
+      */
+    private def finished: F[Unit] =
+      left.getAndSet(None).flatMap:
+        case None                             => F.unit
+        case Some(Unfinished.Abort)           => aborted
+        case Some(Unfinished.Commit(batches)) => committed(again = false, batches) *> batches.traverse_(GroupMembership.committed(_))
+
+    /** Aborts the transaction, leaving the abort to finish where it fails. */
+    private def aborted: F[Unit] = client(driver.abortTransaction(client.handle, timeoutMillis)).onError(_ => left.set(Some(Unfinished.Abort)))
+
+    /** Commits the transaction, as both clients ask: a commit that timed out may still be completing, so it is tried once more and never aborted, and
+      * is left to finish if it times out again; a fatal failure leaves the producer to be released; any other is aborted, so that the producer can
+      * begin the next transaction.
+      */
+    private def committed(again: Boolean, batches: List[CommittableOffsetBatch[F]]): F[Unit] =
+      client(driver.commitTransaction(client.handle, timeoutMillis)).handleErrorWith:
+        case CommitToRetry(failure) =>
+          if again then committed(again = false, batches) else left.set(Some(Unfinished.Commit(batches))) *> F.raiseError(failure)
+        case failure: KafkaException.BackendFailure if failure.fatal.contains(true) => F.raiseError(failure)
+        case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.transactionAbortRequired.contains(true) =>
+          if again then committed(again = false, batches) else left.set(Some(Unfinished.Commit(batches))) *> F.raiseError(failure)
+        case error => aborted.handleErrorWith(failure => F.delay(error.addSuppressed(failure))) *> F.raiseError(error)
 
     private def transaction(recorded: Ref[F, List[CommittableOffsetBatch[F]]]): Transaction[F, K, V] =
       new Transaction[F, K, V]:
@@ -398,14 +450,41 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     if partitions.isEmpty then F.pure(Vector.empty)
     else
       val entries = partitions.toVector
-      untilAnswered(client(driver.committed(client.handle, entries, settings.requestTimeout.toMillis.toInt)), 0).map: stored =>
-        entries.zip(stored).flatMap: (partition, value) =>
-          if value.offset >= 0L then Some(StartAt(partition, value.offset, value.leaderEpoch))
-          else
-            settings.autoOffsetReset match
-              case AutoOffsetReset.Earliest => Some(StartAt(partition, BeginningOffset, -1))
-              case AutoOffsetReset.Latest   => Some(StartAt(partition, EndOffset, -1))
-              case AutoOffsetReset.Fail     => None
+      untilAnswered(client(driver.committed(client.handle, entries, settings.requestTimeout.toMillis.toInt)), 0).flatMap(paired(entries, _)).map:
+        stored =>
+          stored.flatMap: (partition, value) =>
+            if value.offset >= 0L then Some(StartAt(partition, value.offset, value.leaderEpoch))
+            else
+              settings.autoOffsetReset match
+                case AutoOffsetReset.Earliest => Some(StartAt(partition, BeginningOffset, -1))
+                case AutoOffsetReset.Latest   => Some(StartAt(partition, EndOffset, -1))
+                case AutoOffsetReset.Fail     => None
+
+  /** Each of `requested` with the backend's answer for it, which comes in request order, one for each. */
+  private def paired[A, B](requested: Vector[A], answers: Vector[B]): F[Vector[(A, B)]] =
+    if answers.size == requested.size then F.pure(requested.zip(answers))
+    else F.raiseError(new KafkaException.InvalidBackendResponse(s"expected ${requested.size} answers, got ${answers.size}"))
+
+  /** Refuses times before 1970, which Kafka cannot hold: the Java client refuses them, and librdkafka would take -1 and -2 for the latest and
+    * earliest offsets.
+    */
+  private def before1970(times: List[Timestamp]): F[Unit] =
+    times.find(_.epochMillis < 0L).traverse_(time => F.raiseError(new IllegalArgumentException(s"Kafka holds no time before 1970, was $time")))
+
+  /** Refuses a record's time of 1970-01-01T00:00:00Z itself, which librdkafka takes for none and writes as the time it sends the record at, so no
+    * backend writes a time another would write otherwise. The streams engine's producers write it, as the time a record of their input carried.
+    */
+  private def atEpoch(time: Option[Timestamp]): F[Unit] =
+    time.filter(_.epochMillis == 0L && !forStreams).traverse_ : at =>
+      F.raiseError(new IllegalArgumentException(s"a record's time must be after 1970-01-01T00:00:00Z, was $at"))
+
+  /** Refuses a header name holding NUL, since librdkafka gives names back only up to it, so no backend writes one. */
+  private def nulInHeaderName(headers: Headers): F[Unit] =
+    F.defer:
+      headers.values.find(_.key.contains('\u0000')).traverse_ : header =>
+        // Written out char by char, and only once refused: String.replace of a NUL throws on Scala Native on Linux, as CI found.
+        val shown = header.key.flatMap(char => if char == '\u0000' then "\\u0000" else char.toString)
+        F.raiseError(new IllegalArgumentException(s"a header name cannot hold the character NUL, was '$shown'"))
 
   /** Asks again after a failure the broker may get over, waiting 100 ms and twice as long each time up to a second, as the Java consumer does. */
   private def untilAnswered[A](request: F[A], attempt: Int): F[A] =
@@ -574,7 +653,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       )
 
     private def superviseBatch[A](batch: driver.Batch, result: F[A]): F[F[A]] =
-      supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch))).map(_.joinWithNever)
+      // Releasing the producer cancels what it supervises, so a delivery waited on after that fails, as the client is closed.
+      supervisor.supervise(result.guaranteeCase(_ => releaseBatchWhenComplete(batch)))
+        .map(_.joinWith(F.raiseError(new IllegalStateException("the client is closed"))))
 
     private def releaseBatchWhenComplete(batch: driver.Batch): F[Unit] =
       driver.pending(batch).flatMap: pending =>
@@ -594,10 +675,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       else client(driver.awaitDeliveries(batch, DeliveryPollTimeoutMillis)).flatMap(pending => if pending == 0 then F.unit else awaitDelivery(batch))
 
     private def encodeRecord(record: ProducerRecord[K, V]): F[EncodedRecord] =
-      (
-        settings.keySerializer.serialize(record.topic, record.headers, record.key),
-        settings.valueSerializer.serialize(record.topic, record.headers, record.value)
-      ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
+      before1970(record.timestamp.toList) *> atEpoch(record.timestamp) *> nulInHeaderName(record.headers) *>
+        (
+          settings.keySerializer.serialize(record.topic, record.headers, record.key),
+          settings.valueSerializer.serialize(record.topic, record.headers, record.value)
+        ).mapN((key, value) => EncodedRecord(record.topic, record.partition, record.timestamp, record.headers, key, value))
 
     private def outcomes(batch: driver.Batch, records: NonEmptyList[ProducerRecord[K, V]]): F[Vector[Either[KafkaException, RecordMetadata]]] =
       driver.deliveries(client.handle, batch).flatMap: reported =>
@@ -622,8 +704,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
         Option.when(delivery.timestamp >= 0L)(delivery.timestamp).map(Timestamp.fromEpochMillis)
       )
 
-  /** `sought` is how many seeks of the record's partition had been made when it was polled. */
-  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long, sought: Long)
+  /** `sought` is how many seeks of the record's partition had been made when it was polled, and `number` how many times the group had assigned the
+    * partition.
+    */
+  private final case class ReadRecord(record: PolledRecord, lease: Option[Lease], assignment: Long, sought: Long, number: Long)
 
   /** How many seeks of each partition have been made. A poll and a seek each hold `exclusive`, so every record a poll returns was fetched after the
     * seeks counted when it returns and before any made later.
@@ -641,7 +725,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       stopping: Deferred[F, Unit],
       random: Random[F],
       failure: Deferred[F, Throwable],
-      seeks: Seeks
+      seeks: Seeks,
+      numbers: Ref[F, Map[LeaseKey, Long]]
   ) extends KafkaConsumer[F, K, V]:
 
     private val requestTimeoutMillis = settings.requestTimeout.toMillis.toInt
@@ -689,8 +774,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       // Sending outside the permit keeps a full queue from holding the handle that a close is waiting for.
       PollQueue.feed(
         Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
-          .evalMap(_ => leases.reading(pollOnce)((record, _) => leaseKeyOf(record)).product(hold.readUnder)).flatMap((read, assignment) =>
-            Stream.emits(read.map { case ((record, sought), lease) => ReadRecord(record, lease, assignment(leaseKeyOf(record)), sought) })
+          .evalMap(_ => (leases.reading(pollOnce)((record, _) => leaseKeyOf(record)), hold.readUnder, numbers.get).tupled)
+          .flatMap((read, assignment, assigned) =>
+            Stream.emits(read.map { case ((record, sought), lease) =>
+              val key = leaseKeyOf(record)
+              ReadRecord(record, lease, assignment(key), sought, assigned.getOrElse(key, 0L))
+            })
           ),
         polled,
         failure
@@ -713,8 +802,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       * before it gets to it, and the ones still queued are applied as the stream ends.
       */
     val rebalancing: Stream[F, Nothing] =
-      Stream.repeatEval(F.uncancelable(poll => poll(rebalances.take).flatMap(rebalanced(poll)))).drain
-        .onFinalize(rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event, Vector.empty)))))
+      Stream.repeatEval(F.uncancelable(poll => poll(rebalances.take).flatMap(rebalanced(poll)))).drain.onFinalize(applyQueued)
+
+    /** Applies the rebalances still queued, with no starting offsets chosen. */
+    def applyQueued: F[Unit] =
+      rebalances.tryTakeN(None).flatMap(_.traverse_(taken => client(driver.applyRebalance(client.handle, taken.event, Vector.empty))))
 
     private def rebalanced(poll: Poll[F])(taken: Rebalance[driver.Event]): F[Unit] =
       Ref.of[F, Vector[StartAt]](Vector.empty).flatMap: starts =>
@@ -722,10 +814,12 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
           taken.kind match
             case 1 => assigned(taken.partitions) *> starting(taken.partitions).flatMap(starts.set)
             case 0 => handOver(taken.partitions) *> leases.revoke(taken.partitions)
-            // Partitions the group has already given away can commit nothing more, so nothing is waited for.
+            // Partitions the group has already given away can commit nothing more, so no commit is waited for, only a transaction already sending
+            // offsets for them, which its timeout bounds.
             case 2 => hold.lose(taken.partitions) *> leases.revoke(taken.partitions)
-            // Anything else clears the assignment to resynchronise, which ends every lease with it.
-            case _ => leases.assign(Nil, replacing = true)
+            // Anything else clears the assignment to resynchronise, which loses what is assigned, as a lost assignment does, and ends every lease.
+            case _ => assignments.get.map(_.toList.map(leaseKey)).flatMap(all => hold.lose(all) *> leases.revoke(all)) *>
+                leases.assign(Nil, replacing = true)
         val applying = starts.get.flatMap(chosen => client(driver.applyRebalance(client.handle, taken.event, chosen)))
         poll(leasing).guarantee(applying) *> poll(assignment.flatMap(assignments.set))
 
@@ -736,7 +830,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       startsFor(settings.startingOffsets, partitions.flatMap(topicPartition).toSet).handleErrorWith(error => failure.complete(error).as(Vector.empty))
 
     private def assigned(partitions: List[LeaseKey]): F[Unit] =
-      client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(partitions, replacing = !cooperative)) *> hold.assign(partitions)
+      client(driver.cooperative(client.handle)).flatMap(cooperative => leases.assign(partitions, replacing = !cooperative)) *>
+        hold.assign(partitions) *> numbers.update(held => held ++ partitions.map(key => key -> (held.getOrElse(key, 0L) + 1L)))
 
     /** With rebalance-safe commits, waits for the records handed out of revoked partitions to be committed.
       *
@@ -758,12 +853,24 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
     /** A record of a partition being revoked, or read under an assignment the group has since replaced, is dropped and not handed out, where the
-      * revocation waits for what was handed out to be committed. So is a record fetched before a seek of its partition.
+      * revocation waits for what was handed out to be committed. With fencing, so is one read under a lease that has since ended, which no commit
+      * could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
       */
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure)
-        .evalFilter(read => sinceLastSeek(read).ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false)))
-        .evalMap(decode)
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = PollQueue.read(polled, failure).evalFilter(handingOut).evalMap(decode)
+
+    // Counted as handed out only once the partition's stream hands them out, so one dropped before then is not waited for.
+    override private[xkafka] val routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] =
+      PollQueue.read(polled, failure).evalFilter(stillHeld).evalMap(decode)
+
+    private def stillHeld(read: ReadRecord): F[Boolean] = (sinceLastSeek(read), leased(read)).mapN(_ && _)
+
+    private def handingOut(read: ReadRecord): F[Boolean] =
+      stillHeld(read).ifM(hold.handOut(leaseKeyOf(read.record), read.assignment, read.record.offset + 1L), F.pure(false))
+
+    /** Whether the record's lease is still current, where fencing gives records leases. */
+    private def leased(read: ReadRecord): F[Boolean] =
+      if settings.assignmentFencing then leases.held.map(current => read.lease.exists(lease => current(leaseKeyOf(read.record)).contains(lease)))
+      else F.pure(true)
 
     private def sinceLastSeek(read: ReadRecord): F[Boolean] = seeks.made.get.map(_.getOrElse(leaseKeyOf(read.record), 0L) == read.sought)
 
@@ -780,12 +887,21 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
     override val assignmentChanges: Stream[F, Set[TopicPartition]] =
       assignments.discrete.changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
 
+    // Told apart by their numbers, not by the partitions alone: a partition revoked and assigned again between two looks shows only its later
+    // number, in an assignment of the same partitions.
+    override private[xkafka] def numbersAssignments: Boolean = true
+
+    override private[xkafka] def assignmentNumbers: Stream[F, Map[TopicPartition, Long]] =
+      assignments.discrete
+        .evalMap(assignment => numbers.get.map(held => assignment.map(partition => partition -> held.getOrElse(leaseKey(partition), 0L)).toMap))
+        .changes.concurrently(Stream.exec(failure.get.flatMap(F.raiseError[Unit])))
+
     override def committed(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Option[OffsetAndMetadata]]] =
       if topicPartitions.isEmpty then F.pure(Map.empty)
       else
         val entries = topicPartitions.toVector
-        client(driver.committed(client.handle, entries, requestTimeoutMillis))
-          .flatMap(values => F.delay(entries.zip(values).map((tp, value) => tp -> Option.when(value.offset >= 0L)(stored(value))).toMap))
+        client(driver.committed(client.handle, entries, requestTimeoutMillis)).flatMap(paired(entries, _))
+          .flatMap(values => F.delay(values.map((tp, value) => tp -> Option.when(value.offset >= 0L)(stored(value))).toMap))
 
     override def beginningOffsets(topicPartitions: Set[TopicPartition]): F[Map[TopicPartition, Offset]] =
       boundaryOffsets(topicPartitions, "beginning offset", (low, _) => low)
@@ -797,8 +913,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
       if timestampsToSearch.isEmpty then F.pure(Map.empty)
       else
         val entries = timestampsToSearch.toVector
-        client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis)).flatMap: values =>
-          F.delay(entries.zip(values).map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
+        before1970(timestampsToSearch.values.toList) *> client(driver.offsetsForTimes(client.handle, entries, requestTimeoutMillis))
+          .flatMap(paired(entries, _)).flatMap: values =>
+            F.delay(values.map { case ((tp, _), value) => tp -> Option.when(value >= 0L)(offset("timestamp offset", value)) }.toMap)
 
     override def partitionsFor(topic: Topic): F[NonEmptySet[Partition]] = client(readPartitionsFor(client.handle, requestTimeoutMillis, topic))
 
@@ -867,13 +984,33 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F])(using
 
             override private[xkafka] val lease: Option[Lease] = read.lease
 
+            // Neither a lease that has ended nor a seek made since the record was fetched lets it be handed out, as `records` hands out none such.
+            override private[xkafka] val stillHeld: Option[F[Boolean]] = Some(DriverConsumer.this.stillHeld(read))
+
+            override private[xkafka] val handingOut: Option[F[Boolean]] = Some(DriverConsumer.this.handingOut(read))
+
+            override private[xkafka] val assignment: Option[Long] = Some(read.number)
+
             override private[xkafka] val membership: GroupMembership[F] =
               leases.membership(DriverConsumer.this, read.lease, groupHandle, releaseGroupMetadata, Some(committedElsewhere))
 
         CommittableConsumerRecord(record, committable)
 
+    // A member removed from a group it alone was in may find the group gone, which the broker answers as GROUP_ID_NOT_FOUND; it is a member of no
+    // group, as where others stay, so it is reported as UNKNOWN_MEMBER_ID, as the Java client reports it on every backend.
     private def commitOffsets(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
-      if offsets.isEmpty then F.unit else client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis)) *> committedElsewhere(offsets)
+      if offsets.isEmpty then F.unit
+      else
+        client(driver.commit(client.handle, offsets.toVector, commitTimeoutMillis)).adaptError {
+          case gone: KafkaException.BackendFailure if gone.code.contains(ErrorCode.GroupIdNotFound) =>
+            new KafkaException.BackendFailure(
+              gone.detail,
+              Some(ErrorCode.UnknownMemberId),
+              Some(ErrorCode.UnknownMemberId.retriable),
+              gone.fatal,
+              cause = gone
+            )
+        } *> committedElsewhere(offsets)
 
     override val pausing: PartitionPausing[F] =
       new PartitionPausing.Backend[F]:

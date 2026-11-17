@@ -114,6 +114,32 @@ static void xkafka_set_error(char *error, size_t error_size, int32_t *error_code
         xkafka_set_error_at(error, error_size, error_code, value, -1);
 }
 
+/* A failure as librdkafka reports it, where _FATAL, which only says the client is done, is reported as the failure that made it so,
+ * so it is classified by its cause, as the Java client classifies it. So is a record purged because the client is done, which
+ * librdkafka gives up once a failure is fatal. */
+static void xkafka_set_failure(rd_kafka_t *client, char *error, size_t error_size, int32_t *error_code, const char *value,
+                               rd_kafka_resp_err_t code) {
+        char reason[512];
+        rd_kafka_resp_err_t cause;
+
+        if ((code == RD_KAFKA_RESP_ERR__FATAL || code == RD_KAFKA_RESP_ERR__PURGE_QUEUE || code == RD_KAFKA_RESP_ERR__PURGE_INFLIGHT) &&
+            client != NULL) {
+                cause = rd_kafka_fatal_error(client, reason, sizeof(reason));
+                if (cause != RD_KAFKA_RESP_ERR_NO_ERROR) {
+                        xkafka_set_error_at(error, error_size, error_code, reason, cause);
+                        return;
+                }
+        }
+        xkafka_set_error_at(error, error_size, error_code, value, code);
+}
+
+/* Whether the client has met a failure librdkafka holds fatal. */
+static int xkafka_fatal(rd_kafka_t *client) {
+        char reason[8];
+
+        return client != NULL && rd_kafka_fatal_error(client, reason, sizeof(reason)) != RD_KAFKA_RESP_ERR_NO_ERROR;
+}
+
 /* Only the two failures that a waiting call cannot otherwise explain are kept. */
 static void xkafka_error_callback(rd_kafka_t *client,
                                   int err,
@@ -159,6 +185,23 @@ static int xkafka_take_security_error(rd_kafka_t *client,
         }
         pthread_mutex_unlock(&state->lock);
         return found;
+}
+
+/* Whether a failure is the client giving up on reaching the brokers, which a
+ * recorded security failure explains. Any other failure is its own, however
+ * long ago a handshake or login failed. */
+static int xkafka_unreached(rd_kafka_resp_err_t err) {
+        switch (err) {
+        case RD_KAFKA_RESP_ERR__MSG_TIMED_OUT:
+        case RD_KAFKA_RESP_ERR__TIMED_OUT:
+        case RD_KAFKA_RESP_ERR__TRANSPORT:
+        case RD_KAFKA_RESP_ERR__ALL_BROKERS_DOWN:
+        case RD_KAFKA_RESP_ERR__AUTHENTICATION:
+        case RD_KAFKA_RESP_ERR__SSL:
+                return 1;
+        default:
+                return 0;
+        }
 }
 
 static int xkafka_conf_set(rd_kafka_conf_t *conf,
@@ -332,7 +375,8 @@ xkafka_batch_t *xkafka_batch_new(size_t capacity) {
 }
 
 /* Enqueues one message, returning 0 where the batch took it, 1 where the
- * producer has no room for it yet, and -1 where it was refused. The message
+ * producer has no room for it yet, -2 where it was refused because the
+ * producer met a fatal failure, and -1 where it was refused otherwise. The message
  * owns a copy of its payload, so the caller's buffers may be released as soon
  * as this returns. */
 int xkafka_batch_add(rd_kafka_t *producer,
@@ -406,22 +450,34 @@ int xkafka_batch_add(rd_kafka_t *producer,
                 slot->complete = 1;
                 break;
         default:
-                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(result), result);
-                return -1;
+                xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(result), result);
+                return xkafka_fatal(producer) ? -2 : -1;
         }
 
         batch->count++;
         return 0;
 }
 
+/* When a producer fails fatally, librdkafka purges its queues once, without
+ * waiting for its broker threads, and sends nothing more. A record that reaches
+ * a queue as that happens is missed, and its report would wait out the
+ * record's message timeout. Purging again, and waiting for it, whenever the
+ * producer is found fatal reports such a record at once. */
+static void xkafka_purge_if_fatal(rd_kafka_t *producer) {
+        if (xkafka_fatal(producer))
+                rd_kafka_purge(producer, RD_KAFKA_PURGE_F_QUEUE);
+}
+
 /* Serves whatever delivery reports are ready, for up to the timeout. Enqueues may run alongside it. */
 void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms) {
+        xkafka_purge_if_fatal(producer);
         rd_kafka_poll(producer, timeout_ms);
 }
 
 /* Sends what the producer holds without waiting out its linger, and serves delivery reports, until nothing is
  * outstanding or the timeout passes. */
 void xkafka_producer_flush(rd_kafka_t *producer, int timeout_ms) {
+        xkafka_purge_if_fatal(producer);
         rd_kafka_flush(producer, timeout_ms);
 }
 
@@ -430,7 +486,7 @@ size_t xkafka_batch_pending(const xkafka_batch_t *batch) {
 }
 
 /* Reads the outcome of one delivery of a batch whose reports have all arrived,
- * returning 0 where it was delivered. */
+ * returning 0 where it was delivered, -2 where it failed once the producer met a fatal failure, and -1 where it failed otherwise. */
 int xkafka_batch_error_at(rd_kafka_t *producer,
                           xkafka_batch_t *batch,
                           size_t index,
@@ -448,6 +504,17 @@ int xkafka_batch_error_at(rd_kafka_t *producer,
         if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
                 return 0;
 
+        /* Any failure but the client giving up on the brokers is the delivery's own. */
+        if (!xkafka_unreached(err)) {
+                xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(err), err);
+                return xkafka_fatal(producer) ? -2 : -1;
+        }
+        /* One that timed out once the producer met a fatal failure is reported as that failure, which made it fatal too, as
+         * librdkafka retries nothing after it: a fenced producer's deliveries then say it was fenced. */
+        if (xkafka_fatal(producer)) {
+                xkafka_set_failure(producer, error, error_size, error_code, rd_kafka_err2str(RD_KAFKA_RESP_ERR__FATAL), RD_KAFKA_RESP_ERR__FATAL);
+                return -2;
+        }
         /* A delivery report that never reached a broker reports the retries
          * ending, so a recorded security failure is the cause. */
         if (!batch->security_read) {
@@ -786,9 +853,9 @@ rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                 return NULL;
         }
         if (message->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                if (!xkafka_take_security_error(consumer, error, error_size, error_code))
-                        xkafka_set_error_at(error, error_size, error_code,
-                                            rd_kafka_message_errstr(message), message->err);
+                if (!xkafka_unreached(message->err) || !xkafka_take_security_error(consumer, error, error_size, error_code))
+                        xkafka_set_failure(consumer, error, error_size, error_code,
+                                           rd_kafka_message_errstr(message), message->err);
                 rd_kafka_message_destroy(message);
                 *status = -1;
                 return NULL;
@@ -952,31 +1019,36 @@ xkafka_topic_partition_list(const char *const *topics,
 }
 
 /* Offsets to commit, each with its leader epoch, negative for none, and its
- * metadata, empty for none. librdkafka frees the metadata with the list, so
- * it is allocated through librdkafka. */
+ * metadata: `metadata_sizes[index]` bytes of `metadata`, each after the one
+ * before, so a metadata holding NUL is kept whole; none where the size is 0.
+ * librdkafka frees the metadata with the list, so it is allocated through
+ * librdkafka. */
 static rd_kafka_topic_partition_list_t *
 xkafka_commit_list(rd_kafka_t *client,
                    const char *const *topics,
                    const int32_t *partitions,
                    const int64_t *offset_values,
                    const int32_t *leader_epochs,
-                   const char *const *metadata,
+                   const char *metadata,
+                   const int32_t *metadata_sizes,
                    size_t count) {
         rd_kafka_topic_partition_list_t *native_offsets =
             xkafka_topic_partition_list(topics, partitions, offset_values, count);
         size_t index;
+        size_t at = 0;
 
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
-                size_t size = strlen(metadata[index]);
+                size_t size = metadata_sizes[index] > 0 ? (size_t)metadata_sizes[index] : 0;
 
                 if (leader_epochs[index] >= 0)
                         rd_kafka_topic_partition_set_leader_epoch(entry, leader_epochs[index]);
                 if (size > 0) {
                         entry->metadata = rd_kafka_mem_malloc(client, size);
-                        memcpy(entry->metadata, metadata[index], size);
+                        memcpy(entry->metadata, metadata + at, size);
                         entry->metadata_size = size;
                 }
+                at += size;
         }
         return native_offsets;
 }
@@ -1036,8 +1108,8 @@ void *xkafka_consumer_committed(rd_kafka_t *consumer,
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size, error_code,
-                                         rd_kafka_err2str(entry->err));
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(entry->err), entry->err);
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return NULL;
                 }
@@ -1090,8 +1162,8 @@ int xkafka_consumer_position(rd_kafka_t *consumer,
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size, error_code,
-                                         rd_kafka_err2str(entry->err));
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(entry->err), entry->err);
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return -1;
                 }
@@ -1144,8 +1216,8 @@ int xkafka_consumer_offsets_for_times(rd_kafka_t *consumer,
         for (index = 0; index < count; index++) {
                 rd_kafka_topic_partition_t *entry = &native_offsets->elems[index];
                 if (entry->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error(error, error_size, error_code,
-                                         rd_kafka_err2str(entry->err));
+                        xkafka_set_error_at(error, error_size, error_code,
+                                            rd_kafka_err2str(entry->err), entry->err);
                         rd_kafka_topic_partition_list_destroy(native_offsets);
                         return -1;
                 }
@@ -1187,25 +1259,14 @@ void *xkafka_consumer_metadata(rd_kafka_t *consumer,
         for (topic_index = 0; topic_index < metadata->topic_cnt; topic_index++) {
                 const rd_kafka_metadata_topic_t *topic_metadata =
                     &metadata->topics[topic_index];
-                int partition_index;
 
+                /* Only a topic's own error fails the call: a partition whose leader is offline is listed with the others, as the Java client
+                 * lists it. */
                 if (topic_metadata->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
                         xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(topic_metadata->err),
                                             topic_metadata->err);
                         rd_kafka_metadata_destroy(metadata);
                         return NULL;
-                }
-                for (partition_index = 0;
-                     partition_index < topic_metadata->partition_cnt;
-                     partition_index++) {
-                        rd_kafka_resp_err_t partition_error =
-                            topic_metadata->partitions[partition_index].err;
-                        if (partition_error != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                                xkafka_set_error_at(error, error_size, error_code, rd_kafka_err2str(partition_error),
-                                                    partition_error);
-                                rd_kafka_metadata_destroy(metadata);
-                                return NULL;
-                        }
                 }
         }
         return (void *)metadata;
@@ -1246,13 +1307,23 @@ int32_t xkafka_metadata_partition_at(const void *metadata,
 /* librdkafka's admin calls are asynchronous: the request goes on a queue and the outcome arrives as
  * an event. Each helper below submits, waits for its event, and reports the first failure it finds,
  * because the portable API reports one failure rather than an outcome for each topic. */
+/* Bounds a request, and the broker's work on it, by the call's timeout, as the Java client bounds the same requests. The timeout is the
+ * client's own, always one librdkafka takes, so the setters' answers need no checking. */
+static void xkafka_admin_timeouts(rd_kafka_AdminOptions_t *options, int timeout_ms) {
+        char ignored[128];
+
+        rd_kafka_AdminOptions_set_request_timeout(options, timeout_ms, ignored, sizeof(ignored));
+        rd_kafka_AdminOptions_set_operation_timeout(options, timeout_ms, ignored, sizeof(ignored));
+}
+
 static int xkafka_admin_await(rd_kafka_queue_t *queue,
                               rd_kafka_event_type_t expected,
                               int timeout_ms,
                               char *error,
                               size_t error_size,
                               int32_t *error_code) {
-        rd_kafka_event_t *event = rd_kafka_queue_poll(queue, timeout_ms);
+        /* librdkafka ends the request with its own timed out result, so this waits a little longer than the request may take. */
+        rd_kafka_event_t *event = rd_kafka_queue_poll(queue, timeout_ms + timeout_ms / 2);
         const rd_kafka_topic_result_t **results = NULL;
         size_t count = 0, index;
         int outcome = 0;
@@ -1347,6 +1418,8 @@ int xkafka_admin_create_topics(rd_kafka_t *client,
         rd_kafka_queue_t *queue = rd_kafka_queue_new(client);
         rd_kafka_AdminOptions_t *options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_CREATETOPICS);
         size_t index, configured = 0;
+
+        xkafka_admin_timeouts(options, timeout_ms);
         int outcome = 0;
 
         if (topics == NULL) {
@@ -1407,6 +1480,8 @@ int xkafka_admin_delete_topics(rd_kafka_t *client,
         size_t index;
         int outcome;
 
+        xkafka_admin_timeouts(options, timeout_ms);
+
         if (topics == NULL) {
                 xkafka_set_error(error, error_size, error_code, "could not allocate the topics to delete");
                 rd_kafka_AdminOptions_destroy(options);
@@ -1450,6 +1525,7 @@ int xkafka_admin_create_partitions(rd_kafka_t *client,
 
         queue = rd_kafka_queue_new(client);
         options = rd_kafka_AdminOptions_new(client, RD_KAFKA_ADMIN_OP_CREATEPARTITIONS);
+        xkafka_admin_timeouts(options, timeout_ms);
         rd_kafka_CreatePartitions(client, &request, 1, options, queue);
         outcome = xkafka_admin_await(queue, RD_KAFKA_EVENT_CREATEPARTITIONS_RESULT, timeout_ms, error, error_size, error_code);
 
@@ -2276,7 +2352,8 @@ int xkafka_admin_alter_group_offsets(rd_kafka_t *client,
                                      const int32_t *partitions,
                                      const int64_t *offset_values,
                                      const int32_t *leader_epochs,
-                                     const char *const *metadata,
+                                     const char *metadata,
+                                     const int32_t *metadata_sizes,
                                      size_t count,
                                      int timeout_ms,
                                      int32_t *codes,
@@ -2296,7 +2373,7 @@ int xkafka_admin_alter_group_offsets(rd_kafka_t *client,
         xkafka_partition_codes(NULL, topics, partitions, count, codes);
         if (options == NULL)
                 return -1;
-        offsets = xkafka_commit_list(client, topics, partitions, offset_values, leader_epochs, metadata, count);
+        offsets = xkafka_commit_list(client, topics, partitions, offset_values, leader_epochs, metadata, metadata_sizes, count);
         request = rd_kafka_AlterConsumerGroupOffsets_new(group, offsets);
         rd_kafka_topic_partition_list_destroy(offsets);
         queue = rd_kafka_queue_new(client);
@@ -2635,7 +2712,8 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
                                  const int32_t *partitions,
                                  const int64_t *offset_values,
                                  const int32_t *leader_epochs,
-                                 const char *const *offset_metadata,
+                                 const char *offset_metadata,
+                                 const int32_t *offset_metadata_sizes,
                                  size_t count,
                                  int timeout_ms,
                                  char *error,
@@ -2653,7 +2731,7 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer,
                 return -1;
         }
         native_offsets =
-            xkafka_commit_list(producer, topics, partitions, offset_values, leader_epochs, offset_metadata, count);
+            xkafka_commit_list(producer, topics, partitions, offset_values, leader_epochs, offset_metadata, offset_metadata_sizes, count);
         status = xkafka_take_error(
             rd_kafka_send_offsets_to_transaction(
                 producer, native_offsets,
@@ -2672,14 +2750,15 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
                            const int32_t *partitions,
                            const int64_t *offset_values,
                            const int32_t *leader_epochs,
-                           const char *const *metadata,
+                           const char *metadata,
+                           const int32_t *metadata_sizes,
                            size_t count,
                            int timeout_ms,
                            char *error,
                            size_t error_size,
                            int32_t *error_code) {
         rd_kafka_topic_partition_list_t *native_offsets =
-            xkafka_commit_list(consumer, topics, partitions, offset_values, leader_epochs, metadata, count);
+            xkafka_commit_list(consumer, topics, partitions, offset_values, leader_epochs, metadata, metadata_sizes, count);
         rd_kafka_queue_t *queue = rd_kafka_queue_new(consumer);
         rd_kafka_resp_err_t enqueued;
         rd_kafka_event_t *event;
@@ -2690,8 +2769,8 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
         rd_kafka_topic_partition_list_destroy(native_offsets);
 
         if (enqueued != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                xkafka_set_error_at(error, error_size, error_code,
-                                    rd_kafka_err2str(enqueued), enqueued);
+                xkafka_set_failure(consumer, error, error_size, error_code,
+                                   rd_kafka_err2str(enqueued), enqueued);
                 rd_kafka_queue_destroy(queue);
                 return -1;
         }
@@ -2707,8 +2786,8 @@ int xkafka_consumer_commit(rd_kafka_t *consumer,
         } else {
                 rd_kafka_resp_err_t failure = rd_kafka_event_error(event);
                 if (failure != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                        xkafka_set_error_at(error, error_size, error_code,
-                                            rd_kafka_err2str(failure), failure);
+                        xkafka_set_failure(consumer, error, error_size, error_code,
+                                           rd_kafka_err2str(failure), failure);
                         outcome = -1;
                 }
                 rd_kafka_event_destroy(event);

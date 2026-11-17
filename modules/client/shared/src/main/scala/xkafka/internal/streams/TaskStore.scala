@@ -26,6 +26,7 @@ package streams
 import scala.collection.immutable.TreeMap
 
 import cats.effect.Concurrent
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import fs2.Chunk
 
@@ -64,6 +65,9 @@ private[xkafka] trait TaskStore[F[_]]:
   /** Releases what the store holds open, after which it is not used again; a store in memory holds nothing open. */
   def close: F[Unit]
 
+  /** Empties the store, as one made anew: what it holds, its positions and its clock. */
+  def clear: F[Unit]
+
   /** The keys starting with `prefix` and what they hold, in order. */
   final def prefixed(prefix: Chunk[Byte]): F[Vector[(Chunk[Byte], Stored)]] = range(Some(prefix), StoreContents.past(prefix))
 
@@ -79,6 +83,29 @@ private[xkafka] object TaskStore:
 
   /** Opens each store in memory. */
   def memory[F[_]: Concurrent]: Open[F] = (_, time, held) => inMemory(held, time)
+
+  /** What a read of a guarded store that has closed fails with. */
+  case object Closed extends RuntimeException("the store has closed", null, false, false)
+
+  /** As many reads as may run at once on a guarded store, all of which its close takes. */
+  private val Readers = Long.MaxValue
+
+  /** `store` for readers that may come while its task gives it up, as queries do: a close waits for the reads under way, and a read after it fails
+    * with `Closed`, so that no read reaches a store once it is closed.
+    */
+  def guarded[F[_]](store: TaskStore[F])(using F: Concurrent[F]): F[TaskStore[F]] =
+    (Semaphore[F](Readers), F.ref(false)).mapN: (permits, shut) =>
+      def reading[A](read: F[A]): F[A] = permits.permit.surround(shut.get.ifM(F.raiseError(Closed), read))
+      new TaskStore[F]:
+        def get(key: Chunk[Byte]): F[Option[Stored]]                                                    = reading(store.get(key))
+        def range(from: Option[Chunk[Byte]], to: Option[Chunk[Byte]]): F[Vector[(Chunk[Byte], Stored)]] = reading(store.range(from, to))
+        def timed(from: Long, to: Long): F[Vector[(Chunk[Byte], Stored)]]                               = reading(store.timed(from, to))
+        def clock: F[Long]                                                                              = reading(store.clock)
+        def clear: F[Unit]                                                                              = reading(store.clear)
+        def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit]                            = reading(store.write(changes, positions))
+        def positions: F[Map[Int, Long]]                                                                = reading(store.positions)
+        def close: F[Unit]                                                                              =
+          F.uncancelable(_ => permits.acquireN(Readers) *> shut.getAndSet(true).ifM(F.unit, store.close) <* permits.releaseN(Readers))
 
   /** What a store in memory holds: its keys, the same keys in order of time where it has a time, its clock, and its position. */
   private final case class Held(contents: StoreContents, byTime: TreeMap[(Long, Chunk[Byte]), Unit], clock: Long, positions: Map[Int, Long])
@@ -100,9 +127,10 @@ private[xkafka] object TaskStore:
           state.get.map: now =>
             if from > to then Vector.empty
             else now.byTime.rangeFrom((from, Chunk.empty)).keysIterator.takeWhile(_._1 <= to).map((_, key) => key -> now.contents(key)).toVector
-        def clock: F[Long]                                                   = state.get.map(_.clock)
-        def positions: F[Map[Int, Long]]                                     = state.get.map(_.positions)
-        def close: F[Unit]                                                   = F.unit
+        def clock: F[Long]               = state.get.map(_.clock)
+        def positions: F[Map[Int, Long]] = state.get.map(_.positions)
+        def close: F[Unit]               = F.unit
+        def clear: F[Unit]               = state.set(Held(StoreContents.empty, TreeMap.empty(using timeThenKey), WindowStore.NoTime, Map.empty))
         def write(changes: StoreChanges, positions: Map[Int, Long]): F[Unit] =
           state.update: now =>
             val moved = now.positions ++ positions

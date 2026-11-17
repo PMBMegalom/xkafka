@@ -92,6 +92,12 @@ final class SaslSuite extends CatsEffectSuite:
       outcome  <- Sasl.scram(Digest.Sha256, user, clientNonce, crypto, scripted.send).attempt
     yield refusal(outcome, "the broker asks for 4095 SCRAM iterations, fewer than 4096")
 
+  test("a broker asking for more iterations than Kafka's brokers keep is refused"):
+    for
+      scripted <- broker(s"r=$serverNonce,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=16385")
+      outcome  <- Sasl.scram(Digest.Sha256, user, clientNonce, crypto, scripted.send).attempt
+    yield refusal(outcome, "the broker asks for 16385 SCRAM iterations, more than 16384")
+
   test("a first broker message without a salt or an iteration count is refused"):
     for
       noSalt            <- broker(s"r=$serverNonce,i=4096")

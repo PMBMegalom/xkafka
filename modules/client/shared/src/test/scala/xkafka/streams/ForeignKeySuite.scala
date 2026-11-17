@@ -79,6 +79,56 @@ final class ForeignKeySuite extends CatsEffectSuite:
       assertEquals(to(changed._2, responses).map(_.partition), Vector(Some(3)))
       assertEquals(to(changed._2, responses).map(_.key), Vector(Some(bytes("k1"))))
 
+  test("the row's key is written for each topic it goes to, the answers' and the result's changelog, as Java writes it for each"):
+    // Keys whose bytes name the topic they were written for, read only from it, as a registry's may differ between subjects.
+    val tagged =
+      Serde[IO, String](
+        Serializer.instance((topic, _, key) => IO.pure(Some(bytes(s"${topic.value}:$key")))),
+        Deserializer.instance: (topic, _, written) =>
+          written.map(read => new String(read.toArray)) match
+            case Some(text) if text.startsWith(s"${topic.value}:") => IO.pure(text.stripPrefix(s"${topic.value}:"))
+            case other => IO.raiseError(new IllegalArgumentException(s"$other was not written for ${topic.value}"))
+      )
+    val keyed    = KTable(Named("rows"), left, tagged, text, Store("rows"))
+    val topology =
+      program(keyed.joinOnForeignKey(Named("fk"), users, text, text, text, Store("result"), text)((_, value) => Some(value))((l, r) => s"$l+$r"))
+    for
+      rowsTask  <- taskReading(topology, "left", 0)
+      usersTask <- taskReading(topology, "other", 0)
+      known     <- usersTask.process(TaskState.empty, input("other", "a", Some(bytes("A"))), 0L)
+      sent      <- rowsTask.process(TaskState.empty, TaskInput(Some(bytes("left:k1")), Some(bytes("a")), 1000L, Headers.empty, "left", 0, 0L), 0L)
+      request = to(sent._2, requests).head
+      answered <- usersTask.process(known._1, TaskInput(request.key, request.value, request.timestamp, request.headers, requests, 0, 0L), 0L)
+      answer = to(answered._2, responses).head
+      result <- rowsTask.process(sent._1, TaskInput(answer.key, answer.value, answer.timestamp, answer.headers, responses, 0, 0L), 0L)
+    yield
+      assertEquals(answer.key, Some(bytes(s"$responses:k1")))
+      assertEquals(to(result._2, "app-result-changelog").map(_.key), Vector(Some(bytes("app-result-changelog:k1"))))
+      assertEquals(to(result._2, "out").map(_.key), Vector(Some(bytes("k1"))))
+
+  test("a foreign key is kept for the subscriptions as written for their -fk topic, so a change to the other table finds them, as Java's does"):
+    val tagged =
+      Serde[IO, String](
+        Serializer.instance((topic, _, key) => IO.pure(Some(bytes(s"${topic.value}:$key")))),
+        Deserializer.instance: (topic, _, written) =>
+          written.map(read => new String(read.toArray)) match
+            case Some(text) if text.startsWith(s"${topic.value}:") => IO.pure(text.stripPrefix(s"${topic.value}:"))
+            case other => IO.raiseError(new IllegalArgumentException(s"$other was not written for ${topic.value}"))
+      )
+    val taggedUsers = KTable(Named("users"), other, tagged, text, Store("users"))
+    val topology    = program(rows.joinOnForeignKey(Named("fk"), taggedUsers, text, tagged, text)((_, value) => Some(value))((l, r) => s"$l+$r"))
+    for
+      rowsTask  <- taskReading(topology, "left", 0)
+      usersTask <- taskReading(topology, "other", 0)
+      sent      <- rowsTask.process(TaskState.empty, input("left", "k1", Some(bytes("a"))), 0L)
+      request = to(sent._2, requests).head
+      subscribed <- usersTask.process(TaskState.empty, TaskInput(request.key, request.value, request.timestamp, request.headers, requests, 0, 0L), 0L)
+      changed    <- usersTask.process(subscribed._1, TaskInput(Some(bytes("other:a")), Some(bytes("A")), 2000L, Headers.empty, "other", 0, 0L), 0L)
+    yield
+      val kept = to(subscribed._2, "app-fk-subscription-store-changelog").flatMap(_.key).map(key => new String(key.toArray))
+      assert(kept.exists(_.contains(s"$requests-fk:a")), kept)
+      assertEquals(to(changed._2, responses).size, 1)
+
   test("an answer for a value the row has since changed from is dropped, and one for the value it holds makes the result"):
     val topology                   = program(joined)
     val hashOf                     = (value: String) => Some(Murmur3.hash128(bytes(value)))
@@ -177,6 +227,26 @@ final class ForeignKeySuite extends CatsEffectSuite:
     assertEquals(Topology.of(rejoined(unkept)).left.toOption.map(_.toList), Some(List(TopologyError.WindowedJoin)))
     assert(Topology.of(grouped(kept)).isRight)
     assert(Topology.of(rejoined(kept)).isRight)
+    // A step after the result that keeps a store of its own is joined through that store, as Java's is.
+    assert(Topology.of(rejoined(unkept.mapValues(Named("m"), Store("mapped"), text)(_ + "!"))).isRight)
+    assert(Topology.of(rejoined(unkept.filter(Named("f"), Store("filtered"), text)((_, _) => true))).isRight)
+    // A filter that keeps a store of its own reads the old values it drops from there, and hands them on to the groupBy after it.
+    assert(Topology.of(grouped(unkept.filter(Named("f"), Store("filtered"), text)((_, _) => true))).isRight)
+
+  test("a filter after a result kept in no store runs without old values, as Java's, a value it drops becoming a delete whatever came before"):
+    val filtered                             = joined.filter(Named("f"))((_, value) => value.startsWith("a"))
+    val topology                             = program(filtered)
+    val hashOf                               = (value: String) => Some(Murmur3.hash128(bytes(value)))
+    def answer(hash: Option[Hash], at: Long) = input("app-fk-subscription-response-topic", "k1", Some(Response(hash, Some(bytes("A"))).encoded), at)
+    for
+      task    <- taskReading(topology, "left", 0)
+      first   <- task.process(TaskState.empty, input("left", "k1", Some(bytes("a"))), 0L)
+      kept    <- task.process(first._1, answer(hashOf("a"), 2000L), 0L)
+      second  <- task.process(kept._1, input("left", "k1", Some(bytes("b"))), 0L)
+      dropped <- task.process(second._1, answer(hashOf("b"), 3000L), 0L)
+    yield
+      assertEquals(to(kept._2, "out").map(_.value), Vector(Some(bytes("a+A"))))
+      assertEquals(to(dropped._2, "out").map(_.value), Vector(None))
 
   test("a windowed table cannot join on a foreign key, on either side"):
     val windowed =

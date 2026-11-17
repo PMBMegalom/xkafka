@@ -41,5 +41,23 @@ private[xkafka] object MockCluster:
   /** Kafka's `OffsetFetch` API, which reads a group's committed offsets. */
   val OffsetFetch = 9
 
+  /** Kafka's `ListOffsets` API, which finds offsets by time. */
+  val ListOffsets = 2
+
+  /** Kafka's `TOPIC_AUTHORIZATION_FAILED` error. */
+  val TopicAuthorizationFailed = 29
+
   /** Kafka's `NOT_COORDINATOR` error. */
   val NotCoordinator = 16
+
+  /** Kafka's `OffsetCommit` API, which commits a group's offsets. */
+  val OffsetCommit = 8
+
+  /** Kafka's `Produce` API, which writes records. */
+  val Produce = 0
+
+  /** Kafka's `INVALID_PRODUCER_EPOCH` error, which librdkafka takes as a newer producer fencing a transactional one, fatal to it. */
+  val InvalidProducerEpoch = 47
+
+  /** Kafka's `FENCED_INSTANCE_ID` error, which librdkafka takes as fatal to a static member. */
+  val FencedInstanceId = 82

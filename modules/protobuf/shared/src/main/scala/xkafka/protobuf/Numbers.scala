@@ -40,8 +40,9 @@ private[protobuf] object Numbers:
     import quotes.reflect.*
     val module = if symbol.flags.is(Flags.Module) && !symbol.moduleClass.isNoSymbol then symbol.moduleClass.annotations else Nil
     (symbol.annotations ++ module).filter(_.tpe.typeSymbol.fullName == "xkafka.protobuf.ProtobufField").map:
-      case Apply(_, List(Literal(IntConstant(number)))) => number
-      case other => report.errorAndAbort(s"the number @ProtobufField gives ${symbol.name} must be written as a literal", other.pos)
+      case annotation @ Apply(_, List(argument)) => xkafka.schemaregistry.Meta.constantNumber(argument)
+          .getOrElse(report.errorAndAbort(s"the number @ProtobufField gives ${symbol.name} must be a constant", annotation.pos))
+      case other => report.errorAndAbort(s"the number @ProtobufField gives ${symbol.name} must be a constant", other.pos)
     .headOption
 
   private def position(using Quotes)(symbol: quotes.reflect.Symbol): quotes.reflect.Position =

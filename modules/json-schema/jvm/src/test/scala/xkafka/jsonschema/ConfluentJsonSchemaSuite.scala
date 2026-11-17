@@ -31,12 +31,11 @@ import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import fs2.Chunk
 import io.circe.Json
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient
-import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException
 import io.confluent.kafka.schemaregistry.json.{JsonSchema, JsonSchemaUtils}
 import io.confluent.kafka.serializers.json.{KafkaJsonSchemaDeserializer, KafkaJsonSchemaSerializer}
 import munit.CatsEffectSuite
 import xkafka.{Headers, Topic}
-import xkafka.schemaregistry.{Compatibility, Part, Registered, Schema, SchemaId, SchemaRegistry, SchemaType, Subject}
+import xkafka.schemaregistry.Part
 
 final case class Grown(sku: String, quantity: Int = 1, colour: Option[String] = None) derives JsonSchemaCodec
 
@@ -72,6 +71,8 @@ class ConfluentJsonSchemaSuite extends CatsEffectSuite:
     valid(JsonSchemaCodec[Payment], Card("1"), Cash, Transfer("x"))
     valid(JsonSchemaCodec[Status], Status.Open)
     valid(JsonSchemaCodec[Node], Node(1, Some(Node(2, Some(Node(3))))))
+    valid(JsonSchemaCodec[Vehicle], Car(4), Stop, Go)
+    valid(JsonSchemaCodec[Holder], Holder(Some(Holder(Some(Holder(None))))))
 
   test("Confluent finds a value that breaks a derived schema invalid, so its validation reads the schema as xkafka means it"):
     val schema = confluent(JsonSchemaCodec[Line])
@@ -85,21 +86,6 @@ class ConfluentJsonSchemaSuite extends CatsEffectSuite:
     assertEquals(confluent(JsonSchemaCodec[Grown]).isBackwardCompatible(older).asScala.toList, Nil)
     assert(confluent(JsonSchemaCodec[LineBefore]).isBackwardCompatible(older).asScala.nonEmpty, "removing a field from a closed object")
 
-  /** xkafka's registry operations on Confluent's registry in memory. */
-  private def bridged(mock: MockSchemaRegistryClient): SchemaRegistry[IO] =
-    def missing[A](run: => A): IO[Option[A]] = IO.blocking(Option(run)).recover { case error: RestClientException if error.getStatus == 404 => None }
-    new SchemaRegistry[IO]:
-      override def schema(id: SchemaId): IO[Schema] = IO.blocking(Schema(mock.getSchemaById(id.value).canonicalString, SchemaType.Json))
-      override def register(subject: Subject, schema: Schema): IO[SchemaId] =
-        IO.blocking(SchemaId(mock.register(subject.value, new JsonSchema(schema.text))))
-      override def lookup(subject: Subject, schema: Schema): IO[Option[Registered]] =
-        missing(mock.getId(subject.value, new JsonSchema(schema.text))).map(_.map(id => Registered(SchemaId(id), subject, 1, schema)))
-      override def latest(subject: Subject): IO[Option[Registered]] =
-        missing(mock.getLatestSchemaMetadata(subject.value))
-          .map(_.map(meta => Registered(SchemaId(meta.getId), subject, meta.getVersion, Schema(meta.getSchema, SchemaType.Json))))
-      override def version(subject: Subject, version: Int): IO[Option[Registered]]    = IO.pure(None)
-      override def compatibility(subject: Subject, schema: Schema): IO[Compatibility] = IO.pure(Compatibility.Compatible)
-
   test("Confluent's deserializer reads what xkafka writes, and xkafka reads what Confluent's serializer writes"):
     val mock         = new MockSchemaRegistryClient(List(new io.confluent.kafka.schemaregistry.json.JsonSchemaProvider()).asJava)
     val serializer   = new KafkaJsonSchemaSerializer[JsonNode](mock)
@@ -108,7 +94,7 @@ class ConfluentJsonSchemaSuite extends CatsEffectSuite:
     deserializer.configure(Map("schema.registry.url" -> "mock://xkafka").asJava, false)
     val theirs = order.copy(payment = Card("9"), note = None)
     for
-      serde   <- JsonSchemaSerde.of[IO, Order](bridged(mock), Part.Value)
+      serde   <- JsonSchemaSerde.of[IO, Order](ConfluentJsonRegistry.bridged(mock), Part.Value)
       ours    <- serde.serializer.serialize(topic, Headers.empty, order)
       read    <- IO.blocking(deserializer.deserialize("orders", ours.get.toArray))
       written <-

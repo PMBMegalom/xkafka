@@ -70,9 +70,23 @@ private[xkafka] object GlobalStores:
         Resource.make(
           globals.traverse(global => open(global.store.value, None, StoreContents.empty).map(global.store.value -> _)).map(_.toMap)
         )(_.values.toList.traverse_(_.close))
-      // A table kept on disk is read on from where its store holds each partition to, and any other from the start.
-      from <- Resource.eval(globals.traverse(global => held(global.store.value).positions.map(global.topic.value -> _)).map(_.toMap))
-      _    <-
+      // A table kept on disk is read on from where its store holds each partition to, and any other from the start. One whose store holds a
+      // position outside its topic, as one past its end after the topic was made anew, holds what the topic no longer does: it is emptied and read
+      // from the start, as Java takes such a store as corrupted.
+      kept   <- Resource.eval(globals.traverse(global => held(global.store.value).positions.map(global -> _)))
+      bounds <-
+        Resource
+          .eval(starts.traverse(at => Restore.whileMoving(driver.watermarks(consumer, at, Restore.EndsTimeoutMillis)).map(at -> _)).map(_.toMap))
+      outside =
+        kept.collect:
+          case (global, positions)
+              if positions.exists((partition, at) =>
+                bounds.collectFirst { case (tp, (low, high)) if tp.topic == global.topic && tp.partition.value == partition => at < low || at > high }
+                  .contains(true)
+              ) => global
+      _ <- Resource.eval(outside.traverse_(global => held(global.store.value).clear))
+      from = kept.filterNot((global, _) => outside.contains(global)).map((global, positions) => global.topic.value -> positions).toMap
+      _ <-
         Resource.eval(driver.assign(
           consumer,
           starts.toVector,

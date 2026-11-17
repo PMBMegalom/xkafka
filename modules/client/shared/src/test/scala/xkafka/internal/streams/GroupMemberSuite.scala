@@ -57,8 +57,8 @@ final class GroupMemberSuite extends CatsEffectSuite:
       Coordinator((_, request) => IO.pure(answer(request, active = Some(Set(TaskId("0", 0))), interval = 1000))).flatMap: coordinator =>
         member(coordinator).use: member =>
           member.changes.head.compile.lastOrError.flatMap:
-            case MemberAction.Assign(round, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(1200.millis)
-            case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+            case MemberAction.Assign(round, _, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(1200.millis)
+            case other                            => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
         *> coordinator.sent
     TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
       assertEquals(sent.map(_._1).take(3), List(0L, 500L, 1500L))
@@ -111,9 +111,9 @@ final class GroupMemberSuite extends CatsEffectSuite:
             before <- member.epoch
             _      <- IO.sleep(100.millis)
             after  <- member.epoch
-            first  <- member.commit(offsets).attempt
+            first  <- member.commit(offsets, after).attempt
             opened <- coordinator.opened
-            second <- member.commit(offsets)
+            second <- member.commit(offsets, after)
             read   <- member.committed(asked)
             counts <- (coordinator.opened, coordinator.closed).tupled
             made   <- coordinator.requests
@@ -133,6 +133,44 @@ final class GroupMemberSuite extends CatsEffectSuite:
           OffsetFetchRequest("app", Some("member"), 1, asked, requireStable = true)
         )
       )
+
+  test("a connection a failed request gives up is closed only once the requests still on it are answered"):
+    val failure = new KafkaException.BackendFailure("gone", Some(ErrorCode.RequestTimedOut), Some(true))
+    val offsets = List(OffsetCommitRequest.Topic("input", List(OffsetCommitRequest.Partition(0, 5L, -1, None))))
+    val run     =
+      Coordinator(
+        (n, request) => if n == 1 then IO.raiseError(failure) else IO.pure(answer(request, active = Some(Set.empty), interval = 1000)),
+        [R] =>
+          (_: Int, request: Request[R]) =>
+            request match
+              case _: OffsetCommitRequest => IO.sleep(3.seconds).as(List(OffsetCommitRequest.Answer("input", 0, 0)))
+              case other                  => Coordinator.unexpected(other)
+      ).flatMap: coordinator =>
+        // The second heartbeat fails a second in, while the commit waits two more seconds for its answer.
+        member(coordinator).use(member => IO.sleep(100.millis) *> member.epoch.flatMap(member.commit(offsets, _)).attempt).product(coordinator.opened)
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (committed, opened) =>
+      assertEquals(committed, Right(List(OffsetCommitRequest.Answer("input", 0, 0))))
+      assertEquals(opened, 2)
+
+  test("requests made together while there is no connection share the one connection made for them"):
+    val offsets = List(OffsetCommitRequest.Topic("input", List(OffsetCommitRequest.Partition(0, 5L, -1, None))))
+    val run     =
+      Coordinator(
+        (_, request) => IO.pure(answer(request, active = Some(Set.empty))),
+        [R] =>
+          (_: Int, request: Request[R]) =>
+            request match
+              case _: OffsetCommitRequest => IO.pure(List(OffsetCommitRequest.Answer("input", 0, 0)))
+              case other                  => Coordinator.unexpected(other)
+        ,
+        connecting = 1.second
+      ).flatMap: coordinator =>
+        // The first heartbeat and the commit both wait for the connection the first of them asked for.
+        member(coordinator).use(member => member.epoch.flatMap(member.commit(offsets, _))) *> (coordinator.opened, coordinator.sent.map(_.size))
+          .tupled
+    TestControl.executeEmbed(run.timeout(1.minute)).map: (opened, heartbeats) =>
+      assertEquals(opened, 1)
+      assert(heartbeats >= 1)
 
   test("a heartbeat refused the application's topics goes again after a wait, and the refusal is reported until one is accepted"):
     val run =
@@ -162,6 +200,16 @@ final class GroupMemberSuite extends CatsEffectSuite:
 
   private def offsetsAt(n: Long) = TaskOffsets(List(StreamsGroup.TaskOffset("0", 1, n)), List(StreamsGroup.TaskOffset("0", 1, 5L)))
 
+  test("a heartbeat waits no longer than a second for task offsets slow to read, and goes without them"):
+    // A read that cannot be cancelled, as the engine's reads of partition ends are not.
+    val slow = IO.sleep(1.minute).uncancelable.as(offsetsAt(1))
+    val run  =
+      Coordinator((_, request) => IO.pure(answer(request, active = Some(Set.empty), interval = 300, offsetInterval = 1000))).flatMap: coordinator =>
+        member(coordinator).use(member => member.offsetsFrom(slow) *> IO.sleep(2500.millis)) *> coordinator.sent
+    TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
+      assert(sent.size >= 2, s"only ${sent.size} heartbeats went in 2.5 seconds")
+      assert(sent.forall((_, heartbeat) => heartbeat.taskOffsets.isEmpty), sent)
+
   test("the joining heartbeat carries the task offsets, and later ones only those that changed"):
     carried(IO.pure(offsetsAt(2L))).map: sent =>
       assertEquals(sent.map(_._1), List(0L))
@@ -186,8 +234,8 @@ final class GroupMemberSuite extends CatsEffectSuite:
           coordinator =>
             member(coordinator).use: member =>
               member.offsetsFrom(reads.updateAndGet(_ + 1).map(offsetsAt)) *> member.changes.head.compile.lastOrError.flatMap:
-                case MemberAction.Assign(round, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(100.millis)
-                case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+                case MemberAction.Assign(round, _, _) => IO.sleep(500.millis) *> member.assigned(round) *> IO.sleep(100.millis)
+                case other                            => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
             *> coordinator.sent
     TestControl.executeEmbed(run.timeout(1.minute)).map: sent =>
       val reporting = sent.filter((_, request) => request.memberEpoch > 0 && request.activeTasks.nonEmpty)
@@ -229,12 +277,12 @@ final class GroupMemberSuite extends CatsEffectSuite:
       assertEquals(changes.collect { case Left(error: KafkaException.BackendFailure) => error.code }, List(Some(ErrorCode.Other(42))))
       assertEquals(left.left.toOption.collect { case error: KafkaException.BackendFailure => error.code }, Some(Some(ErrorCode.Other(42))))
 
-  test("a failure the connection does not name stops the member with a failure that carries it"):
+  test("a failure the connection does not name stops the member with a failure that carries it, with no code and so nothing said of retrying"):
     val boom = new IllegalStateException("boom")
     val run  = Coordinator((_, _) => IO.raiseError(boom)).flatMap(coordinator => member(coordinator).use(_.changes.compile.drain.attempt))
     TestControl.executeEmbed(run.timeout(1.minute)).map: outcome =>
       assertEquals(outcome.left.toOption.map(_.getCause), Some(boom))
-      assertEquals(outcome.left.toOption.collect { case error: KafkaException.BackendFailure => error.retriable }, Some(Some(false)))
+      assertEquals(outcome.left.toOption.collect { case error: KafkaException.BackendFailure => (error.code, error.retriable) }, Some((None, None)))
 
   test("leaving gives back the active tasks first, then tells the coordinator, and the changes end"):
     val tasks = Set(TaskId("0", 0))
@@ -243,28 +291,32 @@ final class GroupMemberSuite extends CatsEffectSuite:
         member(coordinator).use: member =>
           val engine =
             member.changes.evalTap {
-              case MemberAction.Assign(round, _) => member.assigned(round) *> IO.sleep(100.millis) *> member.leave.start.void
-              case MemberAction.Revoke(round, _) => member.revoked(round)
-              case _                             => IO.unit
+              case MemberAction.Assign(round, _, _) => member.assigned(round) *> IO.sleep(100.millis) *> member.leave.start.void
+              case MemberAction.Revoke(round, _)    => member.revoked(round)
+              case _                                => IO.unit
             }.compile.toList
           engine.flatMap(changes => coordinator.sent.map((changes, _)))
     TestControl.executeEmbed(run.timeout(1.minute)).map: (changes, sent) =>
-      assertEquals(changes, List(MemberAction.Assign(1, Assignment(tasks, Set.empty, Set.empty)), MemberAction.Revoke(2, tasks)))
+      assertEquals(changes, List(MemberAction.Assign(1, Assignment(tasks, Set.empty, Set.empty), 1), MemberAction.Revoke(2, tasks)))
       assertEquals(sent.last._2.memberEpoch, -1)
       assertEquals(sent.last._2.activeTasks, Some(Nil))
 
-  test("released without leaving, the member leaves, waiting no longer than its close timeout for its tasks to be given back"):
-    val run =
+  test("released, the member leaves at once, its engine gone and its tasks given back by none, whether or not the engine asked it to leave"):
+    def released(askToLeave: Boolean) =
       Coordinator((_, request) => IO.pure(answer(request, active = Some(Set(TaskId("0", 0)))))).flatMap: coordinator =>
         val engine =
           (member: GroupMember[IO]) =>
             member.changes.head.compile.lastOrError.flatMap:
-              case MemberAction.Assign(round, _) => member.assigned(round) *> IO.sleep(100.millis)
-              case other                         => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
+              // The engine runs the assignment, then, where it asks to leave, never gives the tasks back, and is gone after its own close timeout.
+              case MemberAction.Assign(round, _, _) => member.assigned(round) *> IO.sleep(100.millis) *>
+                  (member.leave.start *> IO.sleep(CloseTimeout)).whenA(askToLeave)
+              case other => IO.raiseError(new AssertionError(s"expected an assignment, got $other"))
         member(coordinator).use(engine).timed.map(_._1).flatMap(took => coordinator.sent.map((took, _)))
-    TestControl.executeEmbed(run.timeout(1.minute)).map: (took, sent) =>
-      assertEquals(took, 100.millis + CloseTimeout)
-      assert(sent.forall(_._2.memberEpoch != -1), s"the member said it left while it still had tasks: $sent")
+    TestControl.executeEmbed((released(false), released(true)).tupled.timeout(1.minute)).map: (unasked, asked) =>
+      assertEquals(unasked._1, 100.millis)
+      assertEquals(unasked._2.last._2.memberEpoch, -1)
+      assertEquals(asked._1, 100.millis + CloseTimeout, "no second close timeout")
+      assertEquals(asked._2.last._2.memberEpoch, -1)
 
   test("released without tasks, the member tells the coordinator it leaves"):
     val run =
@@ -437,21 +489,27 @@ object GroupMemberSuite:
       others: [R] => (Int, Request[R]) => IO[R],
       log: Ref[IO, Vector[(Long, StreamsGroupHeartbeatRequest)]],
       made: Ref[IO, Vector[Request[?]]],
-      counts: Ref[IO, (Int, Int)]
+      counts: Ref[IO, (Int, Int)],
+      connecting: FiniteDuration
   ):
     def sent: IO[List[(Long, StreamsGroupHeartbeatRequest)]] = log.get.map(_.toList)
     def requests: IO[List[Request[?]]]                       = made.get.map(_.toList)
     def opened: IO[Int]                                      = counts.get.map(_._1)
     def closed: IO[Int]                                      = counts.get.map(_._2)
 
+    /** Connections that fail an answer that comes after they are closed, as a closed socket can give none. */
     val connect: Resource[IO, Connection[IO]] =
-      Resource.make(counts.update((opened, closed) => (opened + 1, closed)))(_ => counts.update((opened, closed) => (opened, closed + 1))).as:
+      Resource.make(IO.sleep(connecting) *> counts.update((opened, closed) => (opened + 1, closed)) *> IO.ref(false))(closed =>
+        closed.set(true) *> counts.update((opened, closed) => (opened, closed + 1))
+      ).map: closed =>
         new Connection[IO]:
           def send[R](request: Request[R]): IO[R] =
-            request match
-              case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
-                  .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
-              case other => made.modify(before => (before :+ other, before.size)).flatMap(others(_, other))
+            val answered: IO[R] =
+              request match
+                case heartbeat: StreamsGroupHeartbeatRequest => IO.monotonic
+                    .flatMap(now => log.modify(sent => (sent :+ (now.toMillis, heartbeat), sent.size))).flatMap(n => script(n, heartbeat))
+                case other => made.modify(before => (before :+ other, before.size)).flatMap(others(_, other))
+            answered.flatTap(_ => closed.get.flatMap(IO.raiseWhen(_)(new AssertionError(s"$request was answered on a closed connection"))))
 
   object Coordinator:
     /** A request the coordinator has no answer for, which fails the test. */
@@ -459,7 +517,8 @@ object GroupMemberSuite:
 
     def apply(
         script: (Int, StreamsGroupHeartbeatRequest) => IO[StreamsGroupHeartbeatResponse],
-        others: [R] => (Int, Request[R]) => IO[R] = [R] => (_: Int, request: Request[R]) => unexpected(request)
+        others: [R] => (Int, Request[R]) => IO[R] = [R] => (_: Int, request: Request[R]) => unexpected(request),
+        connecting: FiniteDuration = Duration.Zero
     ): IO[Coordinator] =
       (IO.ref(Vector.empty[(Long, StreamsGroupHeartbeatRequest)]), IO.ref(Vector.empty[Request[?]]), IO.ref((0, 0)))
-        .mapN(new Coordinator(script, others, _, _, _))
+        .mapN(new Coordinator(script, others, _, _, _, connecting))
