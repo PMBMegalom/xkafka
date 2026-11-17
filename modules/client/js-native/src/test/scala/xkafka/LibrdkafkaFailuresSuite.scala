@@ -85,10 +85,14 @@ final class LibrdkafkaFailuresSuite extends CatsEffectSuite:
         // librdkafka keeps the gapless guarantee by holding a permanent failure of an idempotent producer fatal.
         producing <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO], Map("enable.gapless.guarantee" -> "true")).liftTo[IO]
         records = NonEmptyList.fromListUnsafe(List.tabulate(2000)(n => ProducerRecord(topic, s"key-$n", "v" * 1000)))
-        attempts <-
-          KafkaClient[IO].producer(producing).use: producer =>
+        // This test has hung in CI, rarely, so a wait past its usual few seconds fails with what the deliveries went through. The work runs on a
+        // fiber of its own and is left to it, since cancelling it would wait for the producer to close.
+        driver <- TracedDriver(KafkaClientPlatform.driver[IO])
+        work =
+          new DriverClient[IO](driver).producer(producing).use: producer =>
             producer.produceAndAwait(NonEmptyList.one(ProducerRecord(topic, "key", "v"))) *>
               cluster.failRequests(MockCluster.Produce, List(MockCluster.InvalidProducerEpoch)) *> producer.produceAttemptEachAndAwait(records)
+        attempts <- work.start.flatMap(_.joinWithNever.timeoutTo(45.seconds, driver.report.flatMap(trace => IO(fail(s"still waiting: $trace")))))
       yield
         val failures = attempts.toList.flatMap(_.outcome.left.toOption).collect { case failure: KafkaException.BackendFailure => failure }
         assert(failures.size > 1, attempts.toList.map(_.outcome).distinct)
