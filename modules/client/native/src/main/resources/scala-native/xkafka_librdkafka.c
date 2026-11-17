@@ -458,14 +458,26 @@ int xkafka_batch_add(rd_kafka_t *producer,
         return 0;
 }
 
+/* When a producer fails fatally, librdkafka purges its queues once, without
+ * waiting for its broker threads, and sends nothing more. A record that reaches
+ * a queue as that happens is missed, and its report would wait out the
+ * record's message timeout. Purging again, and waiting for it, whenever the
+ * producer is found fatal reports such a record at once. */
+static void xkafka_purge_if_fatal(rd_kafka_t *producer) {
+        if (xkafka_fatal(producer))
+                rd_kafka_purge(producer, RD_KAFKA_PURGE_F_QUEUE);
+}
+
 /* Serves whatever delivery reports are ready, for up to the timeout. Enqueues may run alongside it. */
 void xkafka_producer_poll(rd_kafka_t *producer, int timeout_ms) {
+        xkafka_purge_if_fatal(producer);
         rd_kafka_poll(producer, timeout_ms);
 }
 
 /* Sends what the producer holds without waiting out its linger, and serves delivery reports, until nothing is
  * outstanding or the timeout passes. */
 void xkafka_producer_flush(rd_kafka_t *producer, int timeout_ms) {
+        xkafka_purge_if_fatal(producer);
         rd_kafka_flush(producer, timeout_ms);
 }
 
