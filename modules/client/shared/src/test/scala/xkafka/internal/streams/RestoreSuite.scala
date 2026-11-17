@@ -65,13 +65,14 @@ final class RestoreSuite extends CatsEffectSuite:
     */
   private def settled(server: String, topics: Topic*): IO[Unit] =
     def reading(isolation: String) =
-      Resource.make(driver.consumer(server, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> isolation), reportEnds = false))(
-        driver.destroyConsumer
-      )
+      Resource.make(
+        driver.consumer(server, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> isolation), reportEnds = false)
+      )(driver.destroyConsumer)
     (reading("read_committed"), reading("read_uncommitted")).tupled.use: (committed, all) =>
       val partitions = topics.toList.flatMap(topic => List(partition(topic, 0), partition(topic, 1)))
       def caughtUp   =
-        partitions.forallM(at => (driver.watermarks(committed, at, 5000), driver.watermarks(all, at, 5000)).mapN((stable, high) => stable._2 == high._2))
+        partitions
+          .forallM(at => (driver.watermarks(committed, at, 5000), driver.watermarks(all, at, 5000)).mapN((stable, high) => stable._2 == high._2))
       def wait: IO[Unit] = caughtUp.ifM(IO.unit, IO.sleep(50.millis) *> wait)
       wait.timeout(10.seconds)
 
@@ -138,8 +139,7 @@ final class RestoreSuite extends CatsEffectSuite:
             TaskStore.memory[IO].apply(name, time, held).flatTap: store =>
               store.write(StoreContents.unchanged.updated(text("gone"), Some(Stored(text("v"), 1L))), Map(0 -> 50L, 1 -> 50L))
         create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k1", Some("v"), 1000L))).void) *>
-          settled(broker, table) *> consumer.use:
-          client =>
+          settled(broker, table) *> consumer.use: client =>
             GlobalStores(driver, client, List(read), _ => IO.pure(2), kept).use: held =>
               held.stores("gs").all.map(all => assertEquals(all.map(key => new String(key._1.toArray)).toSet, Set("k1")))
 
@@ -245,8 +245,7 @@ final class RestoreSuite extends CatsEffectSuite:
             driver.consumer(broker, None, s"xkafka-restore-$backend", "earliest", Map("isolation.level" -> "read_committed"), reportEnds = true)
           )(driver.destroyConsumer)
         create(broker, table) *> transactionally(broker)(_.produce(NonEmptyList.of(record(table, 0, "k", Some("raw"), 1000L))).void) *>
-          settled(broker, table) *> consumer.use:
-          client =>
+          settled(broker, table) *> consumer.use: client =>
             GlobalStores(driver, client, List(read), _ => IO.pure(2), TaskStore.memory[IO]).use: held =>
               held.stores("gs").all
                 .map(all => assertEquals(all.map((key, stored) => (new String(key.toArray), new String(stored.value.toArray))), Vector("k" -> "raw")))
