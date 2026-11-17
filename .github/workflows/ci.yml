@@ -60,7 +60,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         if: matrix.project == 'rootJS'
@@ -179,7 +179,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Download target directories (3, rootJS)
         uses: actions/download-artifact@v6
@@ -263,7 +263,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Submit Dependencies
         uses: scalacenter/sbt-dependency-submission@v2
@@ -328,7 +328,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -446,7 +446,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -576,7 +576,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -660,7 +660,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -742,7 +742,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -793,7 +793,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Generate classes from schema files in a build on sbt 1 and on sbt 2
         run: sbt sbtCodegen/scripted '++3.9.0 sbtCodegen/scripted'
@@ -826,7 +826,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Cache the librdkafka library build
         uses: actions/cache@v6
@@ -881,7 +881,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -940,7 +940,7 @@ jobs:
 
       - name: sbt update
         if: matrix.java == 'temurin@17' && steps.setup-java-temurin-17.outputs.cache-hit == 'false'
-        run: sbt +update
+        run: sbt +update streamsFixture/update
 
       - name: Generate site
         run: sbt docs/tlSite
