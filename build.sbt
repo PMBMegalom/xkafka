@@ -33,6 +33,8 @@ val fs2Version           = "3.14.0"
 val circeVersion         = "0.14.17"
 val http4sVersion        = "0.23.38"
 val apacheAvroVersion    = "1.12.2"
+val jacksonVersion       = "2.22.4"    // Apache Avro's own jackson has known vulnerabilities
+val protobufJavaVersion  = "3.25.8"    // smithy4s's protobuf-java has known vulnerabilities
 val confluentVersion     = "8.4.1"
 val scalapbVersion       = "0.11.21"
 val vulcanVersion        = "1.14.1"
@@ -937,6 +939,7 @@ lazy val xkafkaSmithy4s = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   // Confluent's JSON Schema and Protobuf serializers, which check values and files against schemas, run on the JVM alone.
   .jvmSettings(
     resolvers += "Confluent" at "https://packages.confluent.io/maven/",
+    libraryDependencies += "com.google.protobuf" % "protobuf-java" % protobufJavaVersion,
     libraryDependencies ++= Seq("json-schema", "protobuf").map(format => "io.confluent" % s"kafka-$format-serializer" % confluentVersion % Test)
   )
 
@@ -957,7 +960,7 @@ lazy val avroVulcan = project
     )
   )
 
-// avro4s, and the Apache Avro it writes with, run on the JVM alone. avro4s asks for Apache Avro 1.11, which the module is built with.
+// avro4s, and the Apache Avro it writes with, run on the JVM alone. avro4s asks for Apache Avro 1.11; the module brings 1.12.
 lazy val avro4s = project
   .in(file("modules/avro4s"))
   .dependsOn(avro.jvm % "compile->compile;test->test")
@@ -968,8 +971,10 @@ lazy val avro4s = project
     tlVersionIntroduced := Map("3" -> "0.8.0"),
     resolvers += "Confluent" at "https://packages.confluent.io/maven/",
     libraryDependencies ++= Seq(
-      "com.sksamuel.avro4s" %% "avro4s-core"           % avro4sVersion,
-      "io.confluent"         % "kafka-avro-serializer" % confluentVersion % Test
+      "com.sksamuel.avro4s"       %% "avro4s-core"           % avro4sVersion,
+      "org.apache.avro"            % "avro"                  % apacheAvroVersion,
+      "com.fasterxml.jackson.core" % "jackson-databind"      % jacksonVersion,
+      "io.confluent"               % "kafka-avro-serializer" % confluentVersion % Test
     )
   )
 
@@ -1262,8 +1267,9 @@ lazy val codegen = project
     description         := "Scala sources generated from Avro and JSON Schema files, for xkafka",
     tlVersionIntroduced := Map("3" -> "0.8.0"),
     libraryDependencies ++= Seq(
-      "org.apache.avro" % "avro"     % apacheAvroVersion,
-      "org.apache.avro" % "avro-idl" % apacheAvroVersion,
+      "org.apache.avro"            % "avro"             % apacheAvroVersion,
+      "org.apache.avro"            % "avro-idl"         % apacheAvroVersion,
+      "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion,
       // Apache Avro logs through SLF4J, which otherwise says it has nowhere to log; the generator says what it has to say itself.
       "org.slf4j" % "slf4j-nop" % slf4jVersion
     ),
