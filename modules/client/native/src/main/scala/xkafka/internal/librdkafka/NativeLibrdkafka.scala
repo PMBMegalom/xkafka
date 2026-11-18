@@ -343,15 +343,25 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
     F.blocking:
       Zone.acquire: zone =>
         given Zone             = zone
-        val status             = stackalloc[CInt]()
+        val messages           = alloc[CVoidPtr](LibrdkafkaAnswers.PollBatch)
+        val kinds              = alloc[CInt](LibrdkafkaAnswers.PollBatch)
         val (error, errorCode) = errorSlots
-        val message            = Bindings.xkafka_consumer_poll(consumer, timeoutMillis, status, error, ErrorBufferSize.toUSize, errorCode)
+        val count              =
+          Bindings.xkafka_consumer_poll_batch(
+            consumer,
+            timeoutMillis,
+            LibrdkafkaAnswers.PollBatch,
+            messages,
+            kinds,
+            error,
+            ErrorBufferSize.toUSize,
+            errorCode
+          )
 
-        if !status < 0 then throw nativeError(error, errorCode)
-        else if !status == 0 then Polled.empty
+        if count < 0 then throw nativeError(error, errorCode)
         else
-          try if !status == 2 then Polled(Nil, List(copyEnd(message))) else Polled.records(List(copyMessage(message)))
-          finally Bindings.xkafka_message_destroy(message)
+          try LibrdkafkaAnswers.polled(Vector.tabulate(count)(kinds(_)))(index => copyMessage(messages(index)), index => copyEnd(messages(index)))
+          finally (0 until count).foreach(index => Bindings.xkafka_message_destroy(messages(index)))
 
   private def copyEnd(message: CVoidPtr): PartitionEnd =
     PartitionEnd(
