@@ -154,8 +154,11 @@ holds even if the partition later comes back to the same consumer. A batch that
 also holds an offset read since the partition came back keeps only that one.
 
 `IllegalGeneration` is not retriable. Read the records again after the rebalance,
-and commit those offsets. Records fetched before the move but not yet read are
-not handed out at all after it, since their offsets could not be committed, and
+and commit those offsets. The consumer hands out each poll's records together, at
+most `maxPollRecords` of them, as the Java client does, so the records of a poll
+handed out just before the move still reach your code, and committing them fails
+as above. Records fetched before the move and not yet handed out are not handed
+out after it, since their offsets could not be committed, and
 `partitionedRecords` drops those still waiting in a revoked partition's stream.
 
 How many offsets a rebalance affects depends on the partition assignment strategy:

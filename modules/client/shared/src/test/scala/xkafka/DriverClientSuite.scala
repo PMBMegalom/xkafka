@@ -251,6 +251,17 @@ final class DriverClientSuite extends CatsEffectSuite:
           _       <- routing.cancel
         yield assertEquals(first.record.offset.value, 10L)
 
+  test("records polled but not yet handed out when the consumer seeks are not handed out after the seek, as no record fetched before it is"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          _ <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+          // Polled into the consumer's queue, where nothing reads it until after the seek.
+          _     <- fake.deliver(0L) *> fake.drained *> IO.sleep(100.millis)
+          _     <- consumer.seek(eventsZero, Offset.from(10L).toOption.get) *> fake.deliver(10L)
+          first <- consumer.records.take(1).compile.lastOrError.timeout(10.seconds)
+        yield assertEquals(first.record.offset.value, 10L)
+
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
