@@ -23,7 +23,13 @@ lazy val bench = crossProject(JVMPlatform, JSPlatform, NativePlatform)
     // koffi's install script only compiles koffi where no prebuilt binary matches, which never happens on the platforms xkafka supports.
     Compile / additionalNpmConfig += "allowScripts" -> scalajsbundler.util.JSON.obj("koffi@3.3.3" -> scalajsbundler.util.JSON.bool(false))
   )
-  .jvmSettings(Compile / run / fork := true)
+  .jvmSettings(
+    Compile / run / fork := true,
+    // Options for the measured JVM, such as a flight recording: XKAFKA_BENCH_JAVA_OPTIONS="-XX:StartFlightRecording=filename=bench.jfr".
+    Compile / run / javaOptions ++= sys.env.get("XKAFKA_BENCH_JAVA_OPTIONS").toList.flatMap(_.split(' ').filter(_.nonEmpty)),
+    // The baseline the JVM's streams measurements compare with: Java's Kafka Streams, of the kafka-clients release xkafka uses.
+    libraryDependencies += "org.apache.kafka" % "kafka-streams" % "4.4.0"
+  )
   .nativeSettings(
     // Linked against the static librdkafka scripts/benchmark.sh prepares, and the libraries it was built against. On macOS the script names
     // OpenSSL 3 by path, as Homebrew's OpenSSL 4, which the link would otherwise find, lacks the engine API librdkafka calls.

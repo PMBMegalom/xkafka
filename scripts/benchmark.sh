@@ -20,8 +20,11 @@ case "${1:-all}" in
   *)      echo "usage: $0 [jvm|js|native|all]" >&2; exit 2 ;;
 esac
 
-# Scala Native links the librdkafka archive the main build prepares, and the libraries it was built against.
-if [[ " ${commands[*]} " == *" benchNative/run "* ]]; then
+# Scala Native, and the C program that measures librdkafka used directly for Scala.js and Scala Native, link the librdkafka archive the main build
+# prepares, and the libraries it was built against.
+librdkafka_baseline=false
+if [[ " ${commands[*]} " == *" benchNative/run "* || " ${commands[*]} " == *" benchJS/run "* ]]; then
+  librdkafka_baseline=true
   (cd "$project_dir" && sbt clientNative/prepareLibrdkafka)
   prepared="$(find "$project_dir/modules/client/native/target" -maxdepth 1 -type d -name 'librdkafka-*' | sort | while read -r candidate; do
     if [[ -f "$candidate/include/librdkafka/rdkafka.h" && -f "$candidate/lib/librdkafka.a" ]]; then echo "$candidate"; fi
@@ -49,4 +52,16 @@ if [[ " ${commands[*]} " == *" benchNative/run "* ]]; then
   fi
 fi
 
-exec "$script_dir/with-kafka.sh" --directory "$benchmarks_dir" sbt "${commands[@]}"
+run="sbt ${commands[*]}"
+if [[ "$librdkafka_baseline" == true ]]; then
+  baseline="$project_dir/target/benchmark-librdkafka"
+  libraries=(-lssl -lcrypto)
+  if [[ -n "${XKAFKA_OPENSSL_LIBRARIES:-}" ]]; then read -r -a libraries <<<"$XKAFKA_OPENSSL_LIBRARIES"; fi
+  read -r -a search <<<"${XKAFKA_LIBRDKAFKA_SEARCH_PATHS:-}"
+  read -r -a includes <<<"${XKAFKA_INCLUDE_PATHS:-}"
+  cc -O2 -o "$baseline" "$benchmarks_dir/librdkafka/bench.c" -I"$staged/include" ${includes[@]+"${includes[@]}"} -L"$staged/lib" ${search[@]+"${search[@]}"} \
+    -lrdkafka ${libraries[@]+"${libraries[@]}"} -lz -lzstd -lpthread -lm
+  run="$run && $baseline"
+fi
+
+exec "$script_dir/with-kafka.sh" --directory "$benchmarks_dir" bash -c "$run"

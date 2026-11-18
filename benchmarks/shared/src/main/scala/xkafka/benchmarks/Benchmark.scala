@@ -30,51 +30,80 @@ import cats.syntax.all.*
 import fs2.Stream
 import xkafka.streams.{ApplicationId, KStream, Named, Store, StreamsSettings, Topology}
 
-/** Produce, consume and streams rates of one backend against the broker `XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS` names.
+/** What a run measures: `records` records of `valueBytes` bytes over `keys` keys, in topics of `partitions` partitions. */
+private[benchmarks] final case class Run(
+    bootstrap: String,
+    records: Int,
+    valueBytes: Int,
+    keys: Int,
+    partitions: Int,
+    commitEvery: FiniteDuration,
+    suffix: String
+):
+  val value: String = "x" * valueBytes
+
+  /** Each key's count once every record is counted. */
+  val perKey: Map[String, Long] = (0 until records).groupBy(_ % keys).view.mapValues(_.size.toLong).toMap.map((n, count) => s"key-$n" -> count)
+
+/** When a measurement started, when it saw its first record, and when its last. */
+private[benchmarks] final case class Timing(start: FiniteDuration, first: FiniteDuration, end: FiniteDuration):
+  def report(client: String, name: String, run: Run): IO[Unit] =
+    val total  = (end - start).toMillis.max(1L)
+    val active = (end - first).toMillis.max(1L)
+    val rate   = run.records * 1000.0 / active
+    val mib    = rate * run.valueBytes / (1024 * 1024)
+    IO.println(
+      f"$client%-13s $name%-28s ${run.records}%8d records  total ${total / 1000.0}%7.2f s  from first ${active / 1000.0}%7.2f s  $rate%10.0f records/s  $mib%7.2f MiB/s"
+    )
+
+/** Produce, consume and streams rates of one backend against the broker `XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS` names, then those of the client it
+  * drives, used directly, where the platform has one to run (see [[Baselines]]).
   *
   * Each measurement uses topics and groups of its own. A rate counts from the first record read to the last, so the time a group takes to form is
   * left out of it and reported apart; producing counts from its start.
   */
 object Benchmark extends IOApp.Simple:
-  private val bootstrap   = Environment.get("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS").getOrElse("127.0.0.1:19092")
-  private val backend     =
+  private val backend =
     System.getProperty("java.vm.name", "") match
       case "Scala.js"     => "js"
       case "Scala Native" => "native"
       case _              => "jvm"
-  private val records     = Environment.get("XKAFKA_BENCH_RECORDS").fold(200000)(_.toInt)
-  private val valueBytes  = Environment.get("XKAFKA_BENCH_VALUE_BYTES").fold(100)(_.toInt)
-  private val keys        = Environment.get("XKAFKA_BENCH_KEYS").fold(1000)(_.toInt)
-  private val partitions  = Environment.get("XKAFKA_BENCH_PARTITIONS").fold(6)(_.toInt)
+  private val settings    =
+    Run(
+      bootstrap = Environment.get("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS").getOrElse("127.0.0.1:19092"),
+      records = Environment.get("XKAFKA_BENCH_RECORDS").fold(200000)(_.toInt),
+      valueBytes = Environment.get("XKAFKA_BENCH_VALUE_BYTES").fold(100)(_.toInt),
+      keys = Environment.get("XKAFKA_BENCH_KEYS").fold(1000)(_.toInt),
+      partitions = Environment.get("XKAFKA_BENCH_PARTITIONS").fold(6)(_.toInt),
+      commitEvery = 1.second,
+      suffix = System.currentTimeMillis().toString
+    )
+  private val bootstrap   = settings.bootstrap
+  private val records     = settings.records
+  private val keys        = settings.keys
+  private val partitions  = settings.partitions
   private val batch       = 1000
   private val maxInFlight = 64
-  private val commitEvery = 1.second
+  private val commitEvery = settings.commitEvery
 
-  private val utf8  = Serde.utf8[IO]
-  private val value = "x" * valueBytes
-
-  /** When a measurement started, when it saw its first record, and when its last. */
-  private final case class Timing(start: FiniteDuration, first: FiniteDuration, end: FiniteDuration):
-    def report(name: String, count: Long): IO[Unit] =
-      val total  = (end - start).toMillis.max(1L)
-      val active = (end - first).toMillis.max(1L)
-      val rate   = count * 1000.0 / active
-      val mib    = rate * valueBytes / (1024 * 1024)
-      IO.println(f"$backend%-6s $name%-28s $count%8d records  total ${total / 1000.0}%7.2f s  from first ${active / 1000.0}%7.2f s  $rate%10.0f records/s  $mib%7.2f MiB/s")
+  private val utf8   = Serde.utf8[IO]
+  private val value  = settings.value
+  private val client = s"xkafka-$backend"
 
   override val run: IO[Unit] =
-    val suffix = System.currentTimeMillis().toString
+    val suffix = settings.suffix
     for
-      _      <- IO.println(s"$backend: $records records of $valueBytes bytes, $keys keys, $partitions partitions, broker $bootstrap")
+      _      <- IO.println(s"$backend: $records records of ${settings.valueBytes} bytes, $keys keys, $partitions partitions, broker $bootstrap")
       client <- validated(ClientSettings.from(NonEmptyList.one(bootstrap)))
       input  <- topic(s"xkafka-bench-input-$suffix")
       plain  <- topic(s"xkafka-bench-stateless-$suffix")
       counts <- topic(s"xkafka-bench-counts-$suffix")
       _      <- KafkaClient[IO].admin(client).use(_.createTopics(NonEmptySet.of(input, plain, counts).map(NewTopic.from(_, partitions, 1).toOption.get)))
-      _      <- produce(client, input).flatMap(_.report("produce", records.toLong))
-      _      <- consume(client, input, s"xkafka-bench-consume-$suffix").flatMap(_.report("consume", records.toLong))
-      _      <- stateless(client, input, plain, suffix).flatMap(_.report("streams without a store", records.toLong))
-      _      <- stateful(client, input, counts, suffix).flatMap(_.report("streams counting in a store", records.toLong))
+      _      <- produce(client, input).flatMap(_.report(this.client, "produce", settings))
+      _      <- consume(client, input, s"xkafka-bench-consume-$suffix").flatMap(_.report(this.client, "consume", settings))
+      _      <- stateless(client, input, plain, suffix).flatMap(_.report(this.client, "streams without a store", settings))
+      _      <- stateful(client, input, counts, suffix).flatMap(_.report(this.client, "streams counting in a store", settings))
+      _      <- Baselines.run(settings)
     yield ()
 
   private def produce(client: ClientSettings, to: Topic): IO[Timing] =
@@ -104,7 +133,7 @@ object Benchmark extends IOApp.Simple:
 
   /** A program counting each key's records in a store, done once every key has its final count, which only the last update of a key reaches. */
   private def stateful(client: ClientSettings, from: Topic, to: Topic, suffix: String): IO[Timing] =
-    val perKey   = (0 until records).groupBy(_ % keys).view.mapValues(_.size.toLong).toMap.map((n, count) => s"key-$n" -> count)
+    val perKey   = settings.perKey
     val topology =
       Topology.of(
         KStream(Named("read"), from, utf8, utf8).groupByKey(utf8, utf8).count(Named("count"), Store("counts")).toStream(Named("changes"))
