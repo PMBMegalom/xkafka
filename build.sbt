@@ -150,6 +150,13 @@ Global / concurrentRestrictions += Tags.limit(NativeTags.Link, 2)
 
 ThisBuild / githubWorkflowOSes := Seq("ubuntu-24.04", "macos-latest")
 
+// A job that finds no cached dependencies for the build resolves them all before saving them, including those of the streams fixture, which the
+// root does not aggregate, so the broker jobs that run it find them cached too.
+ThisBuild / githubWorkflowJobSetup ~= (_.map {
+  case step: WorkflowStep.Sbt if step.commands == List("+update") => step.withCommands(List("+update", "streamsFixture/update"))
+  case step                                                       => step
+})
+
 // A failure on one entry cancels the others, so nothing waits on a matrix that has already failed.
 ThisBuild / githubWorkflowBuildMatrixFailFast := Some(true)
 
