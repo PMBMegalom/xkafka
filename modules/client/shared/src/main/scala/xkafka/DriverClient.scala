@@ -864,11 +864,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       * commit could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
       */
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalMap(reads => handedOut(reads).flatMap(_.traverse(decode))).flatMap(Stream.chunk)
+      PollQueue.read(polled, failure).evalMap(reads => handedOut(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
 
     // Counted as handed out only once the partition's stream hands them out, so one dropped before then is not waited for.
     override private[xkafka] val routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalMap(reads => stillHeldOf(reads).flatMap(_.traverse(decode))).flatMap(Stream.chunk)
+      PollQueue.read(polled, failure).evalMap(reads => stillHeldOf(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
 
     /** The records of a poll that are still held, as [[stillHeld]] tells them, each read under the same seeks and leases. */
     private def stillHeldOf(reads: Chunk[ReadRecord]): F[Chunk[ReadRecord]] =
@@ -967,16 +967,30 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
         // created afterwards, so this keeps polling for it.
         case failure: KafkaException.BackendFailure if failure.code.contains(ErrorCode.UnknownTopicOrPartition) => Nil
 
-    private def decode(read: ReadRecord): F[CommittableConsumerRecord[F, K, V]] =
+    /** Decodes a poll's records, checking each topic name the poll names once, as its records share a few. */
+    private def decodeAll(reads: Chunk[ReadRecord]): F[Chunk[CommittableConsumerRecord[F, K, V]]] =
+      F.delay(reads.foldLeft(Map.empty[String, Either[KafkaException, Topic]])((checked, read) =>
+        val name = read.record.topic
+        if checked.contains(name) then checked else checked.updated(name, Topic.from(name).leftMap(invalidBackendValue("topic", name, _)))
+      )).flatMap(topics => reads.traverse(read => decode(read, topics(read.record.topic))))
+
+    private def decode(read: ReadRecord, checked: Either[KafkaException, Topic]): F[CommittableConsumerRecord[F, K, V]] =
       val source = read.record
       for
-        topic     <- F.fromEither(Topic.from(source.topic).leftMap(error => invalidBackendValue("topic", source.topic, error)))
-        partition <- F.fromEither(Partition.from(source.partition).leftMap(error => invalidBackendValue("partition", source.partition, error)))
-        offset    <- F.fromEither(Offset.from(source.offset).leftMap(error => invalidBackendValue("offset", source.offset, error)))
-        portableNextOffset <- F.fromEither(offset.next.leftMap(error => invalidBackendValue("next offset", source.offset, error)))
-        leaderEpoch        <- F.delay(epoch("leader epoch", source.leaderEpoch))
-        key                <- settings.keyDeserializer.deserialize(topic, source.headers, source.key)
-        value              <- settings.valueDeserializer.deserialize(topic, source.headers, source.value)
+        // The checks of what the backend reported, which only an invalid answer fails, in one step.
+        (topic, partition, offset, portableNextOffset, leaderEpoch) <-
+          F.delay:
+            def valid[A](result: Either[KafkaException, A]): A = result.fold(error => throw error, identity)
+            val offset = valid(Offset.from(source.offset).leftMap(invalidBackendValue("offset", source.offset, _)))
+            (
+              valid(checked),
+              valid(Partition.from(source.partition).leftMap(invalidBackendValue("partition", source.partition, _))),
+              offset,
+              valid(offset.next.leftMap(invalidBackendValue("next offset", source.offset, _))),
+              epoch("leader epoch", source.leaderEpoch)
+            )
+        key   <- settings.keyDeserializer.deserialize(topic, source.headers, source.key)
+        value <- settings.valueDeserializer.deserialize(topic, source.headers, source.value)
       yield
         val topicPartition = TopicPartition(topic, partition)
         val record         =
@@ -1004,9 +1018,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
             override private[xkafka] val lease: Option[Lease] = read.lease
 
             // Neither a lease that has ended nor a seek made since the record was fetched lets it be handed out, as `records` hands out none such.
-            override private[xkafka] val stillHeld: Option[F[Boolean]] = Some(DriverConsumer.this.stillHeld(read))
+            // Built only when asked for, by a partition's stream: the plain record stream hands out a poll's records without them.
+            override private[xkafka] def stillHeld: Option[F[Boolean]] = Some(DriverConsumer.this.stillHeld(read))
 
-            override private[xkafka] val handingOut: Option[F[Boolean]] = Some(DriverConsumer.this.handingOut(read))
+            override private[xkafka] def handingOut: Option[F[Boolean]] = Some(DriverConsumer.this.handingOut(read))
 
             override private[xkafka] val assignment: Option[Long] = Some(read.number)
 
