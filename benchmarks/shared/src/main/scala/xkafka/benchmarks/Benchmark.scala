@@ -32,8 +32,8 @@ import xkafka.streams.{ApplicationId, KStream, Named, Store, StreamsSettings, To
 
 /** Produce, consume and streams rates of one backend against the broker `XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS` names.
   *
-  * Each measurement uses topics and groups of its own. A rate counts from the first record seen to the last, so the time a group takes to form is
-  * left out of it and reported apart.
+  * Each measurement uses topics and groups of its own. A rate counts from the first record read to the last, so the time a group takes to form is
+  * left out of it and reported apart; producing counts from its start.
   */
 object Benchmark extends IOApp.Simple:
   private val bootstrap   = Environment.get("XKAFKA_INTEGRATION_BOOTSTRAP_SERVERS").getOrElse("127.0.0.1:19092")
@@ -85,11 +85,9 @@ object Benchmark extends IOApp.Simple:
         )
         for
           start <- IO.monotonic
-          first <- Ref[IO].of(Option.empty[FiniteDuration])
-          _     <- batches.through(producer.pipe(maxInFlight)).evalTap(_ => seen(first)).compile.drain
+          _     <- batches.through(producer.pipe(maxInFlight)).compile.drain
           end   <- IO.monotonic
-          at    <- first.get
-        yield Timing(start, at.getOrElse(start), end)
+        yield Timing(start, start, end)
 
   private def consume(client: ClientSettings, from: Topic, group: String): IO[Timing] =
     readUntil(client, from, group, utf8.deserializer)(0L)((count, chunk) => count + chunk.size)(_ >= records)
@@ -104,7 +102,7 @@ object Benchmark extends IOApp.Simple:
     timedStreams(client, s"xkafka-bench-stateless-$suffix", topology):
       readUntil(client, to, s"xkafka-bench-stateless-read-$suffix", utf8.deserializer)(0L)((count, chunk) => count + chunk.size)(_ >= records)
 
-  /** A program counting each key's records in a store, done once every key has its final count. */
+  /** A program counting each key's records in a store, done once every key has its final count, which only the last update of a key reaches. */
   private def stateful(client: ClientSettings, from: Topic, to: Topic, suffix: String): IO[Timing] =
     val perKey   = (0 until records).groupBy(_ % keys).view.mapValues(_.size.toLong).toMap.map((n, count) => s"key-$n" -> count)
     val topology =
@@ -113,9 +111,9 @@ object Benchmark extends IOApp.Simple:
           .to(Named("write"), to, utf8, Serde.long[IO])
       )
     timedStreams(client, s"xkafka-bench-stateful-$suffix", topology):
-      readUntil(client, to, s"xkafka-bench-stateful-read-$suffix", Serde.long[IO].deserializer)(Map.empty[String, Long])((latest, chunk) =>
-        latest ++ chunk.toList.map(record => record.key -> record.value)
-      )(_ == perKey)
+      readUntil(client, to, s"xkafka-bench-stateful-read-$suffix", Serde.long[IO].deserializer)(0)((finished, chunk) =>
+        finished + chunk.toList.count(record => perKey.get(record.key).contains(record.value))
+      )(_ >= perKey.size)
 
   /** Runs the program while `read` waits for its output, and fails if the program stops first. */
   private def timedStreams(client: ClientSettings, application: String, topology: Either[NonEmptyList[xkafka.streams.TopologyError], Topology[IO]])(

@@ -17,6 +17,8 @@ lazy val bench = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .jsConfigure(_.enablePlugins(ScalaJSBundlerPlugin))
   .jsSettings(
     scalaJSUseMainModuleInitializer := true,
+    // Measured as an application ships, fully optimised: a fast link also turns on cats-effect's tracing, which slows Scala.js down.
+    scalaJSStage := FullOptStage,
     Compile / additionalNpmConfig += "license"      -> scalajsbundler.util.JSON.str("MIT"),
     // koffi's install script only compiles koffi where no prebuilt binary matches, which never happens on the platforms xkafka supports.
     Compile / additionalNpmConfig += "allowScripts" -> scalajsbundler.util.JSON.obj("koffi@3.3.3" -> scalajsbundler.util.JSON.bool(false))
