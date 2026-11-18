@@ -146,7 +146,8 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         groupId: String,
         autoOffsetReset: String,
         properties: Map[String, String],
-        reportEnds: Boolean
+        reportEnds: Boolean,
+        maxPollRecords: Int
     ): IO[Client]                                            = called("consumer")(IO.pure("consumer"))
     override def destroyConsumer(consumer: Client): IO[Unit] = called("destroyConsumer")(IO.unit)
     override def admin(bootstrapServers: String, clientId: Option[String], properties: Map[String, String]): IO[Client] =
@@ -181,8 +182,9 @@ final class EffectLazinessSuite extends CatsEffectSuite:
         case _                    => None
     override def assign(consumer: Client, partitions: Vector[TopicPartition], starts: Vector[StartAt]): IO[Unit] = called("assign")(IO.unit)
     override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit]                             = called("subscribe")(IO.unit)
-    override def poll(consumer: Client, timeoutMillis: Int): IO[Polled]       = called("poll")(IO.sleep(timeoutMillis.millis).as(Polled.empty))
-    override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]] = called("takeRebalances")(IO.pure(Nil))
+    override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): IO[Polled]                         =
+      called("poll")(IO.sleep(timeoutMillis.millis).as(Polled.empty))
+    override def takeRebalances(consumer: Client): IO[List[Rebalance[Event]]]                      = called("takeRebalances")(IO.pure(Nil))
     override def applyRebalance(consumer: Client, event: Event, starts: Vector[StartAt]): IO[Unit] = called("applyRebalance")(IO.unit)
     override def cooperative(consumer: Client): IO[Boolean]                                        = called("cooperative")(IO.pure(true))
     override def assignment(consumer: Client): IO[Vector[(String, Int)]]                           = called("assignment")(IO.pure(Vector.empty))

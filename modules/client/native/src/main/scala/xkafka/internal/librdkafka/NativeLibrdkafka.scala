@@ -107,7 +107,8 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
       groupId: String,
       autoOffsetReset: String,
       properties: Map[String, String],
-      reportEnds: Boolean
+      reportEnds: Boolean,
+      maxPollRecords: Int
   ): F[Client] =
     F.blocking:
       Zone.acquire: zone =>
@@ -339,24 +340,15 @@ private[xkafka] final class NativeLibrdkafka[F[_]](using F: Sync[F]) extends Kaf
           if result != 0 then throw nativeError(error, errorCode)
         finally Bindings.xkafka_subscription_destroy(nativeSubscription)
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
+  override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): F[Polled] =
     F.blocking:
       Zone.acquire: zone =>
         given Zone             = zone
-        val messages           = alloc[CVoidPtr](LibrdkafkaAnswers.PollBatch)
-        val kinds              = alloc[CInt](LibrdkafkaAnswers.PollBatch)
+        val messages           = alloc[CVoidPtr](maxRecords)
+        val kinds              = alloc[CInt](maxRecords)
         val (error, errorCode) = errorSlots
         val count              =
-          Bindings.xkafka_consumer_poll_batch(
-            consumer,
-            timeoutMillis,
-            LibrdkafkaAnswers.PollBatch,
-            messages,
-            kinds,
-            error,
-            ErrorBufferSize.toUSize,
-            errorCode
-          )
+          Bindings.xkafka_consumer_poll_batch(consumer, timeoutMillis, maxRecords, messages, kinds, error, ErrorBufferSize.toUSize, errorCode)
 
         if count < 0 then throw nativeError(error, errorCode)
         else

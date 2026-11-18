@@ -71,6 +71,7 @@ limit. The exceptions are:
 - `metadataRefreshInterval` is at most
   `ClientSettings.MetadataRefreshIntervalLimit` (1 hour).
 - `fetchWait` may be zero, and at most `ConsumerSettings.FetchWaitLimit` (5 minutes).
+- `maxPollRecords` is from 1 to `ConsumerSettings.MaxPollRecordsLimit` (100,000).
 - The streams `taskTimeout` may be zero.
 - Under exactly-once, a streams `commitInterval` must be at most
   `StreamsSettings.TransactionTimeout` (10 seconds), as Java refuses, since the
@@ -127,7 +128,7 @@ Each type has `with*` and `without*` methods for deriving one value from
 another. Those that can make the settings invalid return
 `ValidatedNel[SettingsError, *]` and validate the result in full: every one
 that sets a duration or properties, and `withBootstrapServers`, `withAcks`,
-`withIdempotence`, `withBatchSize`, `withGroupInstanceId`,
+`withIdempotence`, `withBatchSize`, `withMaxPollRecords`, `withGroupInstanceId`,
 `withRebalanceSafeCommits`, `withStartingOffsets`, `withoutSessionTimeout`, and
 `withoutHeartbeatInterval`, and `TlsSettings`' `withCertificateAuthority` and
 `withClientCertificate`, `SaslSettings`' `withCredentials`, and the
@@ -185,6 +186,7 @@ Beyond the group and the deserializers, `ConsumerSettings` carries:
 | `heartbeatInterval` | unset, which is 3s on every platform | how often the consumer tells the group it is alive |
 | `maxPollInterval` | 5m | how long the consumer can go without fetching before it leaves its group |
 | `fetchWait` | 500ms | how long the broker may hold a fetch waiting for records, from zero up to 5m |
+| `maxPollRecords` | 500 | the most records one poll takes from the backend, from 1 up to 100,000 |
 | `rebalanceSafeCommits` | none | how long a partition being taken away waits for the records handed out from it to be committed |
 | `startingOffsets` | none | where each assigned partition starts, from offsets the application keeps |
 
@@ -201,6 +203,13 @@ fewer, larger answers, and `fetchWait` then bounds how long a record can wait to
 be gathered. The Java client calls this setting `fetch.max.wait.ms` and
 librdkafka `fetch.wait.max.ms`. Both are [managed properties](#managed-properties),
 so set it through `withFetchWait`.
+
+`maxPollRecords` is the most records the consumer takes from the backend at a
+time, from those the backend has already fetched. The Java client calls it
+`max.poll.records`, a [managed property](#managed-properties) set through
+`withMaxPollRecords`. librdkafka's `max.poll.records` applies only to share
+consumers, which xkafka does not use: its consumer hands over one message at a
+time, and xkafka takes up to this many of those librdkafka holds at each poll.
 
 See [Offsets](offsets.md) for commit recovery, the commit timeout, assignment
 fencing, rebalance-safe commits, and starting offsets, [Transactions](transactions.md) for the isolation level, and

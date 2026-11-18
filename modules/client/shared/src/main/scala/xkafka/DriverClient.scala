@@ -217,7 +217,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
         settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel)) ++
         ClientProperties.security(settings.client.security) ++ ClientProperties(settings.client) ++ ClientProperties.consumer(settings) ++
         settings.managedProperties,
-      reportEnds = false
+      reportEnds = false,
+      maxPollRecords = settings.maxPollRecords
     )
 
   override def streams(settings: StreamsSettings, topology: Topology[F]): Resource[F, KafkaStreams[F]] = streams(settings, topology, Forward.none[F])
@@ -946,7 +947,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
         F.delay(values.headOption.filter(_ >= 0L).map(offset("position", _)))
 
     private def poll: F[List[PolledRecord]] =
-      driver.poll(client.handle, settings.pollTimeout.toMillis.toInt).map(_.records).recover:
+      driver.poll(client.handle, settings.pollTimeout.toMillis.toInt, settings.maxPollRecords).map(_.records).recover:
         // librdkafka reports a subscribed topic that does not exist yet through the poll, and the topic can still be
         // created afterwards, so this keeps polling for it.
         case failure: KafkaException.BackendFailure if failure.code.contains(ErrorCode.UnknownTopicOrPartition) => Nil

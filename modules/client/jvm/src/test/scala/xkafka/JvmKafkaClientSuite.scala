@@ -279,6 +279,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
           assertEquals(properties.get("default.api.timeout.ms"), Some(ConsumerSettings.DefaultRequestTimeout.toMillis.toString))
           // The Java consumer names the fetch wait fetch.max.wait.ms.
           assertEquals(properties.get("fetch.max.wait.ms"), Some("250"))
+          assertEquals(properties.get("max.poll.records"), Some("42"))
           mock
       )
 
@@ -291,7 +292,7 @@ final class JvmKafkaClientSuite extends CatsEffectSuite:
     val client   = ClientSettings.from(NonEmptyList.one("unused:9092"), properties = Map("fetch.min.bytes" -> "1")).toOption.get
     val settings =
       ConsumerSettings.from(client, group, keyDeserializer, valueDeserializer, AutoOffsetReset.Earliest, properties = Map("fetch.min.bytes" -> "2"))
-        .andThen(_.withFetchWait(250.millis)).toOption.get
+        .andThen(_.withFetchWait(250.millis)).andThen(_.withMaxPollRecords(42)).toOption.get
 
     backend.consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
       for

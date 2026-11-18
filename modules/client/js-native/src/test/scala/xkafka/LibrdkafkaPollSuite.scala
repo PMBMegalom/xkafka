@@ -58,3 +58,24 @@ final class LibrdkafkaPollSuite extends CatsEffectSuite:
         assert(clue(polls.map(_.records.size)).head > 1)
         assertEquals(records.map(_.offset), List.range(0L, 50L))
         assertEquals(polls.flatMap(_.ends).map(_.offset), List(50L))
+
+  test("a poll takes no more records than it is given"):
+    val driver = KafkaClientPlatform.driver[IO]
+    LibrdkafkaPlatform.mockCluster[IO](Map(MockCluster.Brokers)).use: cluster =>
+      for
+        _        <- cluster.createTopic(topic.value, 1)
+        client   <- ClientSettings.from(NonEmptyList.one(cluster.bootstrapServers)).liftTo[IO]
+        settings <- ProducerSettings.from(client, Serializer.utf8[IO], Serializer.utf8[IO]).liftTo[IO]
+        _        <-
+          KafkaClient[IO].producer(settings)
+            .use(_.produceAndAwait(NonEmptyList.fromListUnsafe(List.tabulate(50)(n => ProducerRecord(topic, s"key-$n", "v")))))
+        partition = TopicPartition(topic, Partition.from(0).toOption.get)
+        sizes <-
+          Resource.make(driver.consumer(cluster.bootstrapServers, None, "bounded", "earliest", Map.empty, reportEnds = false))(driver.destroyConsumer)
+            .use: consumer =>
+              driver.assign(consumer, Vector(partition), Vector(StartAt(partition, 0L, -1))) *> fs2.Stream.repeatEval(driver.poll(consumer, 500, 7))
+                .map(_.records.size).filter(_ > 0).scan1(_ + _).takeThrough(_ < 50).compile.toList
+      yield
+        // The running total grows by at most 7 a poll.
+        assert(clue(sizes).zip(0 :: sizes).forall((total, before) => total - before <= 7))
+        assert(clue(sizes).head <= 7)

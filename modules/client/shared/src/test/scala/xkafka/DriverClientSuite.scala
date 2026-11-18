@@ -886,7 +886,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         groupId: String,
         autoOffsetReset: String,
         properties: Map[String, String],
-        reportEnds: Boolean
+        reportEnds: Boolean,
+        maxPollRecords: Int
     ) = IO.pure("consumer")
 
     override def destroyConsumer(consumer: Client): IO[Unit] = IO.unit
@@ -975,7 +976,7 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit] = IO.unit
 
-    override def poll(consumer: Client, timeoutMillis: Int): IO[Polled] =
+    override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): IO[Polled] =
       inPoll.getAndSet(None).flatMap(_.sequence_) *> queued.modify {
         case head :: tail => (tail, List(head))
         case Nil          => (Nil, Nil)

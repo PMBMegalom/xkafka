@@ -56,14 +56,17 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Delivers what the producer already accepted for up to the timeout, then destroys it. */
   def destroyProducer(producer: Client, timeoutMillis: Int): F[Unit]
 
-  /** With `reportEnds`, each poll also reports the partitions whose end it reached (see [[Polled]]). */
+  /** With `reportEnds`, each poll also reports the partitions whose end it reached (see [[Polled]]). A poll returns at most `maxPollRecords` records,
+    * which a backend that fixes it when the consumer is made takes from here, and one that takes it at each poll from [[poll]].
+    */
   def consumer(
       bootstrapServers: String,
       clientId: Option[String],
       groupId: String,
       autoOffsetReset: String,
       properties: Map[String, String],
-      reportEnds: Boolean
+      reportEnds: Boolean,
+      maxPollRecords: Int = KafkaDriver.DefaultMaxPollRecords
   ): F[Client]
 
   def destroyConsumer(consumer: Client): F[Unit]
@@ -129,8 +132,10 @@ private[xkafka] trait KafkaDriver[F[_]]:
   /** Subscribes to topic names, or to one pattern, which starts with `^` as no topic name can. */
   def subscribe(consumer: Client, topics: NonEmptyList[String]): F[Unit]
 
-  /** The records one poll returned, none when the timeout passed first, and the ends it reached for a consumer that reports them. */
-  def poll(consumer: Client, timeoutMillis: Int): F[Polled]
+  /** The records one poll returned, at most `maxRecords`, none when the timeout passed first, and the ends it reached for a consumer that reports
+    * them. Give it the `maxPollRecords` the consumer was made with.
+    */
+  def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int = KafkaDriver.DefaultMaxPollRecords): F[Polled]
 
   /** Every rebalance the consumer received since the last call, oldest first. */
   def takeRebalances(consumer: Client): F[List[Rebalance[Event]]]
@@ -230,6 +235,9 @@ private[xkafka] trait KafkaDriver[F[_]]:
   def deleteGroups(admin: Client, groups: Vector[ConsumerGroup], timeoutMillis: Int): F[Vector[Either[KafkaException, Unit]]]
 
 private[xkafka] object KafkaDriver:
+  /** What a consumer takes at most in a poll where nothing sets it: the Java client's default `max.poll.records`. */
+  val DefaultMaxPollRecords: Int = ConsumerSettings.DefaultMaxPollRecords
+
   /** The offset `seek` reads as the beginning of a partition's log. */
   val BeginningOffset: Long = -2L
 

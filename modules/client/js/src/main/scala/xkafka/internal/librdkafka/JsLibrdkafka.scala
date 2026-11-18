@@ -105,7 +105,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       groupId: String,
       autoOffsetReset: String,
       properties: Map[String, String],
-      reportEnds: Boolean
+      reportEnds: Boolean,
+      maxPollRecords: Int
   ): F[Client] =
     F.defer:
       val error                  = ErrorSlot()
@@ -278,9 +279,9 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         if shim.subscribe(consumer, subscription, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then throw error.failure
       finally shim.subscriptionDestroy(subscription): Unit
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
+  override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): F[Polled] =
     F.defer:
-      val batch    = LibrdkafkaAnswers.PollBatch
+      val batch    = maxRecords
       val error    = ErrorSlot()
       val messages = Buffers.alloc(8 * batch)
       val kinds    = Buffers.alloc(4 * batch)

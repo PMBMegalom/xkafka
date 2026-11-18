@@ -121,9 +121,6 @@ private[xkafka] object Failures:
 
 /** The portable answers for what the shim reports about deleting records and describing configurations. */
 private[librdkafka] object LibrdkafkaAnswers:
-  /** The most messages one poll of a consumer takes, Java's default `max.poll.records`. */
-  val PollBatch = 500
-
   /** The records and partition end of a batch the shim took, of `kinds` as it gives them: 1 a record, 2 an end, which only comes last. */
   def polled(kinds: Vector[Int])(record: Int => driver.PolledRecord, end: Int => driver.PartitionEnd): driver.Polled =
     driver.Polled(kinds.indices.filter(kinds(_) == 1).map(record).toList, kinds.indices.filter(kinds(_) == 2).map(end).toList)
