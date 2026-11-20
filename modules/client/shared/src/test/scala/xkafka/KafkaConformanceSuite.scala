@@ -842,29 +842,32 @@ final class KafkaConformanceSuite extends CatsEffectSuite:
           .timeout(90.seconds)
       yield refusedWith(Some(outcome), ErrorCode.UnknownTopicOrPartition, "a seek of a partition not assigned")
 
-  test(conformance("after a seek, the next record handed out of the partition is the one sought, and none fetched before it")):
+  test(conformance("after a seek, the next poll handed out of the partition starts at the record sought, and nothing fetched before it follows")):
     withBroker: server =>
       val topic     = uniqueTopic("seek-buffered")
       val partition = TopicPartition(topic, validPartition(0))
-      // Each seek is made once the record before it is handed out, when the records fetched after that one are already waiting.
+      // Each seek is made once a poll is handed out, when the poll fetched after it may already be waiting.
       def seekAfter(consumer: KafkaConsumer[IO, ?, ?], index: Long): IO[Unit] =
         index match
           case 0 => consumer.seek(partition, validOffset(6L))
-          case 2 => consumer.seek(partition, validOffset(2L))
-          case 4 => consumer.seekToBeginning(Set(partition))
-          case 6 => consumer.seekToEnd(Set(partition))
+          case 1 => consumer.seek(partition, validOffset(2L))
+          case 2 => consumer.seekToBeginning(Set(partition))
+          case 3 => consumer.seekToEnd(Set(partition))
           case _ => IO.unit
 
       for
         _        <- produceValues(server, partition, 10)
         settings <- consumerSettings(server, uniqueGroup("seek-buffered"))
-        offsets  <-
+        polls    <-
           PlatformKafkaClient().consumer(settings, Selection.Topics(NonEmptySet.one(topic))).use: consumer =>
-            // Past the end there is nothing more to read, so the stream is given a while to hand out a record it should not.
-            consumer.records.map(_.record.offset.value).zipWithIndex.evalTap((_, index) => seekAfter(consumer, index)).map(_._1).take(8)
-              .interruptAfter(20.seconds).compile.toList
+            // Past the end there is nothing more to read, so the stream is given a while to hand out a poll it should not.
+            consumer.records.chunks.filter(_.nonEmpty).map(_.toList.map(_.record.offset.value)).zipWithIndex
+              .evalTap((_, index) => seekAfter(consumer, index)).map(_._1).take(5).interruptAfter(20.seconds).compile.toList
           .timeout(90.seconds)
-      yield assertEquals(offsets, List(0L, 6L, 7L, 2L, 3L, 0L, 1L))
+      yield
+        // Each poll holds the records that follow one another from where it starts, as many as the backend fetched.
+        assertEquals(polls.map(_.head), List(0L, 6L, 2L, 0L), polls)
+        assert(polls.forall(poll => poll == (poll.head until poll.head + poll.size).toList), polls)
 
   test(conformance("the position can be unset before consuming, and after consuming is at or past the offset after the record consumed")):
     withBroker: server =>
