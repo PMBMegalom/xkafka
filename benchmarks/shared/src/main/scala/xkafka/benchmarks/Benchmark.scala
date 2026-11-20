@@ -28,7 +28,7 @@ import cats.data.{NonEmptyList, NonEmptySet, ValidatedNel}
 import cats.effect.{IO, IOApp, Ref}
 import cats.syntax.all.*
 import fs2.Stream
-import xkafka.streams.{ApplicationId, KStream, Named, Store, StreamsSettings, Topology}
+import xkafka.streams.{ApplicationId, KStream, Named, Store, StreamsSettings, TimeWindows, Topology}
 
 /** What a run measures: `records` records of `valueBytes` bytes over `keys` keys, in topics of `partitions` partitions. */
 private[benchmarks] final case class Run(
@@ -98,11 +98,13 @@ object Benchmark extends IOApp.Simple:
       input  <- topic(s"xkafka-bench-input-$suffix")
       plain  <- topic(s"xkafka-bench-stateless-$suffix")
       counts <- topic(s"xkafka-bench-counts-$suffix")
-      _      <- KafkaClient[IO].admin(client).use(_.createTopics(NonEmptySet.of(input, plain, counts).map(NewTopic.from(_, partitions, 1).toOption.get)))
+      window <- topic(s"xkafka-bench-windows-$suffix")
+      _      <- KafkaClient[IO].admin(client).use(_.createTopics(NonEmptySet.of(input, plain, counts, window).map(NewTopic.from(_, partitions, 1).toOption.get)))
       _      <- produce(client, input).flatMap(_.report(this.client, "produce", settings))
       _      <- consume(client, input, s"xkafka-bench-consume-$suffix").flatMap(_.report(this.client, "consume", settings))
       _      <- stateless(client, input, plain, suffix).flatMap(_.report(this.client, "streams without a store", settings))
       _      <- stateful(client, input, counts, suffix).flatMap(_.report(this.client, "streams counting in a store", settings))
+      _      <- windowed(client, input, window, suffix).flatMap(_.report(this.client, "streams counting in windows", settings))
       _      <- Baselines.run(settings)
     yield ()
 
@@ -143,6 +145,17 @@ object Benchmark extends IOApp.Simple:
       readUntil(client, to, s"xkafka-bench-stateful-read-$suffix", Serde.long[IO].deserializer)(0)((finished, chunk) =>
         finished + chunk.toList.count(record => perKey.get(record.key).contains(record.value))
       )(_ >= perKey.size)
+
+  /** A program counting each key's records per second in a window store, done once it has written an update for every record. */
+  private def windowed(client: ClientSettings, from: Topic, to: Topic, suffix: String): IO[Timing] =
+    val topology =
+      Topology.of(
+        KStream(Named("read"), from, utf8, utf8).groupByKey(utf8, utf8).windowedBy(TimeWindows.tumbling(1.second, grace = 1.hour))
+          .count(Named("count"), Store("window-counts")).toStream(Named("changes"))
+          .selectKey(Named("name"))((windowed, _) => s"${windowed.key}@${windowed.window.start}").to(Named("write"), to, utf8, Serde.long[IO])
+      )
+    timedStreams(client, s"xkafka-bench-windowed-$suffix", topology):
+      readUntil(client, to, s"xkafka-bench-windowed-read-$suffix", Serde.long[IO].deserializer)(0L)((count, chunk) => count + chunk.size)(_ >= records)
 
   /** Runs the program while `read` waits for its output, and fails if the program stops first. */
   private def timedStreams(client: ClientSettings, application: String, topology: Either[NonEmptyList[xkafka.streams.TopologyError], Topology[IO]])(

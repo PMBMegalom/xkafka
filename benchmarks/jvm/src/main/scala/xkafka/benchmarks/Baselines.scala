@@ -35,7 +35,7 @@ import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.{Deserializer, LongDeserializer, Serdes, StringDeserializer, StringSerializer}
 import org.apache.kafka.streams.{KafkaStreams, StreamsBuilder, StreamsConfig}
-import org.apache.kafka.streams.kstream.{Consumed, Grouped, Materialized, Produced}
+import org.apache.kafka.streams.kstream.{Consumed, Grouped, Materialized, Produced, TimeWindows}
 import org.apache.kafka.streams.state.Stores
 
 /** The same measurements with the Java client and Java's Kafka Streams used directly, which xkafka drives on the JVM. Kafka Streams keeps its
@@ -49,14 +49,16 @@ private[benchmarks] object Baselines:
     val input  = s"kafka-bench-input-${run.suffix}"
     val plain  = s"kafka-bench-stateless-${run.suffix}"
     val counts = s"kafka-bench-counts-${run.suffix}"
+    val window = s"kafka-bench-windows-${run.suffix}"
     val admin  = Admin.create(properties(run, Map.empty))
-    try admin.createTopics(List(input, plain, counts).map(new NewTopic(_, run.partitions, 1.toShort)).asJava).all().get()
+    try admin.createTopics(List(input, plain, counts, window).map(new NewTopic(_, run.partitions, 1.toShort)).asJava).all().get()
     finally admin.close()
     List(
       ("kafka-clients", "produce", produce(run, input)),
       ("kafka-clients", "consume", readUntil(run, input, s"kafka-bench-consume-${run.suffix}", new StringDeserializer)(0L)((n, _, _) => n + 1)(_ >= run.records)),
       ("kafka-streams", "streams without a store", stateless(run, input, plain)),
-      ("kafka-streams", "streams counting in a store", stateful(run, input, counts))
+      ("kafka-streams", "streams counting in a store", stateful(run, input, counts)),
+      ("kafka-streams", "streams counting in windows", windowed(run, input, window))
     )
 
   private def produce(run: Run, topic: String): Timing =
@@ -89,6 +91,16 @@ private[benchmarks] object Baselines:
       readUntil(run, to, s"kafka-bench-stateful-read-${run.suffix}", new LongDeserializer)(0)((finished, key, value) =>
         if run.perKey.get(key).contains(value.longValue) then finished + 1 else finished
       )(_ >= run.perKey.size)
+
+  private def windowed(run: Run, from: String, to: String): Timing =
+    val builder = new StreamsBuilder
+    val store   = Stores.inMemoryWindowStore("window-counts", Duration.ofHours(2), Duration.ofSeconds(1), false)
+    builder.stream(from, Consumed.`with`(Serdes.String(), Serdes.String())).groupByKey(Grouped.`with`(Serdes.String(), Serdes.String()))
+      .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofSeconds(1), Duration.ofHours(1)))
+      .count(Materialized.as[String, java.lang.Long](store).withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+      .toStream((windowed, _) => s"${windowed.key}@${windowed.window.start}").to(to, Produced.`with`(Serdes.String(), Serdes.Long()))
+    streamed(run, builder, s"kafka-bench-windowed-${run.suffix}"):
+      readUntil(run, to, s"kafka-bench-windowed-read-${run.suffix}", new LongDeserializer)(0L)((n, _, _) => n + 1)(_ >= run.records)
 
   /** Runs the program while `read` waits for its output. */
   private def streamed(run: Run, builder: StreamsBuilder, application: String)(read: => Timing): Timing =
