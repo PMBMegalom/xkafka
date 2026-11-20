@@ -45,6 +45,8 @@ int xkafka_producer_send_offsets(rd_kafka_t *producer, void *metadata, const cha
                                  const int32_t *offset_metadata_sizes,
                                  size_t count, int timeout_ms, char *error, size_t error_size, int32_t *error_code, int32_t *is_fatal,
                                  int32_t *is_retriable, int32_t *txn_requires_abort);
+int xkafka_consumer_poll_batch(rd_kafka_t *consumer, int timeout_ms, int capacity, rd_kafka_message_t **messages, int *kinds, char *error,
+                               size_t error_size, int32_t *error_code);
 rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer, int timeout_ms, int *status, char *error, size_t error_size,
                                          int32_t *error_code);
 int xkafka_consumer_commit(rd_kafka_t *consumer, const char *const *topics, const int32_t *partitions, const int64_t *offset_values,
@@ -662,6 +664,42 @@ int xkafka_async_consumer_poll(rd_kafka_t *consumer, int timeout_ms, int *status
         call->status = status;
         call->slots = (xkafka_error_slots_t){error, error_size, error_code};
         call->result = result;
+        return xkafka_job_start(&call->job, done, token);
+}
+
+/* ---- The consumer's batched poll ---- */
+
+typedef struct {
+        xkafka_job_t job;
+        rd_kafka_t *consumer;
+        int timeout_ms;
+        int capacity;
+        rd_kafka_message_t **messages;
+        int *kinds;
+        int *count;
+        xkafka_error_slots_t slots;
+} xkafka_poll_batch_job_t;
+
+static void xkafka_poll_batch_job_run(xkafka_job_t *job) {
+        xkafka_poll_batch_job_t *call = (xkafka_poll_batch_job_t *)job;
+        *call->count = xkafka_consumer_poll_batch(call->consumer, call->timeout_ms, call->capacity, call->messages, call->kinds,
+                                                  call->slots.error, call->slots.error_size, call->slots.error_code);
+}
+
+int xkafka_async_consumer_poll_batch(rd_kafka_t *consumer, int timeout_ms, int capacity, rd_kafka_message_t **messages, int *kinds,
+                                     int *count, char *error, size_t error_size, int32_t *error_code, xkafka_done_t done, int64_t token) {
+        xkafka_poll_batch_job_t *call = (xkafka_poll_batch_job_t *)calloc(1, sizeof(xkafka_poll_batch_job_t));
+
+        if (call == NULL)
+                return -1;
+        call->job.run = xkafka_poll_batch_job_run;
+        call->consumer = consumer;
+        call->timeout_ms = timeout_ms;
+        call->capacity = capacity;
+        call->messages = messages;
+        call->kinds = kinds;
+        call->count = count;
+        call->slots = (xkafka_error_slots_t){error, error_size, error_code};
         return xkafka_job_start(&call->job, done, token);
 }
 

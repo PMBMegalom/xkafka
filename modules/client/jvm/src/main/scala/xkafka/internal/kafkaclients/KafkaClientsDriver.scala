@@ -135,11 +135,16 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
       groupId: String,
       autoOffsetReset: String,
       properties: Map[String, String],
-      reportEnds: Boolean
+      reportEnds: Boolean,
+      maxPollRecords: Int
   ): F[Client] =
     val configured =
-      connection(bootstrapServers, clientId, properties) ++
-        Map("group.id" -> groupId, "auto.offset.reset" -> autoOffsetReset, "enable.auto.commit" -> "false")
+      connection(bootstrapServers, clientId, properties) ++ Map(
+        "group.id"           -> groupId,
+        "auto.offset.reset"  -> autoOffsetReset,
+        "enable.auto.commit" -> "false",
+        "max.poll.records"   -> maxPollRecords.toString
+      )
     javaCall(
       F.blocking:
         val thread = new ConsumerThread(clients.consumer(configured), s"xkafka-consumer-${clientId.getOrElse(groupId)}", reportEnds)
@@ -294,7 +299,8 @@ private[xkafka] final class KafkaClientsDriver[F[_]](clients: JavaClients)(using
         if topics.tail.isEmpty && topics.head.startsWith("^") then value.subscribe(Pattern.compile(topics.head), thread.listener)
         else value.subscribe(topics.toList.asJava, thread.listener)
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
+  // The Java consumer takes at most the `max.poll.records` it was made with.
+  override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): F[Polled] =
     onThread(consumer)(thread =>
       javaCall(F.async_[ConsumerThread.Polled](thread.poll(Duration.ofMillis(timeoutMillis.toLong)))).map(polled =>
         Polled(polled.records.map(polledRecord), polled.ends.map(end => PartitionEnd(end.partition.topic, end.partition.partition, end.offset)))

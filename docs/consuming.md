@@ -185,8 +185,9 @@ refuse is a `SettingsError`:
 - `heartbeatInterval` is how often the consumer tells the group it is alive. It
   must be less than the session timeout.
 - `maxPollInterval` is how long the consumer can go without fetching records.
-  It stops fetching while too many records wait unread, so if your code reads no
-  records for longer than this, the consumer leaves its group. It must be at
+  It stops fetching while `maxPollRecords` records or more wait unread, so if
+  your code reads no records for longer than this, the consumer leaves its
+  group. It must be at
   least the session timeout, unless `group.protocol` is `consumer`.
 - `groupInstanceId` makes the consumer a static member of its group. It follows
   the rules for topic names: at most 249 letters, digits, `.`, `_` or `-`, and
@@ -265,8 +266,10 @@ consumer is not assigned.
 @:@
 
 @:callout(info)
-After a seek, the next record the stream hands out of that partition comes from
-the offset sought, and no record fetched before the seek is handed out. A seek
+After a seek, the next poll's records of that partition come from the offset
+sought, and no record fetched before the seek is handed out after it. The records
+of a poll already handed out still reach your code, as with the Java client,
+since the stream hands out each poll's records together. A seek
 of a partition the consumer has not been assigned fails with
 `ErrorCode.UnknownTopicOrPartition`. On Scala.js and Scala Native, a seek is
 also refused until the partition is being fetched, which happens shortly after

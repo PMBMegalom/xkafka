@@ -23,13 +23,13 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.Order
+import cats.{Applicative, Order}
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Poll, Ref, Resource}
 import cats.effect.implicits.*
 import cats.effect.std.{Mutex, Queue, Random, Supervisor}
 import cats.syntax.all.*
-import fs2.Stream
+import fs2.{Chunk, Stream}
 import fs2.concurrent.{Channel, SignallingRef}
 import internal.{ClientProperties, PollQueue}
 import internal.driver.{CommitToRetry, Delivery, EncodedRecord, KafkaDriver, PolledRecord, Rebalance, StartAt, StoredOffset}
@@ -45,10 +45,6 @@ private def isolationLevel(value: IsolationLevel): String =
   * among them, as Java's Kafka Streams writes them, though librdkafka writes that time as the time it sends the record at.
   */
 private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forStreams: Boolean = false)(using F: Async[F]) extends KafkaClient[F]:
-  // Records the poll loop has read but nothing has taken yet. The loop stops polling when this fills, which is
-  // also when Kafka would consider the consumer stalled.
-  private val RecordQueueSize = 256
-
   /** Group metadata, from a consumer of any client on this platform, that a transaction records offsets against. */
   private object GroupMetadata:
     def unapply(handle: GroupHandle): Option[driver.GroupMetadata] = driver.asGroupMetadata(handle)
@@ -174,7 +170,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
           initialAssignment(selection).toList
             .traverse_(value => leases.assign(List(LeaseKey(value.topic.value, value.partition.value)), replacing = false))
         )
-      polled      <- Resource.eval(Channel.bounded[F, ReadRecord](RecordQueueSize))
+      // Polls whose records the poll loop has read but nothing has taken yet. Their records are counted in `unread`, which bounds the queue.
+      polled      <- Resource.eval(Channel.unbounded[F, Chunk[ReadRecord]])
+      unread      <- Resource.eval(SignallingRef[F, Int](0))
       rebalances  <- Resource.eval(Queue.unbounded[F, Rebalance[driver.Event]])
       assignments <- Resource.eval(SignallingRef[F, AssignmentReport](AssignmentReport(initialAssignment(selection), Map.empty)))
       // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
@@ -187,7 +185,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       seeks  <- Resource.eval((Mutex[F], Ref.of[F, Map[LeaseKey, Long]](Map.empty)).mapN(Seeks(_, _)))
       // How many times the group has assigned each partition, whatever the settings, which partition streams tell assignments apart by.
       numbers <- Resource.eval(Ref.of[F, Map[LeaseKey, Long]](Map.empty))
-      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks, numbers)
+      consumer =
+        new DriverConsumer(client, settings, leases, hold, polled, unread, rebalances, assignments, stopping, random, failure, seeks, numbers)
       // Released after both below stop, and before the client: a rebalance polled after `rebalancing` failed is applied here, since the client cannot
       // close while one waits.
       _ <- Resource.onFinalize(consumer.applyQueued)
@@ -217,7 +216,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
         settings.properties.updated("isolation.level", isolationLevel(settings.isolationLevel)) ++
         ClientProperties.security(settings.client.security) ++ ClientProperties(settings.client) ++ ClientProperties.consumer(settings) ++
         settings.managedProperties,
-      reportEnds = false
+      reportEnds = false,
+      maxPollRecords = settings.maxPollRecords
     )
 
   override def streams(settings: StreamsSettings, topology: Topology[F]): Resource[F, KafkaStreams[F]] = streams(settings, topology, Forward.none[F])
@@ -319,6 +319,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       new Transaction[F, K, V]:
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
         override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]] = records.produceAndAwait(values)
+
+        override private[xkafka] def enqueue(values: NonEmptyList[ProducerRecord[K, V]])(using Applicative[F]): F[F[NonEmptyList[Produced[K, V]]]] =
+          records.produce(values)
 
         override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
           GroupMembership.resolve(batch).use(commitMemberships) *> recorded.update(_ :+ batch)
@@ -719,7 +722,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       settings: ConsumerSettings[F, K, V],
       leases: AssignmentLeases[F],
       hold: RevocationHold[F],
-      polled: Channel[F, ReadRecord],
+      polled: Channel[F, Chunk[ReadRecord]],
+      unread: SignallingRef[F, Int],
       rebalances: Queue[F, Rebalance[driver.Event]],
       assignments: SignallingRef[F, AssignmentReport],
       stopping: Deferred[F, Unit],
@@ -775,15 +779,24 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       PollQueue.feed(
         Stream.repeatEval(stopping.tryGet).takeWhile(_.isEmpty)
           .evalMap(_ => (leases.reading(pollOnce)((record, _) => leaseKeyOf(record)), hold.readUnder, numbers.get).tupled)
-          .flatMap((read, assignment, assigned) =>
-            Stream.emits(read.map { case ((record, sought), lease) =>
+          .map((read, assignment, assigned) =>
+            Chunk.from(read.map { case ((record, sought), lease) =>
               val key = leaseKeyOf(record)
               ReadRecord(record, lease, assignment(key), sought, assigned.getOrElse(key, 0L))
             })
-          ),
+          ).filter(_.nonEmpty).evalTap(admitted),
         polled,
         failure
       )
+
+    /** Waits, before a poll's records join the queue, while `maxPollRecords` records or more wait there unread, so that a consumer whose records go
+      * unread stops polling, and leaves its group once its poll interval passes, as a Java consumer that is not polled does. A consumer whose records
+      * are read, however slowly, or that holds only a few unread, polls on and takes its part in each rebalance.
+      */
+    private def admitted(reads: Chunk[ReadRecord]): F[Unit] = unread.waitUntil(_ < settings.maxPollRecords) *> unread.update(_ + reads.size)
+
+    /** The polls in the queue as they are taken from it, their records no longer counted as unread. */
+    private def taken: Stream[F, Chunk[ReadRecord]] = PollQueue.read(polled, failure).evalTap(reads => unread.update(_ - reads.size))
 
     /** A rebalance taken from the driver has to be applied before the consumer can close, so taking one and queueing it for `rebalancing` is never
       * cut apart by a cancellation, which costs a release at most one poll. Each record comes with how many seeks of its partition it follows.
@@ -857,15 +870,30 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
 
     override def stopConsuming: F[Unit] = stopping.complete(()).attempt.void
 
-    /** A record of a partition being revoked, or read under an assignment the group has since replaced, is dropped and not handed out, where the
-      * revocation waits for what was handed out to be committed. With fencing, so is one read under a lease that has since ended, which no commit
-      * could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
+    /** Each poll's records are handed out together, as the Java client hands them out, so what follows is checked when a poll's records are, not as
+      * each is read. A record of a partition being revoked, or read under an assignment the group has since replaced, is dropped and not handed out,
+      * where the revocation waits for what was handed out to be committed. With fencing, so is one read under a lease that has since ended, which no
+      * commit could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
       */
-    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] = PollQueue.read(polled, failure).evalFilter(handingOut).evalMap(decode)
+    override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
+      taken.evalMap(reads => handedOut(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
 
     // Counted as handed out only once the partition's stream hands them out, so one dropped before then is not waited for.
     override private[xkafka] val routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalFilter(stillHeld).evalMap(decode)
+      taken.evalMap(reads => stillHeldOf(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
+
+    /** The records of a poll that are still held, as [[stillHeld]] tells them, each read under the same seeks and leases. */
+    private def stillHeldOf(reads: Chunk[ReadRecord]): F[Chunk[ReadRecord]] =
+      (seeks.made.get, leases.held).mapN: (made, current) =>
+        reads.filter: read =>
+          val key = leaseKeyOf(read.record)
+          made.getOrElse(key, 0L) == read.sought && (!settings.assignmentFencing || read.lease.exists(lease => current(key).contains(lease)))
+
+    /** The records of a poll that are still held and may be handed out, recorded as handed out together, as [[handingOut]] tells them one by one. */
+    private def handedOut(reads: Chunk[ReadRecord]): F[Chunk[ReadRecord]] =
+      stillHeldOf(reads).flatMap: held =>
+        hold.handOutAll(held.map(read => (leaseKeyOf(read.record), read.assignment, read.record.offset + 1L)))
+          .map(kept => held.zip(kept).collect { case (read, true) => read })
 
     private def stillHeld(read: ReadRecord): F[Boolean] = (sinceLastSeek(read), leased(read)).mapN(_ && _)
 
@@ -946,21 +974,35 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
         F.delay(values.headOption.filter(_ >= 0L).map(offset("position", _)))
 
     private def poll: F[List[PolledRecord]] =
-      driver.poll(client.handle, settings.pollTimeout.toMillis.toInt).map(_.records).recover:
+      driver.poll(client.handle, settings.pollTimeout.toMillis.toInt, settings.maxPollRecords).map(_.records).recover:
         // librdkafka reports a subscribed topic that does not exist yet through the poll, and the topic can still be
         // created afterwards, so this keeps polling for it.
         case failure: KafkaException.BackendFailure if failure.code.contains(ErrorCode.UnknownTopicOrPartition) => Nil
 
-    private def decode(read: ReadRecord): F[CommittableConsumerRecord[F, K, V]] =
+    /** Decodes a poll's records, checking each topic name the poll names once, as its records share a few. */
+    private def decodeAll(reads: Chunk[ReadRecord]): F[Chunk[CommittableConsumerRecord[F, K, V]]] =
+      F.delay(reads.foldLeft(Map.empty[String, Either[KafkaException, Topic]])((checked, read) =>
+        val name = read.record.topic
+        if checked.contains(name) then checked else checked.updated(name, Topic.from(name).leftMap(invalidBackendValue("topic", name, _)))
+      )).flatMap(topics => reads.traverse(read => decode(read, topics(read.record.topic))))
+
+    private def decode(read: ReadRecord, checked: Either[KafkaException, Topic]): F[CommittableConsumerRecord[F, K, V]] =
       val source = read.record
       for
-        topic     <- F.fromEither(Topic.from(source.topic).leftMap(error => invalidBackendValue("topic", source.topic, error)))
-        partition <- F.fromEither(Partition.from(source.partition).leftMap(error => invalidBackendValue("partition", source.partition, error)))
-        offset    <- F.fromEither(Offset.from(source.offset).leftMap(error => invalidBackendValue("offset", source.offset, error)))
-        portableNextOffset <- F.fromEither(offset.next.leftMap(error => invalidBackendValue("next offset", source.offset, error)))
-        leaderEpoch        <- F.delay(epoch("leader epoch", source.leaderEpoch))
-        key                <- settings.keyDeserializer.deserialize(topic, source.headers, source.key)
-        value              <- settings.valueDeserializer.deserialize(topic, source.headers, source.value)
+        // The checks of what the backend reported, which only an invalid answer fails, in one step.
+        (topic, partition, offset, portableNextOffset, leaderEpoch) <-
+          F.delay:
+            def valid[A](result: Either[KafkaException, A]): A = result.fold(error => throw error, identity)
+            val offset = valid(Offset.from(source.offset).leftMap(invalidBackendValue("offset", source.offset, _)))
+            (
+              valid(checked),
+              valid(Partition.from(source.partition).leftMap(invalidBackendValue("partition", source.partition, _))),
+              offset,
+              valid(offset.next.leftMap(invalidBackendValue("next offset", source.offset, _))),
+              epoch("leader epoch", source.leaderEpoch)
+            )
+        key   <- settings.keyDeserializer.deserialize(topic, source.headers, source.key)
+        value <- settings.valueDeserializer.deserialize(topic, source.headers, source.value)
       yield
         val topicPartition = TopicPartition(topic, partition)
         val record         =
@@ -988,9 +1030,10 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
             override private[xkafka] val lease: Option[Lease] = read.lease
 
             // Neither a lease that has ended nor a seek made since the record was fetched lets it be handed out, as `records` hands out none such.
-            override private[xkafka] val stillHeld: Option[F[Boolean]] = Some(DriverConsumer.this.stillHeld(read))
+            // Built only when asked for, by a partition's stream: the plain record stream hands out a poll's records without them.
+            override private[xkafka] def stillHeld: Option[F[Boolean]] = Some(DriverConsumer.this.stillHeld(read))
 
-            override private[xkafka] val handingOut: Option[F[Boolean]] = Some(DriverConsumer.this.handingOut(read))
+            override private[xkafka] def handingOut: Option[F[Boolean]] = Some(DriverConsumer.this.handingOut(read))
 
             override private[xkafka] val assignment: Option[Long] = Some(read.number)
 

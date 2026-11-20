@@ -60,6 +60,7 @@ val ManagedProperties: Set[String] =
     "session.timeout.ms",
     "heartbeat.interval.ms",
     "max.poll.interval.ms",
+    "max.poll.records",
     "fetch.max.wait.ms",
     "fetch.wait.max.ms",
     "batch.size",
@@ -120,6 +121,7 @@ enum SettingsError derives CanEqual:
   case InvalidGroupInstanceId(value: String)
   case PropertyDurationAboveLimit(name: String, value: FiniteDuration, limit: FiniteDuration)
   case PropertyDurationBelowMinimum(name: String, value: FiniteDuration, minimum: FiniteDuration)
+  case MaxPollRecordsOutOfRange(value: Int)
 
   def message: String =
     this match
@@ -155,6 +157,7 @@ enum SettingsError derives CanEqual:
       case PropertyDurationBelowMinimum(name, value, minimum) => s"property '$name' must be at least $minimum, was $value"
       case InvalidGroupInstanceId(value)                      =>
         s"group instance id must be at most 249 letters, digits, '.', '_' or '-', and not '.' or '..', as a topic name is, was '$value'"
+      case MaxPollRecordsOutOfRange(value) => s"maxPollRecords must be from 1 to ${ConsumerSettings.MaxPollRecordsLimit}, was $value"
 
 object SettingsError:
   val MaxDuration: FiniteDuration = Int.MaxValue.toLong.millis
@@ -700,7 +703,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     maxPollInterval: FiniteDuration,
     rebalanceSafeCommits: Option[RebalanceSafeCommits],
     startingOffsets: Option[StartingOffsets[F]],
-    fetchWait: FiniteDuration
+    fetchWait: FiniteDuration,
+    maxPollRecords: Int
 ):
   def mapK[G[_]](fk: FunctionK[F, G]): ConsumerSettings[G, K, V] =
     new ConsumerSettings(
@@ -722,7 +726,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       maxPollInterval,
       rebalanceSafeCommits,
       startingOffsets.map(_.mapK(fk)),
-      fetchWait
+      fetchWait,
+      maxPollRecords
     ) {}
 
   /** The settings for another client, checked against it, as its properties can set the group protocol the membership settings are checked under. */
@@ -802,6 +807,13 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     */
   def withFetchWait(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(fetchWait = value)
 
+  /** The most records one poll takes from the backend, and how many may wait unread before the consumer stops fetching, from 1 to
+    * `ConsumerSettings.MaxPollRecordsLimit`. The default, `ConsumerSettings.DefaultMaxPollRecords`, is the Java client's. The Java client calls it
+    * `max.poll.records`, which is refused as a property. librdkafka's `max.poll.records` is for share consumers alone, so on librdkafka xkafka takes
+    * up to this many of the messages its consumer has already fetched.
+    */
+  def withMaxPollRecords(value: Int): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollRecords = value)
+
   /** Holds back the revocation of a partition until every record `records` handed out from it is committed, for at most `limit`, which must be less
     * than the maximum poll interval.
     *
@@ -875,7 +887,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       maxPollInterval,
       rebalanceSafeCommits,
       startingOffsets,
-      fetchWait
+      fetchWait,
+      maxPollRecords
     ) {}
 
   private def revalidated(
@@ -890,7 +903,8 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       maxPollInterval: FiniteDuration = maxPollInterval,
       rebalanceSafeCommits: Option[RebalanceSafeCommits] = rebalanceSafeCommits,
       startingOffsets: Option[StartingOffsets[F]] = startingOffsets,
-      fetchWait: FiniteDuration = fetchWait
+      fetchWait: FiniteDuration = fetchWait,
+      maxPollRecords: Int = maxPollRecords
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     ConsumerSettings.from(
       client,
@@ -911,14 +925,15 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
       maxPollInterval,
       rebalanceSafeCommits,
       startingOffsets,
-      fetchWait
+      fetchWait,
+      maxPollRecords
     )
 
   override def toString: String =
     s"ConsumerSettings($client,$groupId,$keyDeserializer,$valueDeserializer,$autoOffsetReset,$isolationLevel,$commitRecovery,$commitTimeout,$pollTimeout,$requestTimeout,${redacted(
         properties
       )},$assignmentFencing,$groupInstanceId,$sessionTimeout,$heartbeatInterval,$maxPollInterval,$rebalanceSafeCommits,${startingOffsets
-        .map(value => s"StartingOffsets(${value.limit})")},$fetchWait)"
+        .map(value => s"StartingOffsets(${value.limit})")},$fetchWait,$maxPollRecords)"
 
 object ConsumerSettings:
   /** Short enough to keep other calls on the consumer responsive, long enough that an idle poll is not a spin. */
@@ -959,6 +974,12 @@ object ConsumerSettings:
   /** The longest fetch wait the settings accept, librdkafka's maximum. */
   val FetchWaitLimit: FiniteDuration = 5.minutes
 
+  /** The Java client's default `max.poll.records`. */
+  val DefaultMaxPollRecords: Int = 500
+
+  /** The most records a poll may take, which a librdkafka consumer makes room for at every poll. */
+  val MaxPollRecordsLimit: Int = 100000
+
   def from[F[_], K, V](
       client: ClientSettings,
       groupId: ConsumerGroup,
@@ -978,7 +999,8 @@ object ConsumerSettings:
       maxPollInterval: FiniteDuration = ConsumerSettings.DefaultMaxPollInterval,
       rebalanceSafeCommits: Option[RebalanceSafeCommits] = None,
       startingOffsets: Option[StartingOffsets[F]] = None,
-      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait
+      fetchWait: FiniteDuration = ConsumerSettings.DefaultFetchWait,
+      maxPollRecords: Int = ConsumerSettings.DefaultMaxPollRecords
   ): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] =
     // The protocol may be set for the whole client or for the consumer, which then reads the consumer's.
     val protocol  = (client.properties ++ properties).collect { case (name, value) if name.trim.equalsIgnoreCase("group.protocol") => value.trim }
@@ -1010,6 +1032,7 @@ object ConsumerSettings:
         durationErrors(SettingsError.DurationField.PollTimeout, pollTimeout) ++
         durationErrors(SettingsError.DurationField.RequestTimeout, requestTimeout) ++
         boundedDurationErrors(SettingsError.DurationField.FetchWait, fetchWait, FetchWaitLimit) ++ groupInstanceId.flatMap(groupInstanceIdError) ++
+        Option.when(maxPollRecords < 1 || maxPollRecords > MaxPollRecordsLimit)(SettingsError.MaxPollRecordsOutOfRange(maxPollRecords)) ++
         intervals ++ combinations
     validateSettings(errors).map(_ =>
       new ConsumerSettings(
@@ -1031,7 +1054,8 @@ object ConsumerSettings:
         maxPollInterval,
         rebalanceSafeCommits,
         startingOffsets,
-        fetchWait
+        fetchWait,
+        maxPollRecords
       ) {}
     )
 
@@ -1710,6 +1734,12 @@ trait Transaction[F[_], K, V]:
 
   /** Enqueues `records` and waits for the broker to acknowledge them, which a transaction must do before it can commit. */
   def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]]
+
+  /** Enqueues `records` and gives the effect that completes once the broker has acknowledged them, which the caller awaits before the transaction
+    * commits.
+    */
+  private[xkafka] def enqueue(records: NonEmptyList[ProducerRecord[K, V]])(using F: Applicative[F]): F[F[NonEmptyList[Produced[K, V]]]] =
+    F.map(produce(records))(F.pure)
 
   /** Records `batch` against the consumer group each of its offsets was read by, so those offsets are committed only if this transaction commits. */
   def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit]

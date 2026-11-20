@@ -251,6 +251,47 @@ final class DriverClientSuite extends CatsEffectSuite:
           _       <- routing.cancel
         yield assertEquals(first.record.offset.value, 10L)
 
+  test("a consumer whose records go unread polls on, and takes part in a rebalance, while fewer than maxPollRecords of them wait"):
+    FakeDriver().flatMap: fake =>
+      consumerSettings.withMaxPollRecords(3).liftTo[IO].flatMap: settings =>
+        new DriverClient[IO](fake).consumer(settings, topics).use: _ =>
+          fake.assign *> fake.until(_.count(_ == "assign") == 1) *> fake.deliver(0L) *> fake.deliver(1L) *> fake.drained *> fake.revoke *>
+            fake.until(_.contains("unassign")).timeout(10.seconds)
+
+  test("a consumer stops polling once maxPollRecords records wait unread, so a rebalance waits, and polls again once a poll is read"):
+    FakeDriver().flatMap: fake =>
+      consumerSettings.withMaxPollRecords(3).liftTo[IO].flatMap: settings =>
+        new DriverClient[IO](fake).consumer(settings, topics).use: consumer =>
+          for
+            _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+            _       <- List(0L, 1L, 2L).traverse_(fake.deliver) *> fake.drained
+            _       <- fake.deliver(3L) *> fake.drained *> fake.revoke *> IO.sleep(1.second)
+            stalled <- fake.count("unassign")
+            _       <- consumer.records.take(1).compile.drain *> fake.until(_.contains("unassign")).timeout(10.seconds)
+          yield assertEquals(stalled, 0)
+
+  test("a record whose topic or offset the backend reported invalid fails the stream as an invalid backend answer"):
+    // With fencing, a record of a partition the consumer was never assigned is dropped before it is decoded, so the bad name is read without it.
+    List(("events", -5L, consumerSettings), ("not a topic", 0L, consumerSettings.withoutAssignmentFencing)).traverse_ { (topic, offset, settings) =>
+      FakeDriver().flatMap: fake =>
+        new DriverClient[IO](fake).consumer(settings, topics).use: consumer =>
+          for
+            _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1) *> fake.deliver(topic, offset)
+            outcome <- consumer.records.take(1).compile.lastOrError.timeout(10.seconds).attempt
+          yield assert(outcome.left.exists(_.isInstanceOf[KafkaException.InvalidBackendResponse]), s"$topic at $offset: $outcome")
+    }
+
+  test("records polled but not yet handed out when the consumer seeks are not handed out after the seek, as no record fetched before it is"):
+    FakeDriver().flatMap: fake =>
+      new DriverClient[IO](fake).consumer(consumerSettings, topics).use: consumer =>
+        for
+          _ <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+          // Polled into the consumer's queue, where nothing reads it until after the seek.
+          _     <- fake.deliver(0L) *> fake.drained *> IO.sleep(100.millis)
+          _     <- consumer.seek(eventsZero, Offset.from(10L).toOption.get) *> fake.deliver(10L)
+          first <- consumer.records.take(1).compile.lastOrError.timeout(10.seconds)
+        yield assertEquals(first.record.offset.value, 10L)
+
   test("an offset read under a revoked assignment cannot be recorded in a transaction, and one read after reassignment can"):
     FakeDriver().flatMap: fake =>
       transactional(fake, consumerSettings): (producer, consumer) =>
@@ -842,10 +883,13 @@ final class DriverClientSuite extends CatsEffectSuite:
     /** Completes once every delivered record has been polled. */
     def drained: IO[Unit] = queued.get.map(_.isEmpty).flatMap(done => if done then IO.unit else IO.sleep(5.millis) *> drained)
 
-    def deliver(offset: Long): IO[Unit] =
+    def deliver(offset: Long): IO[Unit] = deliver("events", offset)
+
+    /** Delivers a record of `topic`, which need not be a valid name, as a backend could answer. */
+    def deliver(topic: String, offset: Long): IO[Unit] =
       queued.update(
         _ :+ PolledRecord(
-          "events",
+          topic,
           0,
           offset,
           Some(0L),
@@ -886,7 +930,8 @@ final class DriverClientSuite extends CatsEffectSuite:
         groupId: String,
         autoOffsetReset: String,
         properties: Map[String, String],
-        reportEnds: Boolean
+        reportEnds: Boolean,
+        maxPollRecords: Int
     ) = IO.pure("consumer")
 
     override def destroyConsumer(consumer: Client): IO[Unit] = IO.unit
@@ -975,7 +1020,7 @@ final class DriverClientSuite extends CatsEffectSuite:
 
     override def subscribe(consumer: Client, topics: NonEmptyList[String]): IO[Unit] = IO.unit
 
-    override def poll(consumer: Client, timeoutMillis: Int): IO[Polled] =
+    override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): IO[Polled] =
       inPoll.getAndSet(None).flatMap(_.sequence_) *> queued.modify {
         case head :: tail => (tail, List(head))
         case Nil          => (Nil, Nil)

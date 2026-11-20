@@ -516,6 +516,90 @@ final class EngineSuite extends CatsEffectSuite:
         ended   <- world.ended
       yield assertEquals((fetches.size, ended), (2, None))
 
+  test(
+    "at least once, a poll is processed while what the one before wrote is still being delivered, and no offset is committed until it is, " +
+      "though what was written after it is delivered"
+  ):
+    run(): world =>
+      for
+        gate      <- IO.deferred[Unit]
+        _         <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.deliverAs(gate.get)
+        _         <- world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(200.millis) *> world.deliverAs(IO.unit)
+        _         <- world.records(record(0, 6L, "k", 1000L))
+        _         <- IO.sleep(1500.millis)
+        waiting   <- (world.written.get, world.commits.get).tupled
+        _         <- gate.complete(()) *> IO.sleep(500.millis)
+        delivered <- world.commits.get
+      yield
+        // Both counts were written, the second while the first was still being delivered.
+        assertEquals((waiting._1.count(_.topic.value == "out"), waiting._2), (2, Nil))
+        assertEquals(delivered.flatten.flatMap(_.partitions).map(_.offset).lastOption, Some(7L))
+
+  test(
+    "at least once, a delivery that fails in a way worth retrying starts the tasks again from what the group committed, committing nothing, " +
+      "and what they write again is committed once delivered"
+  ):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed)): world =>
+      for
+        _         <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _         <- world.deliverAs(IO.raiseError(timedOut)) *> world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(300.millis)
+        _         <- world.deliverAs(IO.unit) *> IO.sleep(1200.millis)
+        restarted <- (world.fetches.get, world.commits.get).tupled
+        _         <- world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis)
+        fetches   <- world.fetches.get
+        commits   <- world.commits.get
+        ended     <- world.ended
+      yield
+        assertEquals((restarted._1.size, restarted._2), (2, Nil))
+        assertEquals((fetches.size, commits.flatten.flatMap(_.partitions).map(_.offset), ended), (2, List(6L), None))
+
+  test("at least once, a delivery that fails in a way not worth retrying stops the engine without committing"):
+    val tooLarge = new KafkaException.BackendFailure("too large", Some(ErrorCode.MessageTooLarge), Some(false), Some(false))
+    run(): world =>
+      for
+        _       <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis)
+        _       <- world.deliverAs(IO.raiseError(tooLarge)) *> world.records(record(0, 5L, "k", 1000L))
+        _       <- IO.sleep(1500.millis)
+        commits <- world.commits.get
+        ended   <- world.ended
+      yield assertEquals((commits, ended), (Nil, Some(Left(tooLarge))))
+
+  test("at least once, tasks handed back commit only once what was written before is delivered, and the revocation is answered after"):
+    run(): world =>
+      for
+        gate    <- IO.deferred[Unit]
+        _       <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.deliverAs(gate.get)
+        _       <- world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(200.millis)
+        _       <- world.tell(MemberAction.Revoke(2, Set(TaskId("0", 0)))) *> IO.sleep(300.millis)
+        waiting <- world.log.get
+        _       <- gate.complete(()) *> IO.sleep(300.millis)
+        after   <- world.log.get
+      yield
+        assert(!waiting.exists { case Event.Committed(_) | Event.Revoked(_) => true; case _ => false }, waiting)
+        assertEquals(after.collect { case Event.Committed(_) => "committed"; case Event.Revoked(_) => "revoked" }, List("committed", "revoked"))
+
+  test("exactly once, a transaction commits only once what it wrote is delivered, and one whose delivery fails worth retrying starts again"):
+    val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
+    val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
+    run(committed = _ => IO.pure(committed), failing = exactlyOnce): world =>
+      for
+        gate    <- IO.deferred[Unit]
+        _       <- world.tell(assign(TaskId("0", 0))) *> IO.sleep(100.millis) *> world.deliverAs(gate.get)
+        _       <- world.records(record(0, 5L, "k", 1000L)) *> IO.sleep(1500.millis)
+        waiting <- world.log.get
+        _       <- gate.complete(()) *> IO.sleep(300.millis)
+        after   <- world.log.get
+        _       <- world.deliverAs(IO.raiseError(timedOut)) *> world.records(record(0, 6L, "k", 1000L)) *> IO.sleep(300.millis)
+        _       <- world.deliverAs(IO.unit) *> IO.sleep(1500.millis)
+        fetches <- world.fetches.get
+        ended   <- world.ended
+      yield
+        def transactions(log: List[Event]) = log.collect { case Event.Transaction(written, _) => written }
+        assertEquals((transactions(waiting).size, transactions(after).size), (0, 1))
+        assertEquals((fetches.size, ended), (2, None))
+
   test("at least once, records processed between two failures end the first one's time, though no commit came between, as Java clears it"):
     val committed = OffsetFetchRequest.Answer(List(Fetched("in", 0, 5L, -1, None, 0)), 0)
     val timedOut  = new KafkaException.BackendFailure("timed out", Some(ErrorCode.RequestTimedOut), Some(true), Some(false))
@@ -1668,8 +1752,13 @@ object EngineSuite:
       val restoredFrom: Ref[IO, List[(Map[TopicPartition, Long], Map[String, StoreContents])]],
       offsetsRead: Ref[IO, IO[TaskOffsets]],
       val restoredAlso: Ref[IO, Map[String, StoreContents]],
-      val epochs: Ref[IO, List[Int]]
+      val epochs: Ref[IO, List[Int]],
+      // How what is written from now on is delivered: at once, unless a test holds or fails it.
+      delivering: Ref[IO, IO[Unit]]
   ):
+    /** Delivers what is written from now on as `delivery` does. */
+    def deliverAs(delivery: IO[Unit]): IO[Unit] = delivering.set(delivery)
+
     /** Changelog records for the standby tasks to follow. */
     def changelogs(polled: PolledRecord*): IO[Unit] = polled.toList.traverse_(standingBy.offer)
 
@@ -1737,7 +1826,7 @@ object EngineSuite:
       new Engine.Transactions[IO]:
         def apply[A](epoch: Int)(body: Engine.Writer[IO] => IO[(A, Map[TopicPartition, OffsetAndMetadata])]): IO[A] =
           epochs.update(_ :+ epoch) *> IO.ref(0).flatMap: count =>
-            body(records => count.update(_ + records.size)).flatMap: (result, offsets) =>
+            body(records => count.update(_ + records.size) *> delivering.get).flatMap: (result, offsets) =>
               transacted.modify(n => (n + 1, n)).flatMap: n =>
                 failing(n).fold(count.get.flatMap(written => logged(Event.Transaction(written, offsets))).as(result))(IO.raiseError)
 
@@ -1765,42 +1854,43 @@ object EngineSuite:
           ending.modify((ends, failing) => ((ends, (failing - 1).max(0)), failing)).flatMap: failing =>
             if failing > 0 then IO.raiseError(new KafkaException.BackendFailure("no leader", Some(ErrorCode.NotLeaderOrFollower), Some(true)))
             else ending.get.map(_._1.view.filterKeys(partitions.toSet).toMap)
-        def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[Unit] =
+        def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): IO[IO[Unit]] =
           val values = records.toList.flatMap(_.value).map(value => new String(value.toArray))
           purging.get
             .flatMap(_._3.filter((to, _) => records.exists(record => to(record.topic.value))).traverse_((_, failure) => IO.raiseError(failure))) *>
             purging.getAndUpdate(_.copy(_2 = IO.unit)).flatMap(_._2) *> written.update(_ ++ records.toList) *>
-            now.flatMap(at => wroteAt.update(_ :+ (at, values)))
+            now.flatMap(at => wroteAt.update(_ :+ (at, values))) *> delivering.get
         def purge(before: Map[TopicPartition, Offset]): IO[Unit] = logged(Event.Purged(before)) *> purging.get.flatMap(_._1)
 
   private val identity = MemberIdentity("app", "member", "process", StreamsGroup.Topology(0, Nil), 300000, None, Nil, None)
 
   object World:
     def apply(): IO[World] =
-      (
-        Queue.unbounded[IO, Option[MemberAction]],
-        Queue.unbounded[IO, PolledRecord],
-        IO.ref(List.empty[Event]),
-        IO.ref(List.empty[List[OffsetFetchRequest.Topic]]),
-        IO.ref(List.empty[Long]),
-        IO.ref(List.empty[List[OffsetCommitRequest.Topic]]),
-        IO.ref(List.empty[Long]),
-        IO.ref(List.empty[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]),
-        IO.ref(0),
-        IO.ref(0),
-        IO.ref(Option.empty[Either[Throwable, Unit]]),
-        IO.ref(List.empty[(Long, List[String])]),
-        IO.ref((IO.unit, IO.unit, Option.empty[(String => Boolean, Throwable)])),
-        SignallingRef[IO].of(Member(identity)),
-        IO.ref(Duration.Zero: FiniteDuration),
-        IO.ref(List.empty[StreamsState]),
-        Queue.unbounded[IO, PolledRecord],
-        IO.ref((Map.empty[TopicPartition, Long], 0)),
-        IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, StoreContents])]),
-        IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
-        IO.ref(Map.empty[String, StoreContents]),
-        IO.ref(List.empty[Int])
-      ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _))
+      IO.ref(IO.unit).flatMap: delivering =>
+        (
+          Queue.unbounded[IO, Option[MemberAction]],
+          Queue.unbounded[IO, PolledRecord],
+          IO.ref(List.empty[Event]),
+          IO.ref(List.empty[List[OffsetFetchRequest.Topic]]),
+          IO.ref(List.empty[Long]),
+          IO.ref(List.empty[List[OffsetCommitRequest.Topic]]),
+          IO.ref(List.empty[Long]),
+          IO.ref(List.empty[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]),
+          IO.ref(0),
+          IO.ref(0),
+          IO.ref(Option.empty[Either[Throwable, Unit]]),
+          IO.ref(List.empty[(Long, List[String])]),
+          IO.ref((IO.unit, IO.unit, Option.empty[(String => Boolean, Throwable)])),
+          SignallingRef[IO].of(Member(identity)),
+          IO.ref(Duration.Zero: FiniteDuration),
+          IO.ref(List.empty[StreamsState]),
+          Queue.unbounded[IO, PolledRecord],
+          IO.ref((Map.empty[TopicPartition, Long], 0)),
+          IO.ref(List.empty[(Map[TopicPartition, Long], Map[String, StoreContents])]),
+          IO.ref(IO.raiseError[TaskOffsets](new AssertionError("the engine gave no task offsets"))),
+          IO.ref(Map.empty[String, StoreContents]),
+          IO.ref(List.empty[Int])
+        ).mapN(new World(_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, delivering))
 
   /** Runs a program's engine, the counting one unless another is given, with a commit interval of a second over a member answering as given, while
     * `script` runs: at least once, or exactly once with transactions that fail as `failing` says, running up to `concurrency` tasks at once.

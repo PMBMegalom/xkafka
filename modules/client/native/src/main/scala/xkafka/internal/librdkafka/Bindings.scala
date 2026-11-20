@@ -157,6 +157,17 @@ private[xkafka] object Bindings:
   def xkafka_consumer_poll(consumer: CVoidPtr, timeoutMs: CInt, status: Ptr[CInt], error: CString, errorSize: CSize, errorCode: Ptr[CInt]): CVoidPtr =
     extern
 
+  def xkafka_consumer_poll_batch(
+      consumer: CVoidPtr,
+      timeoutMs: CInt,
+      capacity: CInt,
+      messages: Ptr[CVoidPtr],
+      kinds: Ptr[CInt],
+      error: CString,
+      errorSize: CSize,
+      errorCode: Ptr[CInt]
+  ): CInt = extern
+
   def xkafka_message_destroy(message: CVoidPtr): Unit = extern
 
   def xkafka_message_topic(message: CVoidPtr): CString = extern

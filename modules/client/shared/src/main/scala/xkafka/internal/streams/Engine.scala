@@ -193,8 +193,9 @@ private[xkafka] object Engine:
           def ends(partitions: Vector[TopicPartition]): F[Map[TopicPartition, Long]] = bounds(partitions).map(_.view.mapValues(_._2).toMap)
           def bounds(partitions: Vector[TopicPartition]): F[Map[TopicPartition, (Long, Long)]] =
             partitions.traverse(partition => driver.watermarks(follower, partition, 30000).map(partition -> _)).map(_.toMap)
-          def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit] = producer.produceAndAwait(records).void
-          def purge(before: Map[TopicPartition, Offset]): F[Unit]                                             =
+          def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[F[Unit]] =
+            producer.produce(records).map(_.void)
+          def purge(before: Map[TopicPartition, Offset]): F[Unit] =
             NonEmptyList.fromList(before.toList).traverse_(cuts => admin.deleteRecords(cuts.toNem).void)
       running <-
         val interval = commitInterval.getOrElse(Engine.commitInterval(guarantee))
@@ -253,7 +254,7 @@ private[xkafka] object Engine:
       body: Writer[F] => F[(A, Map[TopicPartition, OffsetAndMetadata])]
   )(using F: Async[F]): F[A] =
     producer.transactionally: transaction =>
-      body(records => transaction.produce(records).void).flatMap: (result, offsets) =>
+      body(records => transaction.enqueue(records).map(_.void)).flatMap: (result, offsets) =>
         if offsets.isEmpty then F.pure(result)
         else
           val named =
@@ -277,8 +278,8 @@ private[xkafka] object Engine:
     override def commitWithMetadata(offsets: Map[TopicPartition, OffsetAndMetadata]): F[Unit] =
       F.raiseError(new IllegalStateException("the engine records these offsets only in its transactions"))
 
-  /** Writes records, waiting until each is delivered. */
-  type Writer[F[_]] = NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] => F[Unit]
+  /** Enqueues records, and gives the effect that completes once each is delivered, failing where one was not. */
+  type Writer[F[_]] = NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]] => F[F[Unit]]
 
   /** Runs a body that writes records inside a transaction, which also records the offsets the body gives, then commits. A body that fails, or a
     * commit that does, aborts the transaction.
@@ -490,8 +491,8 @@ private[xkafka] object Engine:
     /** Where each of these partitions starts and ends. */
     def bounds(partitions: Vector[TopicPartition]): F[Map[TopicPartition, (Long, Long)]]
 
-    /** Writes the records, waiting until each is delivered. */
-    def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[Unit]
+    /** Enqueues the records, and gives the effect that completes once each is delivered, failing where one was not. */
+    def write(records: NonEmptyList[ProducerRecord[Option[Chunk[Byte]], Option[Chunk[Byte]]]]): F[F[Unit]]
 
     /** Deletes the records of each partition before its offset, as far as the cluster lets it. */
     def purge(before: Map[TopicPartition, Offset]): F[Unit]
@@ -543,7 +544,10 @@ private[xkafka] object Engine:
       // Since when transactions have failed in ways Java recovers from, which the task timeout bounds.
       failing: Option[FiniteDuration] = None,
       // Since when writes at the commit have failed one after another, at least once, which records processed between them do not end.
-      flushFailing: Option[FiniteDuration] = None
+      flushFailing: Option[FiniteDuration] = None,
+      // The deliveries of what was written since the tasks last committed, in the order written, all awaited before offsets are committed, as Java
+      // flushes its producer before it commits: offsets never pass output that was not delivered.
+      undelivered: Vector[F[Unit]] = Vector.empty[F[Unit]]
   )
 
   private final class Loop[F[_]](
@@ -684,7 +688,7 @@ private[xkafka] object Engine:
             F.monotonic.flatMap: now =>
               if now - after.committed < commitInterval then F.pure(after)
               else
-                flushed(after, after.tasks.keySet, plane.write).map(Right(_)).recoverWith {
+                flushed(after, after.tasks.keySet, plane.write).flatMap(delivered).map(Right(_)).recoverWith {
                   case failure: KafkaException.BackendFailure if failure.retriable.contains(true) && !failure.fatal.contains(true) =>
                     recovered(after.copy(failing = after.flushFailing), failure, F.unit)
                       .map(restarted => Left(restarted.copy(flushFailing = restarted.failing)))
@@ -700,7 +704,8 @@ private[xkafka] object Engine:
                   if now - after.committed >= commitInterval || waiting > 0 then F.pure(after)
                   else poll(after).flatMap(process(after, _, write)).flatMap(more(_, write))
               transaction(running.epoch)(write =>
-                process(running, polled, write).flatMap(more(_, write)).flatMap(flushed(_, write)).map(after => (after, offsetsOf(after)))
+                process(running, polled, write).flatMap(more(_, write)).flatMap(flushed(_, write)).flatMap(delivered)
+                  .map(after => (after, offsetsOf(after)))
               ).flatMap(after =>
                 (after.tasks.toList.traverse((id, live) => live.stored.map(id -> _.settled)), F.monotonic)
                   .mapN((tasks, now) => after.copy(tasks = tasks.toMap, committed = now, failing = None))
@@ -769,7 +774,8 @@ private[xkafka] object Engine:
       val restoring = running.tasks.keys.exists(id => subtopologies(id.subtopology).stores.nonEmpty)
       phase.set(StreamsPhase.Restoring).whenA(restoring) *> (closed(running.tasks.toList) *> start(running.tasks.keys.toList, Map.empty), F.monotonic)
         .tupled.flatMap: (started, now) =>
-          val again = running.copy(tasks = started, committed = now)
+          // What was written since the last commit is written again by the tasks started from it, so its deliveries no longer count.
+          val again = running.copy(tasks = started, committed = now, undelivered = Vector.empty)
           reassign(again).as(again) <* phase.set(StreamsPhase.Running).whenA(restoring)
 
     // Recovering from failures is bounded per set of tasks, as Java bounds it per task: tasks that change start their time afresh.
@@ -788,7 +794,8 @@ private[xkafka] object Engine:
               case failed: KafkaException.BackendFailure => failed.retriable.contains(true) && !failed.fatal.contains(true)
               case _                                     => false
           val handedBack =
-            flushed(running, tasks, plane.write).attempt.flatMap:
+            // A delivery that failed stays among those awaited, so that the next commit fails on it too and starts the tasks again.
+            flushed(running, tasks, plane.write).flatMap(delivered).attempt.flatMap:
               case Right(written) => committed(written, tasks).recover { case failure if worthRetrying(failure) => (written, false) }
               case Left(failure) if worthRetrying(failure) => F.pure((running, false))
               case Left(failure)                           => F.raiseError(failure)
@@ -956,10 +963,16 @@ private[xkafka] object Engine:
     private def flushed(running: Running[F], tasks: Set[TaskId], write: Writer[F]): F[Running[F]] =
       running.tasks.view.filterKeys(tasks).toList.filter(_._2.state.dirty.values.exists(_.keys.nonEmpty))
         .traverse((id, live) => live.task.flush(live.state).map(id -> (live, _))).flatMap: done =>
-          done.flatMap(_._2._2._2).traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))
-            .as(running.copy(tasks = running.tasks ++ done.map((id, flushed) => id -> flushed._1.copy(state = flushed._2._1))))
+          done.flatMap(_._2._2._2).traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse(write)).map: delivery =>
+            running.copy(
+              tasks = running.tasks ++ done.map((id, flushed) => id -> flushed._1.copy(state = flushed._2._1)),
+              undelivered = running.undelivered ++ delivery
+            )
 
     private def flushed(running: Running[F], write: Writer[F]): F[Running[F]] = flushed(running, running.tasks.keySet, write)
+
+    /** Waits until everything written since the last commit is delivered, failing with the first that was not. */
+    private def delivered(running: Running[F]): F[Running[F]] = running.undelivered.sequence_.as(running.copy(undelivered = Vector.empty))
 
     /** Commits where each of these tasks has read to, with its partition time, asking again while the coordinator is not ready, and answers whether
       * the group took the commit. A member the group no longer counts commits nothing: its tasks go to others, which read again from the group's last
@@ -993,7 +1006,7 @@ private[xkafka] object Engine:
     private def poll(running: Running[F]): F[List[PolledRecord]] = if running.tasks.isEmpty then F.sleep(PollMillis.millis).as(Nil) else plane.poll
 
     /** Runs each task's records through it in order, and its punctuators after each record and whether or not it has any, up to `concurrency` tasks
-      * at once, and writes what the tasks wrote, waiting until every record is delivered.
+      * at once, and enqueues what the tasks wrote, its delivery awaited at the next commit.
       */
     private def process(running: Running[F], polled: List[PolledRecord], write: Writer[F]): F[Running[F]] =
       val routes =
@@ -1020,8 +1033,8 @@ private[xkafka] object Engine:
           .flatMap((after, written) => punctuated(after).map((done, more) => id -> (done, written ++ more)))
       .flatMap: done =>
         val written = done.flatMap(_._2._2)
-        written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse_(write))
-          .as(running.copy(tasks = running.tasks ++ done.map((id, ran) => id -> ran._1)))
+        written.traverse(recordOf).flatMap(records => NonEmptyList.fromList(records).traverse(write))
+          .map(delivery => running.copy(tasks = running.tasks ++ done.map((id, ran) => id -> ran._1), undelivered = running.undelivered ++ delivery))
 
     private def inputOf(record: PolledRecord): TaskInput =
       TaskInput(record.key, record.value, record.timestamp.getOrElse(-1L), record.headers, record.topic, record.partition, record.offset)

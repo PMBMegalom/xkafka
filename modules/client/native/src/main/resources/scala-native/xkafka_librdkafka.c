@@ -65,6 +65,10 @@ typedef struct xkafka_client_s {
         pthread_mutex_t lock;
         int32_t security_error;
         char security_message[512];
+        /* A consumer's error met after a batch of messages, which the next poll
+         * reports, so that the messages before it are not lost with it. Only
+         * the consumer's polls touch it, and they run one at a time. */
+        rd_kafka_message_t *held;
 } xkafka_client_t;
 
 static xkafka_client_t *xkafka_client_new(void) {
@@ -785,6 +789,11 @@ void xkafka_consumer_destroy(rd_kafka_t *consumer) {
 
         /* Read before destroying, since the opaque is unreachable afterwards. */
         state = (xkafka_client_t *)rd_kafka_opaque(consumer);
+        /* librdkafka waits for every message it handed out before a client is destroyed. */
+        if (state != NULL && state->held != NULL) {
+                rd_kafka_message_destroy(state->held);
+                state->held = NULL;
+        }
         /* A rebalance nobody took is applied before the close, which cannot
          * finish while one is still waiting. */
         if (state != NULL) {
@@ -828,40 +837,95 @@ int xkafka_consumer_subscribe(
         return 0;
 }
 
+/* What a message the consumer took is: 1 a record, 2 the end of a partition, which only a consumer with enable.partition.eof reports, and
+ * whose offset is the end reached, 0 nothing to report, which destroys it, and -1 a failure, set in the error slots, which destroys it too. */
+static int xkafka_consumer_message(rd_kafka_t *consumer,
+                                   rd_kafka_message_t *message,
+                                   char *error,
+                                   size_t error_size,
+                                   int32_t *error_code) {
+        if (message->err == RD_KAFKA_RESP_ERR_NO_ERROR)
+                return 1;
+        if (message->err == RD_KAFKA_RESP_ERR__PARTITION_EOF)
+                return 2;
+        /* librdkafka leaves the group when the poll interval is exceeded and rejoins on a later poll, after handing over the lost partitions,
+         * so the notice it queues first is not a failure of the consumer. */
+        if (message->err == RD_KAFKA_RESP_ERR__MAX_POLL_EXCEEDED) {
+                rd_kafka_message_destroy(message);
+                return 0;
+        }
+        if (!xkafka_unreached(message->err) || !xkafka_take_security_error(consumer, error, error_size, error_code))
+                xkafka_set_failure(consumer, error, error_size, error_code, rd_kafka_message_errstr(message), message->err);
+        rd_kafka_message_destroy(message);
+        return -1;
+}
+
+/* The next message: one a batch held back, or else one librdkafka has within the timeout. */
+static rd_kafka_message_t *xkafka_consumer_next(rd_kafka_t *consumer, int timeout_ms) {
+        xkafka_client_t *state = (xkafka_client_t *)rd_kafka_opaque(consumer);
+        rd_kafka_message_t *message;
+
+        if (state != NULL && state->held != NULL) {
+                message = state->held;
+                state->held = NULL;
+                return message;
+        }
+        return rd_kafka_consumer_poll(consumer, timeout_ms);
+}
+
 rd_kafka_message_t *xkafka_consumer_poll(rd_kafka_t *consumer,
                                          int timeout_ms,
                                          int *status,
                                          char *error,
                                          size_t error_size,
                                          int32_t *error_code) {
-        rd_kafka_message_t *message =
-            rd_kafka_consumer_poll(consumer, timeout_ms);
+        rd_kafka_message_t *message = xkafka_consumer_next(consumer, timeout_ms);
+
         if (message == NULL) {
                 *status = 0;
                 return NULL;
         }
-        /* The end of a partition, which only a consumer with enable.partition.eof reports: its offset is the end reached. */
-        if (message->err == RD_KAFKA_RESP_ERR__PARTITION_EOF) {
-                *status = 2;
-                return message;
+        *status = xkafka_consumer_message(consumer, message, error, error_size, error_code);
+        return *status > 0 ? message : NULL;
+}
+
+/* Takes up to `capacity` messages into `messages`, each one's kind in `kinds` as xkafka_consumer_poll gives its status, and answers how many,
+ * or -1 for a failure, set in the error slots. It waits up to the timeout for the first message and takes those librdkafka already has without
+ * waiting. A batch keeps librdkafka's order: it ends with the end of a partition, and an error met after messages is held for the next call. */
+int xkafka_consumer_poll_batch(rd_kafka_t *consumer,
+                               int timeout_ms,
+                               int capacity,
+                               rd_kafka_message_t **messages,
+                               int *kinds,
+                               char *error,
+                               size_t error_size,
+                               int32_t *error_code) {
+        xkafka_client_t *state = (xkafka_client_t *)rd_kafka_opaque(consumer);
+        int count = 0;
+
+        while (count < capacity) {
+                rd_kafka_message_t *message = xkafka_consumer_next(consumer, count == 0 ? timeout_ms : 0);
+                int kind;
+
+                if (message == NULL)
+                        break;
+                if (count > 0 && state != NULL && message->err != RD_KAFKA_RESP_ERR_NO_ERROR &&
+                    message->err != RD_KAFKA_RESP_ERR__PARTITION_EOF && message->err != RD_KAFKA_RESP_ERR__MAX_POLL_EXCEEDED) {
+                        state->held = message;
+                        break;
+                }
+                kind = xkafka_consumer_message(consumer, message, error, error_size, error_code);
+                if (kind < 0)
+                        return -1;
+                if (kind == 0)
+                        break;
+                messages[count] = message;
+                kinds[count] = kind;
+                count++;
+                if (kind == 2)
+                        break;
         }
-        /* librdkafka leaves the group when the poll interval is exceeded and rejoins on a later poll, after handing over the lost partitions,
-         * so the notice it queues first is not a failure of the consumer. */
-        if (message->err == RD_KAFKA_RESP_ERR__MAX_POLL_EXCEEDED) {
-                rd_kafka_message_destroy(message);
-                *status = 0;
-                return NULL;
-        }
-        if (message->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
-                if (!xkafka_unreached(message->err) || !xkafka_take_security_error(consumer, error, error_size, error_code))
-                        xkafka_set_failure(consumer, error, error_size, error_code,
-                                           rd_kafka_message_errstr(message), message->err);
-                rd_kafka_message_destroy(message);
-                *status = -1;
-                return NULL;
-        }
-        *status = 1;
-        return message;
+        return count;
 }
 
 /* ---- Test hooks ----

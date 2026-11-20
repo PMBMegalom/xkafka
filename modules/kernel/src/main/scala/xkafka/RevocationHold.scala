@@ -26,6 +26,7 @@ import scala.concurrent.duration.FiniteDuration
 import cats.effect.Temporal
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
+import fs2.Chunk
 import fs2.concurrent.SignallingRef
 
 /** What a consumer has handed out and committed of each partition it holds, which partitions it no longer hands records out of, and how many times
@@ -75,6 +76,9 @@ private[xkafka] sealed trait RevocationHold[F[_]]:
   /** Whether a record of `partition` read under assignment `readUnder`, whose next offset is `next`, may be handed out, recording it where it may. */
   def handOut(partition: LeaseKey, readUnder: Long, next: Long): F[Boolean]
 
+  /** [[handOut]] for each of `records`, in order, all at once: whether each may be handed out, recording those that may. */
+  def handOutAll(records: Chunk[(LeaseKey, Long, Long)]): F[Chunk[Boolean]]
+
   /** Records offsets that are now committed. */
   def committed(offsets: Iterable[(LeaseKey, Long)]): F[Unit]
 
@@ -100,6 +104,9 @@ private[xkafka] object RevocationHold:
 
       override def handOut(partition: LeaseKey, readUnder: Long, next: Long): F[Boolean] = state.modify(_.handOut(partition, readUnder, next))
 
+      override def handOutAll(records: Chunk[(LeaseKey, Long, Long)]): F[Chunk[Boolean]] =
+        state.modify(held => records.mapAccumulate(held)((now, record) => now.handOut(record._1, record._2, record._3)))
+
       override def committed(offsets: Iterable[(LeaseKey, Long)]): F[Unit] = state.update(_.commit(offsets))
 
       override def revoke(partitions: List[LeaseKey]): F[Set[LeaseKey]] =
@@ -117,6 +124,8 @@ private[xkafka] object RevocationHold:
       override def readUnder: F[LeaseKey => Long] = F.pure(_ => 0L)
 
       override def handOut(partition: LeaseKey, readUnder: Long, next: Long): F[Boolean] = F.pure(true)
+
+      override def handOutAll(records: Chunk[(LeaseKey, Long, Long)]): F[Chunk[Boolean]] = F.pure(records.map(_ => true))
 
       override def committed(offsets: Iterable[(LeaseKey, Long)]): F[Unit] = F.unit
 

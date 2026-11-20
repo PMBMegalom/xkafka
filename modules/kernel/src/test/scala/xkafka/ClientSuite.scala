@@ -949,6 +949,20 @@ final class ClientSuite extends FunSuite:
         Left(NonEmptyList.one(SettingsError.ManagedProperty(name, SettingsError.PropertyScope.Consumer)))
       )
 
+  test("the most records a poll takes is the Java client's default, takes 1 up to its limit, and is set only through its setting"):
+    val deserializer = Deserializer.utf8[IO]
+    val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get
+
+    assertEquals(settings.maxPollRecords, 500)
+    assertEquals(settings.withMaxPollRecords(1).map(_.maxPollRecords).toEither, Right(1))
+    assertEquals(settings.withMaxPollRecords(ConsumerSettings.MaxPollRecordsLimit).map(_.maxPollRecords).toEither, Right(100000))
+    List(0, -1, ConsumerSettings.MaxPollRecordsLimit + 1).foreach: value =>
+      assertEquals(settings.withMaxPollRecords(value).toEither, Left(NonEmptyList.one(SettingsError.MaxPollRecordsOutOfRange(value))), value)
+    assertEquals(
+      settings.withProperty("max.poll.records", "100").toEither,
+      Left(NonEmptyList.one(SettingsError.ManagedProperty("max.poll.records", SettingsError.PropertyScope.Consumer)))
+    )
+
   test("group membership settings are refused where either backend would refuse them"):
     val deserializer = Deserializer.utf8[IO]
     val settings     = ConsumerSettings.from(clientSettings, group, deserializer, deserializer).toOption.get

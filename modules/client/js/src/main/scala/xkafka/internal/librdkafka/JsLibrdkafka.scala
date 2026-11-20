@@ -105,7 +105,8 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
       groupId: String,
       autoOffsetReset: String,
       properties: Map[String, String],
-      reportEnds: Boolean
+      reportEnds: Boolean,
+      maxPollRecords: Int
   ): F[Client] =
     F.defer:
       val error                  = ErrorSlot()
@@ -278,19 +279,23 @@ private[xkafka] final class JsLibrdkafka[F[_]](using F: Async[F]) extends KafkaD
         if shim.subscribe(consumer, subscription, error.message, ErrorBufferSize, error.code).asInstanceOf[Int] != 0 then throw error.failure
       finally shim.subscriptionDestroy(subscription): Unit
 
-  override def poll(consumer: Client, timeoutMillis: Int): F[Polled] =
+  override def poll(consumer: Client, timeoutMillis: Int, maxRecords: Int): F[Polled] =
     F.defer:
-      val error  = ErrorSlot()
-      val status = Buffers.alloc(4)
-      val result = Result()
-      taking(_.poll)(consumer, timeoutMillis, status, error.message, ErrorBufferSize, error.code, result.value):
-        status.readInt32LE(0) match
+      val batch    = maxRecords
+      val error    = ErrorSlot()
+      val messages = Buffers.alloc(8 * batch)
+      val kinds    = Buffers.alloc(4 * batch)
+      val count    = Buffers.alloc(4)
+      taking(_.pollBatch)(consumer, timeoutMillis, batch, messages, kinds, count, error.message, ErrorBufferSize, error.code):
+        count.readInt32LE(0) match
           case negative if negative < 0 => F.raiseError(error.failure)
           case 0                        => F.pure(Polled.empty)
-          case kind                     => direct: shim =>
-              val message = result.pointer
-              try if kind == 2 then Polled(Nil, List(copyEnd(shim, message))) else Polled.records(List(copyMessage(shim, message)))
-              finally shim.messageDestroy(message): Unit
+          case taken                    => direct: shim =>
+              val pointers = Koffi.decode(messages, "void *", taken).asInstanceOf[js.Array[js.Any]]
+              try LibrdkafkaAnswers.polled(
+                  Vector.tabulate(taken)(index => kinds.readInt32LE(4 * index))
+                )(index => copyMessage(shim, pointers(index)), index => copyEnd(shim, pointers(index)))
+              finally pointers.foreach(shim.messageDestroy(_))
 
   private def copyEnd(shim: Shim, message: js.Any): PartitionEnd =
     PartitionEnd(shim.messageTopic(message).asInstanceOf[String], shim.messagePartition(message).asInstanceOf[Int], long(shim.messageOffset(message)))

@@ -27,6 +27,9 @@ ThisBuild / licenses        := Seq("MIT" -> url("https://opensource.org/license/
 ThisBuild / tlJdkRelease    := Some(17)
 ThisBuild / tlFatalWarnings := true
 
+// v0.8.0 was tagged but never published, and moves to the commit that releases it; until then there is nothing to compare with.
+ThisBuild / tlMimaPreviousVersions ~= (_ - "0.8.0")
+
 val catsEffectVersion    = "3.7.1"
 val catsTaglessVersion   = "0.16.6"
 val fs2Version           = "3.14.0"

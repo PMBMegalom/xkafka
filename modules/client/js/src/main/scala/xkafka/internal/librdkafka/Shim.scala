@@ -128,7 +128,9 @@ private[librdkafka] final class Shim(library: KoffiLibrary):
   val pause               = f(s"int xkafka_consumer_pause(void *consumer, $PartitionNames, $Error)")
   val resume              = f(s"int xkafka_consumer_resume(void *consumer, $PartitionNames, $Error)")
 
-  val poll             = f(s"int xkafka_async_consumer_poll(void *consumer, int timeout_ms, int *status, $Error, void **result, $Done)")
+  val poll      = f(s"int xkafka_async_consumer_poll(void *consumer, int timeout_ms, int *status, $Error, void **result, $Done)")
+  val pollBatch =
+    f(s"int xkafka_async_consumer_poll_batch(void *consumer, int timeout_ms, int capacity, void **messages, int *kinds, int *count, $Error, $Done)")
   val messageDestroy   = f("void xkafka_message_destroy(void *message)")
   val messageTopic     = f("const char *xkafka_message_topic(void *message)")
   val messagePartition = f("int32_t xkafka_message_partition(void *message)")
