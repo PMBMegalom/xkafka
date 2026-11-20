@@ -205,7 +205,8 @@ librdkafka `fetch.wait.max.ms`. Both are [managed properties](#managed-propertie
 so set it through `withFetchWait`.
 
 `maxPollRecords` is the most records the consumer takes from the backend at a
-time, from those the backend has already fetched. The Java client calls it
+time, from those the backend has already fetched. It also bounds the records
+waiting unread: while that many or more do, the consumer stops fetching. The Java client calls it
 `max.poll.records`, a [managed property](#managed-properties) set through
 `withMaxPollRecords`. librdkafka's `max.poll.records` applies only to share
 consumers, which xkafka does not use: its consumer hands over one message at a

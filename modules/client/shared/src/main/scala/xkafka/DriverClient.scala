@@ -45,10 +45,6 @@ private def isolationLevel(value: IsolationLevel): String =
   * among them, as Java's Kafka Streams writes them, though librdkafka writes that time as the time it sends the record at.
   */
 private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forStreams: Boolean = false)(using F: Async[F]) extends KafkaClient[F]:
-  // Polls whose records the poll loop has read but nothing has taken yet, each at most `maxPollRecords` records. The loop stops polling when this
-  // fills, which is also when Kafka would consider the consumer stalled.
-  private val QueuedPolls = 1
-
   /** Group metadata, from a consumer of any client on this platform, that a transaction records offsets against. */
   private object GroupMetadata:
     def unapply(handle: GroupHandle): Option[driver.GroupMetadata] = driver.asGroupMetadata(handle)
@@ -174,7 +170,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
           initialAssignment(selection).toList
             .traverse_(value => leases.assign(List(LeaseKey(value.topic.value, value.partition.value)), replacing = false))
         )
-      polled      <- Resource.eval(Channel.bounded[F, Chunk[ReadRecord]](QueuedPolls))
+      // Polls whose records the poll loop has read but nothing has taken yet. Their records are counted in `unread`, which bounds the queue.
+      polled      <- Resource.eval(Channel.unbounded[F, Chunk[ReadRecord]])
+      unread      <- Resource.eval(SignallingRef[F, Int](0))
       rebalances  <- Resource.eval(Queue.unbounded[F, Rebalance[driver.Event]])
       assignments <- Resource.eval(SignallingRef[F, AssignmentReport](AssignmentReport(initialAssignment(selection), Map.empty)))
       // Set by `stopConsuming`, and read before each poll so that no records already fetched are dropped.
@@ -187,7 +185,8 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       seeks  <- Resource.eval((Mutex[F], Ref.of[F, Map[LeaseKey, Long]](Map.empty)).mapN(Seeks(_, _)))
       // How many times the group has assigned each partition, whatever the settings, which partition streams tell assignments apart by.
       numbers <- Resource.eval(Ref.of[F, Map[LeaseKey, Long]](Map.empty))
-      consumer = new DriverConsumer(client, settings, leases, hold, polled, rebalances, assignments, stopping, random, failure, seeks, numbers)
+      consumer =
+        new DriverConsumer(client, settings, leases, hold, polled, unread, rebalances, assignments, stopping, random, failure, seeks, numbers)
       // Released after both below stop, and before the client: a rebalance polled after `rebalancing` failed is applied here, since the client cannot
       // close while one waits.
       _ <- Resource.onFinalize(consumer.applyQueued)
@@ -721,6 +720,7 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       leases: AssignmentLeases[F],
       hold: RevocationHold[F],
       polled: Channel[F, Chunk[ReadRecord]],
+      unread: SignallingRef[F, Int],
       rebalances: Queue[F, Rebalance[driver.Event]],
       assignments: SignallingRef[F, AssignmentReport],
       stopping: Deferred[F, Unit],
@@ -781,10 +781,19 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
               val key = leaseKeyOf(record)
               ReadRecord(record, lease, assignment(key), sought, assigned.getOrElse(key, 0L))
             })
-          ).filter(_.nonEmpty),
+          ).filter(_.nonEmpty).evalTap(admitted),
         polled,
         failure
       )
+
+    /** Waits, before a poll's records join the queue, while `maxPollRecords` records or more wait there unread, so that a consumer whose records go
+      * unread stops polling, and leaves its group once its poll interval passes, as a Java consumer that is not polled does. A consumer whose records
+      * are read, however slowly, or that holds only a few unread, polls on and takes its part in each rebalance.
+      */
+    private def admitted(reads: Chunk[ReadRecord]): F[Unit] = unread.waitUntil(_ < settings.maxPollRecords) *> unread.update(_ + reads.size)
+
+    /** The polls in the queue as they are taken from it, their records no longer counted as unread. */
+    private def taken: Stream[F, Chunk[ReadRecord]] = PollQueue.read(polled, failure).evalTap(reads => unread.update(_ - reads.size))
 
     /** A rebalance taken from the driver has to be applied before the consumer can close, so taking one and queueing it for `rebalancing` is never
       * cut apart by a cancellation, which costs a release at most one poll. Each record comes with how many seeks of its partition it follows.
@@ -864,11 +873,11 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       * commit could be taken for, the group having given it to another member. So is a record fetched before a seek of its partition.
       */
     override val records: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalMap(reads => handedOut(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
+      taken.evalMap(reads => handedOut(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
 
     // Counted as handed out only once the partition's stream hands them out, so one dropped before then is not waited for.
     override private[xkafka] val routedRecords: Stream[F, CommittableConsumerRecord[F, K, V]] =
-      PollQueue.read(polled, failure).evalMap(reads => stillHeldOf(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
+      taken.evalMap(reads => stillHeldOf(reads).flatMap(decodeAll)).flatMap(Stream.chunk)
 
     /** The records of a poll that are still held, as [[stillHeld]] tells them, each read under the same seeks and leases. */
     private def stillHeldOf(reads: Chunk[ReadRecord]): F[Chunk[ReadRecord]] =

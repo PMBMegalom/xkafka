@@ -807,10 +807,10 @@ sealed abstract case class ConsumerSettings[F[_], K, V] private (
     */
   def withFetchWait(value: FiniteDuration): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(fetchWait = value)
 
-  /** The most records one poll takes from the backend, from 1 to `ConsumerSettings.MaxPollRecordsLimit`. The default,
-    * `ConsumerSettings.DefaultMaxPollRecords`, is the Java client's. The Java client calls it `max.poll.records`, which is refused as a property.
-    * librdkafka's `max.poll.records` is for share consumers alone, so on librdkafka xkafka takes up to this many of the messages its consumer has
-    * already fetched.
+  /** The most records one poll takes from the backend, and how many may wait unread before the consumer stops fetching, from 1 to
+    * `ConsumerSettings.MaxPollRecordsLimit`. The default, `ConsumerSettings.DefaultMaxPollRecords`, is the Java client's. The Java client calls it
+    * `max.poll.records`, which is refused as a property. librdkafka's `max.poll.records` is for share consumers alone, so on librdkafka xkafka takes
+    * up to this many of the messages its consumer has already fetched.
     */
   def withMaxPollRecords(value: Int): ValidatedNel[SettingsError, ConsumerSettings[F, K, V]] = revalidated(maxPollRecords = value)
 

@@ -251,6 +251,25 @@ final class DriverClientSuite extends CatsEffectSuite:
           _       <- routing.cancel
         yield assertEquals(first.record.offset.value, 10L)
 
+  test("a consumer whose records go unread polls on, and takes part in a rebalance, while fewer than maxPollRecords of them wait"):
+    FakeDriver().flatMap: fake =>
+      consumerSettings.withMaxPollRecords(3).liftTo[IO].flatMap: settings =>
+        new DriverClient[IO](fake).consumer(settings, topics).use: _ =>
+          fake.assign *> fake.until(_.count(_ == "assign") == 1) *> fake.deliver(0L) *> fake.deliver(1L) *> fake.drained *> fake.revoke *>
+            fake.until(_.contains("unassign")).timeout(10.seconds)
+
+  test("a consumer stops polling once maxPollRecords records wait unread, so a rebalance waits, and polls again once a poll is read"):
+    FakeDriver().flatMap: fake =>
+      consumerSettings.withMaxPollRecords(3).liftTo[IO].flatMap: settings =>
+        new DriverClient[IO](fake).consumer(settings, topics).use: consumer =>
+          for
+            _       <- fake.assign *> fake.until(_.count(_ == "assign") == 1)
+            _       <- List(0L, 1L, 2L).traverse_(fake.deliver) *> fake.drained
+            _       <- fake.deliver(3L) *> fake.drained *> fake.revoke *> IO.sleep(1.second)
+            stalled <- fake.count("unassign")
+            _       <- consumer.records.take(1).compile.drain *> fake.until(_.contains("unassign")).timeout(10.seconds)
+          yield assertEquals(stalled, 0)
+
   test("a record whose topic or offset the backend reported invalid fails the stream as an invalid backend answer"):
     // With fencing, a record of a partition the consumer was never assigned is dropped before it is decoded, so the bad name is read without it.
     List(("events", -5L, consumerSettings), ("not a topic", 0L, consumerSettings.withoutAssignmentFencing)).traverse_ { (topic, offset, settings) =>
