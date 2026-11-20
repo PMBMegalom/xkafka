@@ -1735,6 +1735,12 @@ trait Transaction[F[_], K, V]:
   /** Enqueues `records` and waits for the broker to acknowledge them, which a transaction must do before it can commit. */
   def produce(records: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]]
 
+  /** Enqueues `records` and gives the effect that completes once the broker has acknowledged them, which the caller awaits before the transaction
+    * commits.
+    */
+  private[xkafka] def enqueue(records: NonEmptyList[ProducerRecord[K, V]])(using F: Applicative[F]): F[F[NonEmptyList[Produced[K, V]]]] =
+    F.map(produce(records))(F.pure)
+
   /** Records `batch` against the consumer group each of its offsets was read by, so those offsets are committed only if this transaction commits. */
   def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit]
 

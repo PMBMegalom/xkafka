@@ -23,7 +23,7 @@ package xkafka
 
 import scala.concurrent.duration.*
 
-import cats.Order
+import cats.{Applicative, Order}
 import cats.data.{NonEmptyList, NonEmptyMap, NonEmptySet}
 import cats.effect.{Async, Deferred, Outcome, Poll, Ref, Resource}
 import cats.effect.implicits.*
@@ -319,6 +319,9 @@ private[xkafka] final class DriverClient[F[_]](val driver: KafkaDriver[F], forSt
       new Transaction[F, K, V]:
         /** A transaction cannot commit records the broker has not acknowledged, so this waits for them. */
         override def produce(values: NonEmptyList[ProducerRecord[K, V]]): F[NonEmptyList[Produced[K, V]]] = records.produceAndAwait(values)
+
+        override private[xkafka] def enqueue(values: NonEmptyList[ProducerRecord[K, V]])(using Applicative[F]): F[F[NonEmptyList[Produced[K, V]]]] =
+          records.produce(values)
 
         override def commitOffsets(batch: CommittableOffsetBatch[F]): F[Unit] =
           GroupMembership.resolve(batch).use(commitMemberships) *> recorded.update(_ :+ batch)
