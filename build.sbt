@@ -29,7 +29,7 @@ ThisBuild / tlFatalWarnings := true
 
 val catsEffectVersion    = "3.7.1"
 val catsTaglessVersion   = "0.16.6"
-val fs2Version           = "3.14.0"
+val fs2Version           = "3.16.0"
 val circeVersion         = "0.14.17"
 val http4sVersion        = "0.23.38"
 val apacheAvroVersion    = "1.12.2"
