@@ -47,7 +47,7 @@ val snappyJavaVersion    = "1.1.10.12" // kafka-clients asks for 1.1.10.7, which
 val nodeVersion          = "24"        // The Node.js release the JavaScript backend targets, matching .nvmrc.
 val librdkafkaVersion    = "2.16.0"
 val librdkafkaSha256     = "e6b61de61d3282879a88e4ee3d9f634a8b05bf78a9198dfc25c4820c0c9ed231"
-val rocksdbVersion       = "10.10.1.1" // rocksdbjni on the JVM, and the libraries its jar carries on the others
+val rocksdbVersion       = "11.8.1"    // rocksdbjni on the JVM, and the libraries its jar carries on the others
 val rocksdbSha256        = "e862cc37a22df8f1e7c12556f5141ce65d782af77e30aee1bd7d488d7c554fde"
 // The RocksDB release that jar carries, which the library reports of itself: a jar's version may add a fourth number for a build of one release.
 val rocksdbRelease         = rocksdbVersion.split('.').take(3).mkString(".")
