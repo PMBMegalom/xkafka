@@ -1287,7 +1287,7 @@ lazy val sbtCodegen = project
     headerLicense                 := Some(HeaderLicense.MIT("2026", "xkafka contributors")),
     scalaVersion                  := "2.12.21",
     crossScalaVersions            := Seq("2.12.21", "3.9.0"),
-    pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.0" else "2.1.0"),
+    pluginCrossBuild / sbtVersion := (if (scalaBinaryVersion.value == "2.12") "1.10.11" else "2.1.0"),
     tlVersionIntroduced           := Map("2.12" -> "0.8.0", "3" -> "0.8.0"),
     // The plugin takes none of the other modules' common settings, so it carries the licence as their jars do.
     Compile / packageBin / mappings += (repositoryRoot / "LICENSE" -> "META-INF/LICENSE"),
