@@ -5,7 +5,7 @@ addSbtPlugin("org.scala-native" % "sbt-scala-native"    % "0.5.12")
 addSbtPlugin("ch.epfl.scala"    % "sbt-scalajs-bundler" % "0.21.1")
 addSbtPlugin("org.typelevel"    % "sbt-typelevel"       % "0.8.7")
 addSbtPlugin("org.typelevel"    % "sbt-typelevel-site"  % "0.8.7")
-addSbtPlugin("com.eed3si9n"     % "sbt-buildinfo"       % "0.13.2")
+addSbtPlugin("com.eed3si9n"     % "sbt-buildinfo"       % "0.14.0")
 addSbtPlugin("com.thesamet"     % "sbt-protoc"          % "1.0.8")
 
 // ScalaPB generates the Scala messages the ScalaPB bridge's tests read and write.
